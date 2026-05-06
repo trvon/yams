@@ -19,14 +19,10 @@ Daemon IPC Note
   - job cancel
 - This surface is policy-gated, disabled by default, and not yet treated as a stable external
   versioned interface in the same way as plugin WIT/schema specs.
-- See:
-  - [daemon-download-jobs.md](/Users/trevon/work/tools/yams/docs/design/daemon-download-jobs.md)
-  - [daemon_download_security_test_plan.md](/Users/trevon/work/tools/yams/docs/testing/daemon_download_security_test_plan.md)
-
 Policy
 - Any change to public surfaces requires either:
   - A version bump in `docs/spec/interface_versions.json` for the affected interfaces, or
-  - A CHANGELOG/stability PBI update explicitly acknowledging the change.
+  - A CHANGELOG/stability note explicitly acknowledging the change.
 - CI enforces this via `scripts/ci/check_yams_semver.py` during build.
 
 Plugin Naming Policy (ABI)

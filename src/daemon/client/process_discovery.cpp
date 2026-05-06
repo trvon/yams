@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -13,8 +12,11 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <spawn.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char** environ;
 #endif
 
 namespace yams::daemon::client {
@@ -69,19 +71,54 @@ std::string escapeRegexLiteral(const std::string& value) {
     return out;
 }
 
-std::string runCommandCapture(const std::string& cmd) {
+std::string runProcessCapture(const std::vector<std::string>& args) {
     std::string output;
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
+    if (args.empty()) {
         return output;
     }
 
-    char buffer[256];
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        output.append(buffer);
+    int pipeFds[2] = {-1, -1};
+    if (pipe(pipeFds) != 0) {
+        return output;
     }
 
-    pclose(pipe);
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+        return output;
+    }
+
+    posix_spawn_file_actions_adddup2(&actions, pipeFds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipeFds[0]);
+    posix_spawn_file_actions_addclose(&actions, pipeFds[1]);
+
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) {
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    pid_t childPid = -1;
+    const int spawnResult =
+        posix_spawnp(&childPid, argv[0], &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipeFds[1]);
+    if (spawnResult != 0) {
+        close(pipeFds[0]);
+        return output;
+    }
+
+    char buffer[512];
+    ssize_t nread = 0;
+    while ((nread = read(pipeFds[0], buffer, sizeof(buffer))) > 0) {
+        output.append(buffer, static_cast<size_t>(nread));
+    }
+
+    close(pipeFds[0]);
+    int status = 0;
+    (void)waitpid(childPid, &status, 0);
     return output;
 }
 
@@ -128,8 +165,8 @@ std::string describeProcess(int pid) {
         return std::to_string(pid) + " " + *commandLine;
     }
 
-    std::string cmd = "ps -o pid=,ppid=,stat=,command= -p " + std::to_string(pid);
-    auto output = runCommandCapture(cmd);
+    auto output =
+        runProcessCapture({"ps", "-o", "pid=,ppid=,stat=,command=", "-p", std::to_string(pid)});
     while (!output.empty() &&
            (output.back() == '\n' || output.back() == '\r' || output.back() == ' ')) {
         output.pop_back();
@@ -197,7 +234,7 @@ std::vector<int> collectDaemonPidsForPattern(const std::string& pattern) {
     }
 #endif
 
-    std::istringstream lines(runCommandCapture("ps -ax -o pid=,command="));
+    std::istringstream lines(runProcessCapture({"ps", "-ax", "-o", "pid=,command="}));
     std::string line;
     while (std::getline(lines, line)) {
         const auto first = line.find_first_not_of(" \t");
@@ -245,7 +282,9 @@ discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
     std::set<int> seen;
 
     if (auto pidFromFile = readPidFromFile(pidFilePath);
-        pidFromFile && kill(*pidFromFile, 0) == 0) {
+        pidFromFile && kill(*pidFromFile, 0) ==
+                           0) { // nosemgrep: yams.cpp.kill-zero-one-shot -- snapshot candidate
+                                // filter; callers perform bounded connection attempts.
         candidatePids.push_back(*pidFromFile);
         seen.insert(*pidFromFile);
     }

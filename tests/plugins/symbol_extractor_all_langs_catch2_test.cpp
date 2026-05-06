@@ -56,8 +56,8 @@ std::optional<PluginAPI> load_extractor(const char* so_path) {
     }
     CHECK(getabi() > 0);
     CHECK(0 == init("{\n  \"languages\": [\"cpp\", \"python\", \"rust\", \"go\", \"javascript\", "
-                      "\"typescript\"]\n}",
-                      nullptr));
+                    "\"typescript\"]\n}",
+                    nullptr));
     void* ptr = nullptr;
     int rc = getiface(YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION, &ptr);
     if (rc != 0 || !ptr) {
@@ -221,7 +221,8 @@ TEST_CASE("SymbolExtractorPlugins.ExtractMultipleSymbols", "[plugin][symbolextra
     REQUIRE(out != nullptr);
 
     // Should have at least the class and some methods/functions
-    INFO("Expected at least 1 symbol"); REQUIRE(out->symbol_count >= 1u);
+    INFO("Expected at least 1 symbol");
+    REQUIRE(out->symbol_count >= 1u);
 
     // Verify we have at least one class or function
     bool found_symbol = false;
@@ -232,7 +233,8 @@ TEST_CASE("SymbolExtractorPlugins.ExtractMultipleSymbols", "[plugin][symbolextra
             break;
         }
     }
-    INFO("Expected at least one class/function/method"); CHECK(found_symbol);
+    INFO("Expected at least one class/function/method");
+    CHECK(found_symbol);
 
     api->free_result(api->self, out);
 }
@@ -261,7 +263,8 @@ class DataProcessor:
     PLUGIN_MISSING_SKIP(rc, out, "Python grammar not available");
     REQUIRE(rc == 0);
     REQUIRE(out != nullptr);
-    INFO("No symbols extracted"); REQUIRE(out->symbol_count > 0u);
+    INFO("No symbols extracted");
+    REQUIRE(out->symbol_count > 0u);
 
     // Should have class and methods
     bool has_class = false;
@@ -280,8 +283,10 @@ class DataProcessor:
             has_process = true;
     }
 
-    INFO("Class 'DataProcessor' not found"); CHECK(has_class);
-    INFO("No methods found"); CHECK((has_init || has_process));
+    INFO("Class 'DataProcessor' not found");
+    CHECK(has_class);
+    INFO("No methods found");
+    CHECK((has_init || has_process));
 
     api->free_result(api->self, out);
 }
@@ -312,7 +317,8 @@ TEST_CASE("SymbolExtractorPlugins.ErrorHandling", "[plugin][symbolextractorplugi
         // Error is acceptable for invalid syntax
         CHECK(rc != 0);
         if (out) {
-            INFO("Error code but no error message"); CHECK(out->error != nullptr);
+            INFO("Error code but no error message");
+            CHECK(out->error != nullptr);
             api->free_result(api->self, out);
         }
     }

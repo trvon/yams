@@ -547,4 +547,29 @@ double computeDistortionLowerBound(size_t d, size_t total_bits);
  */
 float sampleBeta(std::mt19937& rng, float alpha, float beta);
 
+namespace vector_utils {
+
+inline std::vector<uint8_t> packedQuantizeVector(const std::vector<float>& vector,
+                                                 TurboQuantMSE* quantizer) {
+    return quantizer ? quantizer->packedEncode(vector) : std::vector<uint8_t>{};
+}
+
+inline std::vector<float> packedDequantizeVector(const std::vector<uint8_t>& packed, size_t /*dim*/,
+                                                 TurboQuantMSE* quantizer) {
+    return quantizer ? quantizer->packedDecode(packed) : std::vector<float>{};
+}
+
+inline std::vector<float> transformQueryForScoring(const std::vector<float>& query,
+                                                   TurboQuantMSE* quantizer) {
+    return quantizer ? quantizer->transformQuery(query) : std::vector<float>{};
+}
+
+inline float scoreCompressedCosine(const std::vector<float>& transformed_query,
+                                   const std::vector<uint8_t>& packed_codes,
+                                   TurboQuantMSE* quantizer) {
+    return quantizer ? quantizer->scoreFromPacked(transformed_query, packed_codes) : 0.0f;
+}
+
+} // namespace vector_utils
+
 } // namespace yams::vector

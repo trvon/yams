@@ -36,16 +36,27 @@ std::string readText(const fs::path& path) {
 TEST_CASE("Homebrew service formulas run yams-daemon in foreground",
           "[cli][homebrew][service][formula][catch2]") {
     const fs::path root = sourceRoot();
-    const std::vector<fs::path> formulaPaths = {
+    const std::vector<fs::path> requiredPaths = {
         root / "packaging/homebrew/yams.rb.template",
         root / "packaging/homebrew/yams-nightly.rb.template",
+    };
+    const std::vector<fs::path> optionalPaths = {
         root / "homebrew-yams/Formula/yams.rb",
         root / "homebrew-yams/Formula/yams-nightly.rb",
     };
 
-    for (const auto& path : formulaPaths) {
+    for (const auto& path : requiredPaths) {
         INFO(path.string());
         REQUIRE(fs::exists(path));
+        const std::string text = readText(path);
+        CHECK_THAT(text, ContainsSubstring("run [opt_bin/\"yams-daemon\", \"--foreground\"]"));
+    }
+
+    for (const auto& path : optionalPaths) {
+        INFO(path.string());
+        if (!fs::exists(path)) {
+            continue;
+        }
         const std::string text = readText(path);
         CHECK_THAT(text, ContainsSubstring("run [opt_bin/\"yams-daemon\", \"--foreground\"]"));
     }

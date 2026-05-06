@@ -269,12 +269,9 @@ TEST_CASE("ResourceGovernor phase-4 policy surfaces respond during daemon operat
     CHECK(retryOverloaded >= retryBaseline);
     CHECK(retryOverloaded <= 5000);
 
-    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100, false);
-    const auto pauseBackpressured = governor.recommendBackpressureReadPauseMs(100, true);
+    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100);
     CHECK(pauseIdle >= 1);
     CHECK(pauseIdle <= 5000);
-    CHECK(pauseBackpressured >= pauseIdle);
-    CHECK(pauseBackpressured <= 5000);
 
     const auto currentSlots = 16u;
     const auto shrunk = governor.recommendConnectionSlotTarget(currentSlots, 1, 4, 64, 8, 1);

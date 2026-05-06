@@ -5,13 +5,16 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/storage/storage_backend.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 using namespace yams::storage;
@@ -126,6 +129,33 @@ TEST_CASE("StorageBackendFactory::create: unknown backend type returns nullptr",
     CHECK(backend == nullptr);
 }
 
+TEST_CASE("StorageBackendFactory::create: URL and S3 backends initialize without network I/O",
+          "[storage][factory][remote][url][s3]") {
+    for (const auto& [type, url] : {
+             std::pair{"http", "http://127.0.0.1:9/yams-test"},
+             std::pair{"https", "https://example.invalid/yams-test"},
+             std::pair{"ftp", "ftp://example.invalid/yams-test"},
+             std::pair{"s3", "s3://yams-test-bucket/prefix"},
+         }) {
+        BackendConfig cfg;
+        cfg.type = type;
+        cfg.url = url;
+        cfg.requestTimeout = 1;
+        cfg.maxRetries = 0;
+
+        auto backend = StorageBackendFactory::create(cfg);
+        REQUIRE(backend != nullptr);
+        CHECK(backend->isRemote());
+        if (std::string_view(type) == "s3") {
+            // S3 may be served by an optional plugin or by the URLBackend fallback.
+            CHECK_FALSE(backend->getType().empty());
+        } else {
+            CHECK(backend->getType() == type);
+        }
+        CHECK(backend->flush().has_value());
+    }
+}
+
 TEST_CASE("StorageBackendFactory::registerBackend: custom type can be created",
           "[storage][factory][create]") {
     // A minimal fake backend that always initializes successfully.
@@ -168,4 +198,119 @@ TEST_CASE("StorageBackendFactory::registerBackend: custom type can be created",
     cfg.type = "yams_test_fake";
     auto backend = StorageBackendFactory::create(cfg);
     CHECK(backend != nullptr);
+}
+
+TEST_CASE("StorageBackendFactory::registerBackend: mocked remote backend supports CRUD",
+          "[storage][factory][remote][mock][plugin]") {
+    struct MockRemoteBackend : IStorageBackend {
+        mutable std::mutex mutex;
+        std::unordered_map<std::string, std::vector<std::byte>> objects;
+
+        yams::Result<void> initialize(const BackendConfig&) override { return {}; }
+
+        yams::Result<void> store(std::string_view key, std::span<const std::byte> data) override {
+            std::lock_guard lock(mutex);
+            objects[std::string(key)] = std::vector<std::byte>(data.begin(), data.end());
+            return {};
+        }
+
+        yams::Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
+            std::lock_guard lock(mutex);
+            auto it = objects.find(std::string(key));
+            if (it == objects.end()) {
+                return yams::Error{yams::ErrorCode::ChunkNotFound, "mock key not found"};
+            }
+            return it->second;
+        }
+
+        yams::Result<bool> exists(std::string_view key) const override {
+            std::lock_guard lock(mutex);
+            return objects.contains(std::string(key));
+        }
+
+        yams::Result<void> remove(std::string_view key) override {
+            std::lock_guard lock(mutex);
+            objects.erase(std::string(key));
+            return {};
+        }
+
+        yams::Result<std::vector<std::string>> list(std::string_view prefix) const override {
+            std::lock_guard lock(mutex);
+            std::vector<std::string> keys;
+            for (const auto& [key, _] : objects) {
+                if (key.starts_with(prefix)) {
+                    keys.push_back(key);
+                }
+            }
+            std::ranges::sort(keys);
+            return keys;
+        }
+
+        yams::Result<yams::StorageStats> getStats() const override {
+            std::lock_guard lock(mutex);
+            yams::StorageStats stats;
+            stats.totalObjects = objects.size();
+            size_t totalBytes = 0;
+            for (const auto& [_, value] : objects) {
+                totalBytes += value.size();
+            }
+            stats.totalBytes = totalBytes;
+            return stats;
+        }
+
+        std::future<yams::Result<void>> storeAsync(std::string_view key,
+                                                   std::span<const std::byte> data) override {
+            return std::async(std::launch::async,
+                              [this, key = std::string(key),
+                               copy = std::vector<std::byte>(data.begin(), data.end())]() {
+                                  return store(key, copy);
+                              });
+        }
+
+        std::future<yams::Result<std::vector<std::byte>>>
+        retrieveAsync(std::string_view key) const override {
+            return std::async(std::launch::async,
+                              [this, key = std::string(key)]() { return retrieve(key); });
+        }
+
+        std::string getType() const override { return "yams_test_remote"; }
+        bool isRemote() const override { return true; }
+        yams::Result<void> flush() override { return {}; }
+    };
+
+    StorageBackendFactory::registerBackendType<MockRemoteBackend>("yams_test_remote");
+
+    BackendConfig cfg;
+    cfg.type = "yams_test_remote";
+    auto backend = StorageBackendFactory::create(cfg);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->isRemote());
+
+    const std::vector<std::byte> payload{std::byte{static_cast<unsigned char>('r')},
+                                         std::byte{static_cast<unsigned char>('e')},
+                                         std::byte{static_cast<unsigned char>('m')}};
+    REQUIRE(backend->store("docs/a", payload).has_value());
+    REQUIRE(backend->storeAsync("docs/b", payload).get().has_value());
+
+    auto exists = backend->exists("docs/a");
+    REQUIRE(exists.has_value());
+    CHECK(exists.value());
+
+    auto readBack = backend->retrieveAsync("docs/a").get();
+    REQUIRE(readBack.has_value());
+    CHECK(readBack.value() == payload);
+
+    auto listed = backend->list("docs/");
+    REQUIRE(listed.has_value());
+    CHECK(listed.value() == std::vector<std::string>{"docs/a", "docs/b"});
+
+    auto stats = backend->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalObjects == 2u);
+    CHECK(stats.value().totalBytes == payload.size() * 2u);
+
+    REQUIRE(backend->remove("docs/a").has_value());
+    auto existsAfterRemove = backend->exists("docs/a");
+    REQUIRE(existsAfterRemove.has_value());
+    CHECK_FALSE(existsAfterRemove.value());
 }

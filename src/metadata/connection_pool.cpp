@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -227,7 +228,8 @@ void ConnectionPool::shutdown() {
 }
 
 Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
-                                                                  ConnectionPriority priority) {
+                                                                  ConnectionPriority priority,
+                                                                  std::string_view callerTag) {
     YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -302,6 +304,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
                     [this](PooledConnection* conn) { returnConnection(conn); },
                     currentGeneration_.load());
 
+                pooledConn->markAcquired(callerTag);
                 totalConnections_++;
                 activeConnections_++;
                 totalAcquired_++;
@@ -319,7 +322,41 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             waitingGuard.markTimeout();
             waitingGuard.finish();
             failedAcquisitions_++;
-            return Error{ErrorCode::Timeout, "Timeout acquiring connection"};
+            std::ostringstream holders;
+            std::size_t shown = 0;
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto* leased : leased_) {
+                if (!leased) {
+                    continue;
+                }
+                if (shown++ > 0) {
+                    holders << "; ";
+                }
+                const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        now - leased->acquiredAt())
+                                        .count();
+                const auto& tag = leased->holderTag();
+                holders << (tag.empty() ? "<untagged>" : tag) << " held_ms=" << heldMs;
+                if (shown >= 8 && leased_.size() > shown) {
+                    holders << "; +" << (leased_.size() - shown) << " more";
+                    break;
+                }
+            }
+            const std::string holderSummary = holders.str();
+            spdlog::error(
+                "[ConnectionPool] timeout acquiring connection tag='{}' priority={} active={} "
+                "available={} total={} waiting={} holders=[{}]",
+                callerTag.empty() ? "<untagged>" : std::string(callerTag),
+                priority == ConnectionPriority::High ? "high" : "normal",
+                activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                totalConnections_.load(std::memory_order_relaxed),
+                waitingRequests_.load(std::memory_order_relaxed), holderSummary);
+            return Error{ErrorCode::Timeout,
+                         "Timeout acquiring connection; active=" +
+                             std::to_string(activeConnections_.load(std::memory_order_relaxed)) +
+                             " available=" + std::to_string(available_.size()) + " total=" +
+                             std::to_string(totalConnections_.load(std::memory_order_relaxed)) +
+                             " holders=[" + holderSummary + "]"};
         }
         waitingGuard.finish();
 
@@ -389,6 +426,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
     }
 
     conn->touch();
+    conn->markAcquired(callerTag);
     activeConnections_++;
     totalAcquired_++;
     leased_.insert(conn.get());
@@ -401,16 +439,22 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
 ConnectionPool::Stats ConnectionPool::getStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    return {.totalConnections = totalConnections_,
-            .availableConnections = available_.size(),
-            .activeConnections = activeConnections_,
-            .waitingRequests = waitingRequests_,
-            .maxObservedWaiting = maxWaitingRequests_.load(std::memory_order_relaxed),
-            .totalWaitMicros = totalWaitMicros_.load(std::memory_order_relaxed),
-            .timeoutCount = timeoutCount_.load(std::memory_order_relaxed),
-            .totalAcquired = totalAcquired_,
-            .totalReleased = totalReleased_,
-            .failedAcquisitions = failedAcquisitions_};
+    Stats out{.totalConnections = totalConnections_,
+              .availableConnections = available_.size(),
+              .activeConnections = activeConnections_,
+              .waitingRequests = waitingRequests_,
+              .maxObservedWaiting = maxWaitingRequests_.load(std::memory_order_relaxed),
+              .totalWaitMicros = totalWaitMicros_.load(std::memory_order_relaxed),
+              .timeoutCount = timeoutCount_.load(std::memory_order_relaxed),
+              .totalAcquired = totalAcquired_,
+              .totalReleased = totalReleased_,
+              .failedAcquisitions = failedAcquisitions_};
+    for (std::size_t i = 0; i < kHolderHistogramBucketCount; ++i) {
+        out.holderDurationBuckets[i] = holderDurationBuckets_[i].load(std::memory_order_relaxed);
+    }
+    out.slowHolderCount = slowHolderCount_.load(std::memory_order_relaxed);
+    out.maxHolderMicros = maxHolderMicros_.load(std::memory_order_relaxed);
+    return out;
 }
 
 Result<void> ConnectionPool::healthCheck() {
@@ -546,7 +590,11 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     if (!timeoutResult) {
         return timeoutResult.error();
     }
-    db.execute("PRAGMA busy_timeout = " + std::to_string(effectiveBusyTimeout.count()));
+    db.execute(
+        "PRAGMA busy_timeout = " +
+        std::to_string(effectiveBusyTimeout
+                           .count())); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric PRAGMA
+                                       // from clamped chrono duration, not external SQL.
 
     // Enable WAL mode if requested.
     if (config_.enableWAL) {
@@ -633,7 +681,9 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         }
     }
     int cacheSizeKB = -(defaultCacheMB * 1024); // negative = KiB for SQLite
-    db.execute("PRAGMA cache_size = " + std::to_string(cacheSizeKB));
+    db.execute("PRAGMA cache_size = " +
+               std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
+                                             // PRAGMA from bounded cache size calculation.
     db.execute("PRAGMA wal_autocheckpoint = 0");
 
     if (sqlite_profile_trace_enabled()) {
@@ -648,6 +698,32 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     YAMS_ZONE_SCOPED_N("MetadataPool::returnConnection");
     if (!conn || !conn->db_)
         return;
+
+    const auto holdMicros =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - conn->acquiredAt())
+                                       .count());
+    {
+        std::size_t bucket = kHolderHistogramBucketCount - 1;
+        for (std::size_t i = 0; i < kHolderHistogramBucketCount; ++i) {
+            if (holdMicros <= kHolderBucketUpperMicros[i]) {
+                bucket = i;
+                break;
+            }
+        }
+        holderDurationBuckets_[bucket].fetch_add(1, std::memory_order_relaxed);
+        std::uint64_t prevMax = maxHolderMicros_.load(std::memory_order_relaxed);
+        while (holdMicros > prevMax && !maxHolderMicros_.compare_exchange_weak(
+                                           prevMax, holdMicros, std::memory_order_relaxed)) {
+        }
+        const auto threshold = slowHolderThresholdMicros_.load(std::memory_order_relaxed);
+        if (threshold > 0 && holdMicros > threshold) {
+            slowHolderCount_.fetch_add(1, std::memory_order_relaxed);
+            const auto& tag = conn->holderTag();
+            spdlog::warn("[ConnectionPool] slow write-connection hold: tag='{}' duration_ms={}",
+                         tag.empty() ? "<untagged>" : tag.c_str(), holdMicros / 1000ULL);
+        }
+    }
 
     // Perform validation outside the lock (SQL queries should not block pool)
     // First, rollback any pending transaction

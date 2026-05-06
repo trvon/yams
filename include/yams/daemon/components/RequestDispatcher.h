@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -124,6 +125,9 @@ public:
     static void __test_forceGetEmptyResultOnce();
     static void __test_forceDownloadServiceUnavailableOnce();
     static void __test_forceDownloadServiceSuccessOnce();
+    static void __test_forceDownloadServiceFailureOnce(const std::string& message);
+    static void __test_resetDownloadServiceRequestCapture();
+    static std::optional<bool> __test_lastDownloadServiceFollowRedirects();
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {
@@ -250,11 +254,6 @@ private:
 
     // Batch request handler (Track B: Communication Overhead Reduction)
     boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
-
-    // Document repair handler (RepairService)
-    boost::asio::awaitable<Response> handleRepairRequest(const RepairRequest& req);
-
-    // Legacy helper declarations removed after dispatcher split
 
     boost::asio::awaitable<AdmissionGuard>
     acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,

@@ -73,7 +73,7 @@ cli_deps = [
   dependency('spdlog'),
   dependency('OpenSSL'),
   dependency('sqlite3'),
-  dependency('boost'),
+  boost_dep,
   cli11_dep,
 ]
 

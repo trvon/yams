@@ -49,11 +49,13 @@ jobs:
             conan_host_profile: ${{ inputs.conan_profile_linux }}
             conan_arch: x86_64
             needs_rosetta: false
+            timeout: 60
           - suffix: linux-arm64
             runs_on: ubuntu-24.04-arm
             conan_host_profile: ${{ inputs.conan_profile_linux }}
             conan_arch: armv8
             needs_rosetta: false
+            timeout: 60
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ${{ inputs.conan_profile_macos }}
@@ -97,9 +99,10 @@ jobs:
           }
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          # Only init sqlite-vec-cpp which is required for the build
+          # Only init the build-required third_party submodules
           # Skip other submodules that use SSH URLs requiring authentication
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
 
       - name: Cache Conan packages (warm)
@@ -114,13 +117,15 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-linux-x86_64-
             conan2-${{ runner.os }}-
 
       - name: Cache ccache (warm)
         if: github.actor != 'nektos/act'
+        id: cache_ccache_warm
         uses: actions/cache@v4
         continue-on-error: true
         with:
@@ -130,6 +135,7 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-linux-x86_64-
             ccache-${{ runner.os }}-
 
       - name: Install Conan and Meson
@@ -151,7 +157,7 @@ jobs:
             fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -173,7 +179,28 @@ jobs:
           fi
           conan profile show
 
+      - name: Pin conancenter to v2 index
+        shell: bash
+        run: |
+          set -euo pipefail
+          if conan remote list | grep -q 'conancenter'; then
+            conan remote update conancenter --url https://center2.conan.io || true
+          else
+            conan remote add conancenter https://center2.conan.io
+          fi
+          conan remote list
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libomp-18-dev ccache
+
       - name: Warm dependencies (${{ inputs.build_type }})
+        # Always run on Linux to populate ccache (cache-hit can be true on a tiny
+        # restored cache). On macOS/Windows, skip if both caches are already warm.
+        if: runner.os == 'Linux' || steps.cache_conan_warm.outputs.cache-hit != 'true' || steps.cache_ccache_warm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -198,6 +225,43 @@ jobs:
             -o "sqlite3/*:fts5=True" \
             -o "yams/*:enable_onnx=${ONNX}" \
             --build=missing
+
+      - name: Populate ccache with source compilation
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_COMPRESS: '1'
+          CCACHE_MAXSIZE: 5G
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime,file_macro
+        run: |
+          set -euo pipefail
+          CACHE_BYTES=$(du -sb ~/.cache/ccache 2>/dev/null | cut -f1 || echo 0)
+          CACHE_MB=$((CACHE_BYTES / 1048576))
+          if [ "$CACHE_MB" -gt 100 ]; then
+            echo "ccache already populated: ${CACHE_MB} MB; skipping source compile"
+            exit 0
+          fi
+          echo "ccache=${CACHE_MB} MB (< 100 MB); compiling source to populate cache"
+          ccache -z >/dev/null 2>&1 || true
+          BUILD_DIR="build/warm-${{ inputs.build_type }}"
+          NATIVE_FILE=$(find "$BUILD_DIR" -name conan_meson_native.ini -type f 2>/dev/null | head -1)
+          if [ -z "$NATIVE_FILE" ]; then
+            echo "No Meson native file found in $BUILD_DIR; skipping source compile"
+            exit 0
+          fi
+          echo "Using Conan native file: $NATIVE_FILE"
+          MESON_BUILDTYPE=$( [ "${{ inputs.build_type }}" = "Debug" ] && echo "--buildtype=debug" || echo "--buildtype=release" )
+          if ! meson setup "$BUILD_DIR" --native-file="$NATIVE_FILE" \
+               $MESON_BUILDTYPE --reconfigure 2>&1; then
+            meson setup "$BUILD_DIR" --native-file="$NATIVE_FILE" $MESON_BUILDTYPE 2>&1
+          fi
+          meson compile -C "$BUILD_DIR" -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+          echo
+          echo "=== ccache stats after warm compilation ==="
+          ccache -s | head -8
 
       - name: Warm summary
         shell: bash

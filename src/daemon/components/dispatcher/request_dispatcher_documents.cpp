@@ -56,6 +56,32 @@ std::atomic<bool> g_forceDownloadServiceSuccessOnce{false};
 std::atomic<int> g_documentsEnqueueFailuresBeforeSuccess{0};
 std::string g_forceListExceptionMessage;
 std::mutex g_forceListExceptionMutex;
+std::optional<std::string> g_forceDownloadServiceFailureMessage;
+std::mutex g_forceDownloadServiceFailureMutex;
+std::optional<bool> g_lastDownloadServiceFollowRedirects;
+std::mutex g_lastDownloadServiceRequestMutex;
+
+void atomicMax(std::atomic<uint64_t>& target, uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void recordAddDispatchTiming(StateComponent* state, uint64_t totalUs, uint64_t fingerprintUs,
+                             uint64_t enqueueUs) {
+    if (!state) {
+        return;
+    }
+    state->stats.addDispatchSamples.fetch_add(1, std::memory_order_relaxed);
+    state->stats.addDispatchTotalUs.fetch_add(totalUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addDispatchMaxUs, totalUs);
+    state->stats.addFingerprintTotalUs.fetch_add(fingerprintUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addFingerprintMaxUs, fingerprintUs);
+    state->stats.addEnqueueTotalUs.fetch_add(enqueueUs, std::memory_order_relaxed);
+    atomicMax(state->stats.addEnqueueMaxUs, enqueueUs);
+}
 
 std::string lowercaseCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -621,8 +647,20 @@ int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDe
     return std::min(maxDelayMs, expDelay + jitter);
 }
 
-boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
-                                                                    std::size_t channelCapacity) {
+struct ImmediateAddFingerprint {
+    std::string hash;
+    std::optional<uint64_t> fileSize;
+    std::optional<int64_t> lastWriteTimeNs;
+};
+
+int64_t fileTimeNs(const std::filesystem::file_time_type& time) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+}
+
+boost::asio::awaitable<bool>
+tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
+                                       const ImmediateAddFingerprint& fingerprint,
+                                       std::size_t channelCapacity) {
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
             "store_document_tasks", channelCapacity);
@@ -635,7 +673,11 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
     boost::asio::steady_timer timer(ex);
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        InternalEventBus::StoreDocumentTask task{req};
+        InternalEventBus::StoreDocumentTask task;
+        task.request = req;
+        task.precomputedHash = fingerprint.hash;
+        task.precomputedFileSize = fingerprint.fileSize;
+        task.precomputedLastWriteTimeNs = fingerprint.lastWriteTimeNs;
         bool pushed = false;
         if (g_documentsEnqueueFailuresBeforeSuccess.load(std::memory_order_acquire) > 0) {
             g_documentsEnqueueFailuresBeforeSuccess.fetch_sub(1, std::memory_order_acq_rel);
@@ -663,31 +705,69 @@ boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDoc
     co_return false;
 }
 
-std::string computeImmediateAddHash(const AddDocumentRequest& req, bool isDir) {
+ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest& req, bool isDir) {
+    ImmediateAddFingerprint fingerprint;
     if (isDir || req.recursive) {
-        return "";
+        return fingerprint;
     }
 
     try {
         auto hasher = yams::crypto::createSHA256Hasher();
         maybeThrowForcedDocumentsHashFailure();
         if (!req.content.empty()) {
-            return hasher->hash(req.content);
+            fingerprint.hash = hasher->hash(req.content);
+            fingerprint.fileSize = static_cast<uint64_t>(req.content.size());
+            return fingerprint;
         }
         if (!req.path.empty()) {
-            return hasher->hashFile(req.path);
+            std::error_code ec;
+            const auto beforeSize = std::filesystem::file_size(req.path, ec);
+            if (ec) {
+                return fingerprint;
+            }
+            const auto beforeMtime = std::filesystem::last_write_time(req.path, ec);
+            if (ec) {
+                return fingerprint;
+            }
+            const auto hash = hasher->hashFile(req.path);
+            const auto afterSize = std::filesystem::file_size(req.path, ec);
+            if (ec || afterSize != beforeSize) {
+                fingerprint.hash = hash;
+                return fingerprint;
+            }
+            const auto afterMtime = std::filesystem::last_write_time(req.path, ec);
+            if (ec || afterMtime != beforeMtime) {
+                fingerprint.hash = hash;
+                return fingerprint;
+            }
+            fingerprint.hash = hash;
+            fingerprint.fileSize = beforeSize;
+            fingerprint.lastWriteTimeNs = fileTimeNs(beforeMtime);
         }
     } catch (...) {
     }
-    return "";
+    return fingerprint;
 }
 
-AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req, std::string_view message,
-                                          bool isDir) {
+AddDocumentResponse makeQueuedAddResponse(const AddDocumentRequest& req,
+                                          const ImmediateAddFingerprint& fingerprint,
+                                          std::string_view message, StateComponent* state,
+                                          std::chrono::steady_clock::time_point requestStart,
+                                          std::chrono::steady_clock::time_point fingerprintStart,
+                                          std::chrono::steady_clock::time_point enqueueStart) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto fingerprintUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(enqueueStart - fingerprintStart)
+            .count());
+    const auto enqueueUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - enqueueStart).count());
+    const auto totalUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - requestStart).count());
+    recordAddDispatchTiming(state, totalUs, fingerprintUs, enqueueUs);
     AddDocumentResponse response;
     response.path = req.path.empty() ? req.name : req.path;
     response.documentsAdded = 0;
-    response.hash = computeImmediateAddHash(req, isDir);
+    response.hash = fingerprint.hash;
     response.extractionStatus = "pending";
     response.message = std::string(message);
     return response;
@@ -697,11 +777,16 @@ boost::asio::awaitable<Response>
 enqueueAddDocumentOrReject(ServiceManager* serviceManager, StateComponent* state,
                            const AddDocumentRequest& req, std::size_t channelCapacity,
                            std::string_view message, bool countDeferred, bool isDir) {
-    if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
+    const auto requestStart = std::chrono::steady_clock::now();
+    const auto fingerprintStart = requestStart;
+    const auto fingerprint = computeImmediateAddFingerprint(req, isDir);
+    const auto enqueueStart = std::chrono::steady_clock::now();
+    if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, fingerprint, channelCapacity)) {
         if (countDeferred) {
             state->stats.addRequestsDeferred.fetch_add(1, std::memory_order_acq_rel);
         }
-        co_return makeQueuedAddResponse(req, message, isDir);
+        co_return makeQueuedAddResponse(req, fingerprint, message, state, requestStart,
+                                        fingerprintStart, enqueueStart);
     }
 
     state->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
@@ -776,7 +861,22 @@ void RequestDispatcher::__test_forceDownloadServiceSuccessOnce() {
     g_forceDownloadServiceSuccessOnce.store(true, std::memory_order_release);
 }
 
-// PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
+void RequestDispatcher::__test_forceDownloadServiceFailureOnce(const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_forceDownloadServiceFailureMutex);
+    g_forceDownloadServiceFailureMessage = message;
+}
+
+void RequestDispatcher::__test_resetDownloadServiceRequestCapture() {
+    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+    g_lastDownloadServiceFollowRedirects.reset();
+}
+
+std::optional<bool> RequestDispatcher::__test_lastDownloadServiceFollowRedirects() {
+    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+    return g_lastDownloadServiceFollowRedirects;
+}
+
+// Prepare session using app services.
 int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
     try {
         auto appContext = serviceManager_->getAppContext();
@@ -1283,6 +1383,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
+            const auto requestStart = std::chrono::steady_clock::now();
             const auto channelCapacity =
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
 
@@ -1386,6 +1487,10 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             response.size = serviceResp.bytesStored;
             response.extractionStatus = "pending";
             response.message = "Document stored successfully.";
+            const auto now = std::chrono::steady_clock::now();
+            const auto totalUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - requestStart).count());
+            recordAddDispatchTiming(state_, totalUs, 0, 0);
             co_return response;
         });
 }
@@ -1491,9 +1596,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             }
             const auto& serviceResp = result.value();
             // Special handling: when pathsOnly is requested, the app-level GrepService
-            // intentionally omits per-file match details and instead populates filesWith.
-            // Map those paths into lightweight GrepMatch entries so daemon clients (and tests)
-            // can observe results via the standard matches field.
+            // intentionally omits per-file match details and instead populates the shared
+            // pathsOnly projection. Map those paths into lightweight GrepMatch entries so daemon
+            // clients (and tests) can observe results via the standard matches field.
             if (serviceReq.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
@@ -1506,7 +1611,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                 response.filesWith = serviceResp.filesWith;
                 response.filesWithout = serviceResp.filesWithout;
                 response.pathsOnly = serviceResp.pathsOnly;
-                for (const auto& path : serviceResp.filesWith) {
+                for (const auto& path : serviceResp.pathsOnly) {
                     GrepMatch dm;
                     dm.file = path;
                     dm.lineNumber = 0;
@@ -1631,7 +1736,7 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
 
                 app::services::DownloadServiceRequest sreq;
                 sreq.url = std::move(requestUrl);
-                sreq.followRedirects = true;
+                sreq.followRedirects = false;
                 sreq.storeOnly = policy.storeOnly;
                 sreq.concurrency = 4;
                 sreq.chunkSizeBytes = 8388608;
@@ -1641,6 +1746,21 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
                 sreq.shouldCancel = [cancelFlag]() {
                     return cancelFlag && cancelFlag->load(std::memory_order_acquire);
                 };
+
+                {
+                    std::lock_guard<std::mutex> lock(g_lastDownloadServiceRequestMutex);
+                    g_lastDownloadServiceFollowRedirects = sreq.followRedirects;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_forceDownloadServiceFailureMutex);
+                    if (g_forceDownloadServiceFailureMessage) {
+                        downloadJobRegistry().fail(dataDir, jobId,
+                                                   *g_forceDownloadServiceFailureMessage);
+                        g_forceDownloadServiceFailureMessage.reset();
+                        return;
+                    }
+                }
 
                 auto sres = downloadService->download(sreq);
                 if (!sres) {

@@ -1,8 +1,14 @@
 #include <yams/wal/wal_entry.h>
 
+#include <array>
 #include <cstring>
 #include <iomanip>
+#include <iterator>
+#include <limits>
+#include <span>
 #include <sstream>
+#include <stdexcept>
+#include <type_traits>
 
 // CRC32 implementation (simplified - in production use a library)
 namespace {
@@ -21,6 +27,64 @@ uint32_t crc32(const void* data, size_t length) {
     return ~crc;
 }
 
+uint32_t checkedMetadataPartSize(size_t size, const char* field) {
+    if (size > std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error(std::string("WAL metadata ") + field +
+                                " exceeds uint32 size limit");
+    }
+    return static_cast<uint32_t>(size);
+}
+
+template <typename T> std::span<const std::byte> objectBytes(const T& value) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WAL serialization only supports trivially-copyable POD payloads");
+    return std::as_bytes(std::span<const T>(&value, 1));
+}
+
+template <typename T> void appendObjectBytes(std::vector<std::byte>& out, const T& value) {
+    const auto bytes = objectBytes(value);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
+std::array<std::byte, yams::wal::WALEntry::Header::size()>
+stableHeaderBytes(yams::wal::WALEntry::Header header) {
+    // Header has natural padding on some targets. Zeroing a copy makes checksum bytes stable
+    // without changing the on-disk layout expected by existing WAL files.
+    yams::wal::WALEntry::Header stable{};
+    stable.magic = header.magic;
+    stable.version = header.version;
+    stable.sequenceNum = header.sequenceNum;
+    stable.timestamp = header.timestamp;
+    stable.transactionId = header.transactionId;
+    stable.operation = header.operation;
+    stable.flags = header.flags;
+    stable.reserved = header.reserved;
+    stable.dataSize = header.dataSize;
+    stable.checksum = header.checksum;
+
+    std::array<std::byte, yams::wal::WALEntry::Header::size()> bytes{};
+    std::memcpy(bytes.data(), &stable, sizeof(stable));
+    return bytes;
+}
+
+void appendHeaderBytes(std::vector<std::byte>& out, const yams::wal::WALEntry::Header& header) {
+    const auto bytes = stableHeaderBytes(header);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
+template <typename T> std::optional<T> readObject(std::span<const std::byte> in) {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WAL deserialization only supports trivially-copyable POD payloads");
+    if (in.size() < sizeof(T)) {
+        return std::nullopt;
+    }
+    T result{};
+    std::memcpy(&result, in.data(),
+                sizeof(T)); // nosemgrep: yams.cpp.memcpy-non-pod-object -- centralized POD WAL
+                            // payload decoder with static_assert.
+    return result;
+}
+
 } // anonymous namespace
 
 namespace yams::wal {
@@ -33,29 +97,33 @@ std::vector<std::byte> WALEntry::serialize() const {
     auto headerCopy = header;
     headerCopy.checksum = 0; // Zero out for calculation
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&headerCopy);
-    result.insert(result.end(), headerBytes, headerBytes + sizeof(Header));
+    appendHeaderBytes(result, headerCopy);
 
     // Copy data
     result.insert(result.end(), data.begin(), data.end());
 
     // Calculate and set checksum
     uint32_t checksum = crc32(result.data(), result.size());
-    auto* checksumPtr = reinterpret_cast<uint32_t*>(result.data() + offsetof(Header, checksum));
-    *checksumPtr = checksum;
+    std::memcpy(result.data() + offsetof(Header, checksum), &checksum, sizeof(checksum));
 
     return result;
 }
 
 std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer) {
+    constexpr size_t headerSize = sizeof(Header);
+
     // Check minimum size
-    if (buffer.size() < sizeof(Header)) {
+    if (buffer.size() < headerSize) {
         return std::nullopt;
     }
 
     // Read header
     WALEntry entry;
-    std::memcpy(&entry.header, buffer.data(), sizeof(Header));
+    auto header = readObject<Header>(buffer);
+    if (!header) {
+        return std::nullopt;
+    }
+    entry.header = *header;
 
     // Validate header
     if (!entry.header.isValid()) {
@@ -63,13 +131,14 @@ std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer)
     }
 
     // Check buffer has enough data
-    if (buffer.size() < sizeof(Header) + entry.header.dataSize) {
+    if (buffer.size() < headerSize + entry.header.dataSize) {
         return std::nullopt;
     }
 
     // Read data
-    entry.data.assign(buffer.begin() + sizeof(Header),
-                      buffer.begin() + sizeof(Header) + entry.header.dataSize);
+    const auto dataBegin = std::next(buffer.begin(), static_cast<std::ptrdiff_t>(headerSize));
+    entry.data.assign(dataBegin,
+                      std::next(dataBegin, static_cast<std::ptrdiff_t>(entry.header.dataSize)));
 
     // Verify checksum
     if (!entry.verifyChecksum()) {
@@ -87,8 +156,7 @@ void WALEntry::updateChecksum() {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&header);
-    temp.insert(temp.end(), headerBytes, headerBytes + sizeof(Header));
+    appendHeaderBytes(temp, header);
     temp.insert(temp.end(), data.begin(), data.end());
 
     header.checksum = crc32(temp.data(), temp.size());
@@ -106,28 +174,38 @@ bool WALEntry::verifyChecksum() const {
     std::vector<std::byte> temp;
     temp.reserve(totalSize());
 
-    const auto* headerBytes = reinterpret_cast<const std::byte*>(&headerCopy);
-    temp.insert(temp.end(), headerBytes, headerBytes + sizeof(Header));
+    appendHeaderBytes(temp, headerCopy);
     temp.insert(temp.end(), data.begin(), data.end());
 
     uint32_t calculatedChecksum = crc32(temp.data(), temp.size());
 
-    return savedChecksum == calculatedChecksum;
+    if (savedChecksum == calculatedChecksum) {
+        return true;
+    }
+
+    // Older WAL entries were checksummed over raw Header bytes, including padding.
+    // Keep recovery compatible while all new writes use stable zero-padded bytes.
+    temp.clear();
+    appendObjectBytes(temp, headerCopy);
+    temp.insert(temp.end(), data.begin(), data.end());
+    return savedChecksum == crc32(temp.data(), temp.size());
 }
 
 // StoreBlockData implementation
 std::vector<std::byte> WALEntry::StoreBlockData::encode(const std::string& hash, uint32_t size,
                                                         uint32_t refCount) {
-    std::vector<std::byte> result(sizeof(StoreBlockData));
-    auto* data = reinterpret_cast<StoreBlockData*>(result.data());
+    StoreBlockData data{};
 
     // Copy hash (truncate if needed)
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    data->size = size;
-    data->refCount = refCount;
+    data.size = size;
+    data.refCount = refCount;
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(StoreBlockData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -137,19 +215,19 @@ WALEntry::StoreBlockData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    StoreBlockData result;
-    std::memcpy(&result, data.data(), sizeof(StoreBlockData));
-    return result;
+    return readObject<StoreBlockData>(data);
 }
 
 // DeleteBlockData implementation
 std::vector<std::byte> WALEntry::DeleteBlockData::encode(const std::string& hash) {
-    std::vector<std::byte> result(sizeof(DeleteBlockData));
-    auto* data = reinterpret_cast<DeleteBlockData*>(result.data());
+    DeleteBlockData data{};
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(DeleteBlockData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -159,22 +237,22 @@ WALEntry::DeleteBlockData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    DeleteBlockData result;
-    std::memcpy(&result, data.data(), sizeof(DeleteBlockData));
-    return result;
+    return readObject<DeleteBlockData>(data);
 }
 
 // UpdateReferenceData implementation
 std::vector<std::byte> WALEntry::UpdateReferenceData::encode(const std::string& hash,
                                                              int32_t delta) {
-    std::vector<std::byte> result(sizeof(UpdateReferenceData));
-    auto* data = reinterpret_cast<UpdateReferenceData*>(result.data());
+    UpdateReferenceData data{};
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    data->delta = delta;
+    data.delta = delta;
 
+    std::vector<std::byte> result;
+    result.reserve(sizeof(UpdateReferenceData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -184,32 +262,31 @@ WALEntry::UpdateReferenceData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    UpdateReferenceData result;
-    std::memcpy(&result, data.data(), sizeof(UpdateReferenceData));
-    return result;
+    return readObject<UpdateReferenceData>(data);
 }
 
 // UpdateMetadataData implementation
 std::vector<std::byte> WALEntry::UpdateMetadataData::encode(const std::string& hash,
                                                             const std::string& key,
                                                             const std::string& value) {
-    size_t totalSize = sizeof(UpdateMetadataData) + key.size() + value.size();
-    std::vector<std::byte> result(totalSize);
+    UpdateMetadataData data{};
 
-    auto* data = reinterpret_cast<UpdateMetadataData*>(result.data());
+    std::memset(data.hash, 0, HASH_SIZE);
+    std::memcpy(data.hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
 
-    std::memset(data->hash, 0, HASH_SIZE);
-    std::memcpy(data->hash, hash.data(), std::min(hash.size(), static_cast<size_t>(HASH_SIZE)));
+    data.keySize = checkedMetadataPartSize(key.size(), "key");
+    data.valueSize = checkedMetadataPartSize(value.size(), "value");
 
-    data->keySize = static_cast<uint32_t>(key.size());
-    data->valueSize = static_cast<uint32_t>(value.size());
+    std::vector<std::byte> result;
+    result.reserve(sizeof(UpdateMetadataData) + key.size() + value.size());
+    appendObjectBytes(result, data);
 
     // Copy key and value
-    auto* keyPtr = result.data() + sizeof(UpdateMetadataData);
-    std::memcpy(keyPtr, key.data(), key.size());
+    const auto* keyPtr = reinterpret_cast<const std::byte*>(key.data());
+    result.insert(result.end(), keyPtr, keyPtr + key.size());
 
-    auto* valuePtr = keyPtr + key.size();
-    std::memcpy(valuePtr, value.data(), value.size());
+    const auto* valuePtr = reinterpret_cast<const std::byte*>(value.data());
+    result.insert(result.end(), valuePtr, valuePtr + value.size());
 
     return result;
 }
@@ -220,11 +297,13 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    UpdateMetadataData result;
-    std::memcpy(&result, data.data(), sizeof(UpdateMetadataData));
+    auto result = readObject<UpdateMetadataData>(data);
+    if (!result) {
+        return std::nullopt;
+    }
 
     // Verify size
-    size_t expectedSize = sizeof(UpdateMetadataData) + result.keySize + result.valueSize;
+    size_t expectedSize = sizeof(UpdateMetadataData) + result->keySize + result->valueSize;
     if (data.size() < expectedSize) {
         return std::nullopt;
     }
@@ -234,12 +313,13 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
 
 // TransactionData implementation
 std::vector<std::byte> WALEntry::TransactionData::encode(uint64_t txnId, uint32_t count) {
-    std::vector<std::byte> result(sizeof(TransactionData));
-    auto* data = reinterpret_cast<TransactionData*>(result.data());
+    TransactionData data{};
+    data.transactionId = txnId;
+    data.participantCount = count;
 
-    data->transactionId = txnId;
-    data->participantCount = count;
-
+    std::vector<std::byte> result;
+    result.reserve(sizeof(TransactionData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -249,19 +329,18 @@ WALEntry::TransactionData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    TransactionData result;
-    std::memcpy(&result, data.data(), sizeof(TransactionData));
-    return result;
+    return readObject<TransactionData>(data);
 }
 
 // CheckpointData implementation
 std::vector<std::byte> WALEntry::CheckpointData::encode(uint64_t seqNum, uint64_t timestamp) {
-    std::vector<std::byte> result(sizeof(CheckpointData));
-    auto* data = reinterpret_cast<CheckpointData*>(result.data());
+    CheckpointData data{};
+    data.sequenceNum = seqNum;
+    data.timestamp = timestamp;
 
-    data->sequenceNum = seqNum;
-    data->timestamp = timestamp;
-
+    std::vector<std::byte> result;
+    result.reserve(sizeof(CheckpointData));
+    appendObjectBytes(result, data);
     return result;
 }
 
@@ -271,9 +350,7 @@ WALEntry::CheckpointData::decode(std::span<const std::byte> data) {
         return std::nullopt;
     }
 
-    CheckpointData result;
-    std::memcpy(&result, data.data(), sizeof(CheckpointData));
-    return result;
+    return readObject<CheckpointData>(data);
 }
 
 // Stream operators

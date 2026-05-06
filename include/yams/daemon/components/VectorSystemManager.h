@@ -55,6 +55,9 @@ public:
 
         /// Function to get embedding dimension from generator
         std::function<size_t()> getEmbeddingDimension;
+
+        /// Suppress startup/search-index build work while profiling allocator overhead.
+        bool suppressVectorIndexBuild{false};
     };
 
     explicit VectorSystemManager(Dependencies deps);

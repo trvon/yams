@@ -5,10 +5,10 @@ spdlog_dep = dependency('spdlog', required: false)
 json_dep = dependency('nlohmann_json', required: false)
 yams_core = dependency('yams_core', required: false)
 yams_onnx_resource = dependency('yams_onnx_resource', required: false)
-boost_dep = dependency('boost', modules: ['asio'], required: false)
-if not boost_dep.found()
-  boost_dep = dependency('boost', required: false)
-endif
+# Boost.Asio is header-only; its runtime needs (boost::system) are already
+# in the top-level boost_dep. Use that variable directly to bypass meson's
+# Windows Boost finder, which can't reconcile Conan's MSVC layout. See
+# meson #14146 for the override_dependency+modules limitation.
 
 win_extra_deps = []
 if host_machine.system() == 'windows'
@@ -40,7 +40,6 @@ yams_onnx_plugin_srcs = [
   'onnx_text_processing.cpp',
   'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
-  'onnx_reranker_session.cpp',
   'onnx_colbert_session.cpp',
   '../../src/vector/tokenizer.cpp',
 ]

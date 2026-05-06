@@ -432,6 +432,14 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
     sqlite3_busy_timeout(db_, 5000); // 5 second timeout
 
     path_ = path;
+
+    if (mode == ConnectionMode::ReadWrite || mode == ConnectionMode::Create) {
+        if (auto wal = enableWAL(); !wal) {
+            spdlog::warn("Database::open: WAL not enabled for '{}': {}", path_,
+                         wal.error().message);
+        }
+    }
+
     trace_db_lifetime("open", this, path_, db_, statementCache_.size(), SQLITE_OK,
                       count_live_statements(db_));
     return {};
@@ -588,6 +596,51 @@ Result<void> Database::execute(const std::string& sql) {
         return Error{ErrorCode::DatabaseError, "Failed to execute SQL: " + error};
     }
     return {};
+}
+
+Result<void> Database::checkIntegrity() {
+    if (!db_) {
+        return Error{ErrorCode::InvalidState, "Database not open"};
+    }
+
+    sqlite3_busy_timeout(db_, 10000);
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, "PRAGMA quick_check", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::string err = sqlite3_errmsg(db_);
+        return Error{ErrorCode::DatabaseError, "quick_check prepare failed: " + err};
+    }
+
+    std::string firstLine;
+    std::string allLines;
+    int rowCount = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char* text = sqlite3_column_text(stmt, 0);
+        std::string line = text ? reinterpret_cast<const char*>(text) : "";
+        if (rowCount == 0) {
+            firstLine = line;
+        }
+        if (!allLines.empty()) {
+            allLines += "; ";
+        }
+        allLines += line;
+        ++rowCount;
+        if (rowCount >= 16) {
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        std::string err = sqlite3_errmsg(db_);
+        return Error{ErrorCode::DatabaseError, "quick_check step failed: " + err};
+    }
+
+    if (rowCount == 1 && firstLine == "ok") {
+        return {};
+    }
+    return Error{ErrorCode::DatabaseError, "quick_check reported: " + allLines};
 }
 
 Result<void> Database::beginTransaction() {

@@ -86,6 +86,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
     'in_process_transport.cpp',
     'process_discovery.cpp',
     'sandbox_detection.cpp',
+    'sandbox_probe.cpp',
     'global_io_context.cpp',
     '../ipc/connection_fsm.cpp',
     '../ipc/message_framing.cpp',
@@ -99,9 +100,11 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
     dependency('yams_config'),
     dependency('spdlog'),
     protobuf_dep,
-    # Boost.Asio relies on these Boost components at link time
-    dependency('Boost', modules: 'system'),
-    dependency('Boost', modules: 'thread'),
+    # Boost.Asio relies on Boost.System + Boost.Thread at link time; both
+    # are bundled in the top-level boost_dep (per-library pkg-config probe).
+    # Re-invoking dependency('Boost'/'boost', modules: ...) here would bypass
+    # meson's override_dependency on the modules: form (meson #14146).
+    boost_dep,
     tl_expected_dep,
     nlohmann_json_dep,
   ],

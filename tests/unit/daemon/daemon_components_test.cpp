@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,12 +15,13 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 #include <yams/daemon/components/IOCoordinator.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
@@ -209,6 +209,61 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
     fs::remove_all(runtimeDir, ec);
 }
 
+TEST_CASE("SocketServer: main-socket admission ignores proxy connection load",
+          "[daemon][components][socket][admission]") {
+    SocketServer::Config config;
+    config.socketPath = "/tmp/yams-socket-admission-test.sock";
+    config.maxConnections = 4;
+    config.proxyMaxConnections = 64;
+
+    StateComponent state;
+    SocketServer server(config, nullptr, nullptr, nullptr, &state);
+    REQUIRE(server.resizeConnectionSlots(config.maxConnections));
+
+    AddDocumentRequest addRequest;
+    addRequest.path = "src";
+    addRequest.recursive = true;
+
+    SECTION("Main-socket write admission keys off main connections, not total connections") {
+        server.testing_setConnectionCounts(/*mainActive=*/0, /*proxyActive=*/10);
+
+        CHECK(server.activeConnections() == 10);
+        CHECK(server.proxyActiveConnections() == 10);
+        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
+              SocketAdmissionVerdict::admit);
+        CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
+        CHECK(server.getSlotUtilization() == 0.0);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Main-socket pressure still rejects once main connections cross the limit bands") {
+        server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/0);
+
+        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
+              SocketAdmissionVerdict::reject);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Control requests remain bypassed on the main socket") {
+        server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/20);
+
+        CHECK(server.testing_mainSocketAdmissionVerdict(StatusRequest{}) ==
+              SocketAdmissionVerdict::bypass);
+        server.testing_setConnectionCounts(0, 0);
+    }
+
+    SECTION("Emergency guard is driven only by main active connections") {
+        const auto hardLimit = AdmissionPolicy::emergencySessionLimit(config.maxConnections);
+
+        server.testing_setConnectionCounts(/*mainActive=*/hardLimit - 1, /*proxyActive=*/hardLimit);
+        CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
+
+        server.testing_setConnectionCounts(/*mainActive=*/hardLimit, /*proxyActive=*/0);
+        CHECK(server.testing_mainSocketEmergencyGuardRejects());
+        server.testing_setConnectionCounts(0, 0);
+    }
+}
+
 // =============================================================================
 // Socket Path Resolution Tests
 // =============================================================================
@@ -315,6 +370,17 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
     // Cleanup
     std::error_code ec;
     fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("Socket path resolution: proxy path derived from main socket",
+          "[daemon][components][socket][utils]") {
+    const fs::path mainSocket{"/tmp/yams-daemon.sock"};
+    const auto proxySocket = socket_utils::derive_proxy_socket_path(mainSocket);
+    REQUIRE(proxySocket == fs::path{"/tmp/yams-daemon.proxy.sock"});
+
+    const fs::path nestedSocket{"/run/user/1000/custom.sock"};
+    const auto nestedProxy = socket_utils::derive_proxy_socket_path(nestedSocket);
+    REQUIRE(nestedProxy == fs::path{"/run/user/1000/custom.proxy.sock"});
 }
 
 // =============================================================================
@@ -494,12 +560,9 @@ TEST_CASE("Daemon components: ResourceGovernor backpressure policy helpers",
     CHECK(retryOverloaded >= retryBaseline);
     CHECK(retryOverloaded <= 5000);
 
-    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100, false);
-    const auto pauseBackpressured = governor.recommendBackpressureReadPauseMs(100, true);
+    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100);
     CHECK(pauseIdle >= 1);
     CHECK(pauseIdle <= 5000);
-    CHECK(pauseBackpressured >= pauseIdle);
-    CHECK(pauseBackpressured <= 5000);
 
     // Leave singleton policy state neutral for subsequent tests.
     governor.reportDbLockContention(0, 1);

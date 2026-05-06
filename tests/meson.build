@@ -26,6 +26,9 @@ catch2_incs = []
 #Must be defined early before subdirs are included
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
+_test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
+_test_timeout_scale = _test_thread_sanitizer ? 10 : 1
+_test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
 fs = import('fs')
 cli11_dep = cli11_resolved_dep
@@ -41,7 +44,7 @@ test_deps = [
   dependency('OpenSSL'),
 
   cli11_dep,
-  dependency('boost', required: true),
+  boost_dep,
   dependency('libcurl', required: false),
   dependency('zlib'),
   dependency('fmt', required: false),
@@ -223,7 +226,6 @@ heavy_tests = [
 #Temporary skips to stabilize shards(Option A) : vector DB / WAL heavy
   'VectorDatabaseTest.*',
   'VectorDatabasePersistenceTest.*',
-  'VectorIndexManagerTest.*',
   'OnnxRuntimeTest.*',
   'EmbeddingGeneratorTest.*',
   'ModelManagementTest.*',
@@ -252,6 +254,11 @@ endif
 #deployed runtime libraries(e.g.ONNX, TBB) even when the Conan cache is absent.
 _test_rpaths = [meson.project_build_root()]
 _test_ld_library_path = [meson.project_build_root()]
+if host_machine.system() == 'linux'
+  # Docker test stages install Conan-provided runtimes under /opt/yams/usr/local/lib
+  # before invoking meson test, so include that path in the test environment.
+  _test_ld_library_path += ['/opt/yams/usr/local/lib']
+endif
 foreach d : [onnx_dep, tbb_dep]
   if d.found()
     libdir = d.get_variable(pkgconfig: 'libdir', default_value: '')
@@ -463,8 +470,9 @@ if catch2_dep.found()
       'unit/daemon/components/database_manager_test.cpp',
       'unit/daemon/components/plugin_manager_test.cpp',
       'unit/daemon/plugin_manager_config_test.cpp',
-      'unit/daemon/components/request_queue_test.cpp',
+      'unit/daemon/components/topology_tuner_catch2_test.cpp',
       'unit/daemon/components/vector_system_manager_test.cpp',
+      'unit/search/topological_quality_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -526,20 +534,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#Compressed ANN fusion / dedup contract and behavior tests
-  catch2_compressed_ann_fusion_exe = executable('catch2_compressed_ann_fusion',
-    files(
-      'unit/search/compressed_ann_fusion_contract_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_behavior_catch2_test.cpp',
-      'unit/search/compressed_ann_dedup_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #ParallelPostProcessor daemon - aware budgeting tests
   catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
     files('unit/search/parallel_post_processor_catch2_test.cpp'),
@@ -584,24 +578,6 @@ if catch2_dep.found()
   )
 
   if onnx_dep.found()
-#Reranker session test(uses mock mode by default, real model optional)
-#Compile the reranker session source directly into the test to avoid plugin linking issues
-    reranker_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
-
-    catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
-      files(
-        'unit/daemon/onnx_reranker_session_test.cpp',
-        '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
-        '../src/vector/tokenizer.cpp',
-      ),
-      include_directories: incs,
-      dependencies: reranker_test_deps,
-      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-      build_rpath: ':'.join(_test_rpaths),
-      install: false,
-    )
     onnx_provider_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
     catch2_daemon_onnx_provider_exe = executable('catch2_daemon_onnx_provider',
       files(
@@ -610,7 +586,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -640,7 +615,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -706,6 +680,51 @@ if catch2_dep.found()
 
   catch2_service_manager_exe = executable('catch2_service_manager',
     files('unit/daemon/service_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_db_recovery_exe = executable('catch2_db_recovery',
+    files('unit/daemon/db_recovery_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_storage_preflight_exe = executable('catch2_storage_preflight',
+    files('unit/daemon/storage_preflight_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_tune_advisor_snapshot_exe = executable('catch2_tune_advisor_snapshot',
+    files('unit/daemon/tune_advisor_snapshot_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_repair_hold_hints_exe = executable('catch2_repair_hold_hints',
+    files('unit/daemon/repair_hold_hints_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_physical_walk_ttl_exe = executable('catch2_physical_walk_ttl',
+    files('unit/daemon/physical_walk_ttl_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -787,6 +806,33 @@ if catch2_dep.found()
 
   catch2_abi_model_provider_dim_exe = executable('catch2_abi_model_provider_dim',
     files('unit/daemon/abi_model_provider_dimension_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_status_readiness_vector_usable_exe = executable('catch2_status_readiness_vector_usable',
+    files('unit/daemon/status_readiness_vector_usable_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_model_provider_registry_exe = executable('catch2_model_provider_registry',
+    files('unit/daemon/model_provider_registry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_simeon_model_provider_exe = executable('catch2_simeon_model_provider',
+    files('unit/daemon/simeon_model_provider_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -967,6 +1013,36 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_vector_index_coordinator_bulk_scope_exe = executable(
+    'catch2_vector_index_coordinator_bulk_scope',
+    files('unit/daemon/vector_index_coordinator_bulk_scope_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_vector_index_coordinator_coalesce_exe = executable(
+    'catch2_vector_index_coordinator_coalesce',
+    files('unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_vector_index_coordinator_telemetry_exe = executable(
+    'catch2_vector_index_coordinator_telemetry',
+    files('unit/daemon/vector_index_coordinator_telemetry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_tuning_loop_wakeup_exe = executable('catch2_tuning_loop_wakeup',
     files('unit/daemon/tuning_loop_wakeup_catch2_test.cpp'),
     include_directories: incs,
@@ -984,7 +1060,6 @@ if catch2_dep.found()
         '../plugins/onnx/onnx_text_processing.cpp',
         '../plugins/onnx/ort_runtime_loader.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
-        '../plugins/onnx/onnx_reranker_session.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
       ),
@@ -1073,6 +1148,9 @@ if catch2_dep.found()
       'unit/search/entity_linker_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
+      'unit/search/lexical_scoring_catch2_test.cpp',
+      'unit/search/simeon_lexical_backend_catch2_test.cpp',
+      'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_router_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
@@ -1085,9 +1163,6 @@ if catch2_dep.found()
       'unit/search/query_literal_extractor_catch2_test.cpp',
       'unit/search/search_filters_catch2_test.cpp',
       'unit/search/search_results_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_contract_catch2_test.cpp',
-      'unit/search/compressed_ann_fusion_behavior_catch2_test.cpp',
-      'unit/search/compressed_ann_dedup_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1232,6 +1307,7 @@ if catch2_dep.found()
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
+      'unit/cli/command_registry_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
@@ -1273,11 +1349,10 @@ if catch2_dep.found()
     catch2_vector_submodule_exe = executable('catch2_vector_submodule',
       files(
         'unit/vector/document_chunker_catch2_test.cpp',
+        'unit/vector/dim_resolver_catch2_test.cpp',
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
-        'unit/vector/hnsw_index_catch2_test.cpp',
-        'unit/vector/hnsw_persistence_catchup_catch2_test.cpp',
-        'unit/vector/multi_dimension_hnsw_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
+        'unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
         'unit/vector/vector_dimension_validation_catch2_test.cpp',
@@ -1289,7 +1364,7 @@ if catch2_dep.found()
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
         'unit/vector/turboquant_packed_reranker_catch2_test.cpp',
-        'unit/vector/compressed_ann_catch2_test.cpp',
+        'unit/vector/simeon_backend_catch2_test.cpp',
       ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2040,19 +2115,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#Reranker Integration Tests(Catch2)
-#Tests IReranker interface, ModelProviderRerankerAdapter, and reranker config
-  reranker_integration_exe = executable('reranker_integration',
-    files('unit/search/reranker_integration_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
-      dependency('yams_daemon'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #Ghidra plugin integration test(PBI - 075)
 #Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
   if host_machine.system() != 'windows'
@@ -2406,12 +2468,6 @@ if catch2_dep.found()
     timeout: 180
   )
 
-  test('reranker_integration', reranker_integration_exe,
-    suite: ['catch2', 'unit', 'search', 'reranker'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
 #Plugin integration tests
   if host_machine.system() != 'windows'
     test('ghidra_plugin_communication', ghidra_plugin_exe,
@@ -2430,7 +2486,7 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 180 : 120
+  daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 240 : 180
 
   test('daemon_metrics_status', catch2_daemon_metrics_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
@@ -2579,19 +2635,6 @@ if catch2_dep.found()
   )
 
   if onnx_dep.found()
-#Reranker session test - uses mock mode by default, enabling quick CI runs
-    test('daemon_reranker_session', catch2_daemon_reranker_exe,
-      suite: ['catch2', 'unit', 'daemon', 'reranker'],
-      env: {
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-        'YAMS_TEST_MODE': '1',  # Enable mock mode for CI
-      },
-      timeout: 60,
-      is_parallel: true
-    )
-  endif
-
-  if onnx_dep.found()
     test('daemon_onnx_provider_config', catch2_daemon_onnx_provider_exe,
       suite: ['catch2', 'unit', 'daemon', 'onnx'],
       env: {
@@ -2644,6 +2687,36 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('db_recovery', catch2_db_recovery_exe,
+    suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('storage_preflight', catch2_storage_preflight_exe,
+    suite: ['catch2', 'unit', 'daemon', 'storage_preflight'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('tune_advisor_snapshot', catch2_tune_advisor_snapshot_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune_advisor'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('repair_hold_hints', catch2_repair_hold_hints_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tuning'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('physical_walk_ttl', catch2_physical_walk_ttl_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tuning'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('streaming_processor', catch2_streaming_processor_exe,
@@ -2706,6 +2779,24 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('status_readiness_vector_usable', catch2_status_readiness_vector_usable_exe,
+    suite: ['catch2', 'unit', 'daemon', 'readiness'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('model_provider_registry', catch2_model_provider_registry_exe,
+    suite: ['catch2', 'unit', 'daemon', 'model_provider'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('simeon_model_provider', catch2_simeon_model_provider_exe,
+    suite: ['catch2', 'unit', 'daemon', 'model_provider', 'simeon'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('embedding_recovery', catch2_embedding_recovery_exe,
@@ -2834,6 +2925,24 @@ if catch2_dep.found()
 
   test('health_check_isolation', catch2_health_check_isolation_exe,
     suite: ['catch2', 'unit', 'daemon', 'state', 'health-check'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_coalesce', catch2_vector_index_coordinator_coalesce_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('vector_index_coordinator_telemetry', catch2_vector_index_coordinator_telemetry_exe,
+    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

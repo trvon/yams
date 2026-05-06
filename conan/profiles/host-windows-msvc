@@ -1,10 +1,17 @@
+{# windows-latest (= windows-2022) ships VS 2022 with the v143 toolset at #}
+{# 14.44.x (MSVC compiler.version=194). Its 14.50 entries are runtime libs #}
+{# only — no 14.5 toolset on disk. Default to 194 here; users with a true #}
+{# 14.5 toolset (e.g. windows-2025-vs2026) can opt back in via env. #}
+{% set compiler_version = os.getenv("YAMS_CONAN_COMPILER_VERSION", "194") %}
+{% set compiler_version_int = compiler_version | int %}
+{% set vs_version = os.getenv("YAMS_MSBUILD_VS_VERSION", "17") %}
 [settings]
 os=Windows
 arch=x86_64
 compiler=msvc
-# MSVC 194 = VS 2022 17.10+ (14.4x toolset), compatible with Boost 1.85
-# Note: 193 = VS 2022 17.0-17.9 (14.3x), 194 = VS 2022 17.10+ (14.4x)
-compiler.version=194
+# Defaults track the newest supported Windows runner toolset.
+# Override locally or in CI with YAMS_CONAN_COMPILER_VERSION / YAMS_MSBUILD_VS_VERSION.
+compiler.version={{ compiler_version }}
 compiler.runtime=dynamic
 compiler.cppstd=20
 build_type=Release
@@ -13,5 +20,6 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
+tools.microsoft.msbuild:vs_version={{ vs_version }}
 
 [tool_requires]

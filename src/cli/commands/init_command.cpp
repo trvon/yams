@@ -206,15 +206,17 @@ public:
             std::string selectedModel;
             bool colbertSelected = false;
             if (autoInit_) {
-                // Use the default model (first in the list) for auto-init
-                selectedModel = init_assets::embeddingModels().front().name;
-                spdlog::info("Using default embedding model: {}", selectedModel);
+                selectedModel = "simeon-default";
+                spdlog::info("Using default embedding backend: simeon ({})", selectedModel);
                 colbertSelected = isColbertModelName(selectedModel);
             } else if (!nonInteractive_) {
                 enableVectorDB = prompt_yes_no("\nEnable semantic search? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 if (enableVectorDB) {
-                    selectedModel = promptForModel(dataPath);
+                    selectedModel = "simeon-default";
+                    std::cout
+                        << "\nSemantic search uses the built-in Simeon embeddings by default.\n";
+                    std::cout << "No embedding model download is required.\n";
                     colbertSelected = isColbertModelName(selectedModel);
                 }
             }
@@ -453,15 +455,6 @@ private:
         }
     }
 
-    static bool envTruthy(const char* val) {
-        if (!val || !*val)
-            return false;
-        std::string v(val);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return v == "1" || v == "true" || v == "yes" || v == "on";
-    }
-
     static fs::path findGitRoot(const fs::path& start) {
         std::error_code ec;
         fs::path cur = fs::absolute(start, ec);
@@ -560,8 +553,6 @@ private:
                                                   .retryOnInvalid = true});
         return fs::path(selected);
     }
-
-    // Removed legacy promptYesNo (replaced by prompt_yes_no in prompt_util.h)
 
     static Result<void> updateV2Config(
         const fs::path& configPath, const fs::path& dataDir, const fs::path& privateKeyPath,
@@ -682,6 +673,22 @@ private:
                                                                   selectedModel / "model.onnx")
                                                                      .string()) +
                                                 "\"");
+                        }
+                    }
+                }
+            }
+
+            // Update embeddings settings
+            if (enableVectorDB && !selectedModel.empty()) {
+                pos = content.find("[embeddings]");
+                if (pos != std::string::npos) {
+                    size_t preferredPos = content.find("preferred_model = ", pos);
+                    if (preferredPos != std::string::npos) {
+                        size_t endPos = content.find("\n", preferredPos);
+                        if (endPos != std::string::npos) {
+                            content.replace(preferredPos, endPos - preferredPos,
+                                            "preferred_model = \"" +
+                                                escapeTomlString(selectedModel) + "\"");
                         }
                     }
                 }
@@ -1777,13 +1784,24 @@ private:
                 content.append("\n[search]\n");
             }
 
-            // Set reranker_model and reranker_model_path in [search]
+            // Set reranker_backend, reranker_model and reranker_model_path in [search]
             fs::path rerankerModelPath =
                 dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
             auto secPos = content.find("[search]");
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
                 auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                auto backendPos = content.find("reranker_backend =", secPos);
+                std::string backendLine = "reranker_backend = \"onnx\"";
+                if (backendPos == std::string::npos || backendPos > rangeEnd) {
+                    content.insert(rangeEnd, backendLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', backendPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(backendPos, lineEnd - backendPos, backendLine);
+                }
 
                 // Add reranker_model
                 auto namePos = content.find("reranker_model =", secPos);
@@ -1848,6 +1866,17 @@ private:
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
                 auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                auto backendPos = content.find("reranker_backend =", secPos);
+                std::string backendLine = "reranker_backend = \"colbert\"";
+                if (backendPos == std::string::npos || backendPos > rangeEnd) {
+                    content.insert(rangeEnd, backendLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', backendPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(backendPos, lineEnd - backendPos, backendLine);
+                }
 
                 auto enablePos = content.find("enable_reranking", secPos);
                 if (enablePos == std::string::npos || enablePos > rangeEnd) {

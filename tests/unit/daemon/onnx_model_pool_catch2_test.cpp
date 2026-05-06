@@ -326,6 +326,48 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: maintenance", "[daemon]")
     CHECK(stats.loadedModels >= 0);
 }
 
+TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: hot models evict expired idle sessions",
+                 "[daemon]") {
+    const auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SUCCEED("test model unavailable for hot-maintenance regression");
+        return;
+    }
+
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    auto initResult = pool_->initialize();
+    REQUIRE(initResult);
+
+    unsetenv("YAMS_TEST_MODE");
+    auto loadResult = pool_->loadModel(modelName);
+    setenv("YAMS_TEST_MODE", "1", 1);
+    if (!loadResult) {
+        SKIP("hot-maintenance setup failed: " + loadResult.error().message);
+    }
+    REQUIRE(pool_->setModelHot(modelName, true));
+
+    {
+        auto handle = pool_->acquireModel(modelName, 5s);
+        REQUIRE(handle);
+    }
+
+    auto before = pool_->testingModelPoolStats(modelName);
+    REQUIRE(before);
+    REQUIRE(before->loaded);
+    REQUIRE(before->isHot);
+    REQUIRE(before->availableResources >= 1);
+
+    std::this_thread::sleep_for(config_.modelIdleTimeout + 300ms);
+    pool_->performMaintenance();
+
+    auto after = pool_->testingModelPoolStats(modelName);
+    REQUIRE(after);
+    CHECK(after->loaded);
+    CHECK(after->isHot);
+    CHECK(after->availableResources == 0);
+    CHECK(after->inUseResources == 0);
+}
+
 // Test model handle RAII behavior
 TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model handle RAII", "[daemon]") {
     pool_ = std::make_unique<OnnxModelPool>(config_);
@@ -877,7 +919,11 @@ TEST_CASE("CoreML denylisted sessions clamp CPU fallback resources",
         CHECK(session.getExecutionProvider() == "cpu");
 
         const auto [intraThreads, interThreads] = session.getThreading();
+#ifdef _WIN32
+        CHECK(intraThreads == 1);
+#else
         CHECK(intraThreads == 2);
+#endif
         CHECK(interThreads == 1);
         CHECK(session.getLearnedBatchLimit() == 4);
         CHECK(TuneAdvisor::getEmbedDocCap() == 4);

@@ -83,6 +83,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                         timeoutMs = std::max(parsed, 1000);
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
 
@@ -103,6 +104,8 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                                 spdlog::error("Shutdown exceeded {}ms; forcing process exit",
                                               timeoutMs);
                             } catch (...) {
+                                // Intentional best-effort path; keep the primary operation
+                                // unaffected.
                             }
 #if !defined(_WIN32)
                             raise(SIGKILL);
@@ -116,6 +119,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             try {
                 spdlog::info("Initiating daemon shutdown request...");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
 
             d->requestStop();
@@ -130,6 +134,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                         spdlog::error("Timed out waiting for daemon stop completion after shutdown "
                                       "request");
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             } else {
@@ -143,6 +148,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                             spdlog::error("Daemon shutdown encountered error: {}",
                                           result.error().message);
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
                 } else {
@@ -160,12 +166,14 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             try {
                 spdlog::error("Exception during daemon shutdown: {}", e.what());
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         } catch (...) {
             finalizeWatchdog();
             try {
                 spdlog::error("Unknown exception during daemon shutdown");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 
@@ -173,6 +181,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             try {
                 spdlog::info("Daemon shutdown complete, exiting process");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
             std::fflush(nullptr);
             std::_Exit(0);
@@ -181,11 +190,13 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                 spdlog::info(
                     "Daemon shutdown complete (foreground-managed mode, not forcing exit)");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         } else {
             try {
                 spdlog::info("Daemon shutdown complete (test mode, not exiting)");
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         // NOLINTEND(bugprone-empty-catch)

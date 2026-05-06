@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace yams::daemon {
@@ -33,15 +34,33 @@ struct DaemonReadiness {
     // Track doc count at last search engine build for re-tuning decisions
     std::atomic<uint64_t> searchEngineDocCount{0};
 
-    // DEPRECATED: not an authoritative lifecycle signal. Use DaemonLifecycleFsm state instead.
-    bool fullyReady() const {
+    // Populated when the metadata DB failed integrity_check on startup and was
+    // quarantined + recreated. Write-once during init; reads are guarded by
+    // recoveryMutex_.
+    mutable std::mutex recoveryMutex;
+    std::string databaseRecoveredAt;
+    std::string databaseRecoveredFrom;
+
+    // Database init phase visibility. Lets `yams daemon status` show what the
+    // daemon is doing during a slow open/migrate/recover instead of a generic
+    // "Initializing". Values: "" (unset), "opening", "recovering", "migrating",
+    // "ready". Updated under recoveryMutex along with phase start time.
+    std::string databasePhase;
+    std::chrono::steady_clock::time_point databasePhaseSince;
+
+    // Set by the storage preflight when the data dir responded but was slow.
+    // Surfaced as a banner in `yams daemon status`.
+    std::string storageWarning;
+
+    // Bootstrap-only readiness summary used before lifecycle-backed status is available.
+    bool bootstrapReady() const {
         return ipcServerReady && contentStoreReady && databaseReady && metadataRepoReady &&
                searchEngineReady && modelProviderReady && vectorIndexReady && pluginsReady;
     }
 
-    // DEPRECATED: for legacy display only; not a lifecycle source of truth.
-    std::string overallStatus() const {
-        if (fullyReady())
+    // Bootstrap-only display state used for early status files and fallback paths.
+    std::string bootstrapStatus() const {
+        if (bootstrapReady())
             return "Ready";
         if (ipcServerReady)
             return "Initializing";
@@ -81,6 +100,8 @@ struct DaemonStats {
     std::atomic<uint64_t> repairQueueDepth{0};
     std::atomic<uint64_t> repairTotalBacklog{0};
     std::atomic<uint64_t> repairProcessed{0};
+    std::atomic<uint64_t> repairCurrentOperationCode{0};
+    std::atomic<uint64_t> repairCurrentOperationStartedMs{0};
     std::atomic<bool> repairRunning{false};
     std::atomic<bool> repairInProgress{false};
 
@@ -96,6 +117,13 @@ struct DaemonStats {
     std::atomic<uint64_t> searchRequestsRejected{0};
     std::atomic<uint64_t> addRequestsDeferred{0};
     std::atomic<uint64_t> addRequestsRejected{0};
+    std::atomic<uint64_t> addDispatchSamples{0};
+    std::atomic<uint64_t> addDispatchTotalUs{0};
+    std::atomic<uint64_t> addDispatchMaxUs{0};
+    std::atomic<uint64_t> addFingerprintTotalUs{0};
+    std::atomic<uint64_t> addFingerprintMaxUs{0};
+    std::atomic<uint64_t> addEnqueueTotalUs{0};
+    std::atomic<uint64_t> addEnqueueMaxUs{0};
 };
 
 /**

@@ -46,7 +46,7 @@ class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
-class KGWriteQueue;
+class WriteCoordinator;
 
 // Simple LRU cache for metadata lookups
 // Template parameters: Key type, Value type
@@ -145,6 +145,28 @@ class PostIngestQueue {
 public:
     static constexpr double kKgBackpressureThreshold = 0.95;
 
+    struct Timing {
+        std::uint64_t calls{0};
+        std::uint64_t totalMs{0};
+        std::uint64_t maxMs{0};
+    };
+
+    struct BatchMetrics {
+        std::uint64_t extractionBatches{0};
+        std::uint64_t extractionTasks{0};
+        std::uint64_t extractionSuccesses{0};
+        std::uint64_t extractionFailures{0};
+        std::uint64_t embedJobsEmitted{0};
+        std::uint64_t embedDocsEmitted{0};
+        std::uint64_t embedPreparedDocsEmitted{0};
+        std::uint64_t embedHashOnlyDocsEmitted{0};
+    };
+
+    struct MetricsSnapshot {
+        std::unordered_map<std::string, Timing> timings;
+        BatchMetrics batches;
+    };
+
     struct Task {
         std::string hash;
         std::string mime;
@@ -163,6 +185,8 @@ public:
         std::vector<std::string> tags;
         std::string language;
         std::shared_ptr<std::vector<std::byte>> contentBytes;
+        bool priorContentExtracted = false;
+        metadata::ExtractionStatus priorExtractionStatus = metadata::ExtractionStatus::Pending;
 
         // Dispatch flags (determined during preparation)
         bool shouldDispatchKg = true;
@@ -251,6 +275,8 @@ public:
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_.load(std::memory_order_relaxed); }
+    MetricsSnapshot metricsSnapshot() const;
+    void resetMetrics();
 
     // Backpressure observability
     std::uint64_t backpressureRejects() const {
@@ -360,8 +386,7 @@ public:
     // Set title extractor (GLiNER-backed) for deriving better FTS titles.
     void setTitleExtractor(search::EntityExtractionFunc extractor);
 
-    // Set KGWriteQueue for async NL entity KG population (merged with title extraction)
-    void setKgWriteQueue(KGWriteQueue* queue) { kgWriteQueue_ = queue; }
+    void setWriteCoordinator(WriteCoordinator* coord) { writeCoordinator_ = coord; }
 
     /// Set callback to be invoked when the queue drains (all stages become idle).
     /// Used by ServiceManager to trigger search engine rebuild.
@@ -370,6 +395,9 @@ public:
         std::lock_guard<std::mutex> lock(drainCallbackMutex_);
         drainCallback_ = std::move(callback);
     }
+
+    [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
+    [[nodiscard]] bool hasTitleExtractor() const;
 
 private:
     boost::asio::awaitable<void> channelPoller();
@@ -433,8 +461,6 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
-    [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
-    [[nodiscard]] bool hasTitleExtractor() const;
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
     void requeueMissedEntityExtractions();
@@ -500,7 +526,7 @@ private:
 
     mutable std::mutex titleExtractorMutex_;
     search::EntityExtractionFunc titleExtractor_;
-    KGWriteQueue* kgWriteQueue_{nullptr};
+    WriteCoordinator* writeCoordinator_{nullptr};
 
     // Cached EventBus channel pointers — resolved once in start(), avoids
     // per-call mutex + unordered_map<string> lookups on every enqueue/dispatch/depth query.
@@ -551,6 +577,7 @@ private:
 
     /// Process batch with work-stealing parallelization (default)
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
+    void recordTiming(const std::string& name, std::chrono::steady_clock::time_point start);
 
     /// Snapshot stage config under locks (symbol extension map + entity providers)
     struct StageConfigSnapshot {
@@ -574,6 +601,16 @@ private:
 
     /// Cache for metadata lookups
     MetadataCache metadataCache_;
+    mutable std::mutex metricsMutex_;
+    std::unordered_map<std::string, Timing> timings_;
+    std::atomic<std::uint64_t> extractionBatches_{0};
+    std::atomic<std::uint64_t> extractionTasks_{0};
+    std::atomic<std::uint64_t> extractionSuccesses_{0};
+    std::atomic<std::uint64_t> extractionFailures_{0};
+    std::atomic<std::uint64_t> embedJobsEmitted_{0};
+    std::atomic<std::uint64_t> embedDocsEmitted_{0};
+    std::atomic<std::uint64_t> embedPreparedDocsEmitted_{0};
+    std::atomic<std::uint64_t> embedHashOnlyDocsEmitted_{0};
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};
@@ -584,9 +621,6 @@ private:
     std::atomic<std::uint64_t> gs_highValueEntities_{0};
     std::atomic<std::uint64_t> gs_totalEdges_{0};
     std::atomic<std::uint64_t> gs_totalPrimaryTopicEdges_{0};
-
-    // Entity dispatch diagnostics
-    std::atomic<std::uint64_t> entityDispatched_{0};
 };
 
 } // namespace yams::daemon

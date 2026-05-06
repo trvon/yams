@@ -78,7 +78,9 @@ struct CorpusStats {
     [[nodiscard]] bool isProseDominant() const noexcept { return proseRatio > 0.7; }
     [[nodiscard]] bool isMixed() const noexcept { return !isCodeDominant() && !isProseDominant(); }
 
-    [[nodiscard]] bool hasKnowledgeGraph() const noexcept { return symbolDensity > 0.1; }
+    [[nodiscard]] bool hasKnowledgeGraph() const noexcept {
+        return symbolDensity > 0.1 || nerEntityDensity > 0.1;
+    }
     [[nodiscard]] bool hasPaths() const noexcept { return pathDepthAvg > 1.0; }
     [[nodiscard]] bool hasTags() const noexcept { return tagCoverage > 0.1; }
     [[nodiscard]] bool hasEmbeddings() const noexcept { return embeddingCoverage > 0.5; }

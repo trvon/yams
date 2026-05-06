@@ -18,7 +18,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/KGWriteQueue.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -629,13 +629,7 @@ double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* c
 
 std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
     baseBatchSize = std::max<std::size_t>(1u, baseBatchSize);
-    // Keep extraction commits meaningfully batched even when stage concurrency is clamped.
-    // Concurrency governs how many batches run at once; this floor governs docs per batch.
     constexpr std::size_t kExtractionBatchFloor = 4u;
-    // Extraction batch size is decoupled from KG channel backpressure. KG processing
-    // is downstream and independent — a full KG channel should not throttle text
-    // extraction + FTS indexing. The KG channel already handles drops gracefully
-    // when full, and the KG poller runs on its own independent schedule.
     return std::max(baseBatchSize, kExtractionBatchFloor);
 }
 
@@ -886,6 +880,53 @@ std::size_t PostIngestQueue::size() const {
     return normalDepth + rpcDepth;
 }
 
+PostIngestQueue::MetricsSnapshot PostIngestQueue::metricsSnapshot() const {
+    MetricsSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(metricsMutex_);
+        snapshot.timings = timings_;
+    }
+    snapshot.batches.extractionBatches = extractionBatches_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionTasks = extractionTasks_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionSuccesses = extractionSuccesses_.load(std::memory_order_relaxed);
+    snapshot.batches.extractionFailures = extractionFailures_.load(std::memory_order_relaxed);
+    snapshot.batches.embedJobsEmitted = embedJobsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedDocsEmitted = embedDocsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedPreparedDocsEmitted =
+        embedPreparedDocsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.embedHashOnlyDocsEmitted =
+        embedHashOnlyDocsEmitted_.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void PostIngestQueue::resetMetrics() {
+    {
+        std::lock_guard<std::mutex> lock(metricsMutex_);
+        timings_.clear();
+    }
+    extractionBatches_.store(0, std::memory_order_relaxed);
+    extractionTasks_.store(0, std::memory_order_relaxed);
+    extractionSuccesses_.store(0, std::memory_order_relaxed);
+    extractionFailures_.store(0, std::memory_order_relaxed);
+    embedJobsEmitted_.store(0, std::memory_order_relaxed);
+    embedDocsEmitted_.store(0, std::memory_order_relaxed);
+    embedPreparedDocsEmitted_.store(0, std::memory_order_relaxed);
+    embedHashOnlyDocsEmitted_.store(0, std::memory_order_relaxed);
+}
+
+void PostIngestQueue::recordTiming(const std::string& name,
+                                   std::chrono::steady_clock::time_point start) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    std::lock_guard<std::mutex> lock(metricsMutex_);
+    auto& timing = timings_[name];
+    timing.calls += 1;
+    timing.totalMs += static_cast<std::uint64_t>(std::max<long long>(0, ms));
+    timing.maxMs = std::max<std::uint64_t>(timing.maxMs,
+                                           static_cast<std::uint64_t>(std::max<long long>(0, ms)));
+}
+
 std::size_t PostIngestQueue::kgQueueDepth() const {
     return kgChannel_ ? kgChannel_->size_approx() : 0;
 }
@@ -931,6 +972,8 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.mimeType = mime.empty() ? info.mimeType : mime;
     prepared.extension = info.fileExtension;
     prepared.tags = tags;
+    prepared.priorContentExtracted = info.contentExtracted;
+    prepared.priorExtractionStatus = info.extractionStatus;
 
     // Respect per-document opt-out (set by StoreDocumentRequest.noEmbeddings).
     // DocumentService persists this as a real tag key "tag:no_embeddings".
@@ -1005,7 +1048,6 @@ PostIngestQueue::prepareMetadataEntry(
     // Title+NL extraction: single GLiNER call for both title and NL entities
     if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
-        // Store snippet for GLiNER inference
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
@@ -1259,13 +1301,18 @@ void PostIngestQueue::processSymbolExtractionBatch(
             continue;
         }
         try {
-            std::vector<std::byte> bytes;
+            const std::byte* dataPtr = nullptr;
+            std::size_t dataLen = 0;
+            std::vector<std::byte> ownedFallback;
             if (j.contentBytes) {
-                bytes = *j.contentBytes;
+                dataPtr = j.contentBytes->data();
+                dataLen = j.contentBytes->size();
             } else if (store_) {
                 auto contentResult = store_->retrieveBytes(hash);
                 if (contentResult) {
-                    bytes = std::move(contentResult.value());
+                    ownedFallback = std::move(contentResult.value());
+                    dataPtr = ownedFallback.data();
+                    dataLen = ownedFallback.size();
                 } else {
                     spdlog::warn(
                         "[PostIngestQueue] Failed to load content for symbol extraction: {}",
@@ -1281,8 +1328,7 @@ void PostIngestQueue::processSymbolExtractionBatch(
             extractJob.documentHash = hash;
             extractJob.filePath = j.filePath;
             extractJob.language = std::move(j.language);
-            extractJob.contentUtf8 =
-                std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            extractJob.contentUtf8 = std::string(reinterpret_cast<const char*>(dataPtr), dataLen);
 
             auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
             if (!result) {
@@ -1500,10 +1546,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             return;
         }
 
-        // Track cumulative nodeKey -> nodeId mappings across batches
-        // This allows edges to reference nodes from previous batches
-        std::unordered_map<std::string, std::int64_t> canonicalKeyToId;
-        std::unordered_map<std::string, std::int64_t> versionKeyToId;
         size_t totalNodesInserted = 0;
         size_t totalEdgesInserted = 0;
         size_t totalAliasesInserted = 0;
@@ -1521,23 +1563,18 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         auto result = provider->extractEntitiesStreaming(
             content, filePath,
             [this, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted, &hash,
-             &snapshotId, &entityTypeCounts,
+             &snapshotId,
              &filePath](ExternalEntityProviderAdapter::EntityResult batch,
                         const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
                 if (batch.nodes.empty()) {
                     return true; // Continue to next batch
                 }
 
-                // Wrap all KG operations in a single WriteBatch transaction
-                auto batchRes = kg_->beginWriteBatch();
-                if (!batchRes) {
-                    spdlog::warn("[PostIngestQueue] Failed to begin WriteBatch: {}",
-                                 batchRes.error().message);
-                    return true; // Continue despite error
-                }
-                auto& kgBatch = batchRes.value();
-
                 const bool hasSnapshot = !snapshotId.empty();
+                auto wb = std::make_unique<WriteBatch>();
+                wb->source = "PostIngestQueue::entityExtraction/" + hash.substr(0, 12) + "/batch/" +
+                             std::to_string(progress.batchNumber);
+
                 std::vector<metadata::KGNode> canonicalNodes;
                 std::vector<metadata::KGNode> versionNodes;
                 canonicalNodes.reserve(batch.nodes.size());
@@ -1580,65 +1617,31 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     }
                 }
 
-                // Insert canonical nodes and get their IDs
-                auto canonicalIds = kgBatch->upsertNodes(canonicalNodes);
-                if (!canonicalIds) {
-                    spdlog::warn("[PostIngestQueue] Failed to insert batch {} nodes: {}",
-                                 progress.batchNumber, canonicalIds.error().message);
-                    return true; // Continue despite error - partial success
+                if (!canonicalNodes.empty()) {
+                    wb->ops.emplace_back(UpsertNodesOp{std::move(canonicalNodes)});
+                }
+                if (!versionNodes.empty()) {
+                    wb->ops.emplace_back(UpsertNodesOp{std::move(versionNodes)});
                 }
 
-                // Update key maps with this batch's nodes
-                for (size_t i = 0; i < canonicalNodes.size() && i < canonicalIds.value().size();
-                     ++i) {
-                    canonicalKeyToId[canonicalNodes[i].nodeKey] = canonicalIds.value()[i];
-                }
+                std::vector<DeferredEdge> deferredEdges;
+                deferredEdges.reserve(batch.edges.size() + (hasSnapshot ? batch.nodes.size() : 0));
+
                 if (hasSnapshot) {
-                    // Insert version nodes and get their IDs
-                    auto versionIds = kgBatch->upsertNodes(versionNodes);
-                    if (!versionIds) {
-                        spdlog::warn(
-                            "[PostIngestQueue] Failed to insert batch {} version nodes: {}",
-                            progress.batchNumber, versionIds.error().message);
-                        return true; // Continue despite error - partial success
-                    }
-                    for (size_t i = 0; i < versionNodes.size() && i < versionIds.value().size();
-                         ++i) {
-                        versionKeyToId[canonicalNodes[i].nodeKey] = versionIds.value()[i];
-                    }
-                    totalNodesInserted += versionIds.value().size();
-
-                    // Link canonical to version nodes
-                    std::vector<metadata::KGEdge> observedEdges;
-                    observedEdges.reserve(versionNodes.size());
-                    for (size_t i = 0;
-                         i < canonicalNodes.size() && i < canonicalIds.value().size() &&
-                         i < versionIds.value().size();
-                         ++i) {
-                        metadata::KGEdge edge;
-                        edge.srcNodeId = canonicalIds.value()[i];
-                        edge.dstNodeId = versionIds.value()[i];
+                    for (const auto& node : batch.nodes) {
+                        DeferredEdge edge;
+                        edge.srcNodeKey = node.nodeKey;
+                        edge.dstNodeKey = node.nodeKey + "@snap:" + snapshotId;
                         edge.relation = "observed_as";
                         edge.weight = 1.0f;
                         nlohmann::json props;
                         props["snapshot_id"] = snapshotId;
                         props["document_hash"] = snapshotId;
                         edge.properties = props.dump();
-                        observedEdges.push_back(std::move(edge));
+                        deferredEdges.push_back(std::move(edge));
                     }
-                    if (!observedEdges.empty()) {
-                        kgBatch->addEdgesUnique(observedEdges);
-                    }
-                } else {
-                    for (size_t i = 0; i < canonicalNodes.size() && i < canonicalIds.value().size();
-                         ++i) {
-                        versionKeyToId[canonicalNodes[i].nodeKey] = canonicalIds.value()[i];
-                    }
-                    totalNodesInserted += canonicalIds.value().size();
                 }
 
-                // Resolve and insert edges
-                std::vector<metadata::KGEdge> resolvedEdges;
                 for (auto& edge : batch.edges) {
                     try {
                         if (!edge.properties)
@@ -1646,68 +1649,67 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         auto props = nlohmann::json::parse(*edge.properties);
                         std::string srcKey = props.value("_src_key", "");
                         std::string dstKey = props.value("_dst_key", "");
+                        if (srcKey.empty() || dstKey.empty())
+                            continue;
+                        props.erase("_src_key");
+                        props.erase("_dst_key");
 
-                        auto srcIt = versionKeyToId.find(srcKey);
-                        auto dstIt = versionKeyToId.find(dstKey);
-
-                        if (srcIt != versionKeyToId.end() && dstIt != versionKeyToId.end()) {
-                            edge.srcNodeId = srcIt->second;
-                            edge.dstNodeId = dstIt->second;
-                            props.erase("_src_key");
-                            props.erase("_dst_key");
-                            edge.properties = props.dump();
-                            resolvedEdges.push_back(std::move(edge));
-                        }
+                        DeferredEdge deferred;
+                        deferred.srcNodeKey = hasSnapshot ? srcKey + "@snap:" + snapshotId : srcKey;
+                        deferred.dstNodeKey = hasSnapshot ? dstKey + "@snap:" + snapshotId : dstKey;
+                        deferred.relation = edge.relation;
+                        deferred.weight = edge.weight;
+                        deferred.properties = props.dump();
+                        deferredEdges.push_back(std::move(deferred));
                     } catch (const std::exception& e) {
-                        spdlog::debug("Skipping unparsable KG edge during version resolution: {}",
+                        spdlog::debug("Skipping unparsable KG edge during deferred resolution: {}",
                                       e.what());
-                        // Skip edges we can't parse
                     } catch (...) {
                         spdlog::debug(
-                            "Skipping unparsable KG edge during version resolution: unknown "
+                            "Skipping unparsable KG edge during deferred resolution: unknown "
                             "exception");
-                        // Skip edges we can't parse
                     }
                 }
 
-                if (!resolvedEdges.empty()) {
-                    kgBatch->addEdgesUnique(resolvedEdges);
-                    totalEdgesInserted += resolvedEdges.size();
-                }
-
-                // Resolve and insert aliases
-                std::vector<metadata::KGAlias> resolvedAliases;
+                std::vector<metadata::KGAlias> deferredAliases;
+                deferredAliases.reserve(batch.aliases.size());
                 for (auto& alias : batch.aliases) {
                     if (alias.source && alias.source->starts_with("_node_key:")) {
                         std::string nodeKey = alias.source->substr(10);
-                        auto it = canonicalKeyToId.find(nodeKey);
-                        if (it != canonicalKeyToId.end()) {
-                            alias.nodeId = it->second;
-                            alias.source = "ghidra";
-                            resolvedAliases.push_back(std::move(alias));
-                        }
+                        alias.nodeId = 0;
+                        alias.source = "ghidra|" + nodeKey;
+                        deferredAliases.push_back(std::move(alias));
                     }
                 }
 
-                if (!resolvedAliases.empty()) {
-                    kgBatch->addAliases(resolvedAliases);
-                    totalAliasesInserted += resolvedAliases.size();
-                }
-
-                // Commit the WriteBatch transaction
-                auto commitRes = kgBatch->commit();
-                if (!commitRes) {
-                    spdlog::warn("[PostIngestQueue] Failed to commit WriteBatch: {}",
-                                 commitRes.error().message);
-                }
-
                 const size_t batchNodesInserted =
-                    hasSnapshot ? versionNodes.size() : canonicalNodes.size();
+                    hasSnapshot ? batch.nodes.size() * 2 : batch.nodes.size();
+                const size_t batchEdgesQueued = deferredEdges.size();
+                const size_t batchAliasesQueued = deferredAliases.size();
+
+                if (!deferredEdges.empty()) {
+                    wb->ops.emplace_back(AddDeferredEdgesOp{std::move(deferredEdges)});
+                }
+                if (!deferredAliases.empty()) {
+                    wb->ops.emplace_back(AddAliasesOp{std::move(deferredAliases)});
+                }
+
+                if (writeCoordinator_) {
+                    writeCoordinator_->enqueue(std::move(wb));
+                    totalNodesInserted += batchNodesInserted;
+                    totalEdgesInserted += batchEdgesQueued;
+                    totalAliasesInserted += batchAliasesQueued;
+                } else {
+                    spdlog::warn("[PostIngestQueue] WriteCoordinator unavailable; dropping entity "
+                                 "extraction KG batch for {}",
+                                 hash.substr(0, 12));
+                }
+
                 spdlog::info("[PostIngestQueue] Batch {}/{} ingested for {} "
                              "(nodes={}, edges={}, aliases={}, elapsed={:.1f}s)",
                              progress.batchNumber, progress.totalBatchesEstimate,
-                             hash.substr(0, 12), batchNodesInserted, resolvedEdges.size(),
-                             resolvedAliases.size(), progress.elapsedSeconds);
+                             hash.substr(0, 12), batchNodesInserted, batchEdgesQueued,
+                             batchAliasesQueued, progress.elapsedSeconds);
 
                 return true; // Continue to next batch
             });
@@ -1763,9 +1765,24 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.language = language;
     job.mimeType = mimeType;
 
-    if (!channel->try_push(std::move(job))) {
-        spdlog::debug("[PostIngestQueue] Title channel full, skipping async title for {}",
-                      hash.substr(0, 12));
+    // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
+    // TuningManager tick) without changing steady-state drop behavior.
+    auto jobCopy = job;
+    bool pushed = channel->try_push(std::move(job));
+    if (!pushed) {
+        TuningManager::notifyWakeup();
+        constexpr int kMaxRetries = 8;
+        constexpr std::chrono::milliseconds kBackoff{4};
+        for (int attempt = 0; attempt < kMaxRetries && !pushed; ++attempt) {
+            std::this_thread::sleep_for(kBackoff);
+            auto retryJob = jobCopy;
+            pushed = channel->try_push(std::move(retryJob));
+        }
+    }
+    if (!pushed) {
+        spdlog::debug(
+            "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
+            hash.substr(0, 12));
         InternalEventBus::instance().incTitleDropped();
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
@@ -1915,8 +1932,16 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             auto newTitle = yams::extraction::util::normalizeTitleCandidate(bestTitle->text);
             if (!newTitle.empty() && newTitle != fallbackTitle) {
                 if (meta_ && docId >= 0) {
-                    auto updateRes =
-                        meta_->setMetadata(docId, "title", metadata::MetadataValue(newTitle));
+                    Result<void> updateRes;
+                    if (writeCoordinator_) {
+                        auto wb = std::make_unique<WriteBatch>();
+                        wb->source = "PostIngestQueue::titleExtraction/title";
+                        wb->ops.emplace_back(SetMetadataBatchOp{
+                            {{docId, "title", metadata::MetadataValue(newTitle)}}});
+                        writeCoordinator_->enqueue(std::move(wb));
+                    } else {
+                        updateRes = Error{ErrorCode::InvalidState, "WriteCoordinator unavailable"};
+                    }
                     if (!updateRes) {
                         spdlog::warn("[PostIngestQueue] Failed to update title for {}: {}",
                                      hash.substr(0, 12), updateRes.error().message);
@@ -1928,9 +1953,12 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             }
         }
 
-        // Populate KG with NL entities if we have any and KGWriteQueue is available
-        if (!nlEntities.empty() && kgWriteQueue_ && kg_) {
+        // Populate KG with NL entities if we have any and the write coordinator is available.
+        if (!nlEntities.empty() && writeCoordinator_ && kg_) {
             auto batch = std::make_unique<DeferredKGBatch>();
+            batch->nodes.reserve(nlEntities.size() + 6);
+            batch->deferredEdges.reserve(nlEntities.size() * 4 + 8);
+            batch->aliases.reserve(nlEntities.size() * 3);
             const std::string normalizedFilePath = normalizeGraphPath(filePath);
             batch->sourceFile = normalizedFilePath.empty() ? filePath : normalizedFilePath;
 
@@ -2131,7 +2159,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 entityRefs.push_back(EntityRef{nodeKey, type, text, qc->confidence, titleOverlap,
                                                highValue, segmentIndex});
 
-                // Add aliases for query-time KG resolution. KGWriteQueue resolves nodeId from
+                // Add aliases for query-time KG resolution. WriteCoordinator resolves nodeId from
                 // source when encoded as "source|nodeKey".
                 for (const auto& aliasVariant : buildNlAliasVariants(text, type, qc->confidence)) {
                     metadata::KGAlias alias;
@@ -2288,8 +2316,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
             // Add bounded co-mention edges among strongest entities to enrich local graph
             // structure without exploding edge count.
-            constexpr std::size_t kMaxCoMentionEntities = 12;
-            constexpr std::size_t kMaxCoMentionEdges = 36;
+            //
+            // Edge-creation policy:
+            // 1. Only create edges where at least one entity is a high-value biomedical type
+            //    (protein, gene, disease, drug, etc.). Skipping generic-NL-only pairs
+            //    (person/organization/location) dramatically reduces noise — the graph
+            //    reranker's composite score is dominated by entity entity-signal-weight,
+            //    and injecting low-relevance edges dilutes it.
+            // 2. Tighten edge weight scaling so that high-confidence biomedical co-occurrences
+            //    stand out against the noise floor. The confidence floor for a biomedical pair
+            //    is raised to 0.20 (from 0.10), and the per-edge weight floor for
+            //    non-biomedical pairs is 0.08. The base multiplier goes from 0.50→0.65 and
+            //    title-overlap boost from 0.75→0.85, so weights land in [0.08, 0.45] range
+            //    instead of the previous [0.05, 0.35].
+            // 3. Tighter edge budget: top-8 entities (was 12), max 16 edges (was 36). With
+            //    ~15 entities per SciFact doc this still covers the most important pairs while
+            //    cutting the total edge count by over 50%.
+            constexpr std::size_t kMaxCoMentionEntities = 8;
+            constexpr std::size_t kMaxCoMentionEdges = 16;
             const std::size_t entityLimit = std::min(entityRefs.size(), kMaxCoMentionEntities);
             std::size_t coMentionEdgeCount = 0;
             for (std::size_t i = 0; i < entityLimit; ++i) {
@@ -2298,17 +2342,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                         break;
                     }
 
+                    // Skip edges where neither entity is a high-value biomedical type.
+                    // Generic NL types (person, organization, location) offer no useful
+                    // graph signal for scientific retrieval and only add noise.
+                    if (!entityRefs[i].highValue && !entityRefs[j].highValue) {
+                        continue;
+                    }
+
                     DeferredEdge coEdge;
                     coEdge.srcNodeKey = entityRefs[i].nodeKey;
                     coEdge.dstNodeKey = entityRefs[j].nodeKey;
                     coEdge.relation = coOccurrenceRelation(entityRefs[i].type, entityRefs[j].type);
-                    const float confidenceFloor =
-                        (entityRefs[i].highValue && entityRefs[j].highValue) ? 0.10f : 0.05f;
+                    const bool bothHighValue = entityRefs[i].highValue && entityRefs[j].highValue;
+                    const float confidenceFloor = bothHighValue ? 0.20f : 0.08f;
                     coEdge.weight = std::max(
                         confidenceFloor,
                         std::min(entityRefs[i].confidence, entityRefs[j].confidence) *
-                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.75f
-                                                                                        : 0.5f));
+                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.85f
+                                                                                        : 0.65f));
 
                     nlohmann::json edgeProps;
                     edgeProps["source"] = "gliner";
@@ -2344,11 +2395,37 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
             }
 
-            // Enqueue the batch (non-blocking)
+            // Diagnostic: log graph-construction statistics every 100 documents
+            // so we can trace entity extraction → edge creation → KG population.
+            {
+                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+                gs_totalEntities_ += nlEntities.size();
+                gs_highValueEntities_ += static_cast<size_t>(
+                    std::count_if(entityRefs.begin(), entityRefs.end(),
+                                  [](const EntityRef& r) { return r.highValue; }));
+                gs_totalEdges_ += coMentionEdgeCount;
+                gs_totalPrimaryTopicEdges_ += primaryTopicCount;
+                if ((nth % 100) == 0 || nth == 1) {
+                    spdlog::info(
+                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
+                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
+                        hash.substr(0, 12), nth, nlEntities.size(),
+                        static_cast<size_t>(
+                            std::count_if(entityRefs.begin(), entityRefs.end(),
+                                          [](const EntityRef& r) { return r.highValue; })),
+                        coMentionEdgeCount, primaryTopicCount, gs_processed_.load(),
+                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
+                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
+                }
+            }
+
             try {
-                kgWriteQueue_->enqueue(std::move(batch));
-                // Don't wait for completion - fire and forget for async KG population
-                // The KGWriteQueue will batch and commit efficiently
+                if (writeCoordinator_) {
+                    auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
+                    auto wb =
+                        makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
+                    writeCoordinator_->enqueue(std::move(wb));
+                }
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
                               nlEntities.size(), hash.substr(0, 12));
             } catch (const std::exception& e) {
@@ -2593,6 +2670,13 @@ PostIngestQueue::StageConfigSnapshot PostIngestQueue::snapshotStageConfig() {
 
 void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& successes,
                                          std::vector<ExtractionFailure>& failures) {
+    const auto timingStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("commit_batch_results", start); }
+    } timingGuard{this, timingStart};
+
     if (!successes.empty() && meta_) {
         std::vector<metadata::BatchContentEntry> entries;
         entries.reserve(successes.size());
@@ -2605,10 +2689,15 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
             entry.language = prepared.language;
+            entry.priorStateKnown = true;
+            entry.priorContentExtracted = prepared.priorContentExtracted;
+            entry.priorExtractionStatus = prepared.priorExtractionStatus;
             entries.push_back(std::move(entry));
         }
 
+        const auto contentWriteStart = std::chrono::steady_clock::now();
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
+        recordTiming("commit_content_index", contentWriteStart);
         if (!batchResult) {
             spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
                           batchResult.error().message);
@@ -2633,7 +2722,17 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                                           metadata::MetadataValue(prepared.title));
             }
             if (!titleUpdates.empty()) {
-                auto metaResult = meta_->setMetadataBatch(titleUpdates);
+                const auto titleWriteStart = std::chrono::steady_clock::now();
+                Result<void> metaResult;
+                if (writeCoordinator_) {
+                    auto wb = std::make_unique<WriteBatch>();
+                    wb->source = "PostIngestQueue::titleMetadata";
+                    wb->ops.emplace_back(SetMetadataBatchOp{std::move(titleUpdates)});
+                    writeCoordinator_->enqueue(std::move(wb));
+                } else {
+                    metaResult = Error{ErrorCode::InvalidState, "WriteCoordinator unavailable"};
+                }
+                recordTiming("commit_title_metadata", titleWriteStart);
                 if (!metaResult) {
                     spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
                                  metaResult.error().message);
@@ -2642,32 +2741,47 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
     }
 
-    for (const auto& failure : failures) {
-        if (failure.documentId >= 0 && meta_) {
-            auto updateRes = meta_->updateDocumentExtractionStatus(
-                failure.documentId, false, metadata::ExtractionStatus::Failed,
-                failure.errorMessage);
-            if (!updateRes) {
-                spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                             failure.hash, updateRes.error().message);
+    const auto failureWriteStart = std::chrono::steady_clock::now();
+    if (!failures.empty() && meta_) {
+        if (writeCoordinator_) {
+            auto wb = std::make_unique<WriteBatch>();
+            wb->source = "PostIngestQueue::extractionFailures";
+            std::vector<std::string> failedHashes;
+            failedHashes.reserve(failures.size());
+            for (const auto& failure : failures) {
+                if (failure.documentId >= 0) {
+                    wb->ops.emplace_back(UpdateExtractionStatusOp{
+                        failure.documentId, false, metadata::ExtractionStatus::Failed,
+                        failure.errorMessage});
+                }
+                if (!failure.hash.empty()) {
+                    failedHashes.push_back(failure.hash);
+                }
             }
-            (void)meta_->batchUpdateDocumentRepairStatuses({failure.hash},
-                                                           metadata::RepairStatus::Failed);
+            if (!failedHashes.empty()) {
+                wb->ops.emplace_back(
+                    UpdateRepairStatusOp{std::move(failedHashes), metadata::RepairStatus::Failed});
+            }
+            writeCoordinator_->enqueue(std::move(wb));
+        } else {
+            spdlog::warn("[PostIngestQueue] WriteCoordinator unavailable; cannot mark {} "
+                         "extraction failures",
+                         failures.size());
         }
     }
-
-    if (!successes.empty() && meta_) {
-        std::vector<std::string> successHashes;
-        successHashes.reserve(successes.size());
-        for (const auto& prepared : successes) {
-            successHashes.push_back(prepared.hash);
-        }
-        (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
-                                                       metadata::RepairStatus::Completed);
+    if (!failures.empty()) {
+        recordTiming("commit_failures", failureWriteStart);
     }
 }
 
 void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes) {
+    const auto timingStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("dispatch_successes", start); }
+    } timingGuard{this, timingStart};
+
     std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
 
     // Opportunistically enqueue embedding jobs for successfully extracted/indexed documents.
@@ -2675,7 +2789,11 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     auto embedQ = embedChannel_;
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
+    std::size_t embedPreparedBatchPayloadBytes = 0;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
+    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
+    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16u * 1024u * 1024u;
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     const bool embedStageActive =
@@ -2700,17 +2818,23 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.preparedDocs = std::move(embedPreparedBatch);
         job.hashes = std::move(embedHashBatch);
         job.batchSize = static_cast<uint32_t>(job.preparedDocs.size() + job.hashes.size());
+        const auto batchSize = job.batchSize;
         job.hashes.reserve(job.hashes.size() + job.preparedDocs.size());
         for (const auto& doc : job.preparedDocs) {
             job.hashes.push_back(doc.hash);
         }
         job.skipExisting = true;
+        job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
         uint32_t waits = 0;
         while (!stop_.load(std::memory_order_acquire)) {
-            if (embedQ->push_wait(job, kEnqueueTimeout)) {
-                InternalEventBus::instance().incEmbedQueued(job.batchSize);
+            if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
+                InternalEventBus::instance().incEmbedQueued(batchSize);
+                embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
+                embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
+                embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
+                embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
                 TuningManager::notifyWakeup();
                 if (preparedDocsCount > 0) {
                     InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
@@ -2725,17 +2849,17 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             if ((waits % 20u) == 1u) {
                 spdlog::warn(
                     "[PostIngestQueue] embed enqueue waiting on full channel (batch={}, waits={})",
-                    job.batchSize, waits);
+                    batchSize, waits);
             }
         }
         if (stop_.load(std::memory_order_acquire)) {
-            InternalEventBus::instance().incEmbedDropped(job.batchSize);
+            InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();
         embedHashBatch.clear();
+        embedPreparedBatchPayloadBytes = 0;
     };
 
-    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     auto embedChunker =
         yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);
@@ -2751,7 +2875,22 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         src.fileName = prepared.fileName;
         src.filePath = prepared.filePath;
         src.mimeType = prepared.mimeType;
-        return embed::prepareEmbedPreparedDoc(src, *embedChunker, selectionCfg);
+        auto preparedDoc = embed::prepareEmbedPreparedDoc(src, *embedChunker, selectionCfg);
+        if (!preparedDoc) {
+            return std::nullopt;
+        }
+
+        std::size_t payloadBytes = 0;
+        for (const auto& chunk : preparedDoc->chunks) {
+            payloadBytes += chunk.content.size();
+            if (payloadBytes > kMaxPreparedEmbedPayloadBytes) {
+                spdlog::debug("[PostIngestQueue] prepared embed payload for {} is {} bytes; "
+                              "queueing hash-only fallback",
+                              prepared.hash, payloadBytes);
+                return std::nullopt;
+            }
+        }
+        return preparedDoc;
     };
 
     auto getOrLoadContent =
@@ -2776,9 +2915,18 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
             if (auto preparedDoc = makePreparedDoc(prepared);
                 preparedDoc && !preparedDoc->chunks.empty()) {
+                std::size_t docPayloadBytes = 0;
+                for (const auto& chunk : preparedDoc->chunks) {
+                    docPayloadBytes += chunk.content.size();
+                }
+                if (!embedPreparedBatch.empty() &&
+                    embedPreparedBatchPayloadBytes + docPayloadBytes >
+                        kMaxPreparedEmbedBatchPayloadBytes) {
+                    flushEmbedBatch();
+                }
+                embedPreparedBatchPayloadBytes += docPayloadBytes;
                 embedPreparedBatch.push_back(std::move(*preparedDoc));
             } else {
-                // Fallback: queue by hash.
                 embedHashBatch.push_back(prepared.hash);
             }
 
@@ -2818,6 +2966,14 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     if (tasks.empty()) {
         return;
     }
+    const auto processStart = std::chrono::steady_clock::now();
+    struct TimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~TimingGuard() { self->recordTiming("process_batch", start); }
+    } timingGuard{this, processStart};
+    extractionBatches_.fetch_add(1, std::memory_order_relaxed);
+    extractionTasks_.fetch_add(tasks.size(), std::memory_order_relaxed);
 
     if (!store_ || !meta_) {
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping {} tasks",
@@ -2851,6 +3007,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         allSuccesses.reserve(tasks.size());
         allFailures.reserve(tasks.size() / 10);
 
+        const auto prepareStart = std::chrono::steady_clock::now();
         for (const auto& task : tasks) {
             auto result = prepareTask(task);
             if (std::holds_alternative<PreparedMetadataEntry>(result)) {
@@ -2859,9 +3016,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
                 allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
             }
         }
+        recordTiming("prepare_metadata", prepareStart);
 
         processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
         failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
         commitBatchResults(allSuccesses, allFailures);
         dispatchSuccesses(allSuccesses);
         return;
@@ -2876,6 +3036,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     futures.reserve(numChunks);
     auto executor = coordinator_->getExecutor();
 
+    const auto prepareStart = std::chrono::steady_clock::now();
     for (std::size_t i = 0; i < tasks.size(); i += chunkSize) {
         std::size_t end = std::min(i + chunkSize, tasks.size());
         std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
@@ -2917,9 +3078,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             spdlog::error("[PostIngestQueue] Chunk processing failed: unknown exception");
         }
     }
+    recordTiming("prepare_metadata", prepareStart);
 
     processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
     failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+    extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+    extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
     commitBatchResults(allSuccesses, allFailures);
     dispatchSuccesses(allSuccesses);
 }

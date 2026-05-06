@@ -38,7 +38,9 @@ public:
 
         // Mock compression - just copy with a header
         result.data.resize(input.size() + 16);
-        std::memcpy(result.data.data() + 16, input.data(), input.size());
+        if (!input.empty()) {
+            std::memcpy(result.data.data() + 16, input.data(), input.size());
+        }
         result.compressedSize = result.data.size();
 
         compressionCount_++;
@@ -53,7 +55,9 @@ public:
 
         // Mock decompression - skip header and return data
         std::vector<std::byte> result(compressed.size() - 16);
-        std::memcpy(result.data(), compressed.data() + 16, result.size());
+        if (!result.empty()) {
+            std::memcpy(result.data(), compressed.data() + 16, result.size());
+        }
 
         decompressionCount_++;
         return result;

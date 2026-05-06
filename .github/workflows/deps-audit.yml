@@ -1,0 +1,65 @@
+# yamllint disable rule:line-length
+name: Deps Audit
+
+# Weekly dependency-drift report:
+#   - Conan pin freshness    (deps-conan)
+#   - CVE scan via OSV-DB    (deps-cve)
+#   - Submodule freshness    (deps-subs)
+#   - License allowlist      (deps-licenses)
+# Runs on a schedule + on demand. Non-blocking by default; --strict can be
+# enabled by editing the env var below if/when the team wants to gate.
+
+'on':
+  schedule:
+    - cron: '17 6 * * 1'  # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  deps-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install conan + osv-scanner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'conan==2.21.*'
+          curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+
+      - name: Run deps audit
+        id: audit
+        run: |
+          set +e
+          scripts/lint.sh deps 2>&1 | tee deps-audit-report.txt
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-audit-report-${{ github.run_number }}
+          path: deps-audit-report.txt
+          retention-days: 90
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Deps Audit Report"
+            echo
+            echo '```'
+            cat deps-audit-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

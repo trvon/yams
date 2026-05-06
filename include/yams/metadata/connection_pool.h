@@ -1,10 +1,14 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <string>
+#include <string_view>
 #include <thread>
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
 #include <semaphore>
@@ -29,8 +33,7 @@ struct ConnectionPoolConfig {
     std::chrono::seconds idleTimeout{300};
     std::chrono::seconds maxConnectionAge{3600};
     std::chrono::seconds connectTimeout{2};
-    std::chrono::milliseconds busyTimeout{
-        2000}; ///< Reduced from 15s to prevent worker thread starvation
+    std::chrono::milliseconds busyTimeout{100};
     bool enableWAL = true;
     bool enableForeignKeys = true;
     bool readOnly =
@@ -88,6 +91,14 @@ public:
      */
     void touch() { lastAccessed_ = std::chrono::steady_clock::now(); }
 
+    void markAcquired(std::string_view tag) {
+        acquiredAt_ = std::chrono::steady_clock::now();
+        holderTag_.assign(tag.data(), tag.size());
+    }
+
+    [[nodiscard]] std::chrono::steady_clock::time_point acquiredAt() const { return acquiredAt_; }
+    [[nodiscard]] const std::string& holderTag() const { return holderTag_; }
+
 private:
     friend class ConnectionPool; // Allow ConnectionPool to access private members
 
@@ -95,6 +106,8 @@ private:
     std::function<void(PooledConnection*)> returnFunc_;
     std::chrono::steady_clock::time_point lastAccessed_;
     std::chrono::steady_clock::time_point createdAt_{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point acquiredAt_{std::chrono::steady_clock::now()};
+    std::string holderTag_;
     bool returned_ = false;
     uint64_t generation_ = 0; // PBI-079: Track which refresh generation this connection is from
 };
@@ -130,15 +143,15 @@ public:
      */
     Result<std::unique_ptr<PooledConnection>> acquire(
         std::chrono::milliseconds timeout = std::chrono::milliseconds(30000), // 30 seconds default
-        ConnectionPriority priority = ConnectionPriority::Normal);
+        ConnectionPriority priority = ConnectionPriority::Normal, std::string_view callerTag = {});
 
     /**
      * @brief Execute a function with a connection
      */
     template <typename Func>
-    auto withConnection(Func&& func, ConnectionPriority priority = ConnectionPriority::Normal)
-        -> std::invoke_result_t<Func, Database&> {
-        auto connResult = acquire(std::chrono::milliseconds(30000), priority);
+    auto withConnection(Func&& func, ConnectionPriority priority = ConnectionPriority::Normal,
+                        std::string_view callerTag = {}) -> std::invoke_result_t<Func, Database&> {
+        auto connResult = acquire(std::chrono::milliseconds(30000), priority, callerTag);
         if (!connResult) {
             return Error{ErrorCode::ResourceExhausted, "Failed to acquire database connection"};
         }
@@ -156,6 +169,8 @@ public:
     /**
      * @brief Get current pool statistics
      */
+    static constexpr std::size_t kHolderHistogramBucketCount = 8;
+
     struct Stats {
         size_t totalConnections;
         size_t availableConnections;
@@ -167,9 +182,24 @@ public:
         size_t totalAcquired;
         size_t totalReleased;
         size_t failedAcquisitions;
+        std::array<std::uint64_t, kHolderHistogramBucketCount> holderDurationBuckets{};
+        std::uint64_t slowHolderCount{0};
+        std::uint64_t maxHolderMicros{0};
     };
 
     [[nodiscard]] Stats getStats() const;
+
+    [[nodiscard]] const std::string& dbPath() const { return dbPath_; }
+
+    void setSlowHolderThreshold(std::chrono::milliseconds threshold) {
+        slowHolderThresholdMicros_.store(static_cast<std::uint64_t>(threshold.count()) * 1000ULL,
+                                         std::memory_order_relaxed);
+    }
+
+    static constexpr std::array<std::uint64_t, kHolderHistogramBucketCount>
+        kHolderBucketUpperMicros{
+            1'000ULL,     10'000ULL,     100'000ULL,    1'000'000ULL,
+            5'000'000ULL, 10'000'000ULL, 30'000'000ULL, std::numeric_limits<std::uint64_t>::max()};
 
     /**
      * @brief Health check for all connections
@@ -210,6 +240,11 @@ private:
     std::atomic<size_t> failedAcquisitions_{0};
     std::atomic<bool> shutdown_{false};
     std::atomic<uint64_t> currentGeneration_{0}; // PBI-079: Incremented on refreshAll()
+
+    std::array<std::atomic<std::uint64_t>, kHolderHistogramBucketCount> holderDurationBuckets_{};
+    std::atomic<std::uint64_t> slowHolderCount_{0};
+    std::atomic<std::uint64_t> maxHolderMicros_{0};
+    std::atomic<std::uint64_t> slowHolderThresholdMicros_{5'000'000ULL};
 
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     std::jthread maintenanceThread_;

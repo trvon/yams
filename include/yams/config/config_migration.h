@@ -234,7 +234,6 @@ struct ConfigLatest {
         size_t max_log_size = 104857600;
         size_t sync_interval = 1000;
         int sync_timeout_ms = 100;
-        bool compress_old_logs = true;
         size_t max_open_files = 10;
         bool enable_group_commit = true;
     } wal;
@@ -246,8 +245,6 @@ struct ConfigLatest {
         std::string table_name = "document_embeddings";
         size_t embedding_dim = 384;
         std::string search_engine = "hnsw_cosine";
-        std::string quantized_hnsw_mode = "lvq8";
-        size_t quantized_hnsw_rerank_factor = 2;
         std::string index_type = "IVF_PQ";
         size_t num_partitions = 256;
         size_t num_sub_quantizers = 96;
@@ -387,6 +384,18 @@ struct ConfigLatest {
         std::string log_level = "info";
         int connect_timeout_ms = 1000;
         int request_timeout_ms = 5000;
+
+        // Runtime instrumentation profile. profile="auto" activates the
+        // memory profile under macOS MallocStackLogging; profile="memory"
+        // forces it; "normal"/"off" disables automatic behavior.
+        struct Instrumentation {
+            std::string profile = "auto";
+            std::optional<bool> suppress_auto_repair;
+            std::optional<bool> suppress_simeon_lexical_build;
+            std::optional<bool> suppress_vector_index_build;
+            size_t msl_stack_log_warn_mb = 2048;
+            std::optional<size_t> msl_stack_log_warn_bytes;
+        } instrumentation;
 
         // Graph prune policy (snapshot version retention)
         struct GraphPrune {

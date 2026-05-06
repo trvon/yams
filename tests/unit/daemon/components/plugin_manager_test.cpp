@@ -11,10 +11,24 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/model_provider.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <string>
+
+#ifdef _WIN32
+static int setenv(const char* name, const char* value, int /*overwrite*/) {
+    return _putenv_s(name, value);
+}
+static void unsetenv(const char* name) {
+    _putenv_s(name, "");
+}
+#endif
 
 using namespace yams::daemon;
 
@@ -155,4 +169,135 @@ TEST_CASE("PluginManager getName returns component name", "[daemon][components][
 
     PluginManager mgr(deps);
     CHECK(std::string(mgr.getName()) == "PluginManager");
+}
+
+namespace {
+
+struct ScopedEmbedBackend {
+    std::string savedBackend;
+    bool hadBackend{false};
+    std::string savedPreferred;
+    bool hadPreferred{false};
+
+    explicit ScopedEmbedBackend(const char* backend) {
+        if (const char* p = std::getenv("YAMS_EMBED_BACKEND")) {
+            savedBackend = p;
+            hadBackend = true;
+        }
+        if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
+            savedPreferred = p;
+            hadPreferred = true;
+        }
+        setenv("YAMS_EMBED_BACKEND", backend, 1);
+        unsetenv("YAMS_PREFERRED_MODEL");
+    }
+
+    ~ScopedEmbedBackend() {
+        if (hadBackend) {
+            setenv("YAMS_EMBED_BACKEND", savedBackend.c_str(), 1);
+        } else {
+            unsetenv("YAMS_EMBED_BACKEND");
+        }
+        if (hadPreferred) {
+            setenv("YAMS_PREFERRED_MODEL", savedPreferred.c_str(), 1);
+        } else {
+            unsetenv("YAMS_PREFERRED_MODEL");
+        }
+    }
+};
+
+class TaggedInProcessProvider : public IModelProvider {
+public:
+    explicit TaggedInProcessProvider(std::string tag) : tag_(std::move(tag)) {}
+
+    yams::Result<std::vector<float>> generateEmbedding(const std::string&) override {
+        return std::vector<float>{};
+    }
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>&) override {
+        return std::vector<std::vector<float>>{};
+    }
+    yams::Result<std::vector<float>> generateEmbeddingFor(const std::string&,
+                                                          const std::string&) override {
+        return std::vector<float>{};
+    }
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string&, const std::vector<std::string>&) override {
+        return std::vector<std::vector<float>>{};
+    }
+    yams::Result<void> loadModel(const std::string&) override { return {}; }
+    yams::Result<void> unloadModel(const std::string&) override { return {}; }
+    bool isModelLoaded(const std::string&) const override { return false; }
+    std::vector<std::string> getLoadedModels() const override { return {}; }
+    size_t getLoadedModelCount() const override { return 0; }
+    yams::Result<yams::daemon::ModelInfo> getModelInfo(const std::string&) const override {
+        return yams::daemon::ModelInfo{};
+    }
+    size_t getEmbeddingDim(const std::string&) const override { return 384; }
+    std::shared_ptr<yams::vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string&) override {
+        return nullptr;
+    }
+    std::string getProviderName() const override { return tag_; }
+    std::string getProviderVersion() const override { return "0.0.0-test"; }
+    bool isAvailable() const override { return true; }
+    bool isTrainingFree() const override { return true; }
+    size_t getMemoryUsage() const override { return 0; }
+    void releaseUnusedResources() override {}
+    void shutdown() override {}
+
+private:
+    std::string tag_;
+};
+
+std::string makeUniqueProviderName(const char* prefix) {
+    static std::atomic<unsigned long> counter{0};
+    return std::string(prefix) + "_" +
+           std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+} // namespace
+
+TEST_CASE_METHOD(PluginManagerFixture,
+                 "adoptModelProvider: prefers in-process backend when selected via env",
+                 "[daemon][components][plugin][catch2][simeon]") {
+    const std::string backendName = makeUniqueProviderName("pm_test_backend");
+    const std::string expectedTag = backendName;
+
+    ModelProviderFactoryRegistration reg{
+        backendName, [expectedTag]() -> std::unique_ptr<IModelProvider> {
+            return std::make_unique<TaggedInProcessProvider>(expectedTag);
+        }};
+
+    ScopedEmbedBackend guard{backendName.c_str()};
+
+    auto deps = makeDeps();
+    PluginManager mgr(deps);
+    REQUIRE(mgr.initialize().has_value());
+
+    auto result = mgr.adoptModelProvider();
+    REQUIRE(result.has_value());
+    REQUIRE(result.value());
+
+    auto provider = mgr.getModelProvider();
+    REQUIRE(provider != nullptr);
+    CHECK(provider->getProviderName() == expectedTag);
+    CHECK(provider->isTrainingFree());
+    CHECK(mgr.getEmbeddingModelName() == expectedTag);
+}
+
+TEST_CASE_METHOD(
+    PluginManagerFixture,
+    "adoptModelProvider: empty preferredName and backend=auto does not force in-process",
+    "[daemon][components][plugin][catch2][simeon]") {
+    ScopedEmbedBackend guard{"auto"};
+
+    auto deps = makeDeps();
+    PluginManager mgr(deps);
+    REQUIRE(mgr.initialize().has_value());
+
+    auto result = mgr.adoptModelProvider();
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result.value());
+    CHECK(mgr.getModelProvider() == nullptr);
 }

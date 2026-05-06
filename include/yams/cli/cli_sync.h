@@ -57,6 +57,7 @@ inline yams::Result<T> run_sync(boost::asio::awaitable<yams::Result<T>> aw,
             try {
                 result_future.get(); // Consume to clean up
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 

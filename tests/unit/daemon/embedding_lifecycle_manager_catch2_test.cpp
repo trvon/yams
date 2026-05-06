@@ -21,7 +21,6 @@ TEST_CASE("EmbeddingLifecycleManager initial state", "[daemon][embedding-lifecyc
     CHECK(mgr.adoptedPluginName().empty());
     CHECK_FALSE(mgr.isAutoOnAdd());
     CHECK_FALSE(mgr.preloadOnStartup());
-    CHECK(mgr.reranker() == nullptr);
     CHECK(mgr.getEmbeddingDimension() == 0);
 }
 

@@ -5,6 +5,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto/ipc_envelope.pb.h>
+#include <yams/daemon/metric_keys.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -1379,6 +1380,33 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("proxy_active_connections");
             kv->set_value(std::to_string(static_cast<uint64_t>(r.proxyActiveConnections)));
         }
+        // Database init phase + recovery + storage warning (serialized via
+        // request_counts piggybacking — same convention used for other strings).
+        if (!r.databasePhase.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kDatabasePhase));
+            kv->set_value(r.databasePhase);
+        }
+        if (r.databasePhaseElapsedMs > 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kDatabasePhaseElapsedMs));
+            kv->set_value(std::to_string(r.databasePhaseElapsedMs));
+        }
+        if (!r.databaseRecoveredAt.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kDatabaseRecoveredAt));
+            kv->set_value(r.databaseRecoveredAt);
+        }
+        if (!r.databaseRecoveredFrom.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kDatabaseRecoveredFrom));
+            kv->set_value(r.databaseRecoveredFrom);
+        }
+        if (!r.storageWarning.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kStorageWarning));
+            kv->set_value(r.storageWarning);
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1464,6 +1492,30 @@ template <> struct ProtoBinding<StatusResponse> {
                 } catch (...) {
                     r.proxyActiveConnections = 0;
                 }
+                continue;
+            }
+            if (kv.key() == status_keys::kDatabasePhase) {
+                r.databasePhase = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kDatabasePhaseElapsedMs) {
+                try {
+                    r.databasePhaseElapsedMs = std::stoull(kv.value());
+                } catch (...) {
+                    r.databasePhaseElapsedMs = 0;
+                }
+                continue;
+            }
+            if (kv.key() == status_keys::kDatabaseRecoveredAt) {
+                r.databaseRecoveredAt = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kDatabaseRecoveredFrom) {
+                r.databaseRecoveredFrom = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kStorageWarning) {
+                r.storageWarning = kv.value();
                 continue;
             }
             if (kv.key() == "content_store_root") {

@@ -183,6 +183,7 @@ jobs:
           # Init submodules required for the build
           # Skip other submodules that use SSH URLs requiring authentication
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Skip non-linux entries under act (build)
         if: github.actor == 'nektos/act' && !startsWith(matrix.os, 'linux-hosted')
@@ -424,13 +425,6 @@ jobs:
           path: ci-artifacts/coverage
           if_no_artifact_found: warn
 
-
-      - name: Extract release notes from CHANGELOG.md (stable only)
-        id: changelog
-        if: steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act'
-        uses: ffurrer2/extract-release-notes@v2
-        with:
-          changelog_file: CHANGELOG.md
 
       # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
@@ -843,13 +837,39 @@ jobs:
             set -u
           fi
           meson --version
-          meson install -C "$BD" --destdir "$BD/stage"
+          # --no-rebuild: setup.sh + a prior `meson compile` already built;
+          # this step only stages files, never re-triggers the compiler.
+          meson install -C "$BD" --destdir "$BD/stage" --no-rebuild
           if [ ! -d "$BD/stage" ]; then
             echo "Stage directory missing after meson install" >&2
             ls -al "$BD" >&2 || true
             exit 1
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
+
+      - name: Prune staged runtime payload (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              PREFIX="/usr"
+            else
+              PREFIX="/usr/local"
+            fi
+          fi
+
+          INSTALL_ROOT="$STAGE_DIR$PREFIX"
+          if [ ! -d "$INSTALL_ROOT" ]; then
+            echo "Missing staged install root: $INSTALL_ROOT" >&2
+            exit 1
+          fi
+
+          bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
 
       - name: Verify staged runtime assets (Linux/macOS)
         if: runner.os != 'Windows'
@@ -920,8 +940,10 @@ jobs:
               }
           }
 
-          # Install to stage directory
-          meson install -C $buildDir --destdir $stageDir
+          # Install to stage directory.
+          # --no-rebuild: setup.ps1's release build already compiled; this
+          # step only stages files, never re-triggers the compiler.
+          meson install -C $buildDir --destdir $stageDir --no-rebuild
           if ($LASTEXITCODE -ne 0) {
               Write-Error "Meson install failed"
               exit 1
@@ -1971,17 +1993,45 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           echo "Checking if release $TAG already exists" >&2
           if command -v gh >/dev/null 2>&1; then
-            if gh release view "$TAG" >/dev/null 2>&1; then
+            if release_json="$(gh release view "$TAG" --json isDraft,url 2>/dev/null)"; then
               echo "exists=true" >> $GITHUB_OUTPUT
+              draft="$(printf '%s' "$release_json" | sed -n 's/.*"isDraft":[[:space:]]*\(true\|false\).*/\1/p')"
+              url="$(printf '%s' "$release_json" | sed -n 's/.*"url":[[:space:]]*"\([^"]*\)".*/\1/p')"
+              echo "draft=${draft:-unknown}" >> $GITHUB_OUTPUT
+              echo "url=${url:-}" >> $GITHUB_OUTPUT
             else
               echo "exists=false" >> $GITHUB_OUTPUT
+              echo "draft=false" >> $GITHUB_OUTPUT
+              echo "url=" >> $GITHUB_OUTPUT
             fi
           else
             echo "gh CLI not installed; skipping existence check" >&2
             echo "exists=unknown" >> $GITHUB_OUTPUT
+            echo "draft=unknown" >> $GITHUB_OUTPUT
+            echo "url=" >> $GITHUB_OUTPUT
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse immutable release asset overwrite
+        if: ${{ github.actor != 'nektos/act' && steps.existing_release.outputs.exists == 'true' && steps.existing_release.outputs.draft != 'true' && steps.asset_check.outputs.file_count != '0' }}
+        shell: bash
+        run: |
+          cat >&2 <<'EOF'
+          ERROR: The GitHub release for this tag is already published.
+
+          This repository uses immutable releases, so published release assets
+          cannot be replaced. The release upload action overwrites by deleting
+          matching assets first, which GitHub rejects for immutable releases.
+
+          Create a new patch release from the fixed commit, or delete/recreate
+          the release and tag only if the published release is intentionally being
+          withdrawn.
+          EOF
+          if [ -n "${{ steps.existing_release.outputs.url }}" ]; then
+            echo "Existing release: ${{ steps.existing_release.outputs.url }}" >&2
+          fi
+          exit 1
 
       - name: Check job completion status
         id: check-status
@@ -2033,52 +2083,48 @@ jobs:
         uses: ffurrer2/extract-release-notes@v2
         with:
           changelog_file: CHANGELOG.md
+          release_notes_file: RELEASE_NOTES_EXTRACTED.md
 
-      - name: Extract grouped changelogs for minor version (stable only)
-        id: grouped-changelog
-        if: steps.meta.outputs.channel == 'stable'
+      - name: Prepare release body
+        id: release-body
         shell: bash
+        env:
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          RELEASE_NAME: ${{ steps.meta.outputs.release_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          # Extract minor version from current tag
-          CURRENT_VERSION="${{ steps.meta.outputs.version }}"
-          MINOR_VERSION=$(echo "$CURRENT_VERSION" | sed -E 's/^v?([0-9]+\.[0-9]+).*/\1/')
+          set -euo pipefail
 
-          echo "Current version: $CURRENT_VERSION"
-          echo "Extracting all changes for minor version: $MINOR_VERSION"
+          BODY_FILE="RELEASE_BODY.md"
 
-          # Create grouped changelog file
-          GROUPED_FILE="grouped_changelog_${MINOR_VERSION}.md"
+          if [ "$CHANNEL" = "stable" ]; then
+            if [ ! -s "RELEASE_NOTES_EXTRACTED.md" ]; then
+              echo "Expected extracted stable release notes in RELEASE_NOTES_EXTRACTED.md" >&2
+              exit 1
+            fi
 
-          # Extract all entries for this minor version from CHANGELOG.md
-          echo "# Release Notes for v${MINOR_VERSION}.x Series" > "$GROUPED_FILE"
-          echo "" >> "$GROUPED_FILE"
-          echo "This release is part of the v${MINOR_VERSION}.x series. Below are all changes in this series:" >> "$GROUPED_FILE"
-          echo "" >> "$GROUPED_FILE"
+            {
+              echo "## Release Notes"
+              echo
+              cat RELEASE_NOTES_EXTRACTED.md
+              echo
+              echo "Full changelog: [CHANGELOG.md]($REPO_URL/blob/$TAG/CHANGELOG.md)"
+            } > "$BODY_FILE"
+          else
+            FULL_SHA="$(git rev-parse HEAD)"
+            SHORT_SHA="$(git rev-parse --short HEAD)"
 
-          # Parse CHANGELOG.md and extract all sections matching the minor version
-          awk -v minor="$MINOR_VERSION" ' 
-            /^## \[v?[0-9]+\.[0-9]+\.[0-9]+/ {
-              version_str = $2
-              gsub(/ \[v?/, "", version_str)
-              gsub(/ /, "", version_str)
-              split(version_str, version_parts, ".")
-              version_minor = version_parts[1] "." version_parts[2]
+            {
+              echo "## ${RELEASE_NAME}"
+              echo
+              printf -- '- Channel: `%s`\n' "$CHANNEL"
+              printf -- '- Commit: [`%s`](%s/commit/%s)\n' "$SHORT_SHA" "$REPO_URL" "$FULL_SHA"
+              echo "- Changelog: [CHANGELOG.md]($REPO_URL/blob/main/CHANGELOG.md)"
+            } > "$BODY_FILE"
+          fi
 
-              if (version_minor == minor) {
-                in_section = 1
-                print $0
-                next
-              } else {
-                in_section = 0
-              }
-            }
-            /^## \[/ && in_section { in_section = 0 }
-            in_section { print }
-          ' CHANGELOG.md >> "$GROUPED_FILE"
-
-          # Store path for later use
-          echo "grouped_changelog_file=$GROUPED_FILE" >> $GITHUB_OUTPUT
-          echo "minor_version=$MINOR_VERSION" >> $GITHUB_OUTPUT
+          echo "body_file=$BODY_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release assets
         shell: bash
@@ -2101,22 +2147,20 @@ jobs:
           done
           echo "Collected assets:"
           ls -la assets/
-      # Combine step removed; use CHANGELOG.md directly for release notes
-
       - name: "Dry-run: print release notes (act only)"
         if: ${{ github.actor == 'nektos/act' }}
         shell: bash
         run: |
-          echo "--- CHANGELOG.md (dry-run) ---"
-          cat CHANGELOG.md
+          echo "--- RELEASE_BODY.md (dry-run) ---"
+          cat "${{ steps.release-body.outputs.body_file }}"
 
       - name: Create or update GitHub Release (draft, upload assets first)
-        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
+        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' && (steps.existing_release.outputs.exists != 'true' || steps.existing_release.outputs.draft == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.release_name }}
-          body_path: CHANGELOG.md
+          body_path: ${{ steps.release-body.outputs.body_file }}
           files: assets/*
           draft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -2136,7 +2180,7 @@ jobs:
           fi
           TAG="${{ steps.meta.outputs.tag }}"
           # publish the release after assets are uploaded
-          gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file CHANGELOG.md \
+          gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file "${{ steps.release-body.outputs.body_file }}" \
             ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
 
       - name: Validate Homebrew asset URLs (post-publish)
@@ -2185,6 +2229,64 @@ jobs:
 
           verify_asset_url "$(basename "${arm64_candidates[0]}")"
           verify_asset_url "$(basename "${x86_64_candidates[0]}")"
+
+      - name: Publish APT/YUM/latest.json to R2 (stable only)
+        if: ${{ steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Cloudflare API token/account missing; aborting R2 publish." >&2
+            exit 1
+          fi
+          WRANGLER_ROOT="${RUNNER_TEMP:-/tmp}/wrangler-cli"
+          WRANGLER_BIN="$WRANGLER_ROOT/node_modules/.bin/wrangler"
+          if [ ! -x "$WRANGLER_BIN" ]; then
+            npm install --prefix "$WRANGLER_ROOT" wrangler@4.69.0 >/dev/null
+          fi
+          "$WRANGLER_BIN" --version >&2
+          upload_file() {
+            local src="$1"; shift
+            local key="$1"; shift
+            local ct="application/octet-stream"
+            case "$key" in
+              *.json) ct="application/json" ;;
+              *.key) ct="text/plain" ;;
+              *.txt) ct="text/plain" ;;
+              *.xml) ct="application/xml" ;;
+              *.gz) ct="application/gzip" ;;
+              *.deb) ct="application/vnd.debian.binary-package" ;;
+              *.rpm) ct="application/x-rpm" ;;
+              *.asc) ct="application/pgp-signature" ;;
+            esac
+            echo "-- Upload $key" >&2
+            "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
+              --remote \
+              --file "$src" \
+              --content-type "$ct"
+          }
+          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
+            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
+            upload_file gpg.key gpg.key
+          fi
+          if [ -d aptrepo ]; then
+            find aptrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#aptrepo/}"; upload_file "$f" "aptrepo/$rel";
+            done
+          fi
+          if [ -d yumrepo ]; then
+            find yumrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
+            done
+          fi
+          if [ -f assets/latest.json ]; then
+            upload_file assets/latest.json latest.json
+          fi
+          echo "R2 publish complete." >&2
 
       - name: List release assets (post-upload)
         if: ${{ github.actor != 'nektos/act' }}

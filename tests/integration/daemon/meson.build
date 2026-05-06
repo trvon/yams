@@ -47,6 +47,10 @@ else
     'stats_command_crash_test.cpp',
   )
 
+  daemon_db_corruption_recovery_srcs = files(
+    'daemon_db_corruption_recovery_test.cpp',
+  )
+
   cli_responsiveness_under_load_srcs = files(
     'cli_responsiveness_under_load_test.cpp',
   )
@@ -110,6 +114,15 @@ else
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['Daemon client request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_download_job_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket', 'download-jobs'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client download job request execution', '--allow-running-no-tests'],
     )
 
     test('daemon_socket_model_request_execution',
@@ -345,6 +358,22 @@ else
       timeout: get_option('integration-daemon-timeout'),
     )
 
+    daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',
+      daemon_db_corruption_recovery_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('daemon_db_corruption_recovery',
+      daemon_db_corruption_recovery_exe,
+      suite: ['integration', 'daemon', 'catch2', 'db_recovery'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+    )
+
     cli_responsiveness_under_load_exe = executable('yams_cli_responsiveness_under_load_tests_catch2',
       cli_responsiveness_under_load_srcs,
       include_directories: incs,
@@ -519,7 +548,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: 120,  # 2 minutes for multiple daemon restarts
+      timeout: 300,  # 5 sections, ~32s/section (EmbeddingService quiesce dominates)
       args: ['OnnxConcurrencyRegistry respects TuneAdvisor env settings', '--allow-running-no-tests'],
     )
 
@@ -568,6 +597,15 @@ else
       is_parallel: false,
       timeout: 300,  # 5 minutes - real ONNX model loading is slow
       args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_config_backend',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
+      env: _kg_test_env,
+      is_parallel: false,
+      timeout: 300,
+      args: ['Config selecting onnx backend uses ONNX provider for embeddings', '--allow-running-no-tests'],
     )
 
     test('onnx_tuning_timeout',

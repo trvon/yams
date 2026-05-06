@@ -235,6 +235,9 @@ struct BatchContentEntry {
     std::string mimeType;         ///< MIME type for FTS content_type
     std::string extractionMethod; ///< Method used for extraction
     std::string language;         ///< Detected language code
+    bool priorStateKnown = false;
+    bool priorContentExtracted = false;
+    ExtractionStatus priorExtractionStatus = ExtractionStatus::Pending;
 };
 
 /**
@@ -457,7 +460,7 @@ struct SearchResult {
     std::optional<double> pathScore;        ///< Contribution from path matching
     std::optional<double> tagScore;         ///< Contribution from tag matching
     std::optional<double> symbolScore;      ///< Contribution from symbol search
-    std::optional<double> rerankerScore;    ///< Cross-encoder reranker score (if enabled)
+    std::optional<double> anchorScore;      ///< Contribution from topology anchor (medoid affinity)
 };
 
 /**

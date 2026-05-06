@@ -97,10 +97,8 @@ public:
                 if (planRes) {
                     auto plan = std::move(planRes.value());
                     yams::daemon::DaemonClient client(plan.config);
-                    // Always request non-detailed status to avoid any daemon-side
-                    // physical scanning. Verbose mode will format these same fields.
                     yams::daemon::StatusRequest sreq;
-                    sreq.detailed = false;
+                    sreq.detailed = verbose_ || jsonOutput_;
                     auto st = co_await client.call(sreq);
                     if (plan.config.singleUseConnections) {
                         client.disconnect();
@@ -111,6 +109,11 @@ public:
                             auto it = s.requestCounts.find(key);
                             return it != s.requestCounts.end() ? it->second : 0ULL;
                         };
+                        const auto snapshotAgeMs = getCount("status_snapshot_age_ms");
+                        const auto snapshotStale = getCount("status_snapshot_stale") != 0;
+                        const auto detailAgeMs = getCount("status_detail_age_ms");
+                        const auto detailStale = getCount("status_detail_stale") != 0;
+                        const auto detailAvailable = getCount("status_detail_available") != 0;
                         const auto searchMetrics = effectiveSearchMetrics(s);
                         std::string svcSummary;
                         std::string waitingSummary;
@@ -138,8 +141,41 @@ public:
                             j["forcedCloseCount"] = s.forcedCloseCount;
                             j["memoryUsageMb"] = s.memoryUsageMb;
                             j["cpuUsagePercent"] = s.cpuUsagePercent;
+                            {
+                                nlohmann::json mem = nlohmann::json::object();
+                                mem["usageMb"] = s.memoryUsageMb;
+                                if (s.governorRssBytes > 0) {
+                                    mem["governor_rss_bytes"] = s.governorRssBytes;
+                                }
+                                for (const auto& [key, value] : s.requestCounts) {
+                                    static const std::string prefix{"status_mem_"};
+                                    if (key.rfind(prefix, 0) == 0) {
+                                        mem[key.substr(prefix.size())] = value;
+                                    }
+                                }
+                                if (mem.size() > 1 || mem.contains("governor_rss_bytes")) {
+                                    j["memory"] = std::move(mem);
+                                }
+                            }
+                            {
+                                nlohmann::json diag = nlohmann::json::object();
+                                for (const auto& [key, value] : s.requestCounts) {
+                                    static const std::string prefix{"status_diag_"};
+                                    if (key.rfind(prefix, 0) == 0) {
+                                        diag[key.substr(prefix.size())] = value;
+                                    }
+                                }
+                                if (!diag.empty()) {
+                                    j["diagnostics"] = std::move(diag);
+                                }
+                            }
                             if (s.retryAfterMs > 0)
                                 j["retryAfterMs"] = s.retryAfterMs;
+                            j["statusSnapshotAgeMs"] = snapshotAgeMs;
+                            j["statusSnapshotStale"] = snapshotStale;
+                            j["statusDetailAgeMs"] = detailAgeMs;
+                            j["statusDetailStale"] = detailStale;
+                            j["statusDetailAvailable"] = detailAvailable;
                             j["fsmTransitions"] = s.fsmTransitions;
                             j["fsmHeaderReads"] = s.fsmHeaderReads;
                             j["fsmPayloadReads"] = s.fsmPayloadReads;
@@ -231,6 +267,44 @@ public:
                                     pv.push_back(std::move(rec));
                                 }
                                 j["plugins"] = std::move(pv);
+                            }
+                            {
+                                nlohmann::json caps = nlohmann::json::object();
+                                caps["content_extractors_loaded"] =
+                                    getCount("content_extractors_loaded");
+                                caps["symbol_extractors_loaded"] =
+                                    getCount("symbol_extractors_loaded");
+                                caps["entity_extractors_loaded"] =
+                                    getCount("entity_extractors_loaded");
+                                caps["title_extractor_enabled"] =
+                                    getCount("title_extractor_enabled") != 0;
+                                caps["plugin_skipped_count"] = getCount("plugin_skipped_count");
+                                caps["content_extractors_ready"] =
+                                    s.readinessStates.contains("content_extractors_ready")
+                                        ? s.readinessStates.at("content_extractors_ready")
+                                        : false;
+                                caps["symbol_extractors_ready"] =
+                                    s.readinessStates.contains("symbol_extractors_ready")
+                                        ? s.readinessStates.at("symbol_extractors_ready")
+                                        : false;
+                                caps["entity_extractors_ready"] =
+                                    s.readinessStates.contains("entity_extractors_ready")
+                                        ? s.readinessStates.at("entity_extractors_ready")
+                                        : false;
+                                caps["title_extractor_ready"] =
+                                    s.readinessStates.contains("title_extractor_ready")
+                                        ? s.readinessStates.at("title_extractor_ready")
+                                        : false;
+                                caps["plugin_warnings_present"] =
+                                    getCount("plugin_skipped_count") > 0;
+                                j["capabilities"] = std::move(caps);
+                            }
+                            if (!s.skippedPlugins.empty()) {
+                                nlohmann::json skipped = nlohmann::json::array();
+                                for (const auto& sp : s.skippedPlugins) {
+                                    skipped.push_back({{"path", sp.path}, {"reason", sp.reason}});
+                                }
+                                j["skippedPlugins"] = std::move(skipped);
                             }
                             // Include storage stats: render only daemon-provided counts (no local
                             // scans)
@@ -411,6 +485,81 @@ public:
                             resources.push_back({"CPU", cpuVal.str(), ""});
                             resources.push_back(
                                 {"Memory", std::to_string((int)s.memoryUsageMb) + " MB", ""});
+                            {
+                                const uint64_t footprintBytes =
+                                    getCount("status_mem_phys_footprint_bytes");
+                                const uint64_t rssBytes = getCount("status_mem_rss_bytes");
+                                const uint64_t mallocBytes =
+                                    getCount("status_mem_malloc_allocated_bytes");
+                                std::ostringstream memDetail;
+                                bool first = true;
+                                auto appendMb = [&](std::string_view label, uint64_t bytes) {
+                                    if (bytes == 0) {
+                                        return;
+                                    }
+                                    if (!first) {
+                                        memDetail << " · ";
+                                    }
+                                    first = false;
+                                    memDetail << label << "=" << (bytes / (1024ULL * 1024ULL))
+                                              << " MB";
+                                };
+                                appendMb("footprint", footprintBytes);
+                                appendMb("rss", rssBytes);
+                                appendMb("malloc", mallocBytes);
+                                if (!first) {
+                                    resources.push_back({"Memory Detail", memDetail.str(), ""});
+                                }
+                            }
+                            {
+                                const uint64_t mslEnabled = getCount("status_diag_msl_enabled");
+                                const uint64_t sampleUs = getCount("status_diag_memory_sample_us");
+                                const uint64_t allocUs =
+                                    getCount("status_diag_allocator_sample_us");
+                                const uint64_t logBytes =
+                                    getCount("status_diag_msl_stack_log_bytes");
+                                const uint64_t logFiles =
+                                    getCount("status_diag_msl_stack_log_files");
+                                uint64_t logWarnBytes =
+                                    getCount("status_diag_msl_stack_log_warn_bytes");
+                                if (logWarnBytes == 0) {
+                                    logWarnBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+                                }
+                                if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
+                                    std::ostringstream diag;
+                                    bool first = true;
+                                    auto append = [&](std::string_view text) {
+                                        if (!first) {
+                                            diag << " · ";
+                                        }
+                                        first = false;
+                                        diag << text;
+                                    };
+                                    if (mslEnabled) {
+                                        append("MSL on");
+                                    }
+                                    if (sampleUs) {
+                                        append("mem_probe=" + std::to_string(sampleUs) + "µs");
+                                    }
+                                    if (allocUs) {
+                                        append("alloc_probe=" + std::to_string(allocUs) + "µs");
+                                    }
+                                    if (logFiles || logBytes) {
+                                        append("stack_logs=" +
+                                               std::to_string(logBytes / (1024ULL * 1024ULL)) +
+                                               " MB/" + std::to_string(logFiles) + " files");
+                                    }
+                                    const bool logPressure =
+                                        logBytes >= logWarnBytes && logWarnBytes > 0;
+                                    resources.push_back(
+                                        {"Memory Diagnostics",
+                                         severity_text(logPressure ? Severity::Warn
+                                                                   : Severity::Good,
+                                                       diag.str(), true),
+                                         logPressure ? "restart after profiling; use memory profile"
+                                                     : ""});
+                                }
+                            }
                             resources.push_back({"Pools",
                                                  "ipc=" + std::to_string(s.ipcPoolSize) +
                                                      " io=" + std::to_string(s.ioPoolSize),
@@ -587,7 +736,18 @@ public:
                             bool hasPlugins = !s.providers.empty();
                             bool hasEmbeddingInfo = !s.embeddingBackend.empty() ||
                                                     !s.embeddingModel.empty() || s.embeddingDim > 0;
-                            if (hasPlugins || hasEmbeddingInfo) {
+                            const auto contentExtractorCount =
+                                getCount("content_extractors_loaded");
+                            const auto symbolExtractorCount = getCount("symbol_extractors_loaded");
+                            const auto entityExtractorCount = getCount("entity_extractors_loaded");
+                            const bool titleExtractorEnabled =
+                                getCount("title_extractor_enabled") != 0;
+                            const auto skippedPluginCount = getCount("plugin_skipped_count");
+                            const bool hasCapabilities =
+                                contentExtractorCount > 0 || symbolExtractorCount > 0 ||
+                                entityExtractorCount > 0 || titleExtractorEnabled ||
+                                skippedPluginCount > 0;
+                            if (hasPlugins || hasEmbeddingInfo || hasCapabilities) {
                                 std::cout << "\n" << section_header("Plugins") << "\n\n";
                                 std::vector<Row> plugRows;
 
@@ -629,6 +789,39 @@ public:
                                     plugRows.push_back({"Embeddings",
                                                         severity_text(sev, statusText, true),
                                                         attrs});
+                                }
+
+                                plugRows.push_back(
+                                    {"Content Extractors",
+                                     severity_text(
+                                         contentExtractorCount > 0 ? Severity::Good
+                                                                   : Severity::Warn,
+                                         contentExtractorCount > 0 ? "Ready" : "Unavailable", true),
+                                     std::to_string(contentExtractorCount) + " loaded"});
+                                plugRows.push_back(
+                                    {"Symbol Extractors",
+                                     severity_text(
+                                         symbolExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         symbolExtractorCount > 0 ? "Ready" : "Unavailable", true),
+                                     std::to_string(symbolExtractorCount) + " loaded"});
+                                plugRows.push_back(
+                                    {"Entity Extractors",
+                                     severity_text(
+                                         entityExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         entityExtractorCount > 0 ? "Ready" : "Unavailable", true),
+                                     std::to_string(entityExtractorCount) + " loaded"});
+                                plugRows.push_back(
+                                    {"Title Extractor",
+                                     severity_text(
+                                         titleExtractorEnabled ? Severity::Good : Severity::Warn,
+                                         titleExtractorEnabled ? "Enabled" : "Disabled", true),
+                                     titleExtractorEnabled ? "entity-backed title enrichment"
+                                                           : "requires entity extractors"});
+                                if (skippedPluginCount > 0) {
+                                    plugRows.push_back(
+                                        {"Plugin Warnings",
+                                         severity_text(Severity::Warn, "Skipped during load", true),
+                                         std::to_string(skippedPluginCount) + " plugin(s)"});
                                 }
 
                                 render_rows(std::cout, plugRows);
@@ -941,6 +1134,17 @@ public:
                         }
                         co_return Result<void>();
                     }
+                    if (st.error().code == ErrorCode::ResourceBusy) {
+                        if (jsonOutput_) {
+                            nlohmann::json j;
+                            j["error"] = st.error().message;
+                            j["code"] = "resource_busy";
+                            std::cout << j.dump(2) << std::endl;
+                        } else {
+                            std::cout << st.error().message << "\n";
+                        }
+                        co_return Result<void>();
+                    }
                 }
             }
             auto ensured = cli_->ensureStorageInitialized();
@@ -1206,11 +1410,13 @@ private:
             auto leaseHandle = std::move(leaseProbe.value());
             auto promProbe = std::make_shared<std::promise<Result<yams::daemon::StatusResponse>>>();
             auto futProbe = promProbe->get_future();
-            auto workProbe = [leaseHandle, promProbe]() mutable -> boost::asio::awaitable<void> {
+            const bool probeDetailed = verbose_ || jsonOutput_;
+            auto workProbe = [leaseHandle, promProbe,
+                              probeDetailed]() mutable -> boost::asio::awaitable<void> {
                 try {
                     auto& client = **leaseHandle;
                     yams::daemon::StatusRequest sreq;
-                    sreq.detailed = false;
+                    sreq.detailed = probeDetailed;
                     auto sr = co_await client.call(sreq);
                     promProbe->set_value(std::move(sr));
                 } catch (const std::exception& e) {

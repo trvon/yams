@@ -210,6 +210,21 @@ boost::asio::awaitable<yams::Result<T>> await_with_timeout(Fn&& fn, int timeout_
         boost::asio::use_awaitable, std::forward<Fn>(fn));
 }
 
+// co_await_future: suspends the coroutine until a std::future<T> becomes ready.
+// Polls every `poll_interval` so the io_context stays responsive.
+// No atomics, no race, no handler juggling — the coroutine simply resumes when the work finishes.
+template <typename T>
+boost::asio::awaitable<T>
+co_await_future(std::future<T>& future, auto ex,
+                std::chrono::milliseconds poll_interval = std::chrono::milliseconds(50)) {
+    boost::asio::steady_timer timer(ex);
+    while (future.wait_for(poll_interval) != std::future_status::ready) {
+        timer.expires_after(poll_interval);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+    co_return future.get();
+}
+
 // await_with_retry: runs an awaitable fn up to attempts with backoff between attempts.
 // Fn must return boost::asio::awaitable<yams::Result<T>>.
 template <typename T, typename Fn, typename Backoff>

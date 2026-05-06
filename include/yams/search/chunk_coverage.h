@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_types.h>
 
 #include <functional>
 #include <optional>

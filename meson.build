@@ -1,5 +1,5 @@
 project('yams', ['cpp', 'c'],
-  version: '0.13.0', # x-release-please-version
+  version: '0.14.1', # x-release-please-version
   default_options: [
     'buildtype=debugoptimized',
     'b_ndebug=if-release',
@@ -268,6 +268,42 @@ if not onnxruntime_resolved_dep.found()
   onnxruntime_resolved_dep = dependency('libonnxruntime', required: false)
 endif
 
+# Normalize ONNX Runtime linkage to the current library location instead of any stale
+# Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
+if onnxruntime_resolved_dep.found()
+  onnxruntime_link_dirs = []
+  onnxruntime_pkg_libdir = onnxruntime_resolved_dep.get_variable(pkgconfig: 'libdir', default_value: '')
+  if onnxruntime_pkg_libdir != ''
+    onnxruntime_link_dirs += [onnxruntime_pkg_libdir]
+  endif
+
+  onnxruntime_cmake_prefix = onnxruntime_resolved_dep.get_variable(cmake: 'PACKAGE_PREFIX_DIR', default_value: '')
+  if onnxruntime_cmake_prefix != ''
+    onnxruntime_link_dirs += [join_paths(onnxruntime_cmake_prefix, 'lib')]
+  endif
+
+  if host_machine.system() == 'darwin'
+    brew_onnx_libdir = '/opt/homebrew/opt/onnxruntime/lib'
+    if fs.exists(brew_onnx_libdir)
+      onnxruntime_link_dirs = [brew_onnx_libdir] + onnxruntime_link_dirs
+    endif
+  endif
+
+  onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
+  onnxruntime_cpp = meson.get_compiler('cpp')
+  onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', dirs: onnxruntime_link_dirs, required: false)
+  if not onnxruntime_link_dep.found()
+    onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', required: false)
+  endif
+
+  if onnxruntime_link_dep.found()
+    onnxruntime_resolved_dep = declare_dependency(
+      dependencies: [onnxruntime_compile_dep, onnxruntime_link_dep],
+    )
+    message('ONNX Runtime linkage normalized via current library search path')
+  endif
+endif
+
 tbb_resolved_dep = dependency('tbb', required: false, method: 'pkg-config')
 if not tbb_resolved_dep.found()
   tbb_resolved_dep = dependency('onetbb', required: false, method: 'pkg-config')
@@ -277,6 +313,27 @@ if not tbb_resolved_dep.found()
 endif
 if not tbb_resolved_dep.found()
   tbb_resolved_dep = dependency('onetbb', required: false)
+endif
+if host_machine.system() == 'darwin' and tbb_resolved_dep.found()
+  tbb_normalized = false
+  tbb_cpp = meson.get_compiler('cpp')
+  foreach brew_tbb_prefix : ['/opt/homebrew/opt/tbb', '/usr/local/opt/tbb']
+    if not tbb_normalized
+      brew_tbb_incdir = brew_tbb_prefix / 'include'
+      brew_tbb_libdir = brew_tbb_prefix / 'lib'
+      if fs.exists(brew_tbb_incdir) and fs.exists(brew_tbb_libdir)
+        tbb_link_dep = tbb_cpp.find_library('tbb', dirs: [brew_tbb_libdir], required: false)
+        if tbb_link_dep.found()
+          tbb_resolved_dep = declare_dependency(
+            include_directories: include_directories(brew_tbb_incdir),
+            dependencies: [tbb_link_dep],
+          )
+          tbb_normalized = true
+          message('TBB linkage normalized via Homebrew opt prefix')
+        endif
+      endif
+    endif
+  endforeach
 endif
 
 # --- Windows DLL deployment ---
@@ -337,9 +394,8 @@ if host_machine.system() == 'windows'
 root = pathlib.Path(os.path.expanduser("~/.conan2/p"))
 dirs = []
 if root.exists():
-    for child in root.iterdir():
-        bin_dir = child / "p" / "bin"
-        if bin_dir.exists():
+    for pattern in ("*/p/bin", "b/*/p/bin"):
+        for bin_dir in root.glob(pattern):
             dll = bin_dir / "onnxruntime.dll"
             if dll.exists():
                 dirs.append(str(bin_dir))
@@ -452,8 +508,28 @@ if not wasi_enabled
 endif
 
 # Boost is a core requirement (e.g., Boost.Asio for daemon communication).
-# Conan's PkgConfigDeps often doesn't emit boost.pc, so prefer CMake config.
-boost_dep = dependency('boost', modules: ['system', 'thread'], method: 'cmake', required: true)
+# Resolution order:
+#   1. Per-library pkg-config probes against Conan's emitted boost_*.pc.
+#      Required path on Windows: meson 1.4's built-in Boost finder rejects
+#      Conan's MSVC layout (libs are named libboost_<comp>.lib, not the
+#      auto-link form boost_<comp>-vc14x-mt-x64-1_85.lib that meson scans
+#      for). pkg-config bypasses meson's Boost special-case entirely.
+#   2. System Boost auto-detect — Linux/macOS fallback when no .pc files
+#      are on PKG_CONFIG_PATH (apt/brew Boost ships no pkg-config files).
+# NOTE: Conan PkgConfigDeps emits per-component .pc files using HYPHEN
+# separators (boost-system.pc, boost-thread.pc), not underscores. pkg-config
+# resolves dependency names against the .pc filename, so we must match.
+boost_system_dep = dependency('boost-system', method: 'pkg-config',
+                              required: false)
+boost_thread_dep = dependency('boost-thread', method: 'pkg-config',
+                              required: false)
+if boost_system_dep.found() and boost_thread_dep.found()
+  boost_dep = declare_dependency(
+    dependencies: [boost_system_dep, boost_thread_dep])
+else
+  boost_dep = dependency('boost', modules: ['system', 'thread'],
+                         required: true)
+endif
 meson.override_dependency('boost', boost_dep)
 
 # --- RE2 regex engine (optional, for high-performance grep) ---
@@ -623,7 +699,8 @@ else
   subdir('src/wal')
   subdir('src/manifest')
   subdir('src/metadata')
-  subdir('src/topology')
+  subdir('third_party/hdbscan-cpp')
+  meson.override_dependency('yams_hdbscan_cpp', hdbscan_dep)
   subdir('src/integrity')
   subdir('src/config')
   subdir('src/extraction')
@@ -635,7 +712,9 @@ else
   endif
   subdir('src/indexing')
   subdir('src/daemon/client')
+  subdir('src/embedding_simeon')
   subdir('src/vector')
+  subdir('src/topology')
 
   # Third-party libraries (must come before src/search which depends on symspell)
   subdir('third_party/symspell')

@@ -544,6 +544,10 @@ package_all() {
     exit 1
   fi
 
+  if [ -d "${stage_root}/usr" ]; then
+    bash "${REPO_ROOT}/scripts/prune-runtime-install.sh" "${stage_root}/usr"
+  fi
+
   prepare_stage_docs "${stage_root}"
   package_tarball "${version}" "${build_dir}" "${stage_root}"
   package_deb "${version}" "${build_dir}" "${stage_root}"

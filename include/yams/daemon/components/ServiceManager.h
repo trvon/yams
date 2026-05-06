@@ -27,31 +27,31 @@
 #include <yams/app/services/services.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/EmbeddingLifecycleManager.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/KGWriteQueue.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/RepairServiceHost.h>
+#include <yams/daemon/components/RequestExecutor.h>
+#include <yams/daemon/components/SearchAdmissionController.h>
 #include <yams/daemon/components/SearchComponent.h>
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
-#include <yams/daemon/components/EmbeddingLifecycleManager.h>
-#include <yams/daemon/components/IngestMetricsPublisher.h>
-#include <yams/daemon/components/AsyncInitOrchestrator.h>
-#include <yams/daemon/components/RepairServiceHost.h>
-#include <yams/daemon/components/RequestExecutor.h>
-#include <yams/daemon/components/SearchAdmissionController.h>
-#include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
@@ -62,7 +62,9 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/profiling.h>
+#include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
+#include <yams/vector/vector_database.h>
 #include <yams/wal/wal_manager.h>
 
 // Forward declarations for services
@@ -80,7 +82,6 @@ class RepairManager;
 namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
-class IReranker;
 } // namespace yams::search
 namespace yams::vector {
 class EmbeddingGenerator;
@@ -92,10 +93,9 @@ class AbiPluginLoader;
 class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
-class WorkerPool;
 class TuningManager;
 class CheckpointManager;
-class OnnxRerankerSession;
+class VectorIndexCoordinator;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -169,11 +169,8 @@ public:
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         return vectorSystemManager_ ? vectorSystemManager_->getVectorDatabase() : nullptr;
     }
-    std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
     boost::asio::any_io_executor getCliExecutor() const;
-    // Resize the worker pool to a target size; creates pool on demand.
-    bool resizeWorkerPool(std::size_t target);
     std::shared_ptr<PostIngestQueue> getPostIngestQueue() const {
         return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     }
@@ -280,6 +277,13 @@ public:
         snapshot.kgReady = snapshot.lexicalReady && snapshot.postIngestQueued == 0 &&
                            snapshot.postIngestInFlight == 0;
         snapshot.topologyReady = snapshot.kgReady && !snapshot.awaitingDrain;
+        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+            const auto lexical = engine->getSimeonLexicalStatus();
+            snapshot.simeonLexicalConfigured = lexical.configured;
+            snapshot.simeonLexicalReady = lexical.ready;
+            snapshot.simeonLexicalBuilding = lexical.building;
+            snapshot.simeonFragmentGeometryReady = lexical.fragmentGeometryReady;
+        }
         return snapshot;
     }
     std::vector<std::string> getRecentLexicalDeltaHashes() const {
@@ -293,6 +297,7 @@ public:
     }
 
     PluginStatusSnapshot getPluginStatusSnapshot() const;
+    std::shared_ptr<const PluginStatusSnapshot> getPluginStatusSnapshotPtr() const;
     void refreshPluginStatusSnapshot();
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();
@@ -330,13 +335,23 @@ public:
         return kEmpty;
     }
 
+    bool hasTitleExtractor() const {
+        auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+        return piq && piq->hasTitleExtractor();
+    }
+
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
         return databaseManager_ ? databaseManager_->getKgStore() : nullptr;
     }
 
-    // KG Write Queue - serializes KG writes to eliminate lock contention
-    KGWriteQueue* getKgWriteQueue() const { return kgWriteQueue_.get(); }
+    // Write Coordinator - unified single-writer entry point for all metadata writes
+    WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
+#ifdef YAMS_TESTING
+    void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
+        writeCoordinator_ = std::move(coordinator);
+    }
+#endif
 
     // Graph Component (PBI-009)
     std::shared_ptr<GraphComponent> getGraphComponent() const { return loadGraphComponent(); }
@@ -364,14 +379,25 @@ public:
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
 
+    std::shared_ptr<VectorIndexCoordinator> getVectorIndexCoordinator() const {
+        return vectorIndexCoordinator_;
+    }
+
     using TopologyRebuildStats = TopologyManager::RebuildStats;
     using TopologyTelemetrySnapshot = TopologyManager::TelemetrySnapshot;
 
     Result<TopologyRebuildStats>
     rebuildTopologyArtifacts(const std::string& reason, bool dryRun = false,
                              const std::vector<std::string>& documentHashes = {});
+
+    // Deterministic corpus-wide rebuild of the semantic_neighbor edges in the KG.
+    // Clears existing edges then rebuilds against every doc-level vector in vdb.
+    // Returns the number of new edges created.
+    Result<std::size_t> rebuildSemanticNeighborGraph(const std::string& reason,
+                                                     const std::string& modelName = {});
     void requestTopologyRebuild(const std::string& reason,
                                 const std::vector<std::string>& documentHashes = {});
+    void requestSemanticTopologyMaintenance(const std::string& reason);
     TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {
         return topologyManager_.getTelemetrySnapshot();
     }
@@ -442,6 +468,16 @@ public:
     uint64_t getEmbeddingSemanticUpdateErrors() const {
         return embeddingLifecycle_.semanticUpdateErrors();
     }
+    std::unordered_map<std::string, EmbeddingService::PhaseTiming>
+    getEmbeddingPhaseTimingsSnapshot() const {
+        return embeddingService_ ? embeddingService_->phaseTimingsSnapshot()
+                                 : std::unordered_map<std::string, EmbeddingService::PhaseTiming>{};
+    }
+    void resetEmbeddingPhaseTimings() {
+        if (embeddingService_) {
+            embeddingService_->resetPhaseTimings();
+        }
+    }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
@@ -485,15 +521,15 @@ public:
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
-    Result<size_t> adoptContentExtractorsFromHosts();
-    Result<size_t> adoptSymbolExtractorsFromHosts();
-    Result<size_t> adoptEntityExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingLifecycle_.isAutoOnAdd(); }
 
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
 
     std::string resolvePreferredModel() const {
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            return {};
+        }
         return embeddingLifecycle_.resolvePreferredModel();
     }
 
@@ -619,12 +655,9 @@ private:
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
-    boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
-    co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& token,
-                   bool includeEmbeddingGenerator = true);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
-    const DaemonConfig& config_;
+    DaemonConfig config_;
     StateComponent& state_;
 
     // All the services managed by this component
@@ -648,6 +681,9 @@ private:
     boost::asio::cancellation_signal shutdownSignal_;
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
+    /// Dedicated thread pool for blocking I/O (database open, migrations).
+    /// Kept separate from the event-loop pool so long-running SQLite ops never stall async work.
+    std::unique_ptr<boost::asio::thread_pool> blockingPool_;
     std::unique_ptr<IngestService> ingestService_;
     std::unique_ptr<RequestExecutor> requestExecutor_;
 
@@ -658,7 +694,7 @@ private:
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
-    std::unique_ptr<KGWriteQueue> kgWriteQueue_;
+    std::unique_ptr<WriteCoordinator> writeCoordinator_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
@@ -666,6 +702,7 @@ private:
     TuningConfig tuningConfig_{};
 
     std::atomic<bool> shutdownInvoked_{false};
+    std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 
@@ -676,6 +713,7 @@ private:
 
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
+    std::shared_ptr<VectorIndexCoordinator> vectorIndexCoordinator_;
     std::unique_ptr<DatabaseManager> databaseManager_;
 
     // Cached GLiNER query concept extraction function.

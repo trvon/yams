@@ -201,7 +201,23 @@ public:
 
     /// Compute backpressure read-pause delay under current governor pressure state.
     [[nodiscard]] std::uint32_t
-    recommendBackpressureReadPauseMs(std::uint32_t baseMs, bool queueBackpressured) const noexcept;
+    recommendBackpressureReadPauseMs(std::uint32_t baseMs) const noexcept;
+
+    /// Recommend the maximum corpus-text byte budget for the in-memory simeon
+    /// lexical enhancement build. Scales with the daemon memory budget and the
+    /// current pressure level so the lexical build never starves the rest of
+    /// the daemon under load. Callers can clamp further; this is the upper
+    /// bound the governor is willing to grant. Returns 0 when the governor has
+    /// no memory budget (caller should fall back to a conservative literal).
+    [[nodiscard]] std::uint64_t recommendLexicalCorpusBytes() const noexcept;
+
+    /// Recommend the maximum working-set byte budget for the SPQ vector index
+    /// rebuild (training set + per-row encoded codes scratch). Scales with the
+    /// daemon memory budget and current pressure so the rebuild does not push
+    /// a small machine over its limit during a backfill of a large corpus.
+    /// Callers should derive simeon_pq_train_limit and per-batch row counts
+    /// from this cap when it is tighter than their static defaults.
+    [[nodiscard]] std::uint64_t recommendVectorRebuildBudgetBytes() const noexcept;
 
     // ========================================================================
     // Pressure Response Actions (called based on level transitions)

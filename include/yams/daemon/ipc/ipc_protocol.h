@@ -3978,6 +3978,14 @@ struct StatusResponse {
     bool vectorDbInitAttempted{false};
     bool vectorDbReady{false};
     uint32_t vectorDbDim{0};
+    std::string vectorIndexEngine;
+    // Database init phase visibility for `yams daemon status` rendering.
+    // Empty when not set; otherwise "opening" | "recovering" | "migrating" | "ready".
+    std::string databasePhase;
+    uint64_t databasePhaseElapsedMs{0};
+    std::string databaseRecoveredAt;
+    std::string databaseRecoveredFrom;
+    std::string storageWarning;
     // FSM metrics (transport state machine), exposed in daemon status
     uint64_t fsmTransitions = 0;
     uint64_t fsmHeaderReads = 0;
@@ -4258,7 +4266,8 @@ struct StatusResponse {
             << static_cast<uint32_t>(retryAfterMs);
 
         // Vector DB metrics
-        ser << vectorDbInitAttempted << vectorDbReady << static_cast<uint32_t>(vectorDbDim);
+        ser << vectorDbInitAttempted << vectorDbReady << static_cast<uint32_t>(vectorDbDim)
+            << vectorIndexEngine;
 
         // Serialize request counts map
         ser << static_cast<uint32_t>(requestCounts.size());
@@ -4327,6 +4336,11 @@ struct StatusResponse {
 
         // Proxy socket metrics
         ser << static_cast<uint64_t>(proxyActiveConnections) << proxySocketPath;
+
+        // Database phase + recovery + storage warning (appended; older daemons
+        // omit these and older clients tolerate missing tail fields).
+        ser << databasePhase << static_cast<uint64_t>(databasePhaseElapsedMs) << databaseRecoveredAt
+            << databaseRecoveredFrom << storageWarning;
     }
 
     template <typename Deserializer>
@@ -4459,6 +4473,10 @@ struct StatusResponse {
         if (!vDim)
             return vDim.error();
         res.vectorDbDim = vDim.value();
+        auto vectorIndexEngineResult = deser.readString();
+        if (!vectorIndexEngineResult)
+            return vectorIndexEngineResult.error();
+        res.vectorIndexEngine = std::move(vectorIndexEngineResult.value());
 
         // Deserialize request counts
         auto countsCountResult = deser.template read<uint32_t>();
@@ -4697,6 +4715,24 @@ struct StatusResponse {
         auto proxyPathResult = deser.template read<std::string>();
         if (proxyPathResult)
             res.proxySocketPath = proxyPathResult.value();
+
+        // Database phase + recovery + storage warning (appended; tolerate missing
+        // for backward compat with older daemons).
+        auto dbPhaseRes = deser.template read<std::string>();
+        if (dbPhaseRes)
+            res.databasePhase = std::move(dbPhaseRes.value());
+        auto dbPhaseElapsedRes = deser.template read<uint64_t>();
+        if (dbPhaseElapsedRes)
+            res.databasePhaseElapsedMs = dbPhaseElapsedRes.value();
+        auto dbRecoveredAtRes = deser.template read<std::string>();
+        if (dbRecoveredAtRes)
+            res.databaseRecoveredAt = std::move(dbRecoveredAtRes.value());
+        auto dbRecoveredFromRes = deser.template read<std::string>();
+        if (dbRecoveredFromRes)
+            res.databaseRecoveredFrom = std::move(dbRecoveredFromRes.value());
+        auto storageWarnRes = deser.template read<std::string>();
+        if (storageWarnRes)
+            res.storageWarning = std::move(storageWarnRes.value());
 
         return res;
     }

@@ -36,3 +36,8 @@ This document describes the YAMS daemon runtime strictly in terms of its impleme
 - `AbiPluginLoader` and `WasmRuntime` construct ABI shims (`abi_plugin_loader.cpp`) or WASM instances (`wasm_runtime.cpp`) to bind plugin callbacks into daemon services.
 
 Keep this document synchronized with any associated traceability artifacts when responsibilities move or new subsystems are introduced.
+
+## Related Trace
+
+- `docs/architecture/daemon_admission_communication_flow.md` diagrams the user-to-daemon
+  communication path, request admission gates, and executor routing.

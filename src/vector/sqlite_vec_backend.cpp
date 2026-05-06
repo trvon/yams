@@ -1,11 +1,19 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
-#include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_schema_migration.h>
+#include <yams/vector/vector_utils.h>
 
 #include <yams/daemon/components/TuneAdvisor.h>
 
+#include "simeon_pq_persistence.h"
+
 #include <sqlite3.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -24,23 +32,22 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include <simeon/pq.hpp>
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
-#include <sqlite-vec-cpp/index/hnsw.hpp>
-#include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
-#include <sqlite-vec-cpp/index/hnsw_quantized.hpp>
 #include <sqlite-vec-cpp/sqlite/registration.hpp>
 
 namespace yams::vector {
 
-// Type aliases for sqlite-vec-cpp (use distinct name to avoid conflict with enum DistanceMetric)
-using HNSWCosineMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
-using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, HNSWCosineMetric>;
-using HNSWL2Metric = sqlite_vec_cpp::distances::L2Metric<float>;
-using QuantizedHNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, HNSWL2Metric>;
-using QuantizedHNSWSearch = sqlite_vec_cpp::index::HNSWQuantizedSearch<float, HNSWL2Metric>;
-using QuantizedSearchType = sqlite_vec_cpp::index::QuantizationType;
+struct SimeonPqIndexState {
+    simeon::ProductQuantizer pq;
+    std::vector<std::size_t> rowids;
+    std::vector<std::uint8_t> codes;
+    std::size_t rerank_factor = 2;
+
+    explicit SimeonPqIndexState(simeon::PQConfig cfg) : pq(cfg) {}
+};
 
 namespace {
 
@@ -81,6 +88,8 @@ int count_live_statements(sqlite3* db) {
     return count;
 }
 
+thread_local std::vector<sqlite3_stmt*> tl_deferred_finalize;
+
 // Helper to safely get string from sqlite column (avoids GNU ?: extension)
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
@@ -111,18 +120,6 @@ inline bool normalizeEmbeddingInPlace(std::vector<float>& embedding) {
         val *= inv_norm;
     }
     return true;
-}
-
-inline QuantizedSearchType toQuantizedSearchType(QuantizedHnswMode mode) {
-    switch (mode) {
-        case QuantizedHnswMode::LVQ8:
-            return QuantizedSearchType::LVQ8;
-        case QuantizedHnswMode::LVQ4:
-            return QuantizedSearchType::LVQ4;
-        case QuantizedHnswMode::RaBitQ:
-            return QuantizedSearchType::RaBitQ;
-    }
-    return QuantizedSearchType::LVQ8;
 }
 
 // Persist per-coord scales to the DB. Returns true on success.
@@ -239,60 +236,6 @@ inline std::vector<float> loadTurboQuantPerCoordScales(sqlite3* db, size_t dim, 
     return scales;
 }
 
-// Load the full fitted model (scales + optional per-coord centroids) from the DB.
-// Returns a blob that can be passed to TurboQuantMSE::loadFittedModel().
-inline std::vector<uint8_t> loadTurboQuantFittedModelBlob(sqlite3* db, size_t dim, uint8_t bits,
-                                                          uint64_t seed) {
-    // Query: scales, centroids, fit_version (optional column)
-    std::vector<uint8_t> blob;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-                                "SELECT per_coord_scales, per_coord_centroids, fit_version "
-                                "FROM turboquant_quantizer_meta "
-                                "WHERE dim = ? AND bits = ? AND seed = ?",
-                                -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return blob;
-    }
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        // Column 0: scales blob
-        const void* scales_blob = sqlite3_column_blob(stmt, 0);
-        int scales_bytes = sqlite3_column_bytes(stmt, 0);
-        // Column 1: centroids blob (may be null)
-        const void* centroids_blob = sqlite3_column_blob(stmt, 1);
-        int centroids_bytes = sqlite3_column_blob(stmt, 1) ? sqlite3_column_bytes(stmt, 1) : 0;
-        // Column 2: fit_version (may be 0 for old rows without the column)
-        int fit_version = sqlite3_column_int(stmt, 2);
-
-        if (!scales_blob || scales_bytes == 0) {
-            sqlite3_finalize(stmt);
-            return blob;
-        }
-
-        // Build blob: version(4) | bits(1) | [padding(3)] | scales | centroids
-        size_t total = 8 + scales_bytes + centroids_bytes;
-        blob.resize(total);
-        size_t offset = 0;
-
-        uint32_t version = (fit_version > 0) ? static_cast<uint32_t>(fit_version) : 1;
-        std::memcpy(&blob[offset], &version, 4);
-        offset += 4;
-        blob[offset] = bits;
-        offset += 1;
-        offset += 3; // padding
-        std::memcpy(&blob[offset], scales_blob, scales_bytes);
-        offset += scales_bytes;
-        if (centroids_blob && centroids_bytes > 0) {
-            std::memcpy(&blob[offset], centroids_blob, centroids_bytes);
-        }
-    }
-    sqlite3_finalize(stmt);
-    return blob;
-}
-
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
     for (float val : embedding) {
         if (!std::isfinite(val)) {
@@ -304,40 +247,6 @@ inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
 
 inline bool updateOnDuplicateEnabled() {
     return true; // default: update on duplicate for accuracy
-}
-
-inline size_t hnswParallelBuildThreshold() {
-    constexpr size_t kDefaultThreshold = 100;
-    if (const char* env = std::getenv("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD")) {
-        try {
-            const auto parsed = static_cast<long long>(std::stoll(env));
-            if (parsed <= 0) {
-                return std::numeric_limits<size_t>::max();
-            }
-            return static_cast<size_t>(parsed);
-        } catch (...) {
-        }
-    }
-    return kDefaultThreshold;
-}
-
-inline size_t hnswCheckpointThreshold(size_t configuredThreshold) {
-    const size_t fallback = configuredThreshold > 0 ? configuredThreshold : size_t{100};
-    if (const char* env = std::getenv("YAMS_HNSW_CHECKPOINT_THRESHOLD")) {
-        try {
-            const auto parsed = static_cast<long long>(std::stoll(env));
-            if (parsed <= 0) {
-                return std::numeric_limits<size_t>::max();
-            }
-            return static_cast<size_t>(parsed);
-        } catch (...) {
-        }
-    }
-    return fallback;
-}
-
-inline size_t hnswBackgroundSeedThreshold() {
-    return 256;
 }
 
 // ============================================================================
@@ -473,6 +382,7 @@ CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document_hash ON vectors(document_hash);
 CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id, model_version);
 CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
+CREATE INDEX IF NOT EXISTS idx_vectors_level ON vectors(level, document_hash);
 )sql";
 
 // Global quantizer metadata table: stores per-coord scales once per quantizer config.
@@ -492,6 +402,28 @@ CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
     per_coord_scales BLOB,
     per_coord_centroids BLOB,
     UNIQUE(dim, bits, seed)
+))sql";
+
+constexpr const char* kCreateSimeonPqMeta = R"sql(
+CREATE TABLE IF NOT EXISTS simeon_pq_meta (
+    dim INTEGER PRIMARY KEY,
+    format_version INTEGER NOT NULL DEFAULT 1,
+    m INTEGER NOT NULL,
+    k INTEGER NOT NULL,
+    seed INTEGER NOT NULL,
+    rerank_factor INTEGER NOT NULL,
+    trained INTEGER NOT NULL DEFAULT 0,
+    vector_count INTEGER NOT NULL,
+    codebooks_blob BLOB NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+))sql";
+
+constexpr const char* kCreateSimeonPqCodes = R"sql(
+CREATE TABLE IF NOT EXISTS simeon_pq_codes (
+    dim INTEGER NOT NULL,
+    rowid INTEGER NOT NULL,
+    code BLOB NOT NULL,
+    PRIMARY KEY (dim, rowid)
 ))sql";
 
 constexpr const char* kInsertVector = R"sql(
@@ -667,14 +599,6 @@ std::vector<std::string> deserializeStringVector(const std::string& json_str) {
 
 class SqliteVecBackend::Impl {
 public:
-    enum class HnswMaintenanceMode {
-        None,
-        LoadPersisted,
-        CatchUp,
-        FullRebuild,
-        BruteForceFallback,
-    };
-
     explicit Impl(const Config& config) : config_(config) {}
 
     ~Impl() { close(); }
@@ -686,8 +610,25 @@ public:
         return config_.search_engine == VectorSearchEngine::Vec0L2;
     }
 
-    bool usesQuantizedHnswSearchEngine() const {
-        return config_.search_engine == VectorSearchEngine::HnswQuantizedL2;
+    bool usesSimeonPqSearchEngine() const {
+        return config_.search_engine == VectorSearchEngine::SimeonPqAdc;
+    }
+
+    std::uint32_t normalizedSimeonPqSubquantizers(size_t dim) const {
+        const std::uint32_t requested =
+            static_cast<std::uint32_t>(std::max<size_t>(1, config_.simeon_pq_subquantizers));
+        if (dim == 0) {
+            return requested;
+        }
+        if (dim % requested == 0) {
+            return requested;
+        }
+        for (std::uint32_t candidate = requested; candidate > 1; --candidate) {
+            if (dim % candidate == 0) {
+                return candidate;
+            }
+        }
+        return 1;
     }
 
     std::string vec0TableName(size_t dim) const {
@@ -708,17 +649,17 @@ public:
         }
     }
 
-    void markQuantizedHnswDimDirtyUnlocked(size_t dim) {
+    void markSimeonPqDimDirtyUnlocked(size_t dim) {
         if (dim == 0) {
             return;
         }
-        quantized_hnsw_dirty_dims_.insert(dim);
-        quantized_hnsw_ready_dims_.erase(dim);
+        simeon_pq_dirty_dims_.insert(dim);
+        simeon_pq_ready_dims_.erase(dim);
     }
 
-    void markQuantizedHnswDimsDirtyUnlocked(const std::unordered_set<size_t>& dims) {
+    void markSimeonPqDimsDirtyUnlocked(const std::unordered_set<size_t>& dims) {
         for (size_t dim : dims) {
-            markQuantizedHnswDimDirtyUnlocked(dim);
+            markSimeonPqDimDirtyUnlocked(dim);
         }
     }
 
@@ -735,12 +676,6 @@ public:
                          "quantized_primary_storage=true requires enable_turboquant_storage=true"};
         }
 
-        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
-        last_hnsw_added_count_ = 0;
-        last_hnsw_removed_count_ = 0;
-        background_seed_running_.store(false, std::memory_order_release);
-        background_seed_scheduled_.store(false, std::memory_order_release);
-        background_seed_cancel_requested_.store(false, std::memory_order_release);
         query_dim_counts_.clear();
 
         int rc = sqlite3_open(db_path.c_str(), &db_);
@@ -760,7 +695,7 @@ public:
         // Enable WAL mode for better concurrency
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "PRAGMA cache_size=-64000", nullptr, nullptr, nullptr); // 64MB cache
+        sqlite3_exec(db_, "PRAGMA cache_size=-2048", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA mmap_size=268435456", nullptr, nullptr, nullptr); // 256MB
 
@@ -817,7 +752,7 @@ public:
         }
 
         db_path_ = db_path;
-        initialized_ = true;
+        initialized_.store(true, std::memory_order_release);
         refreshQueryDimCountsUnlocked();
         trace_vector_db_lifetime("open", this, db_path_, db_, SQLITE_OK,
                                  count_live_statements(db_));
@@ -845,22 +780,6 @@ public:
         trace_vector_db_lifetime("close.begin", this, db_path_, db_, SQLITE_OK,
                                  count_live_statements(db_));
 
-        background_seed_cancel_requested_.store(true, std::memory_order_release);
-        std::thread backgroundSeedThread;
-        if (background_seed_thread_.joinable()) {
-            backgroundSeedThread = std::move(background_seed_thread_);
-        }
-        if (backgroundSeedThread.joinable()) {
-            lock.unlock();
-            backgroundSeedThread.join();
-            lock.lock();
-        }
-
-        // Save all dirty HNSW indices
-        if (db_) {
-            saveAllHnswUnlocked();
-        }
-
         // Finalize prepared statements
         finalizeStatements();
 
@@ -877,25 +796,21 @@ public:
             db_ = nullptr;
         }
 
-        hnsw_indices_.clear();
-        hnsw_dirty_.clear();
-        initialized_ = false;
-        hnsw_loaded_ = false;
-        background_seed_running_.store(false, std::memory_order_release);
-        background_seed_scheduled_.store(false, std::memory_order_release);
+        initialized_.store(false, std::memory_order_release);
         query_dim_counts_.clear();
         vec0_ready_dims_.clear();
         vec0_dirty_dims_.clear();
-        quantized_hnsw_indices_.clear();
-        quantized_hnsw_searches_.clear();
-        quantized_hnsw_ready_dims_.clear();
-        quantized_hnsw_dirty_dims_.clear();
+        simeon_pq_indices_.clear();
+        simeon_pq_ready_dims_.clear();
+        simeon_pq_dirty_dims_.clear();
         trace_vector_db_lifetime("close.end", this, db_path_, db_);
     }
 
-    bool isInitialized() const {
-        std::shared_lock lock(mutex_);
-        return initialized_;
+    bool isInitialized() const noexcept {
+        // Lock-free: readiness flag is published with release after init, read with
+        // acquire. Prevents status/health paths from blocking on the long-held
+        // unique_lock acquired by buildIndex/rebuild paths.
+        return initialized_.load(std::memory_order_acquire);
     }
 
     Result<void> createTables(size_t embedding_dim) {
@@ -932,17 +847,43 @@ public:
                          "Failed to create turboquant_quantizer_meta table: " + err};
         }
 
-        // Create HNSW shadow tables
-        rc = sqlite_vec_cpp::index::create_hnsw_shadow_tables(db_, "main", "vectors", &err_msg);
-        if (rc != SQLITE_OK) {
-            std::string err = err_msg ? err_msg : "Unknown error";
-            sqlite3_free(err_msg);
-            return Error{ErrorCode::DatabaseError, "Failed to create HNSW tables: " + err};
+        if (auto er = ensurePersistenceSchema(); !er) {
+            return er;
         }
+
+        // NOTE: Legacy vectors_hnsw_meta/vectors_hnsw_nodes and per-dim
+        // vectors_{dim}_hnsw_* tables are no longer created. Existing databases
+        // may still contain them; a future migration can drop them.
 
         // Prepare statements
         prepareStatements();
 
+        return Result<void>{};
+    }
+
+    /// Idempotent self-heal for the Simeon PQ persistence tables.
+    /// Legacy vectors.db files predate kCreateSimeonPqMeta/Codes, so the
+    /// load+save path silently no-ops on every restart and the PQ index
+    /// rebuilds from scratch (~16 s @ 280k vectors). Calling this from the
+    /// existing-tables init branch heals the schema once on next open.
+    Result<void> ensurePersistenceSchema() {
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        char* err_msg = nullptr;
+        int rc = sqlite3_exec(db_, kCreateSimeonPqMeta, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError, "Failed to ensure simeon_pq_meta table: " + err};
+        }
+        rc = sqlite3_exec(db_, kCreateSimeonPqCodes, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            std::string err = err_msg ? err_msg : "Unknown error";
+            sqlite3_free(err_msg);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to ensure simeon_pq_codes table: " + err};
+        }
         return Result<void>{};
     }
 
@@ -978,47 +919,14 @@ public:
         }
 
         int64_t rowid = rowid_result.value();
+        (void)rowid;
         const size_t record_dim = record.embedding.size();
         query_dim_counts_[record_dim] += 1;
         if (usesVec0SearchEngine()) {
             markVec0DimDirtyUnlocked(record_dim);
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            markQuantizedHnswDimDirtyUnlocked(record_dim);
-        }
-
-        // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
-        if (isZeroNormEmbedding(record.embedding)) {
-            spdlog::warn("[HNSW] Skipping zero-norm vector for chunk_id={} (stored in SQLite only)",
-                         record.chunk_id);
-            return Result<void>{};
-        }
-        if (!isFiniteEmbedding(record.embedding)) {
-            spdlog::warn(
-                "[HNSW] Skipping non-finite vector for chunk_id={} (stored in SQLite only)",
-                record.chunk_id);
-            return Result<void>{};
-        }
-
-        if (usesQuantizedHnswSearchEngine()) {
-            return Result<void>{};
-        }
-
-        // Insert into HNSW (dimension-specific index) when an index already exists or can be
-        // resumed from persisted state. Avoid forcing a first full seed build on the write path.
-        if (!shouldMaintainHnswOnWriteUnlocked()) {
-            return Result<void>{};
-        }
-        ensureHnswLoadedUnlocked();
-        if (auto* hnsw = getOrCreateHnswForDim(record_dim)) {
-            std::span<const float> embedding_span(record.embedding.data(), record.embedding.size());
-            hnsw->insert(static_cast<size_t>(rowid), embedding_span);
-            hnsw_dirty_[record_dim] = true;
-            pending_inserts_++;
-
-            if (pending_inserts_ >= hnswCheckpointThreshold(config_.checkpoint_threshold)) {
-                saveHnswCheckpointUnlocked();
-            }
+        if (usesSimeonPqSearchEngine()) {
+            markSimeonPqDimDirtyUnlocked(record_dim);
         }
 
         return Result<void>{};
@@ -1125,8 +1033,8 @@ public:
         if (usesVec0SearchEngine()) {
             markVec0DimsDirtyUnlocked(vec0_affected_dims);
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            markQuantizedHnswDimsDirtyUnlocked(vec0_affected_dims);
+        if (usesSimeonPqSearchEngine()) {
+            markSimeonPqDimsDirtyUnlocked(vec0_affected_dims);
         }
 
         // Commit transaction with retry
@@ -1140,158 +1048,9 @@ public:
             }
         }
 
-        if (usesQuantizedHnswSearchEngine()) {
-            return Result<void>{};
-        }
-
-        if (!shouldMaintainHnswOnWriteUnlocked()) {
-            return Result<void>{};
-        }
-
-        if (shouldDeferHnswBatchUpdatesUnlocked(records.size())) {
-            hnsw_indices_.clear();
-            hnsw_dirty_.clear();
-            hnsw_loaded_ = false;
-            hnsw_needs_rebuild_ = true;
-            pending_inserts_ = 0;
-            if (skipped_existing > 0 || skipped_duplicates > 0 || updated_existing > 0) {
-                spdlog::warn("[HNSW] Batch summary (deferred): inserted={}, updated_existing={}, "
-                             "skipped_existing={}, skipped_duplicates={}",
-                             inserted_count, updated_existing, skipped_existing,
-                             skipped_duplicates);
-            }
-            return Result<void>{};
-        }
-
-        // Insert into HNSW (dimension-specific indices)
-        ensureHnswLoadedUnlocked();
-
-        // Group records by dimension for batch insertion into appropriate indices
-        // Skip zero-norm vectors (they become dead-ends in the HNSW graph)
-        std::vector<size_t> remove_only_indices;
-        remove_only_indices.reserve(records.size());
-        std::unordered_map<size_t, std::vector<std::pair<size_t, size_t>>>
-            dim_records; // dim -> [(idx, rowid)]
-        size_t skipped_zero_norm = 0;
-        size_t skipped_invalid = 0;
-        for (size_t i = 0; i < records.size(); ++i) {
-            if (rowids[i] < 0) {
-                continue;
-            }
-            if (isZeroNormEmbedding(records[i].embedding)) {
-                if (old_rowids[i] && old_dims[i]) {
-                    remove_only_indices.push_back(i);
-                }
-                ++skipped_zero_norm;
-                continue;
-            }
-            if (!isFiniteEmbedding(records[i].embedding)) {
-                if (old_rowids[i] && old_dims[i]) {
-                    remove_only_indices.push_back(i);
-                }
-                ++skipped_invalid;
-                continue;
-            }
-            size_t dim = records[i].embedding.size();
-            dim_records[dim].emplace_back(i, rowids[i]);
-        }
-
-        if (skipped_zero_norm > 0) {
-            spdlog::warn("[HNSW] Skipped {} zero-norm vectors in batch (stored in SQLite only)",
-                         skipped_zero_norm);
-        }
-        if (skipped_invalid > 0) {
-            spdlog::warn("[HNSW] Skipped {} non-finite vectors in batch (stored in SQLite only)",
-                         skipped_invalid);
-        }
-
-        static std::atomic<uint64_t> batch_counter{0};
-        uint64_t bc = batch_counter.fetch_add(1);
-
-        // Threshold for using parallel build (sequential is faster for small batches)
-        const size_t parallelBuildThreshold = hnswParallelBuildThreshold();
-
-        for (size_t idx : remove_only_indices) {
-            if (old_rowids[idx] && old_dims[idx]) {
-                if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
-                    old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
-                }
-            }
-        }
-
-        size_t hnsw_adds = 0;
-
-        for (auto& [dim, indices] : dim_records) {
-            if (auto* hnsw = getOrCreateHnswForDim(dim)) {
-                size_t before_size = hnsw->size();
-
-                if (indices.size() >= parallelBuildThreshold) {
-                    // Use parallel build for large batches
-                    std::vector<size_t> ids;
-                    std::vector<std::span<const float>> vectors;
-                    ids.reserve(indices.size());
-                    vectors.reserve(indices.size());
-
-                    for (const auto& [idx, rowid] : indices) {
-                        ids.push_back(static_cast<size_t>(rowid));
-                        vectors.emplace_back(records[idx].embedding.data(),
-                                             records[idx].embedding.size());
-                        if (old_rowids[idx] && old_dims[idx]) {
-                            if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
-                                old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
-                            }
-                        }
-                        bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
-                        if (old_rowids[idx] && same_dim &&
-                            static_cast<size_t>(*old_rowids[idx]) == rowid) {
-                            *hnsw = hnsw->compact();
-                        }
-                    }
-
-                    hnsw->build_parallel(std::span{ids}, std::span{vectors}, 0); // 0 = auto threads
-                    hnsw_adds += indices.size();
-
-                    spdlog::debug("[HNSW] insertVectorsBatch (parallel): dim={}, added {} records, "
-                                  "hnsw_size: {} -> {} (batch #{})",
-                                  dim, indices.size(), before_size, hnsw->size(), bc);
-                } else {
-                    // Sequential insert for small batches (avoids thread overhead)
-                    for (const auto& [idx, rowid] : indices) {
-                        std::span<const float> embedding_span(records[idx].embedding.data(),
-                                                              records[idx].embedding.size());
-                        if (old_rowids[idx] && old_dims[idx]) {
-                            if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
-                                old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
-                            }
-                        }
-                        bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
-                        if (old_rowids[idx] && same_dim &&
-                            static_cast<size_t>(*old_rowids[idx]) == rowid) {
-                            *hnsw = hnsw->compact();
-                        }
-                        hnsw->insert(static_cast<size_t>(rowid), embedding_span);
-                        ++hnsw_adds;
-                    }
-
-                    if (bc % 100 == 0 || indices.size() >= 10) {
-                        spdlog::debug(
-                            "[HNSW] insertVectorsBatch: dim={}, added {} records, hnsw_size: "
-                            "{} -> {} (batch #{})",
-                            dim, indices.size(), before_size, hnsw->size(), bc);
-                    }
-                }
-                hnsw_dirty_[dim] = true;
-            }
-        }
-
-        pending_inserts_ += hnsw_adds;
-        if (pending_inserts_ >= hnswCheckpointThreshold(config_.checkpoint_threshold)) {
-            saveHnswCheckpointUnlocked();
-        }
-
         if (skipped_existing > 0 || skipped_duplicates > 0 || updated_existing > 0) {
-            spdlog::warn(
-                "[HNSW] Batch summary: inserted={}, updated_existing={}, skipped_existing={}, "
+            spdlog::debug(
+                "[VectorDB] Batch summary: inserted={}, updated_existing={}, skipped_existing={}, "
                 "skipped_duplicates={}",
                 inserted_count, updated_existing, skipped_existing, skipped_duplicates);
         }
@@ -1323,23 +1082,11 @@ public:
                                                      : old_record->embedding_dim;
         }
 
-        const bool maintain_hnsw = shouldMaintainHnswOnWriteUnlocked();
-
         // Delete old record
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
             stepWithRetry(stmt_delete_by_chunk_id_);
-        }
-
-        // Remove from HNSW (soft delete from old dimension's index)
-        if (maintain_hnsw) {
-            ensureHnswLoadedUnlocked();
-            if (old_dim) {
-                if (auto* old_hnsw = getHnswForDim(*old_dim)) {
-                    old_hnsw->remove(static_cast<size_t>(old_rowid));
-                }
-            }
         }
 
         // Insert new record
@@ -1348,7 +1095,8 @@ public:
             return rowid_result.error();
         }
 
-        int64_t new_rowid = rowid_result.value();
+        (void)old_rowid;
+        (void)rowid_result.value();
         size_t new_dim = !record.embedding.empty()
                              ? record.embedding.size()
                              : (record.embedding_dim > 0 ? record.embedding_dim : 0);
@@ -1366,52 +1114,11 @@ public:
             }
             markVec0DimDirtyUnlocked(new_dim);
         }
-        if (usesQuantizedHnswSearchEngine()) {
+        if (usesSimeonPqSearchEngine()) {
             if (old_dim) {
-                markQuantizedHnswDimDirtyUnlocked(*old_dim);
+                markSimeonPqDimDirtyUnlocked(*old_dim);
             }
-            markQuantizedHnswDimDirtyUnlocked(new_dim);
-        }
-
-        // Skip HNSW insertion for zero-norm vectors
-        if (isZeroNormEmbedding(record.embedding)) {
-            spdlog::warn("[HNSW] Skipping zero-norm vector update for chunk_id={}", chunk_id);
-            return Result<void>{};
-        }
-        if (!isFiniteEmbedding(record.embedding)) {
-            spdlog::warn("[HNSW] Skipping non-finite vector update for chunk_id={}", chunk_id);
-            return Result<void>{};
-        }
-
-        if (usesQuantizedHnswSearchEngine()) {
-            return Result<void>{};
-        }
-
-        if (!maintain_hnsw) {
-            return Result<void>{};
-        }
-
-        // Insert into HNSW (new dimension's index)
-        if (auto* hnsw = getOrCreateHnswForDim(new_dim)) {
-            std::span<const float> embedding_span(record.embedding.data(), record.embedding.size());
-
-            // Handle SQLite rowid reuse: if new_rowid == old_rowid AND same dimension,
-            // the node still exists in HNSW (just soft-deleted).
-            bool same_dim = old_dim && *old_dim == new_dim;
-            if (new_rowid == old_rowid && same_dim) {
-                // Compact to fully remove the deleted node, then insert fresh
-                *hnsw = hnsw->compact();
-                hnsw->insert(static_cast<size_t>(new_rowid), embedding_span);
-            } else {
-                hnsw->insert(static_cast<size_t>(new_rowid), embedding_span);
-            }
-            hnsw_dirty_[new_dim] = true;
-
-            // Check if compaction needed (skip if we just compacted)
-            if (!(new_rowid == old_rowid && same_dim) &&
-                hnsw->needs_compaction(config_.compaction_threshold)) {
-                compactHnswUnlocked();
-            }
+            markSimeonPqDimDirtyUnlocked(new_dim);
         }
 
         return Result<void>{};
@@ -1447,8 +1154,8 @@ public:
             if (usesVec0SearchEngine()) {
                 markVec0DimDirtyUnlocked(*dim);
             }
-            if (usesQuantizedHnswSearchEngine()) {
-                markQuantizedHnswDimDirtyUnlocked(*dim);
+            if (usesSimeonPqSearchEngine()) {
+                markSimeonPqDimDirtyUnlocked(*dim);
             }
         }
 
@@ -1459,22 +1166,7 @@ public:
             stepWithRetry(stmt_delete_by_chunk_id_);
         }
 
-        // Soft delete from HNSW (dimension-specific index)
-        if (!shouldMaintainHnswOnWriteUnlocked()) {
-            return Result<void>{};
-        }
-        ensureHnswLoadedUnlocked();
-        if (dim) {
-            if (auto* hnsw = getHnswForDim(*dim)) {
-                hnsw->remove(static_cast<size_t>(rowid));
-                hnsw_dirty_[*dim] = true;
-
-                if (hnsw->needs_compaction(config_.compaction_threshold)) {
-                    compactHnswUnlocked();
-                }
-            }
-        }
-
+        (void)rowid;
         return Result<void>{};
     }
 
@@ -1515,12 +1207,12 @@ public:
             }
             markVec0DimsDirtyUnlocked(affected_dims);
         }
-        if (usesQuantizedHnswSearchEngine()) {
+        if (usesSimeonPqSearchEngine()) {
             std::unordered_set<size_t> affected_dims;
             for (const auto& [_, dim] : rowid_dims) {
                 affected_dims.insert(dim);
             }
-            markQuantizedHnswDimsDirtyUnlocked(affected_dims);
+            markSimeonPqDimsDirtyUnlocked(affected_dims);
         }
 
         // Delete from SQLite
@@ -1528,41 +1220,6 @@ public:
             sqlite3_reset(stmt_delete_by_doc_);
             sqlite3_bind_text(stmt_delete_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
             stepWithRetry(stmt_delete_by_doc_);
-        }
-
-        // Soft delete from HNSW (dimension-specific indices)
-        if (!shouldMaintainHnswOnWriteUnlocked()) {
-            return Result<void>{};
-        }
-        ensureHnswLoadedUnlocked();
-        if (!rowid_dims.empty()) {
-            std::unordered_set<size_t> affected_dims;
-            for (const auto& [rowid, dim] : rowid_dims) {
-                if (auto* hnsw = getHnswForDim(dim)) {
-                    hnsw->remove(static_cast<size_t>(rowid));
-                    hnsw_dirty_[dim] = true;
-                    affected_dims.insert(dim);
-                }
-            }
-
-            // Prune edges to deleted nodes for better search quality
-            for (size_t dim : affected_dims) {
-                if (auto* hnsw = getHnswForDim(dim)) {
-                    if (hnsw->deleted_count() > 0) {
-                        hnsw->isolate_deleted();
-                    }
-                }
-            }
-
-            // Check compaction for affected indices
-            for (size_t dim : affected_dims) {
-                if (auto* hnsw = getHnswForDim(dim)) {
-                    if (hnsw->needs_compaction(config_.compaction_threshold)) {
-                        compactHnswUnlocked();
-                        break; // compactHnswUnlocked handles all indices
-                    }
-                }
-            }
         }
 
         return Result<void>{};
@@ -1588,11 +1245,15 @@ public:
                                                 document_hash, candidate_hashes, metadata_filters);
             }
 
-            {
+            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1602,205 +1263,36 @@ public:
             return vec0SearchUnlocked(query_embedding, k, similarity_threshold);
         }
 
-        if (usesQuantizedHnswSearchEngine()) {
+        if (usesSimeonPqSearchEngine()) {
             const size_t query_dim = query_embedding.size();
 
             if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
-                spdlog::debug("[QHNSW] filtered search falling back to exact cosine scan");
+                spdlog::debug("[SPQ] filtered search falling back to exact cosine scan");
                 return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
                                                 document_hash, candidate_hashes, metadata_filters);
             }
 
-            {
+            if (!simeon_pq_ready_dims_.contains(query_dim) ||
+                simeon_pq_dirty_dims_.contains(query_dim) ||
+                !simeon_pq_indices_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
-                auto ready = ensureQuantizedHnswReadyUnlocked(query_dim);
+                auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
                 }
             }
 
-            return quantizedHnswSearchUnlocked(query_embedding, k, similarity_threshold);
+            return simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
         }
 
-        // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
-        // Otherwise stay on brute-force search until an explicit build or persisted index exists.
-        {
-            lock.unlock();
-            std::unique_lock write_lock(mutex_);
-            if (shouldAttemptHnswLoadOnReadUnlocked()) {
-                ensureHnswLoadedUnlocked();
-            }
-            write_lock.unlock();
-            lock.lock();
-        }
-
-        // Route to the correct HNSW index based on query embedding dimension
-        size_t query_dim = query_embedding.size();
-        HNSWIndex* hnsw = nullptr;
-
-        // Find index for this dimension (const access, no creation)
-        auto it = hnsw_indices_.find(query_dim);
-        if (it != hnsw_indices_.end()) {
-            hnsw = it->second.get();
-        }
-
-        if (!hnsw || hnsw->empty()) {
-            lock.unlock();
-            std::unique_lock write_lock(mutex_);
-            maybeScheduleBackgroundSeedUnlocked(query_dim);
-            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
-            spdlog::info("[HNSW] searchSimilar: no index for dim={} (hnsw={}), falling back to "
-                         "brute-force scan",
-                         query_dim, hnsw ? "empty" : "null");
-            return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, document_hash,
-                                            candidate_hashes, metadata_filters);
-        }
-
-        // Diagnostic: log HNSW size at search time (first 10 searches, then every 100)
-        static std::atomic<uint64_t> search_counter{0};
-        uint64_t sc = search_counter.fetch_add(1);
-        if (sc < 10 || sc % 100 == 0) {
-            spdlog::info("[HNSW] searchSimilar: dim={}, hnsw_size={}, k={}, search #{}", query_dim,
-                         hnsw->size(), k, sc);
-        }
-
-        // Build filter function for document_hash, candidate_hashes, and metadata
-        HNSWIndex::FilterFn filter = nullptr;
-        if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
-            filter = [&](size_t node_id) {
-                // Use lightweight lookup (only document_hash + metadata, no embedding blob)
-                auto filter_opt = getFilterDataByRowidUnlocked(static_cast<int64_t>(node_id));
-                if (!filter_opt)
-                    return false;
-
-                const auto& data = *filter_opt;
-
-                // Check candidate_hashes filter (tiered search narrowing)
-                if (!candidate_hashes.empty() &&
-                    candidate_hashes.find(data.document_hash) == candidate_hashes.end()) {
-                    return false;
-                }
-
-                // Check document_hash filter (single doc)
-                if (document_hash && data.document_hash != *document_hash) {
-                    return false;
-                }
-
-                // Check metadata filters
-                for (const auto& [key, value] : metadata_filters) {
-                    auto it = data.metadata.find(key);
-                    if (it == data.metadata.end() || it->second != value) {
-                        return false;
-                    }
-                }
-
-                return true;
-            };
-        }
-
-        // Search HNSW
-        std::span<const float> query_span(query_embedding.data(), query_embedding.size());
-
-        // Calculate ef_search adaptively based on corpus size for target 95% recall
-        // recommended_ef_search() uses hnsw->size() internally for corpus-aware tuning
-        size_t ef_search = hnsw->recommended_ef_search(k, 0.95F);
-        // Apply user-configured minimum as floor
-        ef_search = std::max(ef_search, config_.hnsw_ef_search);
-        size_t fetch_k = k;
-
-        if (filter != nullptr) {
-            // Estimate filter selectivity based on candidate_hashes
-            // If we're filtering to N candidate docs out of M total, selectivity ≈ N/M
-            // We need to explore ~k/selectivity nodes on average to find k valid results
-            float selectivity = 1.0F;
-
-            if (!candidate_hashes.empty() && hnsw->size() > 0) {
-                // Rough estimate: each doc has ~N chunks on average (configurable)
-                size_t chunks_per_doc =
-                    std::max<size_t>(1, config_.filter_candidate_chunks_per_doc);
-                size_t estimated_valid_chunks = candidate_hashes.size() * chunks_per_doc;
-                selectivity = std::min(1.0F, static_cast<float>(estimated_valid_chunks) /
-                                                 static_cast<float>(hnsw->size()));
-            }
-
-            // With metadata filters, assume another 50% reduction
-            if (!metadata_filters.empty()) {
-                selectivity *= 0.5F;
-            }
-
-            // Clamp selectivity to avoid division by zero or excessive exploration
-            selectivity = std::max(0.01F, selectivity);
-
-            // Increase ef_search inversely proportional to selectivity
-            // With 10% selectivity, we need ~10x more exploration
-            size_t selectivity_boost = static_cast<size_t>(1.0F / selectivity);
-            ef_search = std::max(ef_search, k * selectivity_boost);
-
-            // Also increase fetch_k to ensure we get enough results post-filter
-            fetch_k = std::max(k * 5, static_cast<size_t>(static_cast<float>(k) / selectivity));
-
-            // Cap at reasonable limits to avoid excessive computation
-            ef_search = std::min(ef_search, std::max(size_t{500}, hnsw->size()));
-            fetch_k = std::min(fetch_k, hnsw->size());
-
-            spdlog::debug(
-                "[HNSW] Filtered search: k={}, selectivity={:.2f}, ef_search={}, fetch_k={}", k,
-                selectivity, ef_search, fetch_k);
-        }
-
-        auto results = hnsw->search_with_filter(query_span, fetch_k, ef_search, filter);
-
-        // Convert to VectorRecords
-        std::vector<VectorRecord> records;
-        records.reserve(std::min(results.size(), k));
-
-        // Debug: log HNSW search statistics
-        size_t filtered_count = 0;
-        float min_dist = std::numeric_limits<float>::max();
-        float max_dist = std::numeric_limits<float>::lowest();
-        float min_sim = std::numeric_limits<float>::max();
-        float max_sim = std::numeric_limits<float>::lowest();
-
-        for (const auto& [node_id, distance] : results) {
-            min_dist = std::min(min_dist, distance);
-            max_dist = std::max(max_dist, distance);
-
-            // Convert distance to similarity (cosine distance = 1 - similarity)
-            float similarity = 1.0f - distance;
-            min_sim = std::min(min_sim, similarity);
-            max_sim = std::max(max_sim, similarity);
-
-            if (records.size() >= k)
-                break;
-
-            if (similarity < similarity_threshold) {
-                ++filtered_count;
-                continue;
-            }
-
-            auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
-            if (record_opt) {
-                record_opt->relevance_score = similarity;
-                records.push_back(std::move(*record_opt));
-            }
-        }
-
-        // Log search statistics for debugging retrieval quality
-        if (!results.empty()) {
-            spdlog::info("[HNSW Search] dim={} k={} hnsw_results={} returned={} filtered={} "
-                         "dist=[{:.4f},{:.4f}] sim=[{:.4f},{:.4f}] threshold={:.4f}",
-                         query_embedding.size(), k, results.size(), records.size(), filtered_count,
-                         min_dist, max_dist, min_sim, max_sim, similarity_threshold);
-        } else {
-            spdlog::info("[HNSW Search] dim={} k={} - no results from HNSW (index may be empty or "
-                         "not built)",
-                         query_embedding.size(), k);
-        }
-
-        return records;
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
     }
 
     Result<std::vector<std::vector<VectorRecord>>>
@@ -1818,6 +1310,7 @@ public:
                              "All query embeddings must have the same dimension"};
             }
         }
+        (void)num_threads;
 
         std::shared_lock lock(mutex_);
 
@@ -1826,11 +1319,15 @@ public:
         }
 
         if (usesVec0SearchEngine()) {
-            {
+            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1849,12 +1346,18 @@ public:
             return results;
         }
 
-        if (usesQuantizedHnswSearchEngine()) {
-            {
+        if (usesSimeonPqSearchEngine()) {
+            if (!simeon_pq_ready_dims_.contains(query_dim) ||
+                simeon_pq_dirty_dims_.contains(query_dim) ||
+                !simeon_pq_indices_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
-                auto ready = ensureQuantizedHnswReadyUnlocked(query_dim);
+                auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
+                for (auto* s : tl_deferred_finalize) {
+                    sqlite3_finalize(s);
+                }
+                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1864,7 +1367,7 @@ public:
             std::vector<std::vector<VectorRecord>> results;
             results.reserve(query_embeddings.size());
             for (const auto& query_embedding : query_embeddings) {
-                auto result = quantizedHnswSearchUnlocked(query_embedding, k, similarity_threshold);
+                auto result = simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
                 if (!result) {
                     return result.error();
                 }
@@ -1873,80 +1376,7 @@ public:
             return results;
         }
 
-        // Ensure HNSW is loaded when an existing persisted/catch-up path is available.
-        {
-            lock.unlock();
-            std::unique_lock write_lock(mutex_);
-            if (shouldAttemptHnswLoadOnReadUnlocked()) {
-                ensureHnswLoadedUnlocked();
-            }
-            write_lock.unlock();
-            lock.lock();
-        }
-
-        // Find index for this dimension
-        auto it = hnsw_indices_.find(query_dim);
-        if (it == hnsw_indices_.end() || it->second->empty()) {
-            lock.unlock();
-            std::unique_lock write_lock(mutex_);
-            maybeScheduleBackgroundSeedUnlocked(query_dim);
-            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::BruteForceFallback;
-            spdlog::info("[HNSW] searchSimilarBatch: no index for dim={}, falling back to "
-                         "brute-force scan",
-                         query_dim);
-            return bruteForceSearchBatchUnlocked(query_embeddings, k, similarity_threshold);
-        }
-
-        HNSWIndex* hnsw = it->second.get();
-
-        // Convert to spans for HNSW batch search
-        std::vector<std::span<const float>> query_spans;
-        query_spans.reserve(query_embeddings.size());
-        for (const auto& q : query_embeddings) {
-            query_spans.emplace_back(q.data(), q.size());
-        }
-
-        // Calculate ef_search adaptively based on corpus size
-        size_t ef_search = hnsw->recommended_ef_search(k, 0.95F);
-        ef_search = std::max(ef_search, config_.hnsw_ef_search);
-
-        spdlog::info(
-            "[HNSW] searchSimilarBatch: {} queries, dim={}, k={}, ef_search={}, threads={}",
-            query_embeddings.size(), query_dim, k, ef_search,
-            num_threads ? num_threads : std::thread::hardware_concurrency());
-
-        // Execute parallel batch search
-        auto batch_results = hnsw->search_batch(
-            std::span<const std::span<const float>>(query_spans.data(), query_spans.size()), k,
-            ef_search, num_threads);
-
-        // Convert HNSW results to VectorRecords
-        std::vector<std::vector<VectorRecord>> results;
-        results.reserve(batch_results.size());
-
-        for (const auto& hnsw_results : batch_results) {
-            std::vector<VectorRecord> records;
-            records.reserve(std::min(hnsw_results.size(), k));
-
-            for (const auto& [node_id, distance] : hnsw_results) {
-                if (records.size() >= k)
-                    break;
-
-                float similarity = 1.0f - distance;
-                if (similarity < similarity_threshold) {
-                    continue;
-                }
-
-                auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
-                if (record_opt) {
-                    record_opt->relevance_score = similarity;
-                    records.push_back(std::move(*record_opt));
-                }
-            }
-            results.push_back(std::move(records));
-        }
-
-        return results;
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
     }
 
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) {
@@ -1989,6 +1419,7 @@ public:
         std::vector<VectorRecord> results;
 
         if (stmt_select_by_doc_) {
+            std::lock_guard stmt_lock(stmt_mutex_);
             sqlite3_reset(stmt_select_by_doc_);
             StmtResetGuard guard(stmt_select_by_doc_);
             sqlite3_bind_text(stmt_select_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -1999,6 +1430,93 @@ public:
         }
 
         return results;
+    }
+
+    Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() {
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectAllDocLevel = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+FROM vectors WHERE level = ?
+)sql";
+
+        std::unordered_map<std::string, VectorRecord> results;
+
+        std::lock_guard stmt_lock(stmt_mutex_);
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectAllDocLevel, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare getDocumentLevelVectorsAll: "} + sqlite3_errmsg(db_)};
+        }
+        sqlite3_bind_int(stmt, 1, static_cast<int>(EmbeddingLevel::DOCUMENT));
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto record = recordFromStatement(stmt);
+            auto hash = record.document_hash;
+            if (!hash.empty()) {
+                results.emplace(std::move(hash), std::move(record));
+            }
+        }
+        lock.unlock();
+        sqlite3_finalize(stmt);
+
+        return results;
+    }
+
+    Result<size_t> forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "forEachDocumentLevelVector visitor is empty"};
+        }
+
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectAllDocLevel = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+FROM vectors WHERE level = ?
+)sql";
+
+        std::lock_guard stmt_lock(stmt_mutex_);
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectAllDocLevel, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare forEachDocumentLevelVector: "} + sqlite3_errmsg(db_)};
+        }
+
+        sqlite3_bind_int(stmt, 1, static_cast<int>(EmbeddingLevel::DOCUMENT));
+
+        size_t delivered = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto record = recordFromStatement(stmt);
+            if (record.document_hash.empty()) {
+                continue;
+            }
+            ++delivered;
+            if (!visitor(std::move(record))) {
+                break;
+            }
+        }
+
+        lock.unlock();
+        sqlite3_finalize(stmt);
+        return delivered;
     }
 
     Result<bool> hasEmbedding(const std::string& document_hash) {
@@ -2020,6 +1538,7 @@ public:
         }
 
         if (stmt_has_embedding_) {
+            std::lock_guard stmt_lock(stmt_mutex_);
             sqlite3_reset(stmt_has_embedding_);
             StmtResetGuard guard(stmt_has_embedding_);
             sqlite3_bind_text(stmt_has_embedding_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -2082,14 +1601,14 @@ public:
         return size_t{0};
     }
 
-    Result<VectorDatabase::DatabaseStats> getStats() {
+    Result<VectorDatabaseStats> getStats() {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        VectorDatabase::DatabaseStats stats;
+        VectorDatabaseStats stats;
 
         // Get vector count
         if (stmt_count_) {
@@ -2119,6 +1638,10 @@ public:
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (config_.suppress_search_index_builds) {
+            spdlog::warn("[VectorIndex] buildIndex suppressed by memory instrumentation profile");
+            return Result<void>{};
+        }
 
         const auto start = std::chrono::steady_clock::now();
         if (usesVec0SearchEngine()) {
@@ -2132,29 +1655,19 @@ public:
             spdlog::info("[vec0] buildIndex completed in {} ms", durMs);
             return Result<void>{};
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            auto result = rebuildQuantizedHnswIndicesUnlocked();
+        if (usesSimeonPqSearchEngine()) {
+            auto result = rebuildSimeonPqIndicesUnlocked();
             if (!result) {
                 return result;
             }
             const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - start)
                                    .count();
-            spdlog::info("[QHNSW] buildIndex completed in {} ms", durMs);
+            spdlog::info("[SPQ] buildIndex completed in {} ms", durMs);
             return Result<void>{};
         }
 
-        spdlog::info("[HNSW] buildIndex starting (loaded={} stale={} dims={})", hnsw_loaded_,
-                     hnsw_needs_rebuild_, hnsw_indices_.size());
-
-        rebuildHnswUnlocked();
-
-        const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - start)
-                               .count();
-        spdlog::info("[HNSW] buildIndex completed in {} ms", durMs);
-
-        return Result<void>{};
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
     }
 
     Result<void> prepareSearchIndex() {
@@ -2162,6 +1675,11 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (config_.suppress_search_index_builds) {
+            spdlog::warn(
+                "[VectorIndex] prepareSearchIndex suppressed by memory instrumentation profile");
+            return Result<void>{};
         }
 
         if (usesVec0SearchEngine()) {
@@ -2171,12 +1689,43 @@ public:
             }
             return warmVec0IndicesUnlocked();
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            return rebuildQuantizedHnswIndicesUnlocked();
+        if (usesSimeonPqSearchEngine()) {
+            auto dims = queryVectorDimsUnlocked();
+            if (dims.empty()) {
+                return Result<void>{};
+            }
+            for (size_t dim : dims) {
+                if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
+                    simeon_pq_indices_.contains(dim)) {
+                    continue;
+                }
+                // Attempt to reload the persisted index first: loading the codebooks
+                // from disk clears the dirty flag. This avoids spurious "dirty" errors
+                // when vectors were inserted after the index was built and persisted
+                // (e.g., during a search-engine rebuild that races with PQ finalization).
+                if (loadPersistedSimeonPqDimUnlocked(dim)) {
+                    continue;
+                }
+                // No persisted index exists and the dimension is dirty. Build the PQ
+                // index from scratch using the vectors that are already stored. This
+                // covers cold-run benchmarks where buildIndex() was not called ahead
+                // of prepareSearchIndex().
+                if (simeon_pq_dirty_dims_.contains(dim)) {
+                    auto rebuild = rebuildSimeonPqDimUnlocked(dim);
+                    if (!rebuild) {
+                        return Error{ErrorCode::InvalidState,
+                                     std::string("Simeon PQ index for dim ") + std::to_string(dim) +
+                                         " build failed: " + rebuild.error().message};
+                    }
+                    continue;
+                }
+                return Error{ErrorCode::NotFound, "No reusable persisted Simeon PQ index for dim " +
+                                                      std::to_string(dim)};
+            }
+            return Result<void>{};
         }
 
-        ensureHnswLoadedUnlocked();
-        return Result<void>{};
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
     }
 
     Result<bool> hasReusablePersistedSearchIndex() {
@@ -2189,33 +1738,20 @@ public:
         if (usesVec0SearchEngine()) {
             return Result<bool>(false);
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            return Result<bool>(false);
-        }
-
-        const auto persistedDims = discoverPersistedHnswDimsUnlocked();
-        for (size_t dim : persistedDims) {
-            if (hasPersistedHnswNodesUnlocked(dim)) {
-                return Result<bool>(true);
+        if (usesSimeonPqSearchEngine()) {
+            auto dims = queryVectorDimsUnlocked();
+            if (dims.empty()) {
+                return Result<bool>(false);
             }
+            for (size_t dim : dims) {
+                if (!hasReusablePersistedSimeonPqUnlocked(dim)) {
+                    return Result<bool>(false);
+                }
+            }
+            return Result<bool>(true);
         }
 
         return Result<bool>(false);
-    }
-
-    HnswMaintenanceMode testingLastHnswMaintenanceMode() const {
-        std::shared_lock lock(mutex_);
-        return last_hnsw_maintenance_mode_;
-    }
-
-    std::size_t testingLastHnswAddedCount() const {
-        std::shared_lock lock(mutex_);
-        return last_hnsw_added_count_;
-    }
-
-    std::size_t testingLastHnswRemovedCount() const {
-        std::shared_lock lock(mutex_);
-        return last_hnsw_removed_count_;
     }
 
     Result<void> optimize() {
@@ -2227,59 +1763,85 @@ public:
 
         if (usesVec0SearchEngine()) {
             if (!vec0_dirty_dims_.empty()) {
-                auto rebuild = rebuildVec0IndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[vec0] optimize rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildVec0IndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
             return Result<void>{};
         }
-        if (usesQuantizedHnswSearchEngine()) {
-            if (!quantized_hnsw_dirty_dims_.empty()) {
-                auto rebuild = rebuildQuantizedHnswIndicesUnlocked();
-                if (!rebuild) {
-                    return rebuild;
+        if (usesSimeonPqSearchEngine()) {
+            if (!simeon_pq_dirty_dims_.empty()) {
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[SPQ] optimize rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
                 }
             }
-            return Result<void>{};
-        }
-
-        size_t totalVectors = 0;
-        if (stmt_count_) {
-            sqlite3_reset(stmt_count_);
-            StmtResetGuard guard(stmt_count_);
-            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
-                totalVectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+            for (size_t dim : simeon_pq_ready_dims_) {
+                auto saved = saveSimeonPqDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
+                }
             }
+            return checkpointWalUnlocked();
         }
 
-        if (!anyHnswHasData() && (totalVectors > 0 || hasCatchUpSourceUnlocked())) {
-            spdlog::info("[HNSW] optimize preparing search index before checkpoint (vectors={})",
-                         totalVectors);
-            ensureHnswLoadedUnlocked();
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
+    }
+
+    Result<void> persistIndex() {
+        std::unique_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Compact all HNSW indices if needed (lower threshold for explicit optimize)
-        for (auto& [dim, hnsw] : hnsw_indices_) {
-            if (hnsw && hnsw->needs_compaction(0.1f)) {
-                spdlog::info("Compacting HNSW index for dim={} (deleted ratio: {:.2f})", dim,
-                             static_cast<float>(hnsw->deleted_count()) /
-                                 static_cast<float>(hnsw->size()));
-                *hnsw = hnsw->compact();
-                hnsw_dirty_[dim] = true;
+        if (usesVec0SearchEngine()) {
+            if (!vec0_dirty_dims_.empty()) {
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[vec0] persistIndex rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildVec0IndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
+                }
             }
+            return checkpointWalUnlocked();
+        }
+        if (usesSimeonPqSearchEngine()) {
+            if (!simeon_pq_dirty_dims_.empty()) {
+                if (config_.suppress_search_index_builds) {
+                    spdlog::warn(
+                        "[SPQ] persistIndex rebuild suppressed by memory instrumentation profile");
+                } else {
+                    auto rebuild = rebuildSimeonPqIndicesUnlocked();
+                    if (!rebuild) {
+                        return rebuild;
+                    }
+                }
+            }
+            for (size_t dim : simeon_pq_ready_dims_) {
+                auto saved = saveSimeonPqDimUnlocked(dim);
+                if (!saved) {
+                    return saved;
+                }
+            }
+            return checkpointWalUnlocked();
         }
 
-        // Save any dirty indices
-        saveAllHnswUnlocked();
-
-        // Checkpoint WAL before vacuum to reclaim WAL space
-        checkpointWalUnlocked();
-
-        // Vacuum SQLite
-        sqlite3_exec(db_, "VACUUM", nullptr, nullptr, nullptr);
-
-        return Result<void>{};
+        return Error{ErrorCode::InvalidOperation, "no search engine configured"};
     }
 
     /// Checkpoint vectors.db WAL using PASSIVE mode (non-blocking).
@@ -2293,6 +1855,10 @@ public:
 
         return checkpointWalUnlocked();
     }
+
+    Result<void> beginBulkLoad() { return beginBulkLoadUnlocked(); }
+
+    Result<void> finalizeBulkLoad() { return finalizeBulkLoadUnlocked(); }
 
 private:
     Result<void> checkpointWalUnlocked() {
@@ -2452,21 +2018,18 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
-        // Clear all HNSW indices
-        hnsw_indices_.clear();
-        hnsw_dirty_.clear();
-        hnsw_loaded_ = false;
-
         // Finalize all prepared statements
         finalizeStatements();
 
-        // Find and drop all dimension-specific HNSW tables
-        // Pattern: vectors_{dim}_hnsw_meta, vectors_{dim}_hnsw_nodes
+        // Drop any legacy HNSW shadow tables (orphaned by HNSW removal),
+        // plus SimeonPQ metadata tables and any per-dim vec0 virtual tables.
         std::vector<std::string> tables_to_drop;
         const char* find_tables =
             "SELECT name FROM sqlite_master WHERE type='table' AND "
             "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes')";
+            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
+            " name = 'simeon_pq_meta' OR "
+            " name = 'simeon_pq_codes')";
 
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -2480,8 +2043,9 @@ public:
             sqlite3_finalize(stmt);
         }
 
-        // Drop main vectors table
+        // Drop main vectors and auxiliary metadata tables
         tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
+        tables_to_drop.push_back("DROP TABLE IF EXISTS turboquant_quantizer_meta");
 
         for (const auto& sql : tables_to_drop) {
             char* err_msg = nullptr;
@@ -2493,7 +2057,7 @@ public:
             }
         }
 
-        spdlog::info("Dropped vector tables (including {} HNSW tables)", tables_to_drop.size() - 1);
+        spdlog::info("Dropped {} vector-related tables", tables_to_drop.size());
         return Result<void>{};
     }
 
@@ -2692,6 +2256,7 @@ public:
             results.push_back(parseEntityVectorRow(stmt));
         }
 
+        lock.unlock();
         sqlite3_finalize(stmt);
         return results;
     }
@@ -2761,6 +2326,7 @@ public:
             }
         }
 
+        lock.unlock();
         sqlite3_finalize(stmt);
 
         // Sort by similarity descending
@@ -3009,34 +2575,6 @@ private:
         return std::nullopt;
     }
 
-    // Lightweight filter data for HNSW search (avoids full record deserialization)
-    struct FilterData {
-        std::string document_hash;
-        std::map<std::string, std::string> metadata;
-    };
-
-    std::optional<FilterData> getFilterDataByRowidUnlocked(int64_t rowid) const {
-        std::lock_guard stmt_lock(stmt_mutex_);
-        if (!stmt_filter_by_rowid_) {
-            return std::nullopt;
-        }
-
-        sqlite3_reset(stmt_filter_by_rowid_);
-        StmtResetGuard guard(stmt_filter_by_rowid_);
-        sqlite3_bind_int64(stmt_filter_by_rowid_, 1, rowid);
-
-        if (sqlite3_step(stmt_filter_by_rowid_) == SQLITE_ROW) {
-            FilterData data;
-            data.document_hash = safeColumnText(stmt_filter_by_rowid_, 0);
-            const char* metadata_json =
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt_filter_by_rowid_, 1));
-            data.metadata = deserializeMetadata(metadata_json ? metadata_json : "");
-            return data;
-        }
-
-        return std::nullopt;
-    }
-
     // Build VectorRecord from statement (current row)
     VectorRecord recordFromStatement(sqlite3_stmt* stmt) const {
         VectorRecord record;
@@ -3044,8 +2582,10 @@ private:
         // Column indices match SELECT statement
         // 0: rowid, 1: chunk_id, 2: document_hash, 3: embedding, 4: embedding_dim, 5: content, ...
 
-        record.chunk_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        record.document_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const char* chunk_id_txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        record.chunk_id = chunk_id_txt ? chunk_id_txt : "";
+        const char* doc_hash_txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        record.document_hash = doc_hash_txt ? doc_hash_txt : "";
 
         // Embedding blob — may be NULL in quantized-primary mode
         const void* blob = sqlite3_column_blob(stmt, 3);
@@ -3166,119 +2706,13 @@ private:
         stmt_filter_by_rowid_ = nullptr;
     }
 
-    std::vector<size_t> discoverPersistedHnswDimsUnlocked() {
-        std::vector<size_t> dims;
-        sqlite3_stmt* stmt = nullptr;
-        const char* find_dims =
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vectors_%_hnsw_meta'";
-        if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* table_name =
-                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-                if (!table_name) {
-                    continue;
-                }
-                std::string name(table_name);
-                auto start = name.find('_');
-                if (start == std::string::npos) {
-                    continue;
-                }
-                start += 1;
-                auto end = name.find('_', start);
-                if (end == std::string::npos) {
-                    continue;
-                }
-                try {
-                    size_t dim = std::stoull(name.substr(start, end - start));
-                    if (dim > 0) {
-                        dims.push_back(dim);
-                    }
-                } catch (...) {
-                }
-            }
-            sqlite3_finalize(stmt);
-        }
-        std::sort(dims.begin(), dims.end());
-        dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
-        return dims;
-    }
-
-    bool loadPersistedHnswDimUnlocked(size_t dim) {
-        auto defaultConfigForDim = [&]() {
-            size_t corpus_size = 0;
-            if (stmt_count_) {
-                sqlite3_reset(stmt_count_);
-                StmtResetGuard guard(stmt_count_);
-                if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
-                    corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
-                }
-            }
-            HNSWIndex::Config config = HNSWIndex::Config::for_corpus(corpus_size, dim);
-            config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
-            config.normalize_vectors = true;
-            return config;
-        };
-
-        try {
-            std::string table_prefix = hnswTablePrefix(dim);
-            char* err = nullptr;
-            auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, HNSWCosineMetric>(
-                db_, "main", table_prefix.c_str(), &err);
-            if (err) {
-                spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
-                sqlite3_free(err);
-                return false;
-            }
-            hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
-            hnsw_dirty_[dim] = false;
-            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::LoadPersisted;
-            spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
-                         hnsw_indices_[dim]->size());
-            return true;
-        } catch (const std::exception& e) {
-            spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
-            try {
-                std::string table_prefix = hnswTablePrefix(dim);
-                char* err = nullptr;
-                auto nodes = sqlite_vec_cpp::index::load_hnsw_nodes_incremental<float>(
-                    db_, "main", table_prefix.c_str(), 0, &err);
-                if (err) {
-                    spdlog::warn("[HNSW] Legacy checkpoint load failed for dim={}: {}", dim, err);
-                    sqlite3_free(err);
-                    return false;
-                }
-                if (nodes.empty()) {
-                    return false;
-                }
-                auto [entryPointId, entryPointLayer, _maxNodeId] =
-                    sqlite_vec_cpp::index::get_hnsw_checkpoint_info<float, HNSWCosineMetric>(
-                        db_, "main", table_prefix.c_str());
-                auto fallbackConfig = defaultConfigForDim();
-                auto loaded_hnsw = HNSWIndex::from_serialized(fallbackConfig, entryPointId,
-                                                              entryPointLayer, std::move(nodes));
-                hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
-                hnsw_dirty_[dim] = false;
-                last_hnsw_maintenance_mode_ = HnswMaintenanceMode::LoadPersisted;
-                spdlog::info("[HNSW] Loaded legacy checkpoint for dim={} with {} vectors", dim,
-                             hnsw_indices_[dim]->size());
-                return true;
-            } catch (const std::exception& fallbackError) {
-                spdlog::warn("[HNSW] Legacy checkpoint fallback failed for dim={}: {}", dim,
-                             fallbackError.what());
-                return false;
-            }
-        }
-    }
-
     std::vector<size_t> queryVectorDimsUnlocked() {
         std::vector<size_t> dims;
         sqlite3_stmt* stmt = nullptr;
         // Include both float-blob rows and quantized-primary rows (where embedding_dim > 0).
         // embedding_dim is now always populated even when embedding blob is NULL.
-        const char* sql =
-            "SELECT DISTINCT CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
-            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END AS dim "
-            "FROM vectors WHERE embedding IS NOT NULL OR embedding_dim > 0 ORDER BY dim";
+        const char* sql = "SELECT DISTINCT embedding_dim FROM vectors WHERE embedding_dim > 0 "
+                          "ORDER BY embedding_dim";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 int64_t dim = sqlite3_column_int64(stmt, 0);
@@ -3286,7 +2720,8 @@ private:
                     dims.push_back(static_cast<size_t>(dim));
                 }
             }
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
+            tl_deferred_finalize.push_back(stmt);
         }
         return dims;
     }
@@ -3306,18 +2741,7 @@ private:
         return Result<void>{};
     }
 
-    std::vector<std::pair<size_t, std::vector<float>>> queryVectorsForDimUnlocked(size_t dim) {
-        std::vector<std::pair<size_t, std::vector<float>>> rows;
-        const char* sql =
-            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
-            "quantized_packed_codes FROM vectors "
-            "WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
-            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END) = ? ORDER BY rowid";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            return rows;
-        }
-
+    std::unique_ptr<TurboQuantMSE> makeTurboQuantForDimUnlocked(size_t dim) const {
         std::unique_ptr<TurboQuantMSE> tq;
         if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
             TurboQuantConfig cfg;
@@ -3331,37 +2755,59 @@ private:
                 tq->setPerCoordScales(std::move(scales));
             }
         }
+        return tq;
+    }
+
+    std::optional<std::pair<size_t, std::vector<float>>>
+    decodeVectorForDimRowUnlocked(sqlite3_stmt* stmt, size_t dim, TurboQuantMSE* tq) const {
+        size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
+        const void* blob = sqlite3_column_blob(stmt, 1);
+        int blob_size = sqlite3_column_bytes(stmt, 1);
+
+        std::vector<float> embedding;
+        if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+            embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
+            std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
+        } else if (tq) {
+            auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
+            if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
+                const void* qblob = sqlite3_column_blob(stmt, 5);
+                int qblob_size = sqlite3_column_bytes(stmt, 5);
+                if (qblob && qblob_size > 0) {
+                    std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
+                    std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
+                    embedding = vector_utils::packedDequantizeVector(packed, dim, tq);
+                }
+            }
+        }
+
+        if (embedding.empty() || !isFiniteEmbedding(embedding)) {
+            return std::nullopt;
+        }
+        return std::pair<size_t, std::vector<float>>{rowid, std::move(embedding)};
+    }
+
+    std::vector<std::pair<size_t, std::vector<float>>> queryVectorsForDimUnlocked(size_t dim) {
+        std::vector<std::pair<size_t, std::vector<float>>> rows;
+        const char* sql =
+            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
+            "quantized_packed_codes FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return rows;
+        }
+
+        auto tq = makeTurboQuantForDimUnlocked(dim);
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
-            const void* blob = sqlite3_column_blob(stmt, 1);
-            int blob_size = sqlite3_column_bytes(stmt, 1);
-
-            std::vector<float> embedding;
-            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
-                embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
-                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-            } else if (tq) {
-                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
-                if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
-                    const void* qblob = sqlite3_column_blob(stmt, 5);
-                    int qblob_size = sqlite3_column_bytes(stmt, 5);
-                    if (qblob && qblob_size > 0) {
-                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
-                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                        embedding = vector_utils::packedDequantizeVector(packed, dim, tq.get());
-                    }
-                }
+            if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim, tq.get())) {
+                rows.push_back(std::move(*decoded));
             }
-
-            if (embedding.empty() || !isFiniteEmbedding(embedding)) {
-                continue;
-            }
-            rows.emplace_back(rowid, std::move(embedding));
         }
 
-        sqlite3_finalize(stmt);
+        sqlite3_reset(stmt);
+        tl_deferred_finalize.push_back(stmt);
         return rows;
     }
 
@@ -3382,17 +2828,10 @@ private:
                          "Failed to clear vec0 table for dim " + std::to_string(dim) + ": " + err};
         }
 
-        auto rows = queryVectorsForDimUnlocked(dim);
-        if (rows.empty()) {
-            vec0_dirty_dims_.erase(dim);
-            vec0_ready_dims_.insert(dim);
-            return Result<void>{};
-        }
-
-        sqlite3_stmt* stmt = nullptr;
+        sqlite3_stmt* insert_stmt = nullptr;
         const std::string insert_sql =
             "INSERT INTO \"" + vec0TableName(dim) + "\" (rowid, embedding) VALUES (?, ?)";
-        rc = sqlite3_prepare_v2(db_, insert_sql.c_str(), -1, &stmt, nullptr);
+        rc = sqlite3_prepare_v2(db_, insert_sql.c_str(), -1, &insert_stmt, nullptr);
         if (rc != SQLITE_OK) {
             spdlog::warn("[vec0] Failed to prepare aux insert for dim {}: {}", dim,
                          sqlite3_errmsg(db_));
@@ -3400,23 +2839,46 @@ private:
                          "Failed to prepare vec0 insert for dim " + std::to_string(dim)};
         }
 
-        for (const auto& [rowid, embedding] : rows) {
-            sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(rowid));
-            sqlite3_bind_blob(stmt, 2, embedding.data(),
+        const char* select_sql =
+            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
+            "quantized_packed_codes FROM vectors "
+            "WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
+            "THEN LENGTH(embedding) / 4 ELSE embedding_dim END) = ? ORDER BY rowid";
+        sqlite3_stmt* select_stmt = nullptr;
+        rc = sqlite3_prepare_v2(db_, select_sql, -1, &select_stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            sqlite3_finalize(insert_stmt);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to prepare vec0 source scan for dim " + std::to_string(dim)};
+        }
+
+        auto tq = makeTurboQuantForDimUnlocked(dim);
+        sqlite3_bind_int64(select_stmt, 1, static_cast<sqlite3_int64>(dim));
+        while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+            auto decoded = decodeVectorForDimRowUnlocked(select_stmt, dim, tq.get());
+            if (!decoded) {
+                continue;
+            }
+
+            auto& [rowid, embedding] = *decoded;
+            sqlite3_bind_int64(insert_stmt, 1, static_cast<sqlite3_int64>(rowid));
+            sqlite3_bind_blob(insert_stmt, 2, embedding.data(),
                               static_cast<int>(embedding.size() * sizeof(float)), SQLITE_TRANSIENT);
-            rc = stepWithRetry(stmt);
+            rc = stepWithRetry(insert_stmt);
             if (rc != SQLITE_DONE) {
                 std::string err = sqlite3_errmsg(db_);
-                sqlite3_finalize(stmt);
+                sqlite3_finalize(select_stmt);
+                sqlite3_finalize(insert_stmt);
                 spdlog::warn("[vec0] Failed to populate aux table for dim {} rowid {}: {}", dim,
                              rowid, err);
                 return Error{ErrorCode::DatabaseError, "Failed to populate vec0 table for dim " +
                                                            std::to_string(dim) + ": " + err};
             }
-            sqlite3_reset(stmt);
-            sqlite3_clear_bindings(stmt);
+            sqlite3_reset(insert_stmt);
+            sqlite3_clear_bindings(insert_stmt);
         }
-        sqlite3_finalize(stmt);
+        sqlite3_finalize(select_stmt);
+        sqlite3_finalize(insert_stmt);
 
         vec0_dirty_dims_.erase(dim);
         vec0_ready_dims_.insert(dim);
@@ -3449,6 +2911,13 @@ private:
     Result<void> ensureVec0ReadyUnlocked(size_t dim) {
         if (vec0_ready_dims_.contains(dim) && !vec0_dirty_dims_.contains(dim)) {
             return Result<void>{};
+        }
+        if (config_.suppress_search_index_builds) {
+            if (vec0_ready_dims_.contains(dim)) {
+                return Result<void>{};
+            }
+            return Error{ErrorCode::InvalidOperation,
+                         "vec0 search index build suppressed by memory instrumentation profile"};
         }
         return rebuildVec0IndicesUnlocked(dim);
     }
@@ -3497,122 +2966,210 @@ private:
         return Result<void>{};
     }
 
-    Result<void> rebuildQuantizedHnswDimUnlocked(size_t dim) {
+    Result<void> rebuildSimeonPqDimUnlocked(size_t dim) {
         auto rows = queryVectorsForDimUnlocked(dim);
-        quantized_hnsw_indices_.erase(dim);
-        quantized_hnsw_searches_.erase(dim);
+        simeon_pq_indices_.erase(dim);
 
         if (rows.empty()) {
-            quantized_hnsw_dirty_dims_.erase(dim);
-            quantized_hnsw_ready_dims_.insert(dim);
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
             return Result<void>{};
         }
 
-        auto corpus_it = query_dim_counts_.find(dim);
-        size_t corpus_size = corpus_it != query_dim_counts_.end() ? corpus_it->second : rows.size();
-        corpus_size = std::max(corpus_size, rows.size());
+        const std::uint32_t m = normalizedSimeonPqSubquantizers(dim);
+        const std::uint32_t k = static_cast<std::uint32_t>(
+            std::clamp<std::size_t>(config_.simeon_pq_centroids, 2, 256));
+        simeon::PQConfig pqConfig{
+            .dim = static_cast<std::uint32_t>(dim),
+            .m = m,
+            .k = k,
+            .seed = config_.simeon_pq_seed,
+        };
 
-        QuantizedHNSWIndex::Config config =
-            QuantizedHNSWIndex::Config::for_corpus(corpus_size, dim);
-        config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
-        config.normalize_vectors = false;
+        auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
+        const std::size_t trainCap = std::min(rows.size(), config_.simeon_pq_train_limit);
+        state->rowids.reserve(rows.size());
 
-        auto base = std::make_unique<QuantizedHNSWIndex>(config);
-        base->reserve(rows.size());
-
-        std::vector<size_t> ids;
-        std::vector<std::vector<float>> normalized_rows;
-        std::vector<std::span<const float>> spans;
-        ids.reserve(rows.size());
-        normalized_rows.reserve(rows.size());
-
+        // Pass 1: normalize in place, collect rowids, copy a bounded prefix
+        // into the training buffer. Normalized embeddings stay in `rows` so
+        // pass 2 can encode without re-reading SQLite.
+        std::vector<float> training;
+        training.reserve(trainCap * dim);
+        std::size_t trainSamples = 0;
         for (auto& [rowid, embedding] : rows) {
             if (!normalizeEmbeddingInPlace(embedding)) {
+                embedding.clear();
+                embedding.shrink_to_fit();
                 continue;
             }
-            ids.push_back(rowid);
-            normalized_rows.push_back(std::move(embedding));
+            if (trainSamples < trainCap) {
+                training.insert(training.end(), embedding.begin(), embedding.end());
+                ++trainSamples;
+            }
+            state->rowids.push_back(rowid);
         }
 
-        if (ids.empty()) {
-            quantized_hnsw_dirty_dims_.erase(dim);
-            quantized_hnsw_ready_dims_.insert(dim);
+        if (state->rowids.empty()) {
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
             return Result<void>{};
         }
 
-        spans.reserve(normalized_rows.size());
-        for (auto& embedding : normalized_rows) {
-            spans.emplace_back(embedding.data(), embedding.size());
+        try {
+            if (trainSamples >= k) {
+                state->pq.train(training.data(), static_cast<std::uint32_t>(trainSamples));
+            } else {
+                state->pq.init_random_gaussian();
+            }
+        } catch (const std::exception&) {
+            state->pq.init_random_gaussian();
         }
+        // Training buffer is no longer needed; release before encoding so
+        // peak footprint during encode == size(rows) rather than size(rows)
+        // + size(training).
+        std::vector<float>().swap(training);
 
-        base->build(std::span<const size_t>(ids.data(), ids.size()),
-                    std::span<const std::span<const float>>(spans.data(), spans.size()));
-
-        QuantizedHNSWSearch::Config search_config;
-        search_config.quantization = toQuantizedSearchType(config_.quantized_hnsw_mode);
-        search_config.rerank_factor = std::max<size_t>(1, config_.quantized_hnsw_rerank_factor);
-
-        auto search = std::make_unique<QuantizedHNSWSearch>(*base, search_config);
-        search->build_quantization();
-
-        quantized_hnsw_searches_[dim] = std::move(search);
-        quantized_hnsw_indices_[dim] = std::move(base);
-        quantized_hnsw_dirty_dims_.erase(dim);
-        quantized_hnsw_ready_dims_.insert(dim);
-
-        spdlog::info("[QHNSW] Built quantized index for dim={} with {} vectors mode={} rerank={}",
-                     dim, ids.size(), quantizedHnswModeName(config_.quantized_hnsw_mode),
-                     config_.quantized_hnsw_rerank_factor);
+        state->codes.resize(state->rowids.size() * state->pq.m());
+        std::size_t codeOffset = 0;
+        // Pass 2: encode and progressively release each embedding so the
+        // ~dim*4 bytes per row are returned to the allocator as we go.
+        // Skips entries whose embedding was zeroed above (normalize failed).
+        for (auto& [rowid, embedding] : rows) {
+            (void)rowid;
+            if (embedding.empty()) {
+                continue;
+            }
+            state->pq.encode(embedding.data(), state->codes.data() + codeOffset);
+            codeOffset += state->pq.m();
+            std::vector<float>().swap(embedding);
+        }
+        std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
+        state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
+        simeon_pq_indices_[dim] = std::move(state);
+        simeon_pq_dirty_dims_.erase(dim);
+        simeon_pq_ready_dims_.insert(dim);
+        spdlog::info(
+            "[SPQ] Built persisted PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
+            simeon_pq_indices_[dim]->rowids.size(), m, k, config_.simeon_pq_rerank_factor);
+        // Return the bulk training/encode scratch pages to the OS.
+        // The SPQ rebuild churns up to ~1 GB of transient float buffers
+        // (per-row vectors + codebook training set) which macOS's
+        // DefaultMallocZone otherwise keeps parked in MALLOC_LARGE regions.
+#if defined(__APPLE__)
+        ::malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(__GLIBC__)
+        ::malloc_trim(0);
+#endif
         return Result<void>{};
     }
 
-    Result<void>
-    rebuildQuantizedHnswIndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
+    Result<void> rebuildSimeonPqIndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
         auto dims = queryVectorDimsUnlocked();
         std::unordered_set<size_t> available_dims(dims.begin(), dims.end());
-
         if (focus_dim) {
             if (!available_dims.contains(*focus_dim)) {
-                quantized_hnsw_dirty_dims_.erase(*focus_dim);
-                quantized_hnsw_ready_dims_.erase(*focus_dim);
-                quantized_hnsw_indices_.erase(*focus_dim);
-                quantized_hnsw_searches_.erase(*focus_dim);
+                simeon_pq_dirty_dims_.erase(*focus_dim);
+                simeon_pq_ready_dims_.erase(*focus_dim);
+                simeon_pq_indices_.erase(*focus_dim);
                 return Result<void>{};
             }
             dims = {*focus_dim};
         }
-
         for (size_t dim : dims) {
-            auto result = rebuildQuantizedHnswDimUnlocked(dim);
+            auto result = rebuildSimeonPqDimUnlocked(dim);
             if (!result) {
                 return result;
             }
         }
-
         return Result<void>{};
     }
 
-    Result<void> ensureQuantizedHnswReadyUnlocked(size_t dim) {
-        if (quantized_hnsw_ready_dims_.contains(dim) && !quantized_hnsw_dirty_dims_.contains(dim) &&
-            quantized_hnsw_indices_.contains(dim) && quantized_hnsw_searches_.contains(dim)) {
+    bool loadPersistedSimeonPqDimUnlocked(size_t dim) {
+        std::uint32_t m = 0;
+        std::uint32_t k = 0;
+        std::uint64_t seed = 0;
+        std::size_t rerankFactor = 0;
+        bool trained = false;
+        std::size_t vectorCount = 0;
+        std::vector<float> codebooks;
+        if (!detail::loadPersistedSimeonPqMeta(db_, dim, m, k, seed, rerankFactor, trained,
+                                               vectorCount, codebooks)) {
+            return false;
+        }
+        if (m == 0 || dim % m != 0) {
+            return false;
+        }
+        simeon::PQConfig pqConfig{
+            .dim = static_cast<std::uint32_t>(dim),
+            .m = m,
+            .k = k,
+            .seed = seed,
+        };
+        auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
+        state->pq.import_codebooks(codebooks, trained);
+        state->rerank_factor = std::max<std::size_t>(1, rerankFactor);
+        if (!detail::loadPersistedSimeonPqCodes(db_, dim, m, state->rowids, state->codes) ||
+            state->rowids.size() != vectorCount) {
+            return false;
+        }
+        simeon_pq_indices_[dim] = std::move(state);
+        simeon_pq_dirty_dims_.erase(dim);
+        simeon_pq_ready_dims_.insert(dim);
+        spdlog::info("[SPQ] Loaded persisted PQ index for dim={} with {} vectors m={} k={}", dim,
+                     simeon_pq_indices_[dim]->rowids.size(), m, k);
+        return true;
+    }
+
+    Result<void> saveSimeonPqDimUnlocked(size_t dim) {
+        auto it = simeon_pq_indices_.find(dim);
+        if (it == simeon_pq_indices_.end() || !it->second) {
             return Result<void>{};
         }
-        return rebuildQuantizedHnswIndicesUnlocked(dim);
+        std::string errorMessage;
+        if (!detail::savePersistedSimeonPq(db_, dim, it->second->pq, config_.simeon_pq_seed,
+                                           it->second->rerank_factor, it->second->rowids,
+                                           it->second->codes, errorMessage)) {
+            return Error{ErrorCode::DatabaseError, "Failed to persist Simeon PQ index for dim " +
+                                                       std::to_string(dim) + ": " + errorMessage};
+        }
+        return Result<void>{};
+    }
+
+    bool hasReusablePersistedSimeonPqUnlocked(size_t dim) {
+        return detail::hasPersistedSimeonPqMeta(db_, dim);
+    }
+
+    Result<void> ensureSimeonPqReadyUnlocked(size_t dim) {
+        if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
+            simeon_pq_indices_.contains(dim)) {
+            return Result<void>{};
+        }
+        if (config_.suppress_search_index_builds) {
+            if (simeon_pq_indices_.contains(dim)) {
+                return Result<void>{};
+            }
+            if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
+                return Result<void>{};
+            }
+            spdlog::debug("[SPQ] ensure ready skipped: build suppressed by memory instrumentation "
+                          "profile");
+            return Result<void>{};
+        }
+        if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
+            return Result<void>{};
+        }
+        return rebuildSimeonPqIndicesUnlocked(dim);
     }
 
     Result<std::vector<VectorRecord>>
-    quantizedHnswSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
-                                float similarity_threshold) {
+    simeonPqSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
+                           float similarity_threshold) {
         if (!db_ || query_embedding.empty() || k == 0) {
             return std::vector<VectorRecord>{};
         }
-
         const size_t query_dim = query_embedding.size();
-        auto base_it = quantized_hnsw_indices_.find(query_dim);
-        auto search_it = quantized_hnsw_searches_.find(query_dim);
-        if (base_it == quantized_hnsw_indices_.end() ||
-            search_it == quantized_hnsw_searches_.end() || !base_it->second || !search_it->second ||
-            base_it->second->empty()) {
+        auto it = simeon_pq_indices_.find(query_dim);
+        if (it == simeon_pq_indices_.end() || !it->second || it->second->rowids.empty()) {
             return std::vector<VectorRecord>{};
         }
 
@@ -3621,91 +3178,60 @@ private:
             return std::vector<VectorRecord>{};
         }
 
-        size_t ef_search = base_it->second->recommended_ef_search(k, 0.95F);
-        ef_search = std::max(ef_search, config_.hnsw_ef_search);
+        simeon::PQQuery pqQuery(it->second->pq, normalized_query.data());
+        const size_t m = it->second->pq.m();
+        const size_t approxK = std::min(it->second->rowids.size(),
+                                        std::max<std::size_t>(k, k * it->second->rerank_factor));
 
-        auto results =
-            search_it->second->search(std::span<const float>(normalized_query), k, ef_search);
+        std::vector<std::pair<float, std::size_t>> scores;
+        scores.reserve(it->second->rowids.size());
+        for (std::size_t i = 0; i < it->second->rowids.size(); ++i) {
+            const float approxScore = pqQuery.inner_product(it->second->codes.data() + (i * m));
+            scores.emplace_back(approxScore, i);
+        }
+        const auto cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+        if (scores.size() > approxK) {
+            std::nth_element(scores.begin(), scores.begin() + approxK, scores.end(), cmp);
+            scores.resize(approxK);
+        }
+        std::sort(scores.begin(), scores.end(), cmp);
 
         std::vector<VectorRecord> records;
-        records.reserve(std::min(results.size(), k));
-        for (const auto& [node_id, distance] : results) {
-            (void)distance;
+        records.reserve(k);
+        for (const auto& [approxScore, idx] : scores) {
             if (records.size() >= k) {
                 break;
             }
-            auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
+            auto record_opt =
+                getVectorByRowidUnlocked(static_cast<int64_t>(it->second->rowids[idx]));
             if (!record_opt) {
                 continue;
             }
-
-            float similarity = static_cast<float>(
-                VectorDatabase::computeCosineSimilarity(query_embedding, record_opt->embedding));
+            float similarity = approxScore;
+            if (!record_opt->embedding.empty()) {
+                similarity = static_cast<float>(VectorDatabase::computeCosineSimilarity(
+                    query_embedding, record_opt->embedding));
+            }
             if (similarity < similarity_threshold) {
                 continue;
             }
-
             record_opt->relevance_score = similarity;
             records.push_back(std::move(*record_opt));
         }
-
         return records;
     }
 
-    bool hasPersistedHnswNodesUnlocked(size_t dim) {
-        std::string sql =
-            "SELECT EXISTS(SELECT 1 FROM \"" + hnswTablePrefix(dim) + "_hnsw_nodes\" LIMIT 1)";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-            return false;
-        }
-        bool exists = false;
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            exists = sqlite3_column_int(stmt, 0) != 0;
-        }
-        sqlite3_finalize(stmt);
-        return exists;
+    // beginBulkLoad/finalizeBulkLoad are kept in the public API for ABI compatibility
+    // and to gate future bulk-mode optimizations. With HNSW removed there is no index
+    // state to pause/rebuild here; Vec0 and SimeonPQ indices are maintained lazily.
+    Result<void> beginBulkLoadUnlocked() {
+        std::unique_lock lock(mutex_);
+        return Result<void>{};
     }
 
-    bool hasCatchUpSourceUnlocked() {
-        if (hnsw_loaded_ && !hnsw_indices_.empty()) {
-            return true;
-        }
-        auto persistedDims = discoverPersistedHnswDimsUnlocked();
-        for (size_t dim : persistedDims) {
-            if (hasPersistedHnswNodesUnlocked(dim)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool shouldDeferHnswBatchUpdatesUnlocked(size_t recordCount) {
-        constexpr size_t kMinDeferredBatchSize = 16;
-        return recordCount >= kMinDeferredBatchSize && hasCatchUpSourceUnlocked();
-    }
-
-    bool shouldMaintainHnswOnWriteUnlocked() {
-        return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
-    }
-
-    bool shouldAttemptHnswLoadOnReadUnlocked() {
-        return hnsw_loaded_ || hnsw_needs_rebuild_ || hasCatchUpSourceUnlocked();
-    }
-
-    struct BackgroundSeedSnapshot {
-        std::unordered_map<size_t, std::vector<size_t>> ids_by_dim;
-        std::unordered_map<size_t, std::vector<std::vector<float>>> embeddings_by_dim;
-    };
-
-    bool shouldScheduleBackgroundSeedUnlocked(size_t query_dim) const {
-        if (query_dim == 0 || db_path_ == ":memory:" || hnsw_loaded_ || hnsw_needs_rebuild_ ||
-            background_seed_running_.load(std::memory_order_acquire) ||
-            background_seed_scheduled_.load(std::memory_order_acquire)) {
-            return false;
-        }
-        return query_dim_counts_.find(query_dim) != query_dim_counts_.end() &&
-               query_dim_counts_.at(query_dim) >= hnswBackgroundSeedThreshold();
+    Result<void> finalizeBulkLoadUnlocked() {
+        std::unique_lock lock(mutex_);
+        return Result<void>{};
     }
 
     void refreshQueryDimCountsUnlocked() {
@@ -3783,193 +3309,6 @@ private:
         sqlite3_finalize(stmt);
     }
 
-    Result<BackgroundSeedSnapshot> collectBackgroundSeedSnapshotUnlocked(size_t focus_dim) {
-        BackgroundSeedSnapshot snapshot;
-
-        // Fetch embedding, dimension, and quantized sidecar to handle both float-blob
-        // rows and quantized-primary rows (where embedding blob is NULL).
-        const char* select_by_dim =
-            "SELECT rowid, embedding, embedding_dim, "
-            "quantized_format, quantized_bits, quantized_seed, quantized_packed_codes "
-            "FROM vectors ORDER BY embedding_dim, rowid";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) != SQLITE_OK) {
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to prepare background seed snapshot query"};
-        }
-
-        std::unique_ptr<TurboQuantMSE> snapshot_tq;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantConfig cfg;
-            cfg.dimension = config_.embedding_dim;
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            snapshot_tq = std::make_unique<TurboQuantMSE>(cfg);
-            // Load fitted per-coord scales from DB if available
-            auto scales = loadTurboQuantPerCoordScales(
-                db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
-            if (!scales.empty()) {
-                snapshot_tq->setPerCoordScales(std::move(scales));
-            }
-        }
-
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int64_t rowid = sqlite3_column_int64(stmt, 0);
-            size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 2));
-            if (dim == 0) {
-                continue;
-            }
-
-            std::vector<float> embedding;
-            const void* blob = sqlite3_column_blob(stmt, 1);
-            int blob_size = sqlite3_column_bytes(stmt, 1);
-
-            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
-                // Float blob row: use directly
-                size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
-                embedding.resize(num_floats);
-                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-            } else {
-                // Quantized-primary row: dequantize from packed codes
-                if (!snapshot_tq) {
-                    continue;
-                }
-                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 3));
-                if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
-                    continue;
-                }
-                const void* qblob = sqlite3_column_blob(stmt, 6);
-                int qblob_size = sqlite3_column_bytes(stmt, 6);
-                if (!qblob || qblob_size <= 0) {
-                    continue;
-                }
-                std::vector<uint8_t> packed(qblob_size);
-                std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                embedding = vector_utils::packedDequantizeVector(packed, dim, snapshot_tq.get());
-            }
-
-            if (isZeroNormEmbedding(embedding) || !isFiniteEmbedding(embedding)) {
-                continue;
-            }
-
-            snapshot.ids_by_dim[dim].push_back(static_cast<size_t>(rowid));
-            snapshot.embeddings_by_dim[dim].push_back(std::move(embedding));
-        }
-        sqlite3_finalize(stmt);
-
-        if (snapshot.ids_by_dim.empty()) {
-            return snapshot;
-        }
-
-        if (focus_dim != 0) {
-            auto focusIt = snapshot.ids_by_dim.find(focus_dim);
-            if (focusIt == snapshot.ids_by_dim.end()) {
-                return Error{ErrorCode::NotFound,
-                             "No vectors found for requested background seed dimension"};
-            }
-
-            BackgroundSeedSnapshot focused;
-            focused.ids_by_dim.emplace(focus_dim, std::move(focusIt->second));
-            focused.embeddings_by_dim.emplace(focus_dim,
-                                              std::move(snapshot.embeddings_by_dim[focus_dim]));
-            return focused;
-        }
-
-        return snapshot;
-    }
-
-    void buildBackgroundSeedSnapshot(BackgroundSeedSnapshot snapshot) {
-        std::unordered_map<size_t, std::unique_ptr<HNSWIndex>> seeded_indices;
-        std::unordered_map<size_t, bool> seeded_dirty;
-
-        for (auto& [dim, ids] : snapshot.ids_by_dim) {
-            if (ids.empty()) {
-                continue;
-            }
-
-            size_t corpus_size = ids.size();
-
-            HNSWIndex::Config build_config = HNSWIndex::Config::for_corpus(corpus_size, dim);
-            build_config.ef_construction =
-                std::max(build_config.ef_construction, config_.hnsw_ef_construction);
-            build_config.normalize_vectors = true;
-
-            auto index = std::make_unique<HNSWIndex>(build_config);
-            auto& embeddings = snapshot.embeddings_by_dim[dim];
-            std::vector<std::span<const float>> spans;
-            spans.reserve(embeddings.size());
-            for (auto& embedding : embeddings) {
-                spans.emplace_back(embedding.data(), embedding.size());
-            }
-
-            const auto buildStart = std::chrono::steady_clock::now();
-            spdlog::info("[HNSW] Background seed start dim={} vectors={}", dim, ids.size());
-            index->build(std::span<const size_t>(ids.data(), ids.size()),
-                         std::span<const std::span<const float>>(spans.data(), spans.size()));
-            const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now() - buildStart)
-                                     .count();
-            spdlog::info("[HNSW] Background seed built dim={} with {} vectors in {} ms", dim,
-                         ids.size(), buildMs);
-
-            seeded_dirty[dim] = true;
-            seeded_indices.emplace(dim, std::move(index));
-        }
-
-        std::unique_lock lock(mutex_);
-        background_seed_scheduled_.store(false, std::memory_order_release);
-
-        if (background_seed_cancel_requested_.load(std::memory_order_acquire)) {
-            background_seed_running_.store(false, std::memory_order_release);
-            return;
-        }
-
-        if (!db_ || !hnsw_indices_.empty() || hnsw_loaded_ || hnsw_needs_rebuild_) {
-            background_seed_running_.store(false, std::memory_order_release);
-            return;
-        }
-
-        hnsw_indices_ = std::move(seeded_indices);
-        hnsw_dirty_ = std::move(seeded_dirty);
-        hnsw_loaded_ = !hnsw_indices_.empty();
-        if (hnsw_loaded_) {
-            saveAllHnswUnlocked();
-            last_hnsw_maintenance_mode_ = HnswMaintenanceMode::FullRebuild;
-            spdlog::info("[HNSW] Background seed published {} dimension-specific indices",
-                         hnsw_indices_.size());
-        }
-        background_seed_running_.store(false, std::memory_order_release);
-    }
-
-    void maybeScheduleBackgroundSeedUnlocked(size_t query_dim) {
-        if (!shouldScheduleBackgroundSeedUnlocked(query_dim)) {
-            return;
-        }
-
-        if (background_seed_thread_.joinable() &&
-            !background_seed_running_.load(std::memory_order_acquire)) {
-            background_seed_thread_.join();
-        }
-
-        auto snapshot_result = collectBackgroundSeedSnapshotUnlocked(query_dim);
-        if (!snapshot_result) {
-            spdlog::warn("[HNSW] Failed to snapshot vectors for background seed (dim={}): {}",
-                         query_dim, snapshot_result.error().message);
-            return;
-        }
-
-        auto snapshot = std::move(snapshot_result.value());
-        if (snapshot.ids_by_dim.empty()) {
-            return;
-        }
-
-        background_seed_scheduled_.store(true, std::memory_order_release);
-        background_seed_running_.store(true, std::memory_order_release);
-        background_seed_thread_ = std::thread([this, snapshot = std::move(snapshot)]() mutable {
-            buildBackgroundSeedSnapshot(std::move(snapshot));
-        });
-    }
-
     Result<std::vector<VectorRecord>>
     bruteForceSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
                              float similarity_threshold,
@@ -3990,8 +3329,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        source_chunk_ids, parent_document_hash, child_document_hashes,
        quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors
-WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 THEN LENGTH(embedding) / 4
-            ELSE embedding_dim END) = ?
+WHERE embedding_dim = ?
 ORDER BY rowid
 )sql";
 
@@ -4091,8 +3429,12 @@ ORDER BY rowid
         const size_t query_dim = query_embedding.size();
 
         sqlite3_stmt* stmt = nullptr;
-        const std::string sql = "SELECT rowid, distance FROM \"" + vec0TableName(query_dim) +
-                                "\" WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance";
+        std::string sql = "SELECT rowid, distance FROM \"" + vec0TableName(query_dim) +
+                          "\" WHERE embedding MATCH ?1 AND k = ?2";
+        if (config_.vec0_phss_enabled) {
+            sql += " AND phss = ?3 AND phss_candidates = ?4";
+        }
+        sql += " ORDER BY distance";
         int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
             spdlog::warn("[vec0] Failed to prepare search query for dim {}: {}", query_dim,
@@ -4105,6 +3447,11 @@ ORDER BY rowid
                           static_cast<int>(query_embedding.size() * sizeof(float)),
                           SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(k));
+        if (config_.vec0_phss_enabled) {
+            sqlite3_bind_int(stmt, 3, 1);
+            sqlite3_bind_int64(
+                stmt, 4, static_cast<sqlite3_int64>(std::max(k, config_.vec0_phss_candidates)));
+        }
 
         std::vector<VectorRecord> records;
         records.reserve(k);
@@ -4157,713 +3504,18 @@ ORDER BY rowid
         return results;
     }
 
-    std::vector<size_t> queryOrphanedPersistedNodeIdsUnlocked(size_t dim) {
-        std::vector<size_t> ids;
-        std::string sql = "SELECT n.node_id FROM \"" + hnswTablePrefix(dim) +
-                          "_hnsw_nodes\" n LEFT JOIN vectors v ON v.rowid = n.node_id "
-                          "WHERE v.rowid IS NULL ORDER BY n.node_id";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                ids.push_back(static_cast<size_t>(sqlite3_column_int64(stmt, 0)));
-            }
-            sqlite3_finalize(stmt);
-        }
-        return ids;
-    }
-
-    std::vector<std::pair<size_t, std::vector<float>>>
-    queryMissingVectorsForDimUnlocked(size_t dim) {
-        std::vector<std::pair<size_t, std::vector<float>>> rows;
-        // Fetch embedding blob and quantized sidecar to handle both float rows
-        // and quantized-primary rows (where embedding blob is NULL).
-        std::string sql = "SELECT v.rowid, v.embedding, v.quantized_format, "
-                          "v.quantized_bits, v.quantized_seed, v.quantized_packed_codes "
-                          "FROM vectors v LEFT JOIN \"" +
-                          hnswTablePrefix(dim) +
-                          "_hnsw_nodes\" n ON n.node_id = v.rowid "
-                          "WHERE (CASE WHEN v.embedding_dim IS NULL OR v.embedding_dim = 0 "
-                          "THEN LENGTH(v.embedding) / 4 ELSE v.embedding_dim END) = ? "
-                          "AND n.node_id IS NULL ORDER BY v.rowid";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-            return rows;
-        }
-
-        std::unique_ptr<TurboQuantMSE> catchup_tq;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantConfig cfg;
-            cfg.dimension = dim;
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            catchup_tq = std::make_unique<TurboQuantMSE>(cfg);
-            // Load fitted per-coord scales from DB if available
-            auto scales = loadTurboQuantPerCoordScales(db_, dim, config_.turboquant_bits,
-                                                       config_.turboquant_seed);
-            if (!scales.empty()) {
-                catchup_tq->setPerCoordScales(std::move(scales));
-            }
-        }
-
-        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
-            const void* blob = sqlite3_column_blob(stmt, 1);
-            int blob_size = sqlite3_column_bytes(stmt, 1);
-
-            std::vector<float> embedding;
-            if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
-                embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
-                std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-            } else if (catchup_tq) {
-                // Quantized-primary row: dequantize from packed codes
-                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
-                if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
-                    const void* qblob = sqlite3_column_blob(stmt, 5);
-                    int qblob_size = sqlite3_column_bytes(stmt, 5);
-                    if (qblob && qblob_size > 0) {
-                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
-                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                        embedding =
-                            vector_utils::packedDequantizeVector(packed, dim, catchup_tq.get());
-                    }
-                }
-            }
-
-            if (embedding.empty() || isZeroNormEmbedding(embedding) ||
-                !isFiniteEmbedding(embedding)) {
-                continue;
-            }
-            rows.emplace_back(rowid, std::move(embedding));
-        }
-        sqlite3_finalize(stmt);
-        return rows;
-    }
-
-    void saveHnswDimFullUnlocked(size_t dim) {
-        auto it = hnsw_indices_.find(dim);
-        if (it == hnsw_indices_.end() || !it->second) {
-            return;
-        }
-        std::string table_prefix = hnswTablePrefix(dim);
-        char* err = nullptr;
-        int rc = sqlite_vec_cpp::index::save_hnsw_index<float, HNSWCosineMetric>(
-            db_, "main", table_prefix.c_str(), *it->second, &err);
-        if (rc != SQLITE_OK) {
-            if (err) {
-                spdlog::error("[HNSW] Failed to save full index for dim={}: {}", dim, err);
-                sqlite3_free(err);
-            }
-            return;
-        }
-        hnsw_dirty_[dim] = false;
-        spdlog::info("[HNSW] Saved full index for dim={} with {} vectors", dim, it->second->size());
-    }
-
-    void catchUpDeferredHnswUnlocked() {
-        spdlog::info("[HNSW] Catching up deferred updates from persisted indices");
-        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::CatchUp;
-        last_hnsw_added_count_ = 0;
-        last_hnsw_removed_count_ = 0;
-
-        hnsw_indices_.clear();
-        hnsw_dirty_.clear();
-        hnsw_loaded_ = false;
-
-        auto persistedDims = discoverPersistedHnswDimsUnlocked();
-        for (size_t dim : persistedDims) {
-            loadPersistedHnswDimUnlocked(dim);
-        }
-
-        auto vectorDims = queryVectorDimsUnlocked();
-        if (vectorDims.empty()) {
-            hnsw_loaded_ = true;
-            hnsw_needs_rebuild_ = false;
-            pending_inserts_ = 0;
-            return;
-        }
-
-        if (hnsw_indices_.empty()) {
-            spdlog::info("[HNSW] No persisted indices available for deferred catch-up; falling "
-                         "back to full rebuild");
-            rebuildHnswUnlocked();
-            return;
-        }
-
-        for (size_t dim : vectorDims) {
-            auto* hnsw = getOrCreateHnswForDim(dim);
-            if (!hnsw) {
-                continue;
-            }
-
-            const bool hadPersistedDim =
-                std::find(persistedDims.begin(), persistedDims.end(), dim) != persistedDims.end();
-            bool requireFullSave = !hadPersistedDim;
-
-            if (hadPersistedDim) {
-                auto orphanedIds = queryOrphanedPersistedNodeIdsUnlocked(dim);
-                if (!orphanedIds.empty()) {
-                    for (size_t nodeId : orphanedIds) {
-                        hnsw->remove(nodeId);
-                    }
-                    requireFullSave = true;
-                    last_hnsw_removed_count_ += orphanedIds.size();
-                    spdlog::info(
-                        "[HNSW] Deferred catch-up dim={} removed {} orphaned persisted nodes", dim,
-                        orphanedIds.size());
-                }
-            }
-
-            auto deltaRows = queryMissingVectorsForDimUnlocked(dim);
-            if (!deltaRows.empty()) {
-                std::vector<size_t> ids;
-                std::vector<std::vector<float>> embeddings;
-                std::vector<std::span<const float>> spans;
-                ids.reserve(deltaRows.size());
-                embeddings.reserve(deltaRows.size());
-                spans.reserve(deltaRows.size());
-
-                for (auto& [rowid, embedding] : deltaRows) {
-                    ids.push_back(rowid);
-                    embeddings.push_back(std::move(embedding));
-                }
-                for (auto& embedding : embeddings) {
-                    spans.emplace_back(embedding.data(), embedding.size());
-                }
-
-                for (size_t i = 0; i < ids.size(); ++i) {
-                    hnsw->insert(ids[i], spans[i]);
-                }
-                hnsw_dirty_[dim] = true;
-                last_hnsw_added_count_ += ids.size();
-                spdlog::info("[HNSW] Deferred catch-up dim={} added {} new vectors", dim,
-                             ids.size());
-                requireFullSave = true;
-                spdlog::info("[HNSW] Deferred catch-up dim={} requires full save after delta add",
-                             dim);
-            }
-
-            if (requireFullSave) {
-                saveHnswDimFullUnlocked(dim);
-            }
-        }
-
-        hnsw_loaded_ = true;
-        hnsw_needs_rebuild_ = false;
-        pending_inserts_ = 0;
-    }
-
-    // Ensure HNSW indices are loaded (lazy loading)
-    // Discovers existing dimension-specific tables and loads each index
-    // If force_rebuild is true, skips loading from persisted tables and rebuilds from vectors table
-    void ensureHnswLoadedUnlocked(bool force_rebuild = false) {
-        if (hnsw_loaded_ && !force_rebuild) {
-            // Already loaded - log occasionally for diagnostics
-            static std::atomic<uint64_t> skip_counter{0};
-            uint64_t skc = skip_counter.fetch_add(1);
-            if (skc < 5 || skc % 1000 == 0) {
-                size_t total_size = 0;
-                for (const auto& [dim, idx] : hnsw_indices_) {
-                    if (idx)
-                        total_size += idx->size();
-                }
-                spdlog::debug("[HNSW] ensureHnswLoadedUnlocked: already loaded, total_size={}, "
-                              "num_indices={}, backend={:p} (skip #{})",
-                              total_size, hnsw_indices_.size(), static_cast<void*>(this), skc);
-            }
-            return;
-        }
-
-        if (hnsw_needs_rebuild_ && !force_rebuild) {
-            catchUpDeferredHnswUnlocked();
-            return;
-        }
-
-        spdlog::info("[HNSW] ensureHnswLoadedUnlocked: first load, backend={:p}{}",
-                     static_cast<void*>(this), force_rebuild ? " (force_rebuild)" : "");
-
-        // If force_rebuild, skip table discovery and go straight to building from vectors
-        if (force_rebuild) {
-            spdlog::info("[HNSW] Force rebuilding from vectors table, skipping persisted indices");
-        }
-
-        // stmt is used both in table discovery and in build-from-vectors
-        sqlite3_stmt* stmt = nullptr;
-
-        // Refresh current row counts before deciding whether persisted HNSW state is usable.
-        refreshQueryDimCountsUnlocked();
-
-        // Discover existing dimension-specific HNSW tables (skip if force_rebuild)
-        if (!force_rebuild) {
-            // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
-            std::vector<size_t> existing_dims;
-            bool needsPersistedCatchUp = false;
-
-            // First check for legacy single-dimension tables (vectors_hnsw_meta)
-            const char* check_legacy = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
-                                       "name='vectors_hnsw_meta'";
-            if (sqlite3_prepare_v2(db_, check_legacy, -1, &stmt, nullptr) == SQLITE_OK) {
-                if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0) {
-                    // Legacy table exists - need to migrate or load with detected dimension
-                    spdlog::info(
-                        "[HNSW] Found legacy vectors_hnsw_meta table, will probe for dimension");
-                    // The dimension will be determined when we load from vectors table
-                }
-                sqlite3_finalize(stmt);
-            }
-
-            // Find all dimension-specific tables
-            const char* find_dims = "SELECT name FROM sqlite_master WHERE type='table' AND name "
-                                    "LIKE 'vectors_%_hnsw_meta'";
-            if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    const char* table_name =
-                        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-                    if (table_name) {
-                        // Parse dimension from table name: vectors_384_hnsw_meta -> 384
-                        std::string name(table_name);
-                        auto start = name.find('_') + 1;
-                        auto end = name.find('_', start);
-                        if (start != std::string::npos && end != std::string::npos) {
-                            try {
-                                size_t dim = std::stoull(name.substr(start, end - start));
-                                if (dim > 0) {
-                                    existing_dims.push_back(dim);
-                                    spdlog::debug("[HNSW] Found existing HNSW table for dim={}",
-                                                  dim);
-                                }
-                            } catch (...) {
-                                // Ignore malformed table names
-                            }
-                        }
-                    }
-                }
-                sqlite3_finalize(stmt);
-            }
-
-            // Load existing indices
-            for (size_t dim : existing_dims) {
-                try {
-                    std::string table_prefix = hnswTablePrefix(dim);
-                    char* err = nullptr;
-                    auto loaded_hnsw =
-                        sqlite_vec_cpp::index::load_hnsw_index<float, HNSWCosineMetric>(
-                            db_, "main", table_prefix.c_str(), &err);
-                    if (err) {
-                        spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
-                        sqlite3_free(err);
-                    } else {
-                        auto loaded = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
-                        const auto loadedSize = loaded->size();
-                        const auto activeSize = loaded->active_size();
-                        const auto deletedCount = loaded->deleted_count();
-                        const auto countIt = query_dim_counts_.find(dim);
-                        const auto currentCount =
-                            countIt != query_dim_counts_.end() ? countIt->second : size_t{0};
-                        hnsw_indices_[dim] = std::move(loaded);
-                        hnsw_dirty_[dim] = false;
-                        spdlog::info("[HNSW] Loaded index for dim={} with {} total nodes ({} "
-                                     "active, {} deleted)",
-                                     dim, loadedSize, activeSize, deletedCount);
-                        if (currentCount > 0 && activeSize != currentCount) {
-                            needsPersistedCatchUp = true;
-                            spdlog::warn("[HNSW] Persisted index drift for dim={}: index_size={} "
-                                         "active_nodes={} deleted_nodes={} vector_rows={}. "
-                                         "Applying deferred catch-up from vectors table.",
-                                         dim, loadedSize, activeSize, deletedCount, currentCount);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
-                }
-            }
-
-            if (needsPersistedCatchUp) {
-                hnsw_indices_.clear();
-                hnsw_dirty_.clear();
-                hnsw_needs_rebuild_ = true;
-                catchUpDeferredHnswUnlocked();
-                return;
-            }
-        }
-
-        // If no existing indices found (or force_rebuild), build from database grouped by dimension
-        if (hnsw_indices_.empty()) {
-            spdlog::info("[HNSW] No existing indices found, building from vectors table");
-
-            struct PendingDimBuild {
-                std::vector<size_t> ids;
-                std::vector<std::vector<float>> embeddings;
-            };
-            std::unordered_map<size_t, PendingDimBuild> dim_builds;
-
-            // Query vectors grouped by dimension, including quantized-primary rows where the
-            // float embedding blob is absent.
-            const char* select_by_dim =
-                "SELECT rowid, embedding, embedding_dim, quantized_format, quantized_bits, "
-                "quantized_seed, quantized_packed_codes FROM vectors ORDER BY embedding_dim";
-            std::unique_ptr<TurboQuantMSE> rebuild_tq;
-            if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-                TurboQuantConfig cfg;
-                cfg.dimension = config_.embedding_dim;
-                cfg.bits_per_channel = config_.turboquant_bits;
-                cfg.seed = config_.turboquant_seed;
-                rebuild_tq = std::make_unique<TurboQuantMSE>(cfg);
-                auto scales = loadTurboQuantPerCoordScales(
-                    db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
-                if (!scales.empty()) {
-                    rebuild_tq->setPerCoordScales(std::move(scales));
-                }
-            }
-            if (sqlite3_prepare_v2(db_, select_by_dim, -1, &stmt, nullptr) == SQLITE_OK) {
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    int64_t rowid = sqlite3_column_int64(stmt, 0);
-                    const void* blob = sqlite3_column_blob(stmt, 1);
-                    int blob_size = sqlite3_column_bytes(stmt, 1);
-                    size_t num_floats = (blob && blob_size > 0)
-                                            ? static_cast<size_t>(blob_size) / sizeof(float)
-                                            : 0;
-
-                    // Get dimension from column or infer from blob
-                    size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 2));
-                    if (dim == 0) {
-                        dim = num_floats; // Fallback to blob size
-                    } else if (num_floats > 0 && dim != num_floats) {
-                        spdlog::warn(
-                            "[HNSW] embedding_dim mismatch for rowid={} (col_dim={} blob_dim={}) "
-                            "- using blob_dim",
-                            rowid, dim, num_floats);
-                        dim = num_floats;
-                    }
-
-                    if (dim == 0) {
-                        continue;
-                    }
-
-                    std::vector<float> embedding;
-                    if (blob && blob_size > 0 &&
-                        (blob_size % static_cast<int>(sizeof(float))) == 0) {
-                        embedding.resize(num_floats);
-                        std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-                    } else {
-                        if (!rebuild_tq) {
-                            continue;
-                        }
-                        auto fmt =
-                            static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 3));
-                        if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
-                            continue;
-                        }
-                        const void* qblob = sqlite3_column_blob(stmt, 6);
-                        int qblob_size = sqlite3_column_bytes(stmt, 6);
-                        if (!qblob || qblob_size <= 0) {
-                            continue;
-                        }
-                        std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
-                        std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                        embedding =
-                            vector_utils::packedDequantizeVector(packed, dim, rebuild_tq.get());
-                    }
-
-                    if (embedding.empty()) {
-                        continue;
-                    }
-
-                    // Skip zero-norm vectors during rebuild (they become dead-ends in HNSW)
-                    if (isZeroNormEmbedding(embedding)) {
-                        continue;
-                    }
-                    if (!isFiniteEmbedding(embedding)) {
-                        continue;
-                    }
-
-                    auto& build = dim_builds[dim];
-                    build.ids.push_back(static_cast<size_t>(rowid));
-                    build.embeddings.push_back(std::move(embedding));
-                }
-                sqlite3_finalize(stmt);
-
-                for (auto& [dim, build] : dim_builds) {
-                    auto* hnsw = getOrCreateHnswForDim(dim);
-                    if (!hnsw || build.ids.empty()) {
-                        continue;
-                    }
-
-                    std::vector<std::span<const float>> spans;
-                    spans.reserve(build.embeddings.size());
-                    for (auto& embedding : build.embeddings) {
-                        spans.emplace_back(embedding.data(), embedding.size());
-                    }
-                    const auto buildStart = std::chrono::steady_clock::now();
-                    spdlog::info("[HNSW] Bulk rebuild start dim={} vectors={}", dim,
-                                 build.ids.size());
-                    hnsw->build(
-                        std::span<const size_t>(build.ids.data(), build.ids.size()),
-                        std::span<const std::span<const float>>(spans.data(), spans.size()));
-                    const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::steady_clock::now() - buildStart)
-                                             .count();
-                    spdlog::info("[HNSW] Bulk rebuilt index for dim={} with {} vectors in {} ms",
-                                 dim, build.ids.size(), buildMs);
-                }
-
-                // Log what we built and save immediately
-                for (const auto& [dim, idx] : hnsw_indices_) {
-                    spdlog::info("[HNSW] Built index for dim={} with {} vectors", dim, idx->size());
-                    hnsw_dirty_[dim] = true;
-                }
-                // Save indices immediately after building to ensure persistence
-                saveAllHnswUnlocked();
-            }
-        }
-
-        hnsw_loaded_ = true;
-        hnsw_needs_rebuild_ = false;
-    }
-
-    // Save all HNSW indices to disk
-    void saveAllHnswUnlocked() {
-        if (!db_)
-            return;
-
-        for (auto& [dim, hnsw] : hnsw_indices_) {
-            if (!hnsw || !hnsw_dirty_[dim])
-                continue;
-
-            std::string table_prefix = hnswTablePrefix(dim);
-            char* err = nullptr;
-            const auto saveStart = std::chrono::steady_clock::now();
-            spdlog::info("[HNSW] Saving full index for dim={} with {} vectors", dim, hnsw->size());
-            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, HNSWCosineMetric>(
-                db_, "main", table_prefix.c_str(), *hnsw, &err);
-            if (rc != SQLITE_OK) {
-                if (err) {
-                    spdlog::error("[HNSW] Failed to save index for dim={} rc={}: {}", dim, rc, err);
-                    sqlite3_free(err);
-                } else {
-                    spdlog::error("[HNSW] Failed to save index for dim={} rc={} sqlite_errmsg={}",
-                                  dim, rc, sqlite3_errmsg(db_));
-                }
-            } else {
-                hnsw_dirty_[dim] = false;
-                const auto saveMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now() - saveStart)
-                                        .count();
-                spdlog::info("[HNSW] Saved index for dim={} with {} vectors in {} ms", dim,
-                             hnsw->size(), saveMs);
-            }
-        }
-        pending_inserts_ = 0;
-    }
-
-    // Save HNSW checkpoint (metadata + recent nodes) for all indices
-    void saveHnswCheckpointUnlocked() {
-        if (!db_)
-            return;
-
-        const auto checkpointStart = std::chrono::steady_clock::now();
-        size_t dirtyDims = 0;
-
-        for (auto& [dim, hnsw] : hnsw_indices_) {
-            if (!hnsw || !hnsw_dirty_[dim])
-                continue;
-
-            ++dirtyDims;
-
-            std::string table_prefix = hnswTablePrefix(dim);
-            char* err = nullptr;
-            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, HNSWCosineMetric>(
-                db_, "main", table_prefix.c_str(), *hnsw, &err);
-            if (rc != SQLITE_OK && err) {
-                spdlog::warn("[HNSW] Failed to save checkpoint for dim={}: {}", dim, err);
-                sqlite3_free(err);
-            }
-        }
-        if (dirtyDims > 0) {
-            const auto checkpointMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::steady_clock::now() - checkpointStart)
-                                          .count();
-            spdlog::info("[HNSW] Saved checkpoint for {} dirty dim(s) in {} ms", dirtyDims,
-                         checkpointMs);
-        }
-        pending_inserts_ = 0;
-    }
-
-    // Rebuild all HNSW indices from scratch
-    void rebuildHnswUnlocked() {
-        last_hnsw_maintenance_mode_ = HnswMaintenanceMode::FullRebuild;
-        last_hnsw_added_count_ = 0;
-        last_hnsw_removed_count_ = 0;
-        hnsw_indices_.clear();
-        hnsw_dirty_.clear();
-        hnsw_loaded_ = false;
-
-        // Drop persisted HNSW tables (best effort, may fail but force_rebuild handles it)
-        dropHnswTablesUnlocked();
-
-        // Force rebuild from vectors table, bypassing any stale persisted tables
-        ensureHnswLoadedUnlocked(/*force_rebuild=*/true);
-        saveAllHnswUnlocked();
-    }
-
-    // Drop all HNSW tables (but not the vectors table)
-    void dropHnswTablesUnlocked() {
-        std::vector<std::string> tables_to_drop;
-        const char* find_tables =
-            "SELECT name FROM sqlite_master WHERE type='table' AND "
-            "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes')";
-
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* table_name =
-                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-                if (table_name) {
-                    tables_to_drop.push_back(std::string("DROP TABLE IF EXISTS ") + table_name);
-                }
-            }
-            sqlite3_finalize(stmt);
-        }
-
-        for (const auto& sql : tables_to_drop) {
-            char* err_msg = nullptr;
-            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
-            if (rc != SQLITE_OK) {
-                spdlog::warn("[HNSW] Failed to drop table: {} (sql: {})",
-                             err_msg ? err_msg : "unknown error", sql);
-            }
-            if (err_msg) {
-                sqlite3_free(err_msg);
-            }
-        }
-
-        if (!tables_to_drop.empty()) {
-            spdlog::debug("[HNSW] Dropped {} persisted HNSW tables for rebuild",
-                          tables_to_drop.size());
-        }
-    }
-
-    // Compact all HNSW indices (remove soft-deleted nodes)
-    void compactHnswUnlocked() {
-        for (auto& [dim, hnsw] : hnsw_indices_) {
-            if (!hnsw || !hnsw->needs_compaction(config_.compaction_threshold))
-                continue;
-
-            spdlog::info("[HNSW] Compacting index for dim={} (deleted ratio: {:.2f})", dim,
-                         static_cast<float>(hnsw->deleted_count()) /
-                             static_cast<float>(hnsw->size()));
-
-            *hnsw = hnsw->compact();
-            hnsw_dirty_[dim] = true;
-        }
-
-        saveAllHnswUnlocked();
-    }
-
     Config config_;
     std::string db_path_;
     sqlite3* db_ = nullptr;
-    bool initialized_ = false;
+    std::atomic<bool> initialized_{false};
     bool in_transaction_ = false;
 
-    // HNSW indices - one per embedding dimension for multi-model support
-    // Key: embedding dimension (e.g., 384, 768)
-    // Value: HNSW index for vectors of that dimension
-    std::unordered_map<size_t, std::unique_ptr<HNSWIndex>> hnsw_indices_;
-    std::unordered_map<size_t, bool> hnsw_dirty_; // Track dirty state per dimension
-    bool hnsw_loaded_ = false;
-    bool hnsw_needs_rebuild_ = false;
-    std::unordered_map<size_t, std::unique_ptr<QuantizedHNSWIndex>> quantized_hnsw_indices_;
-    std::unordered_map<size_t, std::unique_ptr<QuantizedHNSWSearch>> quantized_hnsw_searches_;
-    std::unordered_set<size_t> quantized_hnsw_ready_dims_;
-    std::unordered_set<size_t> quantized_hnsw_dirty_dims_;
-    size_t pending_inserts_ = 0;
+    std::unordered_map<size_t, std::unique_ptr<SimeonPqIndexState>> simeon_pq_indices_;
+    std::unordered_set<size_t> simeon_pq_ready_dims_;
+    std::unordered_set<size_t> simeon_pq_dirty_dims_;
     std::unordered_map<size_t, size_t> query_dim_counts_;
-    std::atomic<bool> background_seed_running_{false};
-    std::atomic<bool> background_seed_scheduled_{false};
-    std::atomic<bool> background_seed_cancel_requested_{false};
-    std::thread background_seed_thread_;
-    HnswMaintenanceMode last_hnsw_maintenance_mode_ = HnswMaintenanceMode::None;
-    std::size_t last_hnsw_added_count_ = 0;
-    std::size_t last_hnsw_removed_count_ = 0;
     std::unordered_set<size_t> vec0_ready_dims_;
     std::unordered_set<size_t> vec0_dirty_dims_;
-
-    // Helper to get table prefix for dimension-specific HNSW tables
-    std::string hnswTablePrefix(size_t dim) const { return "vectors_" + std::to_string(dim); }
-
-    // Get or create HNSW index for a specific dimension
-    HNSWIndex* getOrCreateHnswForDim(size_t dim) {
-        auto it = hnsw_indices_.find(dim);
-        if (it != hnsw_indices_.end()) {
-            return it->second.get();
-        }
-
-        // Get corpus size for optimal HNSW configuration
-        // Query directly since we may not hold the lock in the same way as getVectorCount
-        size_t corpus_size = 0;
-        if (stmt_count_) {
-            sqlite3_reset(stmt_count_);
-            StmtResetGuard guard(stmt_count_);
-            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
-                corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
-            }
-        }
-
-        auto countIt = query_dim_counts_.find(dim);
-        if (countIt != query_dim_counts_.end() && countIt->second > 0) {
-            corpus_size = std::max(corpus_size, countIt->second);
-        }
-
-        // Use corpus-aware config from sqlite-vec-cpp for optimal M values
-        // Higher dims (384+) get M=24, M_max=48, M_max_0=96 for better recall
-        HNSWIndex::Config config = HNSWIndex::Config::for_corpus(corpus_size, dim);
-
-        // Preserve user-configured ef_construction if higher than library default
-        config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
-        config.normalize_vectors = true;
-
-        spdlog::info("[HNSW] Creating index for dim={} corpus_size={}: M={} M_max={} M_max_0={} "
-                     "ef_construction={} normalize_vectors={}",
-                     dim, corpus_size, config.M, config.M_max, config.M_max_0,
-                     config.ef_construction, config.normalize_vectors);
-
-        auto idx = std::make_unique<HNSWIndex>(config);
-        auto* ptr = idx.get();
-        hnsw_indices_[dim] = std::move(idx);
-        hnsw_dirty_[dim] = true;
-
-        // Create dimension-specific shadow tables
-        std::string table_prefix = hnswTablePrefix(dim);
-        char* err_msg = nullptr;
-        int rc = sqlite_vec_cpp::index::create_hnsw_shadow_tables(db_, "main", table_prefix.c_str(),
-                                                                  &err_msg);
-        if (rc != SQLITE_OK) {
-            spdlog::warn("[HNSW] Failed to create shadow tables for dim {}: {}", dim,
-                         err_msg ? err_msg : "unknown");
-            sqlite3_free(err_msg);
-        } else {
-            spdlog::info("[HNSW] Created shadow tables for dim {} ({})", dim, table_prefix);
-        }
-
-        return ptr;
-    }
-
-    // Get existing HNSW index for a dimension (nullptr if not exists)
-    HNSWIndex* getHnswForDim(size_t dim) {
-        auto it = hnsw_indices_.find(dim);
-        return it != hnsw_indices_.end() ? it->second.get() : nullptr;
-    }
-
-    // Check if any HNSW index has data
-    bool anyHnswHasData() const {
-        for (const auto& [dim, idx] : hnsw_indices_) {
-            if (idx && !idx->empty())
-                return true;
-        }
-        return false;
-    }
 
     // Prepared statements
     sqlite3_stmt* stmt_insert_ = nullptr;
@@ -4920,6 +3572,10 @@ bool SqliteVecBackend::tablesExist() const {
     return impl_->tablesExist();
 }
 
+Result<void> SqliteVecBackend::ensurePersistenceSchema() {
+    return impl_->ensurePersistenceSchema();
+}
+
 Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {
     return impl_->insertVector(record);
 }
@@ -4971,6 +3627,16 @@ SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
     return impl_->getVectorsByDocument(document_hash);
 }
 
+Result<std::unordered_map<std::string, VectorRecord>>
+SqliteVecBackend::getDocumentLevelVectorsAll() {
+    return impl_->getDocumentLevelVectorsAll();
+}
+
+Result<size_t>
+SqliteVecBackend::forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) {
+    return impl_->forEachDocumentLevelVector(visitor);
+}
+
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     return impl_->hasEmbedding(document_hash);
 }
@@ -4983,7 +3649,7 @@ Result<size_t> SqliteVecBackend::getVectorCount() {
     return impl_->getVectorCount();
 }
 
-Result<VectorDatabase::DatabaseStats> SqliteVecBackend::getStats() {
+Result<VectorDatabaseStats> SqliteVecBackend::getStats() {
     return impl_->getStats();
 }
 
@@ -5003,8 +3669,20 @@ Result<void> SqliteVecBackend::optimize() {
     return impl_->optimize();
 }
 
+Result<void> SqliteVecBackend::persistIndex() {
+    return impl_->persistIndex();
+}
+
 Result<void> SqliteVecBackend::checkpointWal() {
     return impl_->checkpointWal();
+}
+
+Result<void> SqliteVecBackend::beginBulkLoad() {
+    return impl_->beginBulkLoad();
+}
+
+Result<void> SqliteVecBackend::finalizeBulkLoad() {
+    return impl_->finalizeBulkLoad();
 }
 
 Result<void> SqliteVecBackend::beginTransaction() {
@@ -5078,31 +3756,6 @@ Result<SqliteVecBackend::OrphanCleanupStats> SqliteVecBackend::cleanupOrphanRows
 Result<void> SqliteVecBackend::ensureVecLoaded() {
     // sqlite-vec-cpp doesn't require extension loading - it's statically linked
     return Result<void>{};
-}
-
-SqliteVecBackend::HnswMaintenanceMode SqliteVecBackend::testingLastHnswMaintenanceMode() const {
-    auto mode = impl_->testingLastHnswMaintenanceMode();
-    switch (mode) {
-        case Impl::HnswMaintenanceMode::LoadPersisted:
-            return HnswMaintenanceMode::LoadPersisted;
-        case Impl::HnswMaintenanceMode::CatchUp:
-            return HnswMaintenanceMode::CatchUp;
-        case Impl::HnswMaintenanceMode::FullRebuild:
-            return HnswMaintenanceMode::FullRebuild;
-        case Impl::HnswMaintenanceMode::BruteForceFallback:
-            return HnswMaintenanceMode::BruteForceFallback;
-        case Impl::HnswMaintenanceMode::None:
-        default:
-            return HnswMaintenanceMode::None;
-    }
-}
-
-std::size_t SqliteVecBackend::testingLastHnswAddedCount() const {
-    return impl_->testingLastHnswAddedCount();
-}
-
-std::size_t SqliteVecBackend::testingLastHnswRemovedCount() const {
-    return impl_->testingLastHnswRemovedCount();
 }
 
 // ============================================================================

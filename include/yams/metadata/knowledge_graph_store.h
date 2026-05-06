@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,6 +13,8 @@
 #include <vector>
 
 namespace yams::metadata {
+
+class ConnectionPool;
 
 /**
  * KnowledgeGraphStoreConfig controls caching and behavior of the KG store.
@@ -194,8 +197,13 @@ public:
         virtual Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) = 0;
         virtual Result<void> addAliases(const std::vector<KGAlias>& aliases) = 0;
         virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;
+        virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;
+        virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
         virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
         virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
+        virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+        virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
+        virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
         virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
         virtual Result<void> commit() = 0;
     };
@@ -205,6 +213,8 @@ public:
     // Configuration
     virtual void setConfig(const KnowledgeGraphStoreConfig& cfg) = 0;
     virtual const KnowledgeGraphStoreConfig& getConfig() const = 0;
+
+    virtual void setReadPool(ConnectionPool* readPool) { (void)readPool; }
 
     virtual Result<std::unique_ptr<WriteBatch>> beginWriteBatch() = 0;
     virtual KGEntityCountSnapshot getEntityCountSnapshot() const = 0;
@@ -222,6 +232,11 @@ public:
 
     virtual Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) = 0;
     virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) = 0;
+
+    // Batch node retrieval by stable node keys. Missing keys are omitted.
+    // More efficient than calling getNodeByKey N times for semantic graph maintenance.
+    virtual Result<std::vector<KGNode>>
+    getNodesByKeys(const std::vector<std::string>& nodeKeys) = 0;
 
     // Batch node retrieval: returns nodes by IDs in a single query
     // More efficient than calling getNodeById N times for BFS hydration
@@ -281,6 +296,14 @@ public:
     getEdgesFrom(std::int64_t srcNodeId, std::optional<std::string_view> relation = std::nullopt,
                  std::size_t limit = 200, std::size_t offset = 0) = 0;
 
+    // Batch version of getEdgesFrom: fetch edges for multiple source nodes in one query.
+    // Returns a map from source node ID to its outgoing edges.
+    // Useful for bounded graph-maintenance regions without full relation scans.
+    virtual Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
+                      std::optional<std::string_view> relation = std::nullopt,
+                      std::size_t limitPerNode = 10) = 0;
+
     virtual Result<std::vector<KGEdge>>
     getEdgesTo(std::int64_t dstNodeId, std::optional<std::string_view> relation = std::nullopt,
                std::size_t limit = 200, std::size_t offset = 0) = 0;
@@ -299,6 +322,14 @@ public:
     getEdgesBidirectional(std::int64_t nodeId,
                           std::optional<std::string_view> relation = std::nullopt,
                           std::size_t limit = 400) = 0;
+
+    // Stream lightweight edge tuples for a relation. The callback returns false to stop early.
+    // This avoids materializing relation/properties strings for corpus-wide maintenance passes.
+    virtual Result<void>
+    forEachEdgeByRelation(std::string_view relation,
+                          const std::function<bool(std::int64_t edgeId, std::int64_t srcNodeId,
+                                                   std::int64_t dstNodeId, float weight)>& visitor,
+                          std::size_t limit = 0) = 0;
 
     // For quick structural scoring: neighbor ids only (fast path)
     virtual Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,
@@ -388,6 +419,10 @@ public:
     // Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
 
+    // Delete every edge matching the given relation. Used to clear derived
+    // graphs (e.g. semantic_neighbor) before a deterministic corpus-wide rebuild.
+    virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+
     // Delete edges that reference missing nodes. Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
 
@@ -399,6 +434,13 @@ public:
     virtual Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,
                                                           std::string_view relation,
                                                           std::size_t limit = 1000) = 0;
+
+    // Find nodes of a given type that have NO outbound edges of the specified relation.
+    // Used to drive bounded backfill (e.g. semantic_neighbor edges that were never built
+    // for older docs). Result is bounded by `limit`.
+    virtual Result<std::vector<KGNode>> findNodesLackingOutboundEdges(std::string_view nodeType,
+                                                                      std::string_view relation,
+                                                                      std::size_t limit = 1000) = 0;
 
     // Get all distinct node types with their counts, ordered by count descending.
     // Used for node type discovery in CLI (e.g., `yams graph --list-types`).

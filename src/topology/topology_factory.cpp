@@ -1,5 +1,6 @@
 #include <yams/topology/topology_factory.h>
 
+#include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_baseline.h>
 
 #include <spdlog/spdlog.h>
@@ -12,10 +13,10 @@ namespace yams::topology {
 namespace {
 
 constexpr std::string_view kConnectedKey = "connected";
+constexpr std::string_view kHdbscanKey = "hdbscan";
+constexpr std::string_view kLouvainKey = "louvain";
 
-// Central registry. Kept as a plain array so the factory has no global state
-// and no initialization-order concerns.
-constexpr std::array<std::string_view, 1> kKnownAlgorithms{kConnectedKey};
+constexpr std::array<std::string_view, 3> kKnownAlgorithms{kConnectedKey, kHdbscanKey, kLouvainKey};
 
 } // namespace
 
@@ -24,8 +25,12 @@ std::shared_ptr<ITopologyEngine> makeEngine(std::string_view algorithm) {
     if (key == kConnectedKey) {
         return std::make_shared<ConnectedComponentTopologyEngine>();
     }
-    // resolveFactoryKey only returns keys we claim to support; this branch
-    // exists as a forward-compat safety net for future registrations.
+    if (key == kHdbscanKey) {
+        return std::make_shared<HDBSCANTopologyEngine>();
+    }
+    if (key == kLouvainKey) {
+        return std::make_shared<LouvainTopologyEngine>();
+    }
     spdlog::warn("[topology] unknown algorithm '{}'; falling back to connected", algorithm);
     return std::make_shared<ConnectedComponentTopologyEngine>();
 }

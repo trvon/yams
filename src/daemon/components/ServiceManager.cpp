@@ -62,6 +62,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -74,11 +75,14 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TopologyTuner.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/topology/topology_factory.h>
 
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -93,7 +97,6 @@
 #include <yams/metadata/migration.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
-#include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -222,6 +225,11 @@ ServiceManager::PluginStatusSnapshot ServiceManager::getPluginStatusSnapshot() c
     return snap ? *snap : PluginStatusSnapshot{};
 }
 
+std::shared_ptr<const ServiceManager::PluginStatusSnapshot>
+ServiceManager::getPluginStatusSnapshotPtr() const {
+    return std::atomic_load_explicit(&pluginStatusSnapshot_, std::memory_order_acquire);
+}
+
 void ServiceManager::refreshPluginStatusSnapshot() {
     PluginStatusSnapshot snapshot;
     try {
@@ -273,12 +281,12 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         }
 
         // PBI-096: External (Python/JS) plugins
-        spdlog::info("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
-                     static_cast<void*>(pluginManager_.get()));
+        spdlog::debug("[refreshPluginStatusSnapshot] Checking external plugins, pluginManager_={}",
+                      static_cast<void*>(pluginManager_.get()));
         if (auto* external = getExternalPluginHost()) {
             auto externalLoaded = external->listLoaded();
-            spdlog::info("[refreshPluginStatusSnapshot] External host returned {} plugins",
-                         externalLoaded.size());
+            spdlog::debug("[refreshPluginStatusSnapshot] External host returned {} plugins",
+                          externalLoaded.size());
             // Reserve additional space for external plugins
             snapshot.records.reserve(snapshot.records.size() + externalLoaded.size());
             addPluginRecords(externalLoaded, "external");
@@ -306,6 +314,122 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
+
+    {
+        auto enginePolicy = ConfigResolver::resolveTopologyEnginePolicy();
+        if (enginePolicy.engine) {
+            const auto resolved = std::string{topology::resolveFactoryKey(*enginePolicy.engine)};
+            tuningConfig_.topologyAlgorithm = resolved;
+            spdlog::info("Topology engine applied via config: {} (resolved={})",
+                         *enginePolicy.engine, resolved);
+        }
+        if (enginePolicy.hdbscanMinPoints) {
+            topologyManager_.setHdbscanMinPoints(*enginePolicy.hdbscanMinPoints);
+            spdlog::info("Topology hdbscan_min_points applied via config: {}",
+                         *enginePolicy.hdbscanMinPoints);
+        }
+        if (enginePolicy.hdbscanMinClusterSize) {
+            topologyManager_.setHdbscanMinClusterSize(*enginePolicy.hdbscanMinClusterSize);
+            spdlog::info("Topology hdbscan_min_cluster_size applied via config: {}",
+                         *enginePolicy.hdbscanMinClusterSize);
+        }
+        if (enginePolicy.featureSmoothingHops) {
+            topologyManager_.setFeatureSmoothingHops(*enginePolicy.featureSmoothingHops);
+            spdlog::info("Topology feature_smoothing_hops applied via config: {}",
+                         *enginePolicy.featureSmoothingHops);
+        }
+    }
+
+    // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest
+    // every embedding batch fires a `requestTopologyRebuild("post_ingest_drain")`
+    // and without throttling each rebuild starts immediately after the previous
+    // one finishes — turning O(N) ingest into O(N²) wall time because every
+    // rebuild runs HDBSCAN over the full corpus. Default 60s; set to 0 to
+    // disable. Env knob `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
+    {
+        std::int64_t throttleMs = 60'000; // 60s default
+        if (const char* raw = std::getenv("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
+            raw != nullptr && *raw != '\0') {
+            try {
+                throttleMs = std::max<std::int64_t>(0, std::stoll(raw));
+            } catch (...) {
+                // ignore bad input, keep default
+            }
+        }
+        topologyManager_.setRebuildMinIntervalMs(throttleMs);
+        spdlog::info("[ServiceManager] TopologyManager rebuild throttle = {} ms", throttleMs);
+    }
+
+    // Phase G: optional adaptive topology tuner. Disabled by default;
+    // opt-in via [topology.tuner].enabled=true in the daemon config.
+    {
+        auto tunerPolicy = ConfigResolver::resolveTopologyTunerPolicy();
+        const bool tunerEnabled = tunerPolicy.enabled.value_or(false);
+        if (tunerEnabled) {
+            TopologyTunerConfig tcfg;
+            tcfg.enabled = true;
+            if (tunerPolicy.cooldownMinutes) {
+                tcfg.cooldown = std::chrono::minutes{*tunerPolicy.cooldownMinutes};
+            }
+            if (tunerPolicy.docCountDelta) {
+                tcfg.docCountDelta = *tunerPolicy.docCountDelta;
+            }
+            if (tunerPolicy.rewardAlphaSingleton) {
+                tcfg.weights.alphaSingleton = *tunerPolicy.rewardAlphaSingleton;
+            }
+            if (tunerPolicy.rewardBetaGiantCluster) {
+                tcfg.weights.betaGiantCluster = *tunerPolicy.rewardBetaGiantCluster;
+            }
+            if (tunerPolicy.rewardGammaGiniDeviation) {
+                tcfg.weights.gammaGiniDeviation = *tunerPolicy.rewardGammaGiniDeviation;
+            }
+            if (tunerPolicy.rewardDeltaIntraEdge) {
+                tcfg.weights.deltaIntraEdge = *tunerPolicy.rewardDeltaIntraEdge;
+            }
+            // Phase H-TDA: reward mode (geometric / persistence / hybrid).
+            if (tunerPolicy.rewardMode) {
+                std::string mode = *tunerPolicy.rewardMode;
+                std::transform(mode.begin(), mode.end(), mode.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (mode == "persistence") {
+                    tcfg.rewardMode = TunerRewardMode::Persistence;
+                } else if (mode == "hybrid") {
+                    tcfg.rewardMode = TunerRewardMode::Hybrid;
+                } else {
+                    tcfg.rewardMode = TunerRewardMode::Geometric;
+                }
+            }
+            if (tunerPolicy.persistenceSampleSize) {
+                tcfg.persistenceSampleSize = *tunerPolicy.persistenceSampleSize;
+            }
+            // Persist MAB state under data_dir so arm-pull history survives
+            // daemon restarts. Without this, UCB1 always picks the alphabetically
+            // first arm on each fresh daemon spawn (no pulls, infinite UCB).
+            if (!config_.dataDir.empty()) {
+                tcfg.statePath = config_.dataDir / "topology_tuner_state.json";
+            }
+            // V1: arm grid is built for a typical corpus (~5k docs); adaptive
+            // resizing as the corpus grows is a future iteration.
+            constexpr std::size_t kInitialCorpusEstimate = 5000;
+            auto tuner = std::make_shared<TopologyTuner>(tcfg);
+            tuner->setArms(defaultArmGrid(kInitialCorpusEstimate));
+            if (tcfg.statePath) {
+                if (auto r = tuner->loadState(*tcfg.statePath); !r) {
+                    spdlog::debug("[ServiceManager] topology tuner: no prior state at {} ({})",
+                                  tcfg.statePath->string(), r.error().message);
+                } else {
+                    spdlog::info("[ServiceManager] topology tuner loaded state from {}",
+                                 tcfg.statePath->string());
+                }
+            }
+            topologyManager_.setTopologyTuner(tuner);
+            spdlog::info("[ServiceManager] topology tuner enabled (cooldown={}min "
+                         "doc_delta={} arms={} state={})",
+                         std::chrono::duration_cast<std::chrono::minutes>(tcfg.cooldown).count(),
+                         tcfg.docCountDelta, tuner->arms().size(),
+                         tcfg.statePath ? tcfg.statePath->string() : std::string{"<ephemeral>"});
+        }
+    }
 
     metricsPublisher_.setWorkerTarget(1);
 
@@ -351,6 +475,16 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         requestExecutor_->start();
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize RequestExecutor: {}", e.what());
+        throw;
+    }
+
+    // Dedicated blocking pool for synchronous SQLite I/O (open, migrations).
+    // Kept separate from the event-loop pool so heavy disk ops never stall async work.
+    try {
+        blockingPool_ = std::make_unique<boost::asio::thread_pool>(1);
+        spdlog::debug("[ServiceManager] Blocking thread pool created (1 worker)");
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to initialize blocking thread pool: {}", e.what());
         throw;
     }
 
@@ -508,10 +642,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 ingestService_ = std::make_unique<IngestService>(this, workCoordinator_.get());
             }
         } catch (const std::exception& e) {
-            spdlog::warn("ServiceManager: failed to initialize IngestService scaffold: {}",
-                         e.what());
+            spdlog::warn("ServiceManager: failed to initialize IngestService: {}", e.what());
         } catch (...) {
-            spdlog::warn("ServiceManager: unknown error initializing IngestService scaffold");
+            spdlog::warn("ServiceManager: unknown error initializing IngestService");
         }
 
         // PBI-088: Create extracted managers (wiring in progress)
@@ -537,8 +670,18 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             vectorDeps.serviceFsm = &serviceFsm_;
             vectorDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
             vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
+            vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
+
+            // Create VectorIndexCoordinator (owns all vector-index mutations)
+            vectorIndexCoordinator_ = std::make_shared<VectorIndexCoordinator>(
+                workCoordinator_->getExecutor(),
+                nullptr, // VectorDatabase wired below after DB init
+                &state_);
+            vectorIndexCoordinator_->setBuildsSuppressed(
+                config_.instrumentation.suppressVectorIndexBuild);
+            spdlog::debug("[ServiceManager] VectorIndexCoordinator created");
 
             // Create DatabaseManager
             DatabaseManager::Dependencies dbDeps;
@@ -557,6 +700,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
+            checkpointDeps.vectorIndexCoordinator = vectorIndexCoordinator_.get();
+            checkpointDeps.state = &state_;
             checkpointDeps.hotzoneManager = nullptr;
             checkpointDeps.metadataRepository = getMetadataRepo().get();
             checkpointDeps.executor = workCoordinator_->getExecutor();
@@ -696,6 +841,9 @@ yams::Result<void> ServiceManager::initialize() {
             ipcCfg.min_size = 4;
         }
         ipcCfg.max_size = TuneAdvisor::poolMaxSizeIpc();
+        if (ipcCfg.max_size < ipcCfg.min_size) {
+            ipcCfg.max_size = ipcCfg.min_size;
+        }
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
@@ -706,12 +854,14 @@ yams::Result<void> ServiceManager::initialize() {
         if (ioCfg.min_size < 2) {
             ioCfg.min_size = 2;
         }
-        // Bound IO max by both configured max and a dynamic cap from CPU budget
         try {
             auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
             ioCfg.max_size = std::min(TuneAdvisor::poolMaxSizeIpcIo(), dynCap);
         } catch (...) {
             ioCfg.max_size = TuneAdvisor::poolMaxSizeIpcIo();
+        }
+        if (ioCfg.max_size < ioCfg.min_size) {
+            ioCfg.max_size = ioCfg.min_size;
         }
         ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
@@ -727,8 +877,7 @@ yams::Result<void> ServiceManager::initialize() {
         spdlog::debug("Pool configure error: {}", e.what());
     }
 
-    // SearchEngine initialization is handled separately via searchEngineManager_
-    // (SearchExecutor has been deprecated and removed)
+    // Search engine initialization is handled separately via searchEngineManager_.
     return Result<void>();
 }
 
@@ -991,6 +1140,21 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
     }
 
+    // Phase 3.9: Stop the dedicated blocking I/O pool before tearing down shared state.
+    // SQLite open/migrate run here; we must join so no worker touches database_ after
+    // DatabaseManager is destroyed.
+    spdlog::info("[ServiceManager] Phase 3.9: Stopping blocking I/O pool");
+    if (blockingPool_) {
+        try {
+            blockingPool_->stop();
+            blockingPool_->join();
+            spdlog::info("[ServiceManager] Phase 3.9: Blocking I/O pool stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed: {}", e.what());
+        }
+        blockingPool_.reset();
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -1091,13 +1255,10 @@ void ServiceManager::shutdown() {
         }
     }
 
-    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
-    if (kgWriteQueue_) {
-        kgWriteQueue_->shutdown();
-        kgWriteQueue_.reset();
-        spdlog::info("[ServiceManager] Phase 6.3.6: KG write queue shutdown complete");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.3.6: No KG write queue to shutdown");
+    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down write coordinator");
+    if (writeCoordinator_) {
+        writeCoordinator_->shutdown();
+        writeCoordinator_.reset();
     }
 
     // No vector index to save - using VectorDatabase directly
@@ -1180,7 +1341,6 @@ void ServiceManager::shutdown() {
     }
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
-    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
@@ -1196,18 +1356,9 @@ void ServiceManager::shutdown() {
             databaseManager_.reset();
             spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
         }
+        database_.reset();
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
-    }
-
-    spdlog::info("[ServiceManager] Phase 7: Database shutdown delegated to DatabaseManager");
-    try {
-        if (database_) {
-            database_->close();
-            database_.reset();
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[ServiceManager] Phase 7: Legacy database close failed: {}", e.what());
     }
 
     // Release all remaining resources
@@ -1217,11 +1368,13 @@ void ServiceManager::shutdown() {
     searchComponent_.reset();
     spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
     graphQueryServiceOverride_.reset();
-    embeddingLifecycle_.resetReranker();
     repairManager_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
+
+    spdlog::info("[ServiceManager] Phase 8.4.2: Releasing vector index coordinator");
+    vectorIndexCoordinator_.reset();
 
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
     initStrand_.reset();
@@ -1253,20 +1406,6 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
     }
-    try {
-        if (databaseManager_) {
-            databaseManager_->shutdown();
-            databaseManager_.reset();
-            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager reset");
-        } else {
-            spdlog::info("[ServiceManager] Phase 9.3: DatabaseManager already reset");
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
-    }
-    // Phase 9.4: WALManager shutdown is now handled by DatabaseManager::shutdown()
-    // (invoked in Phase 9.3 above).
-
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
         abiPluginLoader_.reset();
@@ -1299,7 +1438,21 @@ void ServiceManager::shutdown() {
 
 // Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
 static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
-                                     const yams::daemon::StateComponent& state) {
+                                     const yams::daemon::StateComponent& state,
+                                     const yams::daemon::ServiceManager* serviceManager = nullptr) {
+    static std::mutex sLastWriteMutex;
+    static std::chrono::steady_clock::time_point sLastWriteAt{};
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(sLastWriteMutex);
+        const auto sinceLast =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastWriteAt).count();
+        const bool ready = state.readiness.bootstrapReady();
+        if (!ready && sLastWriteAt.time_since_epoch().count() != 0 && sinceLast < 250) {
+            return;
+        }
+        sLastWriteAt = now;
+    }
     try {
         namespace fs = std::filesystem;
         fs::path dir = yams::daemon::YamsDaemon::getXDGRuntimeDir();
@@ -1308,10 +1461,10 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         yams::common::ensureDirectories(dir);
         fs::path path = dir / "yams-daemon.status.json";
         nlohmann::json j;
-        j["ready"] = state.readiness.fullyReady();
+        j["ready"] = state.readiness.bootstrapReady();
         // Normalize overall to lowercase for consistency with IPC lifecycle strings
         {
-            std::string ov = state.readiness.overallStatus();
+            std::string ov = state.readiness.bootstrapStatus();
             for (auto& c : ov)
                 c = static_cast<char>(std::tolower(c));
             j["overall"] = ov;
@@ -1330,7 +1483,50 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             state.readiness.vectorDbInitAttempted.load();
         rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
         rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
+        if (serviceManager) {
+            const auto freshness = serviceManager->getIndexFreshnessSnapshot();
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementConfigured)] =
+                freshness.simeonLexicalConfigured;
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementReady)] =
+                freshness.simeonLexicalReady;
+            rd[std::string(readiness::kSearchEngineLexicalEnhancementBuilding)] =
+                freshness.simeonLexicalBuilding;
+            rd[std::string(readiness::kSearchEngineFragmentGeometryReady)] =
+                freshness.simeonFragmentGeometryReady;
+            if (!freshness.simeonLexicalConfigured) {
+                j["search_engine_lexical_enhancement_state"] = "disabled";
+            } else if (freshness.simeonLexicalBuilding) {
+                j["search_engine_lexical_enhancement_state"] = "building";
+            } else if (freshness.simeonLexicalReady) {
+                j["search_engine_lexical_enhancement_state"] = "ready";
+            } else {
+                j["search_engine_lexical_enhancement_state"] = "skipped";
+            }
+        }
         j["readiness"] = std::move(rd);
+        {
+            std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
+            if (!state.readiness.databaseRecoveredAt.empty()) {
+                j[std::string(status_keys::kDatabaseRecoveredAt)] =
+                    state.readiness.databaseRecoveredAt;
+                j[std::string(status_keys::kDatabaseRecoveredFrom)] =
+                    state.readiness.databaseRecoveredFrom;
+            }
+            if (!state.readiness.databasePhase.empty()) {
+                j[std::string(status_keys::kDatabasePhase)] = state.readiness.databasePhase;
+                if (state.readiness.databasePhaseSince.time_since_epoch().count() != 0) {
+                    auto elapsed =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - state.readiness.databasePhaseSince)
+                            .count();
+                    j[std::string(status_keys::kDatabasePhaseElapsedMs)] =
+                        static_cast<uint64_t>(elapsed);
+                }
+            }
+            if (!state.readiness.storageWarning.empty()) {
+                j[std::string(status_keys::kStorageWarning)] = state.readiness.storageWarning;
+            }
+        }
         nlohmann::json pr;
         pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
         pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
@@ -1414,7 +1610,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Vector DB Init (skipped pre-plugins).");
     spdlog::debug("ServiceManager(co): Initializing daemon resources");
     spdlog::default_logger()->flush(); // Flush before potentially crashing
-    writeBootstrapStatusFile(config_, state_);
+    writeBootstrapStatusFile(config_, state_, this);
     spdlog::debug("ServiceManager(co): writeBootstrapStatusFile done");
     spdlog::default_logger()->flush();
 
@@ -1455,7 +1651,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
                         getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-                        reason, build_timeout, getWorkerExecutor());
+                        reason, build_timeout, getWorkerExecutor(),
+                        !config_.instrumentation.suppressSimeonLexicalBuild);
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
@@ -1471,32 +1668,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             },
             boost::asio::detached);
     });
-
-    // Plugins step: mark ready (host scaffolding) and record duration uniformly
-    spdlog::info("[ServiceManager] Phase: Plugins Ready.");
-    try {
-        (void)init::record_duration(
-            std::string(readiness::kPlugins),
-            [&]() -> yams::Result<void> {
-                try {
-                    const auto ps = getPluginHostFsmSnapshot();
-                    state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
-                } catch (...) {
-                    // Best-effort legacy flag; plugin readiness is authoritative via PluginHostFsm.
-                    state_.readiness.pluginsReady = true;
-                }
-                return yams::Result<void>();
-            },
-            state_.initDurationsMs);
-    } catch (...) {
-        try {
-            const auto ps = getPluginHostFsmSnapshot();
-            state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
-        } catch (...) {
-            state_.readiness.pluginsReady = true;
-        }
-    }
-    writeBootstrapStatusFile(config_, state_);
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
@@ -1556,7 +1727,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     yams::api::ContentStoreBuilder builder;
                     builder.withStoragePath(storeRoot)
                         .withStorageEngine(storageDecision.value().storageEngineOverride)
-                        .withCompression(false)
+                        .withCompression(true)
                         .withDeduplication(true)
                         .withIntegrityChecks(true);
                     return builder.build();
@@ -1571,7 +1742,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
             }
             state_.readiness.contentStoreReady = true;
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
         } else {
             spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
             try {
@@ -1593,9 +1764,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Phase: Open metadata DB with timeout (awaitable helper)
     auto dbPath = dataDir / "yams.db";
     database_ = std::make_shared<metadata::Database>();
-    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 5000, 250);
+    // Hard-cap on the blocking SQLite open. 0 = no cap (await real completion).
+    // A non-zero value is an escape hatch for CI/operators; in normal operation the
+    // coroutine awaits the actual open event and a watchdog emits progress logs.
+    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
 
-    // Check stop again before FSM transition
+    // Re-check shutdown before transitioning the database FSM.
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
@@ -1615,7 +1789,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             co_return co_await co_openDatabase(dbPath, open_timeout, token);
         },
         state_.initDurationsMs);
-    writeBootstrapStatusFile(config_, state_);
+    writeBootstrapStatusFile(config_, state_, this);
     spdlog::info("[ServiceManager] Phase: Database Opened.");
     if (db_ok) {
         try {
@@ -1626,7 +1800,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Phase: Migrations (if DB ok)
     if (db_ok) {
-        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 7000, 250);
+        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
         try {
             serviceFsm_.dispatch(MigrationStartedEvent{});
         } catch (...) {
@@ -1653,7 +1827,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (!poolsOk) {
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
@@ -1697,62 +1871,60 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     retrievalSessions_ = std::make_unique<RetrievalSessionManager>();
     spdlog::info("[ServiceManager] Phase: Sessions Initialized.");
 
+    // KG store + GraphComponent: independent of post-ingest queue, hoisted out of
+    // the queue's try block so a queue init failure cannot mask KG state.
+    try {
+        auto writePool = getWriteConnectionPool();
+        if (writePool) {
+            metadata::KnowledgeGraphStoreConfig kgCfg;
+            kgCfg.enable_alias_fts = true;
+            kgCfg.enable_wal = true;
+            auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
+            if (kgRes) {
+                auto kgStore =
+                    std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgRes).value());
+                if (auto readPool = getReadConnectionPool()) {
+                    kgStore->setReadPool(readPool.get());
+                }
+                if (databaseManager_) {
+                    databaseManager_->setKgStore(kgStore);
+                }
+                auto metadataRepo = getMetadataRepo();
+                if (metadataRepo) {
+                    metadataRepo->setKnowledgeGraphStore(kgStore);
+                    spdlog::info("KG store wired to metadata repository for tree diff integration");
+                }
+                try {
+                    auto graphComponent =
+                        std::make_shared<GraphComponent>(metadataRepo, kgStore, this);
+                    auto initResult = graphComponent->initialize();
+                    if (!initResult) {
+                        spdlog::warn("GraphComponent initialization failed: {}",
+                                     initResult.error().message);
+                        storeGraphComponent(std::shared_ptr<GraphComponent>{});
+                    } else {
+                        spdlog::info("GraphComponent initialized successfully");
+                        storeGraphComponent(graphComponent);
+                        if (metadataRepo) {
+                            metadataRepo->setGraphComponent(graphComponent);
+                            spdlog::info("GraphComponent wired to metadata repository");
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("GraphComponent init failed: {}", e.what());
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("KG store init failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("KG store init failed (unknown)");
+    }
+    spdlog::info("[ServiceManager] Phase: KG Store Initialized.");
+
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
         using TA = yams::daemon::TuneAdvisor;
-        uint32_t taThreads = 0;
-        try {
-            taThreads = TA::postIngestThreads();
-        } catch (...) {
-        }
-        (void)taThreads; // Retrieved for future use in post-ingest configuration
-        // Initialize KG store on daemon side using connection pool if available
-        try {
-            auto writePool = getWriteConnectionPool();
-            if (writePool) {
-                metadata::KnowledgeGraphStoreConfig kgCfg;
-                kgCfg.enable_alias_fts = true;
-                kgCfg.enable_wal = true;
-                auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
-                if (kgRes) {
-                    auto uniqueKg = std::move(kgRes).value();
-                    // Promote to shared_ptr for broader use and store as member
-                    auto kgStore =
-                        std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
-                    if (databaseManager_) {
-                        databaseManager_->setKgStore(kgStore);
-                    }
-                    // PBI-043-12: Wire KG store to metadata repository for tree diff integration
-                    auto metadataRepo = getMetadataRepo();
-                    if (metadataRepo) {
-                        metadataRepo->setKnowledgeGraphStore(kgStore);
-                        spdlog::info(
-                            "KG store wired to metadata repository for tree diff integration");
-                    }
-                    // PBI-009: Initialize GraphComponent after KG store is ready
-                    try {
-                        auto graphComponent =
-                            std::make_shared<GraphComponent>(metadataRepo, kgStore, this);
-                        auto initResult = graphComponent->initialize();
-                        if (!initResult) {
-                            spdlog::warn("GraphComponent initialization failed: {}",
-                                         initResult.error().message);
-                            storeGraphComponent(std::shared_ptr<GraphComponent>{});
-                        } else {
-                            spdlog::info("GraphComponent initialized successfully");
-                            storeGraphComponent(graphComponent);
-                            if (metadataRepo) {
-                                metadataRepo->setGraphComponent(graphComponent);
-                                spdlog::info("GraphComponent wired to metadata repository");
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("GraphComponent init failed: {}", e.what());
-                    }
-                }
-            }
-        } catch (...) {
-        }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
         auto newPostIngest = std::make_shared<PostIngestQueue>(
             getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
@@ -1784,19 +1956,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         }
                         return false;
                     }();
-                    if (auto graphComponent = getGraphComponent()) {
-                        auto maintenance = graphComponent->maintainSemanticTopology(false);
-                        if (!maintenance) {
-                            spdlog::warn(
-                                "[ServiceManager] Semantic topology maintenance failed: {}",
-                                maintenance.error().message);
-                        } else if (maintenance.value().semanticEdgesPruned > 0) {
-                            spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor "
-                                         "edges after drain",
-                                         maintenance.value().semanticEdgesPruned);
-                        }
+                    const bool repairActive =
+                        state_.stats.repairInProgress.load(std::memory_order_relaxed);
+                    if (repairActive) {
+                        spdlog::info("[ServiceManager] Skipping drain-triggered graph maintenance "
+                                     "while repair RPC is active");
+                    } else {
+                        requestSemanticTopologyMaintenance("post_ingest_drain");
                     }
-                    if (!disableDrainTopologyRebuild) {
+                    if (!disableDrainTopologyRebuild && !repairActive) {
                         requestTopologyRebuild("post_ingest_drain");
                     }
                     const auto lexicalDelta = searchEngineManager_.getLexicalDeltaSnapshot();
@@ -1831,20 +1999,42 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
         auto initRes = embeddingService->initialize();
         if (initRes) {
+            auto weakSelf = weak_from_this();
             embeddingService->setProviders(
-                [this]() { return this->loadModelProvider(); },
-                [this]() { return this->resolvePreferredModel(); },
-                [this]() { return this->getVectorDatabase(); },
-                [this]() { return this->getKgStore(); },
-                [this](const std::string& model,
-                       std::function<void(const ModelLoadEvent&)> progress) {
-                    return this->ensureEmbeddingModelReadySync(model, std::move(progress),
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->resolvePreferredModel() : std::string{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->getVectorDatabase()
+                                : std::shared_ptr<yams::vector::VectorDatabase>{};
+                },
+                [weakSelf]() {
+                    auto self = weakSelf.lock();
+                    return self ? self->getKgStore()
+                                : std::shared_ptr<metadata::KnowledgeGraphStore>{};
+                },
+                [weakSelf](const std::string& model,
+                           std::function<void(const ModelLoadEvent&)> progress) {
+                    auto self = weakSelf.lock();
+                    if (!self) {
+                        return Result<std::string>(
+                            Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
+                    }
+                    return self->ensureEmbeddingModelReadySync(model, std::move(progress),
                                                                /*timeoutMs=*/0,
                                                                /*keepHot=*/true, /*warmup=*/true);
                 });
             embeddingService->setTopologyRebuildRequester(
-                [this](const std::vector<std::string>& hashes) {
-                    this->requestTopologyRebuild("embedding_batch_complete", hashes);
+                [weakSelf](const std::vector<std::string>& hashes) {
+                    if (auto self = weakSelf.lock()) {
+                        self->requestTopologyRebuild("embedding_batch_complete", hashes);
+                    }
                 });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
@@ -1866,40 +2056,42 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
-    // Initialize KGWriteQueue for serialized KG writes (internal infrastructure, not a phase)
+    // Initialize WriteCoordinator for serialized metadata/KG writes (internal infrastructure).
     try {
         auto kgStore = getKgStore();
         if (kgStore && workCoordinator_) {
-            KGWriteQueue::Config queueConfig;
-            queueConfig.maxBatchSize = 50;
-            queueConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
-            queueConfig.channelCapacity = 1000;
+            WriteCoordinator::Config wcConfig;
+            wcConfig.maxBatchSize = 50;
+            wcConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
+            wcConfig.channelCapacity = 1000;
+            writeCoordinator_ = std::make_unique<WriteCoordinator>(
+                *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
+            writeCoordinator_->start();
 
-            kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
-                                                           kgStore, queueConfig);
-            kgWriteQueue_->start();
             auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
             if (piq) {
-                piq->setKgWriteQueue(kgWriteQueue_.get());
+                piq->setWriteCoordinator(writeCoordinator_.get());
             }
-            spdlog::debug("[ServiceManager] KGWriteQueue started");
+            if (auto emb =
+                    std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire)) {
+                emb->setWriteCoordinatorGetter([this]() { return writeCoordinator_.get(); });
+            }
+            spdlog::debug("[ServiceManager] WriteCoordinator started");
         }
     } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] KGWriteQueue init failed: {}", e.what());
+        spdlog::warn("[ServiceManager] WriteCoordinator init failed: {}", e.what());
     } catch (...) {
     }
 
-    // Cross-encoder reranker is initialized later after plugins are loaded
-    // See the reranker wiring after search engine build in searchEngine setup
+    // Cross-encoder reranker initialization happens after plugin loading.
 
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");
 
-    // VectorIndexManager removed - using VectorDatabase directly for vector search.
-    // Do not mark the vector index ready here; VectorSystemManager determines that after
-    // preparing any persisted or rebuilt HNSW structures.
+    // Vector search uses VectorDatabase directly. VectorSystemManager determines readiness
+    // after preparing any persisted or rebuilt HNSW structures.
     if (getVectorDatabase()) {
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
     spdlog::info("[ServiceManager] Phase: Vector search uses VectorDatabase directly.");
 
@@ -1929,25 +2121,49 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (loadResult) {
                 spdlog::info("ServiceManager: Autoloaded {} plugins.", loadResult.value());
             }
-            auto adoptResult = co_await init::await_with_retry<bool>(
-                [&]() -> boost::asio::awaitable<yams::Result<bool>> {
-                    // Wrap synchronous adoption in an awaitable
-                    co_return adoptModelProviderFromHosts();
-                },
-                /*attempts=*/3,
-                /*backoff*/ [](int n) { return n == 1 ? 100 : 300; });
-            // Log result uniformly
-            if (adoptResult) {
-                spdlog::info("[InitStep] adopt_model_provider: ok");
-            } else {
-                spdlog::warn("[InitStep] adopt_model_provider: failed: {}",
-                             adoptResult.error().message);
+            // PluginManager::autoloadPlugins runs adoptModelProvider() and the three
+            // adoptXExtractors() calls internally — populating PluginManager-owned
+            // collections. ServiceManager keeps its own copies (model provider atomic,
+            // contentExtractors_ vector, plus PostIngestQueue wire-up). Without this
+            // sync, status reports "Waiting on: Content Extractors Ready" + "no provider
+            // after autoload" even though every plugin successfully loaded — same
+            // dual-storage bug class.
+            if (pluginManager_) {
+                if (auto pmp = pluginManager_->getModelProvider()) {
+                    storeModelProvider(pmp);
+                    embeddingLifecycle_.setModelName(pluginManager_->getEmbeddingModelName());
+                }
+                contentExtractors_ = pluginManager_->getContentExtractors();
+                auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+                if (piq) {
+                    if (!contentExtractors_.empty()) {
+                        piq->setExtractors(contentExtractors_);
+                    }
+                    std::unordered_map<std::string, std::string> extMap;
+                    for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
+                        if (!extractor)
+                            continue;
+                        for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
+                            extMap[ext] = lang;
+                        }
+                    }
+                    if (!extMap.empty()) {
+                        piq->setSymbolExtensionMap(std::move(extMap));
+                    }
+                    if (auto titleExtractor =
+                            createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
+                        piq->setTitleExtractor(std::move(titleExtractor));
+                    }
+                }
             }
-            if (adoptResult && adoptResult.value()) {
+            auto modelProvider = loadModelProvider();
+            if (modelProvider && modelProvider->isAvailable()) {
+                spdlog::info("[InitStep] adopt_model_provider: ok");
                 spdlog::info("ServiceManager: Adopted model provider from plugins.");
                 spdlog::info(
                     "ServiceManager: Model provider ready, embeddings will be generated on-demand");
             } else {
+                spdlog::warn("[InitStep] adopt_model_provider: failed: no provider after autoload");
                 spdlog::warn("ServiceManager: No model provider adopted from plugins.");
                 state_.readiness.modelProviderReady.store(false, std::memory_order_release);
                 if (config_.enableModelProvider && config_.modelProviderRequired) {
@@ -1960,38 +2176,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                  "(degraded mode; embeddings unavailable)");
                 }
             }
-            auto extractorResult = init::step<size_t>(
-                "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
-            if (extractorResult) {
-                spdlog::info("ServiceManager: Adopted {} content extractors from plugins.",
-                             extractorResult.value());
-                // Note: Binary extraction via Ghidra is provided by the yams_ghidra plugin
-                // which implements content_extractor_v1 and is adopted above
-            }
-
-            // Respect config flag plugins.symbol_extraction.enable (default: true)
-            bool enableSymbols = ConfigResolver::isSymbolExtractionEnabled(config_);
-            if (enableSymbols) {
-                auto symRes = init::step<size_t>(
-                    "adopt_symbol_extractors", [&]() { return adoptSymbolExtractorsFromHosts(); });
-                if (symRes) {
-                    spdlog::info("ServiceManager: Adopted {} symbol extractors.", symRes.value());
-                }
-            } else {
-                spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
-            }
-
-            auto entityRes = init::step<size_t>("adopt_entity_extractors",
-                                                [&]() { return adoptEntityExtractorsFromHosts(); });
-            if (entityRes) {
-                spdlog::info("ServiceManager: Adopted {} entity extractors.", entityRes.value());
-            }
         }
-        // If autoload is disabled but model provider is enabled, defer initialization
-        // until after daemon reaches Ready state (see daemon.cpp main loop)
+        // If autoload is disabled but model provider is enabled, try the in-process
+        // registry before deferring. This covers training-free backends like simeon
+        // that don't need ABI plugin infrastructure.
         if (!enableAutoload && config_.enableModelProvider) {
-            spdlog::info("Model provider enabled with autoload disabled; deferring initialization "
-                         "until Ready");
+            auto adoptResult = init::step<bool>("adopt_in_process_model_provider",
+                                                [&]() { return adoptModelProviderFromHosts(); });
+            if (!adoptResult || !adoptResult.value()) {
+                spdlog::info("Model provider enabled with autoload disabled; deferring "
+                             "initialization until Ready");
+            }
         }
     } catch (const std::exception& e) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
@@ -2014,6 +2209,30 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            // Wire the VDB into the coordinator now that it's ready.
+            if (vectorIndexCoordinator_) {
+                if (auto vdb = getVectorDatabase()) {
+                    vectorIndexCoordinator_->setVectorDatabase(vdb);
+                }
+                // Async: load or build the initial index (sets vectorIndexReady). Embedded
+                // one-shot clients avoid opportunistic background rebuilds because the process is
+                // about to exit and teardown otherwise waits on this worker.
+                if (!config_.embeddedOneShot && !config_.instrumentation.suppressVectorIndexBuild) {
+                    boost::asio::co_spawn(
+                        workCoordinator_->getExecutor(),
+                        [coord = vectorIndexCoordinator_]() -> boost::asio::awaitable<void> {
+                            auto res = co_await coord->initialBuildIfNeeded();
+                            if (!res) {
+                                spdlog::warn("[ServiceManager] initialBuildIfNeeded failed: {}",
+                                             res.error().message);
+                            }
+                        },
+                        boost::asio::detached);
+                } else if (config_.instrumentation.suppressVectorIndexBuild) {
+                    spdlog::warn("[ServiceManager] Vector index initial build suppressed by memory "
+                                 "instrumentation profile");
+                }
+            }
             // Log vector count from database
             if (auto vectorDatabase = getVectorDatabase()) {
                 auto dbVectorCount = vectorDatabase->getVectorCount();
@@ -2021,33 +2240,40 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     spdlog::info("[VectorInit] Found {} vectors in database", dbVectorCount);
                 }
 
-                if (auto metadataRepo = getMetadataRepo()) {
-                    auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
-                    const auto metadataEmbeddedCount =
-                        static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
-                    const auto actualEmbeddedCount = static_cast<int64_t>(embeddedHashes.size());
-                    if (metadataEmbeddedCount != actualEmbeddedCount) {
-                        spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
-                                     "documents_embedded={} vector_docs={}. Reconciling "
-                                     "document_embeddings_status from vector rows.",
-                                     metadataEmbeddedCount, actualEmbeddedCount);
-                        std::vector<std::string> reconciledHashes;
-                        reconciledHashes.reserve(embeddedHashes.size());
-                        for (const auto& hash : embeddedHashes) {
-                            reconciledHashes.push_back(hash);
-                        }
-                        auto reconcileResult =
-                            metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
-                                reconciledHashes);
-                        if (!reconcileResult) {
-                            spdlog::warn("[Embeddings] Failed to reconcile embedded-doc status "
-                                         "from vector rows: {}",
-                                         reconcileResult.error().message);
-                        } else {
-                            spdlog::info("[Embeddings] Reconciled embedded-doc status: {} -> {}",
+                if (!config_.embeddedOneShot) {
+                    if (auto metadataRepo = getMetadataRepo()) {
+                        auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
+                        const auto metadataEmbeddedCount =
+                            static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
+                        const auto actualEmbeddedCount =
+                            static_cast<int64_t>(embeddedHashes.size());
+                        if (metadataEmbeddedCount != actualEmbeddedCount) {
+                            spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
+                                         "documents_embedded={} vector_docs={}. Reconciling "
+                                         "document_embeddings_status from vector rows.",
                                          metadataEmbeddedCount, actualEmbeddedCount);
+                            std::vector<std::string> reconciledHashes;
+                            reconciledHashes.reserve(embeddedHashes.size());
+                            for (const auto& hash : embeddedHashes) {
+                                reconciledHashes.push_back(hash);
+                            }
+                            auto reconcileResult =
+                                metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
+                                    reconciledHashes);
+                            if (!reconcileResult) {
+                                spdlog::warn("[Embeddings] Failed to reconcile embedded-doc status "
+                                             "from vector rows: {}",
+                                             reconcileResult.error().message);
+                            } else {
+                                spdlog::info(
+                                    "[Embeddings] Reconciled embedded-doc status: {} -> {}",
+                                    metadataEmbeddedCount, actualEmbeddedCount);
+                            }
                         }
                     }
+                } else {
+                    spdlog::debug("[Embeddings] Skipping startup metadata/vector reconciliation "
+                                  "for embedded one-shot host");
                 }
 
                 if (auto modelProvider = loadModelProvider();
@@ -2076,35 +2302,40 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    // Only schedule warmup if vector DB is present with non-zero dim
+    // Only schedule warmup if vector DB is present with non-zero dim.
+    // Training-free providers have nothing to warm; skip entirely.
     if (embeddingLifecycle_.preloadOnStartup()) {
-        size_t vdim = 0;
-        try {
-            if (auto vectorDatabase = getVectorDatabase())
-                vdim = vectorDatabase->getConfig().embedding_dim;
-        } catch (...) {
-        }
-        if (vdim == 0) {
-            spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
+        auto provider = loadModelProvider();
+        if (provider && provider->isTrainingFree()) {
+            spdlog::info("[Warmup] skipped: provider '{}' is training-free",
+                         provider->getProviderName());
             embeddingLifecycle_.setPreloadOnStartup(false);
         } else {
-            spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup "
-                         "will run after Ready");
+            size_t vdim = 0;
+            try {
+                if (auto vectorDatabase = getVectorDatabase())
+                    vdim = vectorDatabase->getConfig().embedding_dim;
+            } catch (...) {
+            }
+            if (vdim == 0) {
+                spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
+                embeddingLifecycle_.setPreloadOnStartup(false);
+            } else {
+                spdlog::info("[Warmup] embeddings.preload_on_startup detected -> background warmup "
+                             "will run after Ready");
+            }
         }
     }
 
     // Build SearchEngine with timeout
     try {
-        state_.readiness.searchProgress = 10;
-        writeBootstrapStatusFile(config_, state_);
-        if (getMetadataRepo()) {
-            state_.readiness.searchProgress = 40;
-            writeBootstrapStatusFile(config_, state_);
-        }
-        if (getVectorDatabase()) {
-            state_.readiness.searchProgress = 70;
-            writeBootstrapStatusFile(config_, state_);
-        }
+        int progress = 10;
+        if (getMetadataRepo())
+            progress = 40;
+        if (getVectorDatabase())
+            progress = 70;
+        state_.readiness.searchProgress = progress;
+        writeBootstrapStatusFile(config_, state_, this);
         int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
 
         // Determine vector readiness: honor env disables and presence of vector infra
@@ -2184,7 +2415,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
-            getWorkerExecutor());
+            getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
@@ -2193,6 +2424,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
             state_.readiness.searchProgress = 100;
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", false);
+            } catch (...) {
+            }
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2205,7 +2440,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 }
             }
 
-            writeBootstrapStatusFile(config_, state_);
+            writeBootstrapStatusFile(config_, state_, this);
 
             spdlog::info("SearchEngine initialized and published to AppContext (docs={})",
                          state_.readiness.searchEngineDocCount.load());
@@ -2223,14 +2458,22 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } else {
             // Do not leave UI stuck below 100% when we are running degraded.
             try {
+                state_.readiness.searchEngineReady = false;
                 state_.readiness.searchProgress = 100;
             } catch (...) {
             }
-            writeBootstrapStatusFile(config_, state_);
-            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded");
+            const auto reason = buildResult.error().message.empty()
+                                    ? std::string{"initial search engine build not ready"}
+                                    : buildResult.error().message;
             try {
-                serviceFsm_.dispatch(
-                    InitializationFailedEvent{"initial search engine build not ready"});
+                lifecycleFsm_.setSubsystemDegraded("search", true, reason);
+            } catch (...) {
+            }
+            writeBootstrapStatusFile(config_, state_, this);
+            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded: {}",
+                         reason);
+            try {
+                serviceFsm_.dispatch(SearchEngineBuiltEvent{});
             } catch (...) {
             }
         }
@@ -2380,94 +2623,136 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
 }
 
 boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
-                                                             int timeout_ms,
+                                                             int /*timeout_ms*/,
                                                              yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
-        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                       void(std::exception_ptr, bool)>(
-            [this, dbPath, ex, timeout_ms](auto handler) mutable {
-                // Shared state for race coordination
-                auto completed = std::make_shared<std::atomic<bool>>(false);
-                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
-                timer->expires_after(std::chrono::milliseconds(timeout_ms));
-
-                // Capture handler in shared_ptr for safe sharing between timer and work
-                using HandlerT = std::decay_t<decltype(handler)>;
-                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
-
-                // Set up timeout
-                timer->async_wait([completed, handlerPtr, completion_exec,
-                                   timeout_ms](const boost::system::error_code& ec) mutable {
-                    if (ec)
-                        return; // Timer cancelled
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
-                        spdlog::warn(
-                            "Database open timed out after {} ms — continuing in degraded mode",
-                            timeout_ms);
-                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(std::exception_ptr{}, false);
-                        });
-                    }
-                });
-
-                // Post blocking work to executor
-                boost::asio::post(ex, [this, dbPath, timer, completed, handlerPtr,
-                                       completion_exec]() mutable {
-                    bool success = false;
-                    std::exception_ptr ep;
-                    try {
-                        auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-                        success = static_cast<bool>(r);
-                        if (!success) {
-                            spdlog::warn("Database open failed: {} — continuing in degraded mode",
-                                         r.error().message);
-                        } else {
-                            state_.readiness.databaseReady = true;
-                            spdlog::info("Database opened successfully");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn(
-                            "Database open threw exception: {} — continuing in degraded mode",
-                            e.what());
-                        ep = std::current_exception();
-                    } catch (...) {
-                        spdlog::warn("Database open failed (unknown exception) — continuing in "
-                                     "degraded mode");
-                        ep = std::current_exception();
-                    }
-
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Work won
-                        timer->cancel();
-                        boost::asio::post(completion_exec,
-                                          [h = std::move(*handlerPtr), ep, success]() mutable {
-                                              std::move(h)(ep, success);
-                                          });
-                    }
-                });
-            },
-            boost::asio::use_awaitable);
-
-    } catch (const std::exception& e) {
-        spdlog::warn("Database open failed (exception): {} — continuing in degraded mode",
-                     e.what());
+    if (token.stop_requested())
         co_return false;
-    } catch (...) {
-        spdlog::warn("Database open failed (unknown exception) — continuing in degraded mode");
+    if (!blockingPool_) {
+        spdlog::error("[ServiceManager] blockingPool_ not available; cannot open database");
         co_return false;
     }
+
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    const auto startedAt = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kOpening);
+        state_.readiness.databasePhaseSince = startedAt;
+    }
+
+    // Liveness watchdog: emits periodic progress logs so a slow cold-open on external
+    // volumes doesn't look like a hang. Terminates as soon as `completed` flips.
+    boost::asio::co_spawn(
+        ex,
+        [completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            boost::asio::steady_timer timer(ex);
+            while (!completed->load(std::memory_order_acquire)) {
+                timer.expires_after(5s);
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                if (completed->load(std::memory_order_acquire))
+                    break;
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   std::chrono::steady_clock::now() - startedAt)
+                                   .count();
+                spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
+                             dbPath.string(), elapsed);
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    // Package the blocking SQLite open and run it off the event loop.
+    auto task = std::make_shared<std::packaged_task<bool()>>([this, dbPath]() {
+        bool ok = false;
+        try {
+            auto openOnce = [&]() -> bool {
+                auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+                if (!r) {
+                    spdlog::warn("Database open failed: {}", r.error().message);
+                    return false;
+                }
+                return true;
+            };
+
+            if (!openOnce()) {
+                return false;
+            }
+
+            auto integrity = database_->checkIntegrity();
+            if (!integrity) {
+                spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
+                              integrity.error().message);
+                database_->close();
+                auto recovery = quarantineAndRecreate(dbPath);
+                if (!recovery) {
+                    spdlog::error("[ServiceManager] Could not auto-recover DB: {}. Inspect "
+                                  "{} or run 'yams repair --orphans' after manual cleanup.",
+                                  recovery.error().message, dbPath.string());
+                    return false;
+                }
+                spdlog::warn("[ServiceManager] Quarantined corrupt DB to {}; reopening fresh "
+                             "metadata DB. Run 'yams repair --orphans' to rebuild metadata.",
+                             recovery.value().quarantinedPath.string());
+                {
+                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                    state_.readiness.databaseRecoveredAt = recovery.value().timestamp;
+                    state_.readiness.databaseRecoveredFrom =
+                        recovery.value().quarantinedPath.string();
+                    state_.readiness.databasePhase = std::string(dbphase::kRecovering);
+                    state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+                }
+                if (!openOnce()) {
+                    return false;
+                }
+            }
+
+            ok = true;
+            state_.readiness.databaseReady = true;
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databasePhase = std::string(dbphase::kReady);
+                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+            }
+            spdlog::info("Database opened successfully");
+        } catch (const std::exception& e) {
+            spdlog::warn("Database open threw exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Database open failed (unknown exception)");
+        }
+        return ok;
+    });
+    auto future = task->get_future();
+    boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
+
+    // Suspend the coroutine until the real work finishes — no race, no fabricated events.
+    bool ok = co_await init::co_await_future(future, ex);
+    completed->store(true, std::memory_order_release);
+
+    if (token.stop_requested()) {
+        spdlog::warn("[ServiceManager] Database open completed but shutdown was requested; "
+                     "treating as failure");
+        co_return false;
+    }
+    co_return ok;
 }
 
-boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
+boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms*/,
                                                                 yams::compat::stop_token token) {
     auto ex = co_await boost::asio::this_coro::executor;
 
-    // Create migration manager on heap so it survives async operations
+    if (token.stop_requested())
+        co_return false;
+    if (!blockingPool_) {
+        spdlog::error("[ServiceManager] blockingPool_ not available; cannot migrate database");
+        co_return false;
+    }
+
     auto mm = std::make_shared<metadata::MigrationManager>(*database_);
     auto initResult = mm->initialize();
     if (!initResult) {
@@ -2477,75 +2762,72 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
     mm->registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
-    try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
-        co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                       void(std::exception_ptr, bool)>(
-            [mm, ex, timeout_ms](auto handler) mutable {
-                // Shared state for race coordination
-                auto completed = std::make_shared<std::atomic<bool>>(false);
-                auto timer = std::make_shared<boost::asio::steady_timer>(ex);
-                timer->expires_after(std::chrono::milliseconds(timeout_ms));
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    const auto startedAt = std::chrono::steady_clock::now();
 
-                // Capture handler in shared_ptr for safe sharing between timer and work
-                using HandlerT = std::decay_t<decltype(handler)>;
-                auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kMigrating);
+        state_.readiness.databasePhaseSince = startedAt;
+    }
 
-                // Set up timeout
-                timer->async_wait([completed, handlerPtr, completion_exec,
-                                   timeout_ms](const boost::system::error_code& ec) mutable {
-                    if (ec)
-                        return; // Timer cancelled
-                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
-                        spdlog::warn("Database migration timed out after {} ms", timeout_ms);
-                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                            std::move(h)(std::exception_ptr{}, false);
-                        });
-                    }
-                });
+    // Progress watchdog
+    boost::asio::co_spawn(
+        ex,
+        [completed, startedAt, ex]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            boost::asio::steady_timer timer(ex);
+            while (!completed->load(std::memory_order_acquire)) {
+                timer.expires_after(5s);
+                boost::system::error_code ec;
+                co_await timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+                if (completed->load(std::memory_order_acquire))
+                    break;
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   std::chrono::steady_clock::now() - startedAt)
+                                   .count();
+                spdlog::info("[ServiceManager] still migrating database ({}s elapsed)", elapsed);
+            }
+            co_return;
+        },
+        boost::asio::detached);
 
-                // Post blocking work to executor
-                boost::asio::post(
-                    ex, [mm, timer, completed, handlerPtr, completion_exec]() mutable {
-                        bool success = false;
-                        std::exception_ptr ep;
-                        try {
-                            auto r = mm->migrate();
-                            success = static_cast<bool>(r);
-                            if (!success) {
-                                spdlog::warn("Database migration failed: {}", r.error().message);
-                            } else {
-                                spdlog::info("Database migrations completed");
-                            }
-                        } catch (const std::exception& e) {
-                            spdlog::warn("Database migration threw exception: {}", e.what());
-                            ep = std::current_exception();
-                        } catch (...) {
-                            spdlog::warn("Database migration failed (unknown exception)");
-                            ep = std::current_exception();
-                        }
+    // Package the blocking migration and run it off the event loop.
+    auto task = std::make_shared<std::packaged_task<bool()>>([mm]() {
+        bool ok = false;
+        try {
+            auto r = mm->migrate();
+            ok = static_cast<bool>(r);
+            if (!ok) {
+                spdlog::warn("Database migration failed: {}", r.error().message);
+            } else {
+                spdlog::info("Database migrations completed");
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Database migration threw exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Database migration failed (unknown exception)");
+        }
+        return ok;
+    });
+    auto future = task->get_future();
+    boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
 
-                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                            // Work won
-                            timer->cancel();
-                            boost::asio::post(completion_exec,
-                                              [h = std::move(*handlerPtr), ep, success]() mutable {
-                                                  std::move(h)(ep, success);
-                                              });
-                        }
-                    });
-            },
-            boost::asio::use_awaitable);
+    bool ok = co_await init::co_await_future(future, ex);
+    completed->store(true, std::memory_order_release);
 
-    } catch (const std::exception& e) {
-        spdlog::warn("Database migration failed (exception): {}", e.what());
-        co_return false;
-    } catch (...) {
-        spdlog::warn("Database migration failed (unknown exception)");
+    if (token.stop_requested()) {
+        spdlog::warn("[ServiceManager] Database migration completed but shutdown was requested; "
+                     "treating as failure");
         co_return false;
     }
+    if (ok) {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databasePhase = std::string(dbphase::kReady);
+        state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+    }
+    co_return ok;
 }
 
 /// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
@@ -2560,103 +2842,11 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             state_.readiness.modelProviderReady = (modelProvider != nullptr);
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
                          embeddingLifecycle_.modelName(), modelProvider ? "valid" : "null");
-
-            // Initialize reranker adapter using model provider's scoreDocuments capability
-            // This is a lazy-init adapter - it fetches the provider on each call
-            if (!embeddingLifecycle_.reranker()) {
-                embeddingLifecycle_.setReranker(
-                    std::make_shared<yams::search::ModelProviderRerankerAdapter>(
-                        [this]() { return this->loadModelProvider(); }));
-                spdlog::info("[Reranker] Initialized model provider reranker adapter");
-            }
         }
         return result;
     }
     spdlog::warn("[Plugin] PluginManager not initialized");
     return Result<bool>(false);
-}
-
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptContentExtractors();
-        if (result) {
-            // Sync local copy for PostIngestQueue and AppContext
-            contentExtractors_ = pluginManager_->getContentExtractors();
-            spdlog::info("[ServiceManager] Synced {} content extractors from PluginManager",
-                         contentExtractors_.size());
-
-            // Update PostIngestQueue with the newly adopted extractors
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                piq->setExtractors(contentExtractors_);
-                spdlog::info("[ServiceManager] Updated PostIngestQueue with {} extractors",
-                             contentExtractors_.size());
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
-}
-
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptSymbolExtractors();
-        if (result && result.value() > 0) {
-            // Build extension-to-language map from symbol extractors and pass to PostIngestQueue
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                std::unordered_map<std::string, std::string> extMap;
-                const auto& extractors = pluginManager_->getSymbolExtractors();
-                for (const auto& extractor : extractors) {
-                    if (!extractor)
-                        continue;
-                    auto supported = extractor->getSupportedExtensions();
-                    for (const auto& [ext, lang] : supported) {
-                        extMap[ext] = lang;
-                    }
-                }
-                auto mapSize = extMap.size();
-                piq->setSymbolExtensionMap(std::move(extMap));
-                spdlog::info(
-                    "[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
-                    mapSize);
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
-}
-
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
-Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
-    if (pluginManager_) {
-        auto result = pluginManager_->adoptEntityExtractors();
-        if (result) {
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
-                auto extractor = createGlinerExtractionFunc(pluginManager_->getEntityExtractors());
-                if (!extractor) {
-                    spdlog::warn("[ServiceManager] GLiNER extraction func is null — title "
-                                 "extraction will be disabled (no entity extractors found)");
-                }
-                piq->setTitleExtractor(std::move(extractor));
-                spdlog::info("[ServiceManager] Updated PostIngestQueue title extractor using {} "
-                             "entity extractors",
-                             pluginManager_->getEntityExtractors().size());
-            }
-
-            if (auto engine = getSearchEngineSnapshot()) {
-                wireSearchEngineRuntimeAdapters(engine, "ServiceManager");
-            }
-        }
-        return result;
-    }
-    spdlog::warn("[Plugin] PluginManager not initialized");
-    return Result<size_t>(0);
 }
 
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
@@ -2679,46 +2869,15 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     }
 
     cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+    if (!cachedQueryConceptExtractor_) {
+        cachedQueryConceptExtractor_ =
+            createGlinerExtractionFuncFromProvider(pluginManager_->getEntityProviders());
+    }
     engine->setConceptExtractor(cachedQueryConceptExtractor_);
     if (cachedQueryConceptExtractor_) {
         spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
     } else {
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
-    }
-
-    auto reranker = embeddingLifecycle_.reranker();
-    if (reranker && reranker->isReady()) {
-        engine->setReranker(std::move(reranker));
-        spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
-    }
-
-    // Milestone 11: wire compressed ANN index invalidation so the search engine
-    // rebuilds its CompressedANNIndex whenever new vectors are ingested.
-    auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embSvc) {
-        embSvc->setCompressedAnnInvalidator(
-            [weakEngine = std::weak_ptr<search::SearchEngine>(engine)]() {
-                if (auto se = weakEngine.lock()) {
-                    se->invalidateCompressedANNIndex();
-                }
-            });
-        spdlog::info("[{}] CompressedANN index invalidation wired to EmbeddingService",
-                     contextLabel);
-    }
-}
-
-bool ServiceManager::resizeWorkerPool(std::size_t target) {
-    try {
-        if (target == 0)
-            target = 1;
-        // With the new architecture, we don't dynamically resize worker pools
-        // The worker count is fixed at construction time
-        spdlog::debug("resizeWorkerPool called with target {} (ignored in new architecture)",
-                      target);
-        return false; // No change made
-    } catch (const std::exception& e) {
-        spdlog::warn("resizeWorkerPool error: {}", e.what());
-        return false;
     }
 }
 
@@ -2735,19 +2894,8 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
     if (result) {
         spdlog::info("ServiceManager: Autoloaded {} plugins via PluginManager", result.value());
 
-        // Adopt model provider from PluginManager's hosts
-        auto adopted = adoptModelProviderFromHosts();
-        if (adopted && adopted.value()) {
-            spdlog::info("[ServiceManager] Model provider adopted after autoload");
-        }
-
-        // Adopt extractors
-        (void)adoptContentExtractorsFromHosts();
-        (void)adoptSymbolExtractorsFromHosts();
-        (void)adoptEntityExtractorsFromHosts();
-
         refreshPluginStatusSnapshot();
-        writeBootstrapStatusFile(config_, state_);
+        writeBootstrapStatusFile(config_, state_, this);
     }
 
     co_return result;
@@ -2792,7 +2940,8 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-            "rebuild_enabled", build_timeout, getWorkerExecutor());
+            "rebuild_enabled", build_timeout, getWorkerExecutor(),
+            !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (rebuildResult.has_value()) {
             const auto& rebuilt = rebuildResult.value();
@@ -2800,6 +2949,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", false);
+            } catch (...) {
+            }
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = getMetadataRepo()) {
                 auto countRes = metadataRepo->getDocumentCount();
@@ -2815,6 +2968,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: success (docs={})",
                          state_.readiness.searchEngineDocCount.load());
         } else {
+            try {
+                lifecycleFsm_.setSubsystemDegraded("search", true, rebuildResult.error().message);
+            } catch (...) {
+            }
             spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");
         }
     } catch (const std::exception& e) {
@@ -2890,7 +3047,8 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
                 getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen), "rebuild",
-                build_timeout, getWorkerExecutor());
+                build_timeout, getWorkerExecutor(),
+                !config_.instrumentation.suppressSimeonLexicalBuild);
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -2899,6 +3057,10 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
                 state_.readiness.searchProgress = 100;
+                try {
+                    lifecycleFsm_.setSubsystemDegraded("search", false);
+                } catch (...) {
+                }
                 // Track doc count at build time for re-tuning decisions
                 if (auto metadataRepo = getMetadataRepo()) {
                     auto countRes = metadataRepo->getDocumentCount();
@@ -2911,11 +3073,16 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                     }
                 }
 
-                writeBootstrapStatusFile(config_, state_);
+                writeBootstrapStatusFile(config_, state_, this);
 
                 spdlog::info("[Rebuild] done ok: vector scoring enabled (docs={})",
                              state_.readiness.searchEngineDocCount.load());
             } else {
+                try {
+                    lifecycleFsm_.setSubsystemDegraded("search", true,
+                                                       rebuildResult.error().message);
+                } catch (...) {
+                }
                 spdlog::warn("[Rebuild] failed: engine rebuild unsuccessful");
             }
 
@@ -3078,29 +3245,6 @@ bool ServiceManager::startEmbeddingWarmupIfConfigured() {
     return true;
 }
 
-boost::asio::awaitable<std::shared_ptr<yams::search::SearchEngine>>
-ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_state& /*token*/,
-                               bool includeEmbeddingGenerator) {
-    auto exec = getWorkerExecutor();
-    std::shared_ptr<vector::EmbeddingGenerator> gen;
-    auto modelProvider = loadModelProvider();
-    if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable()) {
-        try {
-            gen = embeddingLifecycle_.modelName().empty()
-                      ? modelProvider->getEmbeddingGenerator()
-                      : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
-        } catch (...) {
-        }
-    }
-    auto res = co_await searchEngineManager_.buildEngine(getMetadataRepo(), getKgStore(),
-                                                         getVectorDatabase(), std::move(gen),
-                                                         "co_buildEngine", timeout_ms, exec);
-    if (res.has_value()) {
-        co_return res.value();
-    }
-    co_return std::shared_ptr<yams::search::SearchEngine>{};
-}
-
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -3204,6 +3348,26 @@ ServiceManager::rebuildTopologyArtifacts(const std::string& reason, bool dryRun,
                                              tuningConfig_.topologyAlgorithm);
 }
 
+Result<std::size_t>
+ServiceManager::rebuildSemanticNeighborGraph(const std::string& reason,
+                                             const std::string& requestedModel) {
+    auto embSvc = std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (!embSvc) {
+        return Error{ErrorCode::InvalidState,
+                     "rebuildSemanticNeighborGraph: embedding service unavailable"};
+    }
+    std::string modelName = requestedModel;
+    if (modelName.empty()) {
+        modelName = embeddingLifecycle_.modelName();
+    }
+    if (modelName.empty()) {
+        modelName = "simeon-default";
+    }
+    spdlog::info("ServiceManager: corpus-wide semantic neighbor rebuild (reason={}, model={})",
+                 reason, modelName);
+    return embSvc->rebuildSemanticNeighborGraphForCorpus(modelName);
+}
+
 void ServiceManager::requestTopologyRebuild(const std::string& reason,
                                             const std::vector<std::string>& documentHashes) {
     if (shutdownInvoked_.load(std::memory_order_acquire))
@@ -3239,9 +3403,9 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 std::atomic_load_explicit(&self->embeddingService_, std::memory_order_acquire);
             const auto embedQueued = embeddingService ? embeddingService->queuedJobs() : 0U;
             const auto embedInFlight = embeddingService ? embeddingService->inFlightJobs() : 0U;
-            auto* kgWriteQueue = self->getKgWriteQueue();
-            const auto kgQueued = kgWriteQueue ? kgWriteQueue->queuedBatches() : 0U;
-            const auto kgInFlight = kgWriteQueue ? kgWriteQueue->inFlight() : 0U;
+            auto* writeCoordinator = self->getWriteCoordinator();
+            const auto kgQueued = writeCoordinator ? writeCoordinator->queuedBatches() : 0U;
+            const auto kgInFlight = writeCoordinator ? writeCoordinator->inFlight() : 0U;
 
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
@@ -3301,7 +3465,65 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     });
 }
 
+void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reason) {
+    if (shutdownInvoked_.load(std::memory_order_acquire))
+        return;
+    if (!serviceFsm_.isReady())
+        return;
+
+    bool expected = false;
+    if (!semanticTopologyMaintenanceScheduled_.compare_exchange_strong(expected, true,
+                                                                       std::memory_order_acq_rel)) {
+        return;
+    }
+
+    auto weakSelf = weak_from_this();
+    auto executor = getWorkerExecutor();
+    auto debounceTimer = std::make_shared<boost::asio::steady_timer>(executor);
+    debounceTimer->expires_after(std::chrono::milliseconds(250));
+    debounceTimer->async_wait([weakSelf, reason,
+                               debounceTimer](const boost::system::error_code& ec) mutable {
+        if (auto self = weakSelf.lock()) {
+            auto clearScheduled = [&]() {
+                self->semanticTopologyMaintenanceScheduled_.store(false, std::memory_order_release);
+            };
+            if (ec || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+                clearScheduled();
+                return;
+            }
+
+            auto graphComponent = self->getGraphComponent();
+            if (!graphComponent) {
+                clearScheduled();
+                return;
+            }
+
+            auto dirtyForMaintenance = self->topologyManager_.getOverlayHashes(4096);
+            if (dirtyForMaintenance.empty()) {
+                clearScheduled();
+                return;
+            }
+
+            auto maintenance =
+                graphComponent->maintainSemanticTopologyForDocuments(dirtyForMaintenance, false);
+            clearScheduled();
+            if (!maintenance) {
+                spdlog::warn("[ServiceManager] Semantic topology maintenance failed: {}",
+                             maintenance.error().message);
+            } else if (maintenance.value().semanticEdgesPruned > 0) {
+                spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor edges after {}",
+                             maintenance.value().semanticEdgesPruned, reason);
+            }
+        }
+    });
+}
+
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
+    if (config_.instrumentation.suppressAutoRepair) {
+        spdlog::warn(
+            "[RepairServiceHost] auto repair suppressed by memory instrumentation profile");
+        return;
+    }
     RepairServiceHost::Config rcfg;
     rcfg.enable = true;
     rcfg.dataDir = resolvedDataDir_;

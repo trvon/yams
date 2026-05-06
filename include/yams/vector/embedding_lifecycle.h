@@ -6,9 +6,11 @@
 #include <unordered_map>
 #include <vector>
 #include <yams/core/types.h>
-#include <yams/vector/vector_database.h>
+#include <yams/vector/vector_types.h>
 
 namespace yams::vector {
+
+class VectorDatabase;
 
 /**
  * Configuration for embedding lifecycle management

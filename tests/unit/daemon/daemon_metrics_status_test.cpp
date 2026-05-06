@@ -5,11 +5,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <random>
 #include <span>
@@ -17,6 +19,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "../../common/test_helpers_catch2.h"
 
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -545,6 +548,17 @@ public:
         return it->second;
     }
 
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        auto bytes = retrieveBytes(hash);
+        if (!bytes) {
+            return bytes.error();
+        }
+        const auto prefixSize = std::min(maxBytes, bytes.value().size());
+        bytes.value().resize(prefixSize);
+        return bytes;
+    }
+
     Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {
         auto bytes = retrieveBytes(hash);
         if (!bytes) {
@@ -671,6 +685,15 @@ struct GraphDispatcherFixture {
     }
 
     ~GraphDispatcherFixture() {
+        dispatcher.reset();
+        svc.reset();
+        if (writeWork) {
+            writeWork.reset();
+        }
+        writeIo.stop();
+        if (writeThread.joinable()) {
+            writeThread.join();
+        }
         kgStore.reset();
         repo.reset();
         pool.reset();
@@ -697,6 +720,15 @@ struct GraphDispatcherFixture {
             REQUIRE(kgResult.has_value());
             kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgResult).value());
             repo->setKnowledgeGraphStore(kgStore);
+
+            writeIo.restart();
+            writeWork = std::make_unique<
+                boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                writeIo.get_executor());
+            writeThread = std::thread([this] { writeIo.run(); });
+            auto writeCoord = std::make_unique<WriteCoordinator>(writeIo, kgStore, repo);
+            writeCoord->start();
+            svc->__test_setWriteCoordinator(std::move(writeCoord));
         }
     }
 
@@ -743,6 +775,10 @@ struct GraphDispatcherFixture {
     DaemonLifecycleFsm lifecycleFsm;
     std::unique_ptr<ServiceManager> svc;
     std::unique_ptr<RequestDispatcher> dispatcher;
+    boost::asio::io_context writeIo;
+    std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
+        writeWork;
+    std::thread writeThread;
     std::shared_ptr<metadata::ConnectionPool> pool;
     std::shared_ptr<metadata::MetadataRepository> repo;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
@@ -994,7 +1030,7 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
     const auto& status = std::get<StatusResponse>(resp);
 
-    const std::array<std::string_view, 23> requiredCoreReadinessKeys = {
+    const std::vector<std::string_view> requiredCoreReadinessKeys = {
         readiness::kIpcServer,
         readiness::kContentStore,
         readiness::kDatabase,
@@ -1011,17 +1047,36 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kEmbeddingDegraded,
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
+        readiness::kContentExtractorsReady,
+        readiness::kSymbolExtractorsReady,
+        readiness::kEntityExtractorsReady,
+        readiness::kTitleExtractorReady,
         readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
         readiness::kSearchEngineBuildReasonDegraded,
         readiness::kSearchEngineLexicalReady,
         readiness::kSearchEngineVectorUsable,
-        readiness::kSearchEngineHybridUsable};
+        readiness::kSearchEngineHybridUsable,
+        readiness::kSearchEngineLexicalEnhancementConfigured,
+        readiness::kSearchEngineLexicalEnhancementReady,
+        readiness::kSearchEngineLexicalEnhancementBuilding,
+        readiness::kSearchEngineFragmentGeometryReady};
 
     for (const auto key : requiredCoreReadinessKeys) {
         INFO("missing readiness key: " << key);
         REQUIRE(status.readinessStates.count(std::string(key)) > 0);
+    }
+
+    const std::array<std::string_view, 5> requiredCapabilityMetricKeys = {
+        metrics::kContentExtractorsLoaded, metrics::kSymbolExtractorsLoaded,
+        metrics::kEntityExtractorsLoaded,  metrics::kTitleExtractorEnabled,
+        metrics::kPluginSkippedCount,
+    };
+
+    for (const auto key : requiredCapabilityMetricKeys) {
+        INFO("missing capability metric key: " << key);
+        REQUIRE(status.requestCounts.count(std::string(key)) > 0);
     }
 }
 
@@ -1077,6 +1132,12 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     state.stats.repairFailedOperations.store(1);
     state.stats.repairIdleTicks.store(99);
     state.stats.repairBusyTicks.store(33);
+    state.stats.repairCurrentOperationCode.store(10);
+    state.stats.repairCurrentOperationStartedMs.store(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count()) -
+        1500);
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
     RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
@@ -1102,6 +1163,31 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBusyTicks)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) > 0);
     REQUIRE(status.requestCounts.count(std::string(metrics::kRepairInProgress)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairCurrentOperationCode)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairCurrentOperationElapsedMs)) > 0);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairCurrentOperationCode)) == 10);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairCurrentOperationElapsedMs)) >= 1);
+}
+
+TEST_CASE("RequestDispatcher: status includes the current request in requestsProcessed",
+          "[daemon][status][requests]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_request_count_");
+
+    YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
+    StateComponent state;
+    state.stats.requestsProcessed.store(41, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.requestsProcessed == 42);
+    CHECK(state.stats.requestsProcessed.load(std::memory_order_relaxed) == 42);
 }
 
 TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
@@ -1133,100 +1219,6 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     auto resp = fut.get();
 
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
-}
-
-TEST_CASE("RequestDispatcher: repair handler surfaces missing service states",
-          "[daemon][repair][dispatcher]") {
-    DaemonConfig cfg;
-    cfg.dataDir = makeTempDir("yams_repair_dispatcher_");
-
-    StubLifecycle lifecycle;
-    StateComponent state;
-    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
-    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
-    DaemonLifecycleFsm lifecycleFsm;
-    ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
-
-    RepairRequest repairReq;
-    repairReq.repairOrphans = true;
-    repairReq.dryRun = true;
-
-    SECTION("returns not initialized when ServiceManager is absent") {
-        RequestDispatcher noServiceDispatcher(&lifecycle, nullptr, &state);
-        Request req = repairReq;
-
-        auto resp = dispatchRequest(noServiceDispatcher, req);
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::NotInitialized);
-        CHECK(err.message.find("ServiceManager") != std::string::npos);
-    }
-
-    SECTION("returns not initialized when RepairService is not running") {
-        Request req = repairReq;
-
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::NotInitialized);
-        CHECK(err.message.find("RepairService not running") != std::string::npos);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-    }
-
-    SECTION("delegates to RepairService and toggles worker metrics") {
-        svc.startRepairService([] { return size_t{0}; });
-        auto repairService = svc.getRepairServiceShared();
-        REQUIRE(repairService != nullptr);
-
-        Request req = repairReq;
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<RepairResponse>(resp));
-        const auto& repairResp = std::get<RepairResponse>(resp);
-        CHECK(repairResp.success);
-        CHECK(repairResp.totalOperations == 1);
-        REQUIRE(repairResp.operationResults.size() == 1);
-        CHECK(repairResp.operationResults.front().operation == "orphans");
-        CHECK_FALSE(repairResp.operationResults.front().message.empty());
-        CHECK(svc.getWorkerPosted() == 1);
-        CHECK(svc.getWorkerCompleted() == 1);
-        CHECK(svc.getWorkerActive() == 0);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-
-        svc.stopRepairService();
-    }
-
-    SECTION("converts RepairService exceptions into error responses") {
-        auto repo = std::make_shared<StubPruneMetadataRepository>();
-        repo->setThrowOnQuery("repair query exception");
-        svc.__test_setMetadataRepo(repo);
-        svc.startRepairService([] { return size_t{0}; });
-        auto repairService = svc.getRepairServiceShared();
-        REQUIRE(repairService != nullptr);
-
-        RepairRequest throwingReq;
-        throwingReq.repairDownloads = true;
-        Request req = throwingReq;
-
-        auto resp = dispatchRequest(dispatcher, req);
-
-        REQUIRE(std::holds_alternative<RepairResponse>(resp));
-        const auto& repairResp = std::get<RepairResponse>(resp);
-        CHECK_FALSE(repairResp.success);
-        CHECK(repairResp.totalOperations == 0);
-        REQUIRE(repairResp.errors.size() == 1);
-        CHECK(repairResp.errors.front() == "Internal error: repair query exception");
-        CHECK(repairResp.operationResults.empty());
-        CHECK(svc.getWorkerPosted() == 1);
-        CHECK(svc.getWorkerCompleted() == 1);
-        CHECK(svc.getWorkerActive() == 0);
-        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
-
-        svc.stopRepairService();
-    }
 }
 
 TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",
@@ -3499,6 +3491,21 @@ TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
         }
         return latest;
     };
+    auto waitForFollowRedirectsCapture = [](std::chrono::milliseconds timeout =
+                                                std::chrono::seconds(2)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::optional<bool> latest;
+        while (std::chrono::steady_clock::now() < deadline) {
+            latest = RequestDispatcher::__test_lastDownloadServiceFollowRedirects();
+            if (latest.has_value()) {
+                return latest;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return latest;
+    };
+
+    RequestDispatcher::__test_resetDownloadServiceRequestCapture();
 
     SECTION("disabled policy returns safe reminder") {
         DaemonConfig cfg;
@@ -3957,6 +3964,44 @@ TEST_CASE("RequestDispatcher: download handler enforces daemon policy",
         CHECK(finalStatus.localPath.find("forced-download-success.bin") != std::string::npos);
         CHECK(finalStatus.size == 64);
     }
+
+    SECTION("daemon download disables redirects and surfaces blocked redirect failures") {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_download_policy_redirect_blocked_");
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.allowedSchemes = {"https"};
+        cfg.downloadPolicy.allowedHosts = {"*"};
+
+        StubLifecycle lifecycle;
+        StateComponent state;
+        state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager svc(cfg, state, lifecycleFsm);
+        RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+        RequestDispatcher::__test_forceDownloadServiceFailureOnce(
+            "Redirect blocked by policy during probe (follow_redirects=false)");
+
+        auto resp =
+            dispatchDownload(dispatcher, "https://example.com/file.bin", {}, "sha256:abcd1234");
+
+        REQUIRE(std::holds_alternative<DownloadResponse>(resp));
+        const auto& dl = std::get<DownloadResponse>(resp);
+        CHECK(dl.state == "queued");
+        CHECK_FALSE(dl.jobId.empty());
+
+        const auto lastFollowRedirects = waitForFollowRedirectsCapture();
+        REQUIRE(lastFollowRedirects.has_value());
+        CHECK_FALSE(*lastFollowRedirects);
+
+        const auto finalStatus = waitForDownloadJob(dispatcher, dl.jobId);
+        CHECK(finalStatus.jobId == dl.jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK(finalStatus.error ==
+              "Redirect blocked by policy during probe (follow_redirects=false)");
+    }
 }
 
 TEST_CASE("RequestDispatcher: download job status and list use in-memory registry",
@@ -4168,6 +4213,10 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     cfg.dataDir = makeTempDir("yams_embedding_dispatcher_");
     cfg.configFilePath = cfg.dataDir / "missing-config.toml";
     ScopedEnvVar preferredModelGuard("YAMS_PREFERRED_MODEL", std::nullopt);
+    ScopedEnvVar embedBackendGuard("YAMS_EMBED_BACKEND", std::nullopt);
+    ScopedEnvVar configPathGuard("YAMS_CONFIG", cfg.configFilePath.string());
+    ScopedEnvVar xdgConfigHomeGuard("XDG_CONFIG_HOME", cfg.dataDir.string());
+    ScopedEnvVar homeGuard("HOME", cfg.dataDir.string());
 
     StubLifecycle lifecycle;
     StateComponent state;
@@ -4559,6 +4608,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
             out << "preferred_model = \"config-repair-model\"\n";
         }
         cfg.configFilePath = configPath;
+        ScopedEnvVar sectionConfigPathGuard("YAMS_CONFIG", configPath.string());
 
         DaemonLifecycleFsm configLifecycleFsm;
         ServiceManager configSvc(cfg, state, configLifecycleFsm);
@@ -6252,6 +6302,104 @@ TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][m
     CHECK(snap->version == yams::version::string_v);
 }
 
+TEST_CASE("DaemonMetrics: cold snapshot refreshes synchronously", "[daemon][metrics][freshness]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_freshness_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK_FALSE(snap->statusSnapshotStale);
+    CHECK(snap->statusSnapshotAgeMs == 0);
+    CHECK(snap->statusDetailAgeMs == 0);
+    CHECK(snap->statusDetailStale);
+    CHECK_FALSE(snap->statusDetailAvailable);
+}
+
+TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint",
+          "[daemon][status][freshness]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_busy_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.running);
+    CHECK(status.retryAfterMs == 0);
+}
+
+TEST_CASE("RequestDispatcher: cold status still reports active repair work",
+          "[daemon][status][freshness]") {
+    StateComponent state;
+    state.stats.repairRunning.store(true, std::memory_order_relaxed);
+    state.stats.repairQueueDepth.store(7, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_busy_repair_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+    CHECK(status.retryAfterMs == 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) == 1);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairQueueDepth)) == 1);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairRunning)) == 1);
+    CHECK(status.requestCounts.at(std::string(metrics::kRepairQueueDepth)) == 7);
+}
+
+TEST_CASE("RequestDispatcher: status mirrors memory breakdown into requestCounts",
+          "[daemon][status][memory]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_mem_breakdown_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &svc, &state, &metrics);
+
+    auto resp = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    REQUIRE(status.requestCounts.count("status_mem_rss_bytes") == 1);
+    CHECK(status.requestCounts.at("status_mem_rss_bytes") > 0);
+#if defined(__APPLE__)
+    REQUIRE(status.requestCounts.count("status_mem_phys_footprint_bytes") == 1);
+    const auto footprintBytes = status.requestCounts.at("status_mem_phys_footprint_bytes");
+    CHECK(footprintBytes > 0);
+    const auto expectedMb = static_cast<double>(footprintBytes) / (1024.0 * 1024.0);
+    CHECK(std::abs(status.memoryUsageMb - expectedMb) < std::max(1.0, expectedMb * 0.05));
+#endif
+}
+
+TEST_CASE("DaemonMetrics: repair idle and busy counters export from state",
+          "[daemon][metrics][repair]") {
+    StateComponent state;
+    state.stats.repairIdleTicks.store(3, std::memory_order_relaxed);
+    state.stats.repairBusyTicks.store(9, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_repair_counter_export_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->repairIdleTicks == 3);
+    CHECK(snap->repairBusyTicks == 9);
+}
+
 TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
           "[daemon][status][protocol][post_ingest]") {
     StatusResponse s{};
@@ -6275,6 +6423,35 @@ TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_queued") == 3);
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_capacity") == 64);
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_max_per_batch") == 8);
+}
+
+TEST_CASE("StatusResponse: freshness requestCounts keys round-trip",
+          "[daemon][status][protocol][freshness]") {
+    StatusResponse s{};
+    s.requestCounts["status_snapshot_age_ms"] = 42;
+    s.requestCounts["status_snapshot_stale"] = 0;
+    s.requestCounts["status_detail_age_ms"] = 17;
+    s.requestCounts["status_detail_stale"] = 1;
+    s.requestCounts["status_detail_available"] = 1;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("status_snapshot_age_ms") == 42);
+    REQUIRE(decoded.requestCounts.at("status_snapshot_stale") == 0);
+    REQUIRE(decoded.requestCounts.at("status_detail_age_ms") == 17);
+    REQUIRE(decoded.requestCounts.at("status_detail_stale") == 1);
+    REQUIRE(decoded.requestCounts.at("status_detail_available") == 1);
 }
 
 TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",
@@ -6302,6 +6479,64 @@ TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("kg_jobs_depth") == 3880);
     REQUIRE(decoded.requestCounts.at("kg_jobs_capacity") == 4096);
     REQUIRE(decoded.requestCounts.at("kg_jobs_fill_pct") == 95);
+}
+
+TEST_CASE("StatusResponse: memory breakdown requestCounts keys round-trip",
+          "[daemon][status][protocol][memory]") {
+    StatusResponse s{};
+    s.requestCounts["status_mem_rss_bytes"] = 123456;
+    s.requestCounts["status_mem_phys_footprint_bytes"] = 654321;
+    s.requestCounts["status_mem_malloc_allocated_bytes"] = 777777;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("status_mem_rss_bytes") == 123456);
+    REQUIRE(decoded.requestCounts.at("status_mem_phys_footprint_bytes") == 654321);
+    REQUIRE(decoded.requestCounts.at("status_mem_malloc_allocated_bytes") == 777777);
+}
+
+TEST_CASE("AbiPluginHost: failed plugin loads are retained in last scan skips",
+          "[daemon][plugin][status][load-failure]") {
+#if defined(__APPLE__)
+    const std::filesystem::path pluginPath{"/opt/homebrew/lib/yams/plugins/yams_glint.dylib"};
+    if (!std::filesystem::exists(pluginPath)) {
+        SKIP("Installed yams_glint plugin not present");
+    }
+
+    AbiPluginHost host(nullptr);
+    const auto trustFile = makeTempDir("yams_glint_skip_status_") / "plugins.trust";
+    host.setTrustFile(trustFile);
+    REQUIRE(host.trustAdd(pluginPath.parent_path()));
+
+    const auto loadResult = host.load(pluginPath, "{}");
+    if (loadResult) {
+        SUCCEED("yams_glint loaded successfully on this machine");
+        REQUIRE(host.unload(loadResult.value().name));
+        return;
+    }
+
+    const auto skips = host.getLastScanSkips();
+    REQUIRE_FALSE(skips.empty());
+    const auto it = std::find_if(skips.begin(), skips.end(),
+                                 [&](const auto& entry) { return entry.first == pluginPath; });
+    REQUIRE(it != skips.end());
+    CHECK((it->second.find("dlopen failed") != std::string::npos ||
+           it->second.find("preflight failed") != std::string::npos ||
+           it->second.find("Plugin init failed") != std::string::npos));
+#else
+    SUCCEED("macOS-specific plugin load retention test");
+#endif
 }
 
 // =============================================================================

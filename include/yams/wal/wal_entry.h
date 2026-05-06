@@ -4,8 +4,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace yams::wal {
@@ -17,6 +19,13 @@ namespace yams::wal {
  * Entries are written to the log before being applied to ensure durability.
  */
 struct WALEntry {
+    [[nodiscard]] static uint32_t checkedPayloadSize(size_t size) {
+        if (size > std::numeric_limits<uint32_t>::max()) {
+            throw std::length_error("WAL payload exceeds uint32 size limit");
+        }
+        return static_cast<uint32_t>(size);
+    }
+
     // Operation types
     enum class OpType : uint8_t {
         BeginTransaction = 1,
@@ -76,7 +85,7 @@ struct WALEntry {
                                                .count()),
                  .transactionId = txnId,
                  .operation = op,
-                 .dataSize = static_cast<uint32_t>(payload.size()),
+                 .dataSize = checkedPayloadSize(payload.size()),
                  .checksum = 0},
           data(payload.begin(), payload.end()) {
         updateChecksum();

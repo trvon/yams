@@ -112,3 +112,40 @@ TEST_CASE("Connection pool immediate acquire does not count waiting",
 
     pool.shutdown();
 }
+
+TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
+          "[metadata][connection_pool]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_holder_hist_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    pool.setSlowHolderThreshold(std::chrono::milliseconds(20));
+
+    {
+        auto conn =
+            pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "fast_path");
+        REQUIRE(conn.has_value());
+    }
+
+    {
+        auto conn =
+            pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "slow_path");
+        REQUIRE(conn.has_value());
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    }
+
+    auto stats = pool.getStats();
+    std::uint64_t total = 0;
+    for (auto v : stats.holderDurationBuckets) {
+        total += v;
+    }
+    CHECK(total >= 2u);
+    CHECK(stats.slowHolderCount >= 1u);
+    CHECK(stats.maxHolderMicros >= 50'000u);
+
+    pool.shutdown();
+}

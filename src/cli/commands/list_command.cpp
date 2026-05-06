@@ -238,7 +238,7 @@ public:
             dreq.limit = limit_;
             dreq.offset = offset_;
             dreq.recentCount = recentCount_;
-            dreq.recent = (recentCount_ > 0) || (limit_ <= 100); // backward compatibility
+            dreq.recent = (recentCount_ > 0) || (limit_ <= 100);
 
             // Format and display options
             const bool includeCompactMetadataSummary =
@@ -278,7 +278,7 @@ public:
             dreq.changeWindow = changeWindow_;
 
             // Tag filtering
-            dreq.tags = {}; // Keep empty for backward compatibility
+            dreq.tags = {};
             dreq.filterTags = filterTags_;
             dreq.matchAllTags = matchAllTags_;
 

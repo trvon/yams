@@ -52,7 +52,8 @@ Run a fuzzer (interactive / live AFL++ UI):
 
 Notes:
 - Run each fuzzer in its own terminal tab/pane if you want multiple live dashboards.
-- If you copy/paste commands from VS Code, paste the raw command text (not a Markdown link like `[fuzz.sh](...)`).
+- If you copy/paste commands from VS Code, paste the raw command text rather than a formatted
+  Markdown link.
 
 Monitor:
 ```bash

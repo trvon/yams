@@ -1,0 +1,5 @@
+# YAMS Codebase Dead Code Allowlist
+# Files intentionally not included in dead-code analysis
+
+# NOTE: All previously allowed manual tests and utilities have been removed
+# as they are no longer needed by the codebase.

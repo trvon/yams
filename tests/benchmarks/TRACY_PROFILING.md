@@ -135,7 +135,7 @@ void complexOperation() {
 #endif
 ```
 
-## Performance Targets (from PBI-040)
+## Performance Targets (from performance work)
 
 | Benchmark | Target Latency | Threshold |
 |-----------|----------------|-----------|
@@ -214,12 +214,7 @@ meson configure build -Dtracy:on_demand=false
 
 - [Tracy Manual](https://github.com/wolfpld/tracy/releases/latest/download/tracy.pdf)
 - [Tracy GitHub](https://github.com/wolfpld/tracy)
-- [PBI-040: Post-Ingest Performance & Query Responsiveness](../../docs/delivery/040/prd.md)
-- [Task 040-8: Add service layer performance benchmarks](../../docs/delivery/040/tasks.md)
-
-## Related PBIs
-
-- **PBI-040**: Performance improvements (FTS5 readiness, sync indexing)
-- **PBI-001**: Core functionality (UTF-8 grep fix)
+- Post-ingest performance and query responsiveness
+- Service layer performance benchmarks
 
 Last updated: 2025-09-30

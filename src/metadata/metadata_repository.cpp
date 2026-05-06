@@ -708,7 +708,7 @@ MetadataRepository::~MetadataRepository() {
 void MetadataRepository::shutdown() {
     std::lock_guard<std::mutex> lock(symspellInitMutex_);
     symspellIndex_.reset();
-    symspellConn_.reset();
+    symspellDb_.reset();
     symspellInitialized_.store(false, std::memory_order_release);
     graphComponent_.reset();
     kgStore_.reset();
@@ -1488,6 +1488,8 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
     // These counters are intentionally maintained without live DB queries on hot paths.
     uint64_t newlyExtracted = 0;
     uint64_t newlyIndexed = 0;
+    std::vector<int64_t> indexedDocIds;
+    indexedDocIds.reserve(entries.size());
 
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // Begin transaction for batch operation
@@ -1552,7 +1554,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             UPDATE documents
             SET content_extracted = 1,
                 extraction_status = 'Success',
-                extraction_error = NULL
+                extraction_error = NULL,
+                repair_status = 'completed',
+                repair_attempted_at = unixepoch(),
+                repair_attempts = repair_attempts + 1
             WHERE id = ?
         )");
         if (!combinedStmtResult) {
@@ -1617,31 +1622,31 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     db.execute("ROLLBACK");
                     return ftsExec.error();
                 }
+                indexedDocIds.push_back(entry.documentId);
             }
 
-            // 3. Update extracted/indexed flags with a single combined UPDATE.
-            // Pre-check current state to determine counter increments.
-            if (auto r = checkStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = checkStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = checkStmt.bind(1, entry.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto checkStep = checkStmt.step();
-            if (!checkStep) {
-                db.execute("ROLLBACK");
-                return checkStep.error();
-            }
-            bool wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
-            std::string priorStatus;
-            if (checkStep.value()) {
-                priorStatus = checkStmt.getString(1);
+            bool wasExtracted = entry.priorContentExtracted;
+            bool wasIndexed = entry.priorExtractionStatus == ExtractionStatus::Success;
+            if (!entry.priorStateKnown) {
+                if (auto r = checkStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.clearBindings(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                auto checkStep = checkStmt.step();
+                if (!checkStep) {
+                    db.execute("ROLLBACK");
+                    return checkStep.error();
+                }
+                wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
+                wasIndexed = checkStep.value() && checkStmt.getString(1) == "Success";
             }
 
             if (auto r = combinedStmt.reset(); !r) {
@@ -1664,7 +1669,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             if (!wasExtracted) {
                 newlyExtracted++;
             }
-            if (priorStatus != "Success") {
+            if (!wasIndexed) {
                 newlyIndexed++;
             }
         }
@@ -1689,6 +1694,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         }
         if (newlyIndexed > 0) {
             cachedIndexedCount_.fetch_add(newlyIndexed, std::memory_order_relaxed);
+        }
+        for (const auto docId : indexedDocIds) {
+            noteFtsIndexedId(docId);
         }
         YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
                   static_cast<int64_t>(newlyExtracted));
@@ -3012,10 +3020,7 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
         return cached.value();
     }
 
-    // Avoid cold-start full scans on hot paths (e.g. orphan scan) by default.
-    // This cache is maintained incrementally by index/remove operations after startup.
-    // Set YAMS_FTS5_BACKFILL_INDEX_CACHE=1 to force one-time full backfill scan.
-    bool allowBackfill = false;
+    bool allowBackfill = true;
     if (const char* env = std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); env && *env) {
         std::string_view value(env);
         allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
@@ -3134,7 +3139,9 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 }
             }
 
-            if (options.orderByNameAsc) {
+            if (options.orderByIdAsc) {
+                sql += " ORDER BY documents.id ASC";
+            } else if (options.orderByNameAsc) {
                 sql += " ORDER BY file_name ASC";
             } else if (options.orderByIndexedDesc) {
                 sql += " ORDER BY indexed_time DESC";
@@ -3679,6 +3686,7 @@ MetadataRepository::getDocumentCountsByExtension() {
 
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     constexpr auto kCorpusStatsOverlayTtl = std::chrono::minutes(5);
+    const bool countersPrimedForOverlay = countersInitialized_.load(std::memory_order_acquire);
     auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
         const auto reconciledAtMs = stats.computedAtMs;
         const double reconciledMinDepth = stats.pathDepthAvg - stats.pathRelativeDepthAvg;
@@ -3798,7 +3806,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                 return *cachedCorpusStats_;
             }
 
-            if (age < kCorpusStatsOverlayTtl) {
+            if (countersPrimedForOverlay && age < kCorpusStatsOverlayTtl) {
                 auto merged = mergeOnlineOverlay(*cachedCorpusStats_);
                 if (isStale || !docCountUnchanged) {
                     return merged;
@@ -3814,7 +3822,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     // ~5s and was previously gating the Search Engine build critical path.
     // The synthesized stats are marked stale so the next call after
     // kCorpusStatsOverlayTtl (5 min) promotes to a reconciled snapshot.
-    if (cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
+    if (countersPrimedForOverlay && cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
         storage::CorpusStats baseline;
         auto merged = mergeOnlineOverlay(baseline);
         {
@@ -4062,23 +4070,19 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
         return {};
     }
 
-    // Keep a dedicated pooled connection alive for SymSpell. SymSpellSearch stores
-    // a raw sqlite3* pointer and assumes it remains valid for its entire lifetime.
-    auto connResult = pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
-    if (!connResult) {
-        return Error{ErrorCode::ResourceExhausted,
-                     "Failed to acquire database connection for SymSpell"};
+    // SymSpellSearch stores a raw sqlite3* pointer and assumes it remains valid
+    // for its entire lifetime. Do not satisfy that lifetime by permanently
+    // leasing a pooled connection: single-connection pools would be starved for
+    // the rest of the process. Instead open a small dedicated handle to the same
+    // metadata DB.
+    auto db = std::make_unique<Database>();
+    auto openResult = db->open(pool_.dbPath(), ConnectionMode::Create);
+    if (!openResult) {
+        return openResult.error();
     }
 
-    symspellConn_ = std::move(connResult).value();
-    if (!symspellConn_ || !symspellConn_->isValid()) {
-        symspellConn_.reset();
-        return Error{ErrorCode::DatabaseError, "Invalid database connection for SymSpell"};
-    }
-
-    sqlite3* rawDb = (*symspellConn_)->rawHandle();
+    sqlite3* rawDb = db->rawHandle();
     if (!rawDb) {
-        symspellConn_.reset();
         return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
     }
 
@@ -4086,11 +4090,11 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
     auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
     if (!schemaResult) {
         spdlog::error("SymSpell schema initialization failed: {}", schemaResult.error().message);
-        symspellConn_.reset();
         return schemaResult;
     }
 
     // Create the search index instance
+    symspellDb_ = std::move(db);
     symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
     symspellInitialized_.store(true, std::memory_order_release);
 
@@ -4998,6 +5002,22 @@ Result<void> MetadataRepository::checkpointWal() {
             return result;
         }
 
+        return db.execute("PRAGMA optimize");
+    });
+}
+
+// Path 1b: TRUNCATE-mode checkpoint for watermark-triggered or shutdown flushes.
+// Unlike the PASSIVE variant, this takes exclusive access — readers/writers
+// block until the checkpoint finishes. It returns the WAL file to zero bytes.
+// Call sparingly: (a) when WAL size exceeds a watermark (unbounded growth
+// stalls query latency anyway, so a brief block is better than the alternative),
+// (b) at shutdown when no readers are expected.
+Result<void> MetadataRepository::checkpointWalTruncate() {
+    return executeQuery<void>([](Database& db) -> Result<void> {
+        auto result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!result) {
+            return result;
+        }
         return db.execute("PRAGMA optimize");
     });
 }

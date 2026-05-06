@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/service_utils.hpp>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
@@ -555,6 +556,17 @@ public:
         if (!req.sessionId.empty() && !req.bypassSession) {
             md.tags["session_id"] = req.sessionId;
         }
+        if (!req.precomputedHash.empty()) {
+            md.contentHash = req.precomputedHash;
+            if (req.precomputedFileSize) {
+                md.size = *req.precomputedFileSize;
+            }
+            md.tags["__yams_trusted_hash_hint"] = "1";
+            if (req.precomputedLastWriteTimeNs) {
+                md.tags["__yams_hash_hint_mtime_ns"] =
+                    std::to_string(*req.precomputedLastWriteTimeNs);
+            }
+        }
 
         std::string usePath;
         std::optional<std::filesystem::path> tmpToRemove;
@@ -757,8 +769,7 @@ public:
                             docNode.nodeKey = "doc:" + info.sha256Hash;
                             docNode.label = info.filePath;
                             docNode.type = "document";
-                            auto docNodeIds =
-                                ctx_.kgStore->upsertNodes({std::move(docNode)});
+                            auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
                             if (!docNodeIds) {
                                 spdlog::debug("Failed to upsert KG doc node for {}: {}",
                                               info.sha256Hash.substr(0, 8),
@@ -1650,6 +1661,7 @@ public:
         const bool wantsHydration = wantsSnippets || wantsMetadata;
         if (req.pathsOnly || (forceHot && !wantsHydration)) {
             out.documents.reserve(page.size());
+            std::unordered_set<std::string> seenPaths;
             for (const auto& d : page) {
                 DocumentEntry e;
                 e.name = d.fileName;
@@ -1664,7 +1676,15 @@ public:
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
                 e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+                if (req.pathsOnly) {
+                    path_projection::appendUniquePath(
+                        out.paths, seenPaths, path_projection::displayPath(e.path, e.fileName),
+                        req.limit > 0 ? static_cast<std::size_t>(req.limit) : 0);
+                }
                 out.documents.push_back(std::move(e));
+            }
+            if (req.pathsOnly) {
+                out.count = out.paths.size();
             }
             return out;
         }

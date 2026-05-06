@@ -1,6 +1,9 @@
 spdlog_dep = dependency('spdlog', required: true)
 threads_dep = dependency('threads')
-boost_dep = dependency('boost', modules: ['system'], required: true)
+# Use the top-level boost_dep (built from per-library pkg-config probes).
+# Re-invoking dependency('boost', modules: [...]) here would bypass meson's
+# override_dependency and re-trigger meson's broken Windows Boost finder.
+# See meson #14146 for the override+modules limitation.
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_extraction = dependency('yams_extraction', required: false)

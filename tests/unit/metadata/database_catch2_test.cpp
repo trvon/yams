@@ -171,6 +171,22 @@ TEST_CASE("Database: transactions", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: open enables WAL automatically for writable modes",
+          "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    auto stmtResult = db.prepare("PRAGMA journal_mode");
+    REQUIRE(stmtResult.has_value());
+    Statement stmt = std::move(stmtResult).value();
+    auto stepResult = stmt.step();
+    REQUIRE(stepResult.has_value());
+    REQUIRE(stepResult.value());
+    CHECK(stmt.getString(0) == "wal");
+}
+
 TEST_CASE("Database: WAL mode", "[unit][metadata][database]") {
     DatabaseFixture fix;
     Database db;
@@ -305,11 +321,10 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         auto migrateResult = mm.migrate();
         REQUIRE(migrateResult.has_value());
 
-        // Verify final version
+        const int latestAvailable = mm.getLatestVersion();
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
-        CHECK(currentVersion.value() ==
-              31); // Latest schema version (keep in sync with migration.cpp)
+        CHECK(currentVersion.value() == latestAvailable);
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");

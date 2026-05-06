@@ -68,7 +68,6 @@
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 #include <yams/version.hpp>
 
 namespace yams::daemon {
@@ -135,7 +134,13 @@ DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
 DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
-DEFINE_REQUEST_HANDLER(RepairRequest, handleRepairRequest);
+template <> struct RequestHandlerTraits<RepairRequest> {
+    static boost::asio::awaitable<Response> handle(RequestDispatcher*, const RepairRequest&) {
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::InvalidArgument,
+            "RepairRequest is streaming-only; use DaemonClient::callRepair or streaming IPC");
+    }
+};
 
 #undef DEFINE_REQUEST_HANDLER
 
@@ -318,6 +323,13 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         co_return dispatch::makeErrorResponse(ErrorCode::InvalidData,
                                               "Malformed request (variant check failed)");
     }
+    const bool countCurrentStatusRequest = std::holds_alternative<StatusRequest>(req);
+    try {
+        if (state_ && !countCurrentStatusRequest) {
+            state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed);
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch): stats failures must not interrupt response
+    }
     try {
         out = co_await std::visit(
             [this](auto&& arg) -> boost::asio::awaitable<Response> {
@@ -336,13 +348,6 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         spdlog::error("RequestDispatcher::dispatch unknown exception");
         co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
                                               "Failed to process request: unknown error");
-    }
-
-    try {
-        if (state_) {
-            state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed);
-        }
-    } catch (...) { // NOLINT(bugprone-empty-catch): stats failures must not interrupt response
     }
 
     co_return out;
@@ -364,6 +369,7 @@ boost::asio::any_io_executor RequestDispatcher::getCliExecutor() const {
             return serviceManager_->getCliExecutor();
         }
     } catch (...) {
+        // Service manager may be tearing down; fall back to worker executor.
     }
     return getWorkerExecutor();
 }

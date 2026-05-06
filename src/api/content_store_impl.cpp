@@ -12,11 +12,43 @@
 #include <spdlog/spdlog.h>
 
 #include <fstream>
+#include <charconv>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 
 namespace yams::api {
+
+namespace {
+
+constexpr std::string_view kTrustedHashHintTag = "__yams_trusted_hash_hint";
+constexpr std::string_view kHashHintMtimeNsTag = "__yams_hash_hint_mtime_ns";
+
+std::optional<int64_t> parseInt64(std::string_view value) {
+    int64_t out = 0;
+    const auto* begin = value.data();
+    const auto* end = begin + value.size();
+    auto [ptr, ec] = std::from_chars(begin, end, out);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+int64_t fileTimeNs(const std::filesystem::file_time_type& time) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+}
+
+ContentMetadata sanitizeStoredMetadata(ContentMetadata metadata, const std::string& hash,
+                                       uint64_t size) {
+    metadata.contentHash = hash;
+    metadata.size = size;
+    metadata.tags.erase(std::string{kTrustedHashHintTag});
+    metadata.tags.erase(std::string{kHashHintMtimeNsTag});
+    return metadata;
+}
+
+} // namespace
 
 // Implementation of the content store
 class ContentStore : public IContentStore {
@@ -51,13 +83,28 @@ public:
             reporter.setCallback(progress);
         }
 
-        // ContentStore is shared across daemon worker threads. The default SHA256 hasher owns
-        // mutable OpenSSL EVP state and is not thread-safe, so serialize access when reusing the
-        // injected hasher instance.
         std::string fileHash;
-        {
-            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
-            fileHash = hasher_->hashFile(path);
+        const auto trustedHint = metadata.tags.find(std::string{kTrustedHashHintTag});
+        if (trustedHint != metadata.tags.end() && trustedHint->second == "1" &&
+            !metadata.contentHash.empty() && metadata.size == fileSize) {
+            bool mtimeMatches = true;
+            const auto mtimeIt = metadata.tags.find(std::string{kHashHintMtimeNsTag});
+            if (mtimeIt != metadata.tags.end()) {
+                std::error_code ec;
+                const auto currentMtime = std::filesystem::last_write_time(path, ec);
+                const auto expectedMtime = parseInt64(mtimeIt->second);
+                mtimeMatches = !ec && expectedMtime && *expectedMtime == fileTimeNs(currentMtime);
+            }
+            if (mtimeMatches) {
+                fileHash = metadata.contentHash;
+                spdlog::debug("Reusing precomputed file hash: {} for {}", fileHash, path.string());
+            }
+        }
+        if (fileHash.empty()) {
+            // ContentStore is shared across daemon worker threads. Hash with a per-operation hasher
+            // instead of serializing all ingest workers behind the injected mutable hasher.
+            auto fileHasher = crypto::createSHA256Hasher();
+            fileHash = fileHasher->hashFile(path);
         }
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
 
@@ -149,7 +196,7 @@ public:
         // Store manifest metadata
         {
             std::unique_lock lock(metadataMutex_);
-            metadataStore_[fileHash] = metadata;
+            metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
         }
 
         // Store manifest
@@ -335,13 +382,7 @@ public:
                                    const ContentMetadata& metadata) override {
         auto startTime = std::chrono::steady_clock::now();
 
-        std::string dataHash;
-        {
-            std::lock_guard<std::mutex> hasherLock(hasherMutex_);
-            hasher_->init();
-            hasher_->update(data);
-            dataHash = hasher_->finalize();
-        }
+        const std::string dataHash = crypto::SHA256Hasher::hash(data);
 
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
@@ -515,43 +556,63 @@ public:
 
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        return retrieveBytesBounded(hash, std::numeric_limits<std::size_t>::max());
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        return retrieveBytesBounded(hash, maxBytes);
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesBounded(const std::string& hash,
+                                                        std::size_t maxBytes) {
         YAMS_ZONE_SCOPED_N("content_store::retrieve_bytes");
-        // First try to retrieve manifest (chunked content)
+        if (maxBytes == 0) {
+            return std::vector<std::byte>{};
+        }
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
 
         if (manifestResult) {
-            // Content is chunked - reconstruct from manifest
             auto manifest =
                 manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
             if (!manifest) {
                 return manifest.error();
             }
 
-            // Reconstruct content in memory
             std::vector<std::byte> reconstructed;
-            reconstructed.reserve(manifest.value().fileSize);
+            const auto fileSize = manifest.value().fileSize;
+            const std::size_t cap =
+                std::min<std::size_t>(maxBytes, static_cast<std::size_t>(fileSize));
+            reconstructed.reserve(cap);
 
             for (const auto& chunk : manifest.value().chunks) {
+                if (reconstructed.size() >= maxBytes) {
+                    break;
+                }
                 auto chunkData = storage_->retrieve(chunk.hash);
                 if (!chunkData) {
                     spdlog::warn("Failed to retrieve chunk {} for hash {}", chunk.hash, hash);
                     return chunkData.error();
                 }
-                reconstructed.insert(reconstructed.end(), chunkData.value().begin(),
-                                     chunkData.value().end());
+                const auto& bytes = chunkData.value();
+                const std::size_t remaining = maxBytes - reconstructed.size();
+                const std::size_t take = std::min<std::size_t>(bytes.size(), remaining);
+                reconstructed.insert(reconstructed.end(), bytes.begin(), bytes.begin() + take);
             }
 
             updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);
             return reconstructed;
         }
 
-        // Fallback: try direct retrieval (small unchunked content)
         auto dataResult = storage_->retrieve(hash);
         if (!dataResult) {
             return dataResult.error();
         }
         auto data = std::move(dataResult.value());
+        if (data.size() > maxBytes) {
+            data.resize(maxBytes);
+        }
         updateStats(0, 0, data.size(), 0, 0, 1, 0);
         return data;
     }
@@ -757,16 +818,159 @@ public:
     }
 
     // Verify integrity
-    Result<void> verify([[maybe_unused]] ProgressCallback progress) override {
+    Result<void> verify(ProgressCallback progress) override {
         spdlog::info("Starting content store verification");
 
-        // TODO: Implement full verification
-        // This would involve:
-        // 1. Checking all manifests
-        // 2. Verifying all chunks exist and match their hashes
-        // 3. Checking reference counts
+        size_t checkedItems = 0;
+        size_t errors = 0;
 
-        return Result<void>();
+        auto fail = [&errors](const std::string& message) {
+            ++errors;
+            spdlog::warn("Content store verification failed: {}", message);
+        };
+
+        if (auto* concreteStorage = dynamic_cast<storage::StorageEngine*>(storage_.get())) {
+            auto storageVerify = concreteStorage->verify();
+            if (!storageVerify) {
+                fail("storage engine object verification failed: " + storageVerify.error().message);
+            }
+        }
+
+        if (auto* concreteRefCounter =
+                dynamic_cast<storage::ReferenceCounter*>(refCounter_.get())) {
+            auto refIntegrity = concreteRefCounter->verifyIntegrity();
+            if (!refIntegrity || !refIntegrity.value()) {
+                fail("reference counter integrity check failed");
+            }
+        }
+
+        std::vector<std::string> knownHashes;
+        {
+            std::shared_lock lock(metadataMutex_);
+            knownHashes.reserve(metadataStore_.size());
+            for (const auto& [hash, _] : metadataStore_) {
+                knownHashes.push_back(hash);
+            }
+        }
+
+        for (const auto& hash : knownHashes) {
+            ++checkedItems;
+            if (progress) {
+                Progress p;
+                p.bytesProcessed = checkedItems;
+                p.totalBytes = knownHashes.size();
+                p.percentage = knownHashes.empty() ? 100.0
+                                                   : (static_cast<double>(checkedItems) * 100.0 /
+                                                      static_cast<double>(knownHashes.size()));
+                p.currentOperation = "verify";
+                progress(p);
+            }
+
+            const auto manifestHash = hash + ".manifest";
+            auto manifestExists = storage_->exists(manifestHash);
+            if (!manifestExists) {
+                fail("manifest existence check failed for " + hash + ": " +
+                     manifestExists.error().message);
+                continue;
+            }
+
+            if (!manifestExists.value()) {
+                auto direct = storage_->retrieve(hash);
+                if (!direct) {
+                    fail("direct object missing for " + hash + ": " + direct.error().message);
+                    continue;
+                }
+                const auto actualHash = crypto::SHA256Hasher::hash(
+                    std::span<const std::byte>(direct.value().data(), direct.value().size()));
+                if (actualHash != hash) {
+                    fail("direct object hash mismatch for " + hash + ": calculated " + actualHash);
+                }
+                continue;
+            }
+
+            auto manifestBytes = storage_->retrieve(manifestHash);
+            if (!manifestBytes) {
+                fail("manifest retrieve failed for " + hash + ": " + manifestBytes.error().message);
+                continue;
+            }
+
+            auto manifest = manifestManager_->deserialize(std::span<const std::byte>(
+                manifestBytes.value().data(), manifestBytes.value().size()));
+            if (!manifest) {
+                fail("manifest deserialize failed for " + hash + ": " + manifest.error().message);
+                continue;
+            }
+
+            auto validManifest = manifestManager_->validateManifest(manifest.value());
+            if (!validManifest || !validManifest.value()) {
+                fail("manifest validation failed for " + hash);
+                continue;
+            }
+
+            if (manifest.value().fileHash != hash) {
+                fail("manifest file hash mismatch for " + hash + ": manifest has " +
+                     manifest.value().fileHash);
+                continue;
+            }
+
+            std::vector<std::byte> reconstructed;
+            if (manifest.value().fileSize <=
+                static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                reconstructed.reserve(static_cast<size_t>(manifest.value().fileSize));
+            }
+
+            for (const auto& chunk : manifest.value().chunks) {
+                auto exists = storage_->exists(chunk.hash);
+                if (!exists || !exists.value()) {
+                    fail("chunk missing for " + hash + ": " + chunk.hash);
+                    continue;
+                }
+
+                auto chunkBytes = storage_->retrieve(chunk.hash);
+                if (!chunkBytes) {
+                    fail("chunk retrieve failed for " + chunk.hash + ": " +
+                         chunkBytes.error().message);
+                    continue;
+                }
+                if (chunkBytes.value().size() != chunk.size) {
+                    fail("chunk size mismatch for " + chunk.hash);
+                    continue;
+                }
+
+                const auto actualChunkHash = crypto::SHA256Hasher::hash(std::span<const std::byte>(
+                    chunkBytes.value().data(), chunkBytes.value().size()));
+                if (actualChunkHash != chunk.hash) {
+                    fail("chunk hash mismatch for " + chunk.hash + ": calculated " +
+                         actualChunkHash);
+                    continue;
+                }
+
+                auto refCount = refCounter_->getRefCount(chunk.hash);
+                if (!refCount || refCount.value() == 0) {
+                    fail("chunk has no reference count for " + chunk.hash);
+                    continue;
+                }
+
+                reconstructed.insert(reconstructed.end(), chunkBytes.value().begin(),
+                                     chunkBytes.value().end());
+            }
+
+            if (reconstructed.size() != manifest.value().fileSize) {
+                fail("reconstructed size mismatch for " + hash);
+                continue;
+            }
+
+            const auto reconstructedHash = crypto::SHA256Hasher::hash(
+                std::span<const std::byte>(reconstructed.data(), reconstructed.size()));
+            if (reconstructedHash != hash) {
+                fail("reconstructed content hash mismatch for " + hash + ": calculated " +
+                     reconstructedHash);
+            }
+        }
+
+        spdlog::info("Content store verification complete: {} known objects checked, {} errors",
+                     checkedItems, errors);
+        return errors == 0 ? Result<void>{} : Result<void>(ErrorCode::CorruptedData);
     }
 
     // Compact storage
@@ -845,7 +1049,6 @@ private:
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
-    mutable std::mutex hasherMutex_;
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
 
     // Statistics

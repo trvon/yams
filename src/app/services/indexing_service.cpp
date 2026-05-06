@@ -336,11 +336,25 @@ public:
                         snapshot.metadata["collection"] = req.collection;
                     }
 
-                    auto storeResult = ctx_.metadataRepo->upsertTreeSnapshot(snapshot);
+                    auto* coord = ctx_.service_manager ? ctx_.service_manager->getWriteCoordinator()
+                                                       : nullptr;
+                    bool snapshotEnqueued = false;
+                    if (coord) {
+                        auto wb = std::make_unique<yams::daemon::WriteBatch>();
+                        wb->source = "IndexingService::upsertTreeSnapshot";
+                        wb->ops.emplace_back(yams::daemon::UpsertTreeSnapshotOp{snapshot});
+                        coord->enqueue(std::move(wb));
+                        snapshotEnqueued = true;
+                        spdlog::info("[IndexingService] Enqueued snapshot metadata: id={}",
+                                     response.snapshotId);
+                    }
+                    auto storeResult = snapshotEnqueued
+                                           ? Result<void>()
+                                           : ctx_.metadataRepo->upsertTreeSnapshot(snapshot);
                     if (!storeResult) {
                         spdlog::warn("[IndexingService] Failed to store snapshot metadata: {}",
                                      storeResult.error().message);
-                    } else {
+                    } else if (!snapshotEnqueued) {
                         spdlog::info("[IndexingService] Stored snapshot metadata: id={}",
                                      response.snapshotId);
                         // PBI-043: Populate KG with path/blob nodes and relationships

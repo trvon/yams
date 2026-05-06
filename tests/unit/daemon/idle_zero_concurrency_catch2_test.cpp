@@ -53,16 +53,13 @@ void resetPostIngestOverridesAndCaps() {
     TuneAdvisor::setPostTitleConcurrent(0);
     TuneAdvisor::setPostEmbedConcurrent(0);
 
-    // Clear dynamic caps with sentinel value
-    // After Bug 1 fix: UINT32_MAX is the unset sentinel
-    // Before fix: 0 is the unset sentinel — either way, these tests focus on
-    // the allocator minimums, not the sentinel semantics
-    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    // Clear dynamic caps with the production unset sentinel.
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
 }
 
 void setAllPostIngestStagesActive() {

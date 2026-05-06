@@ -7,15 +7,23 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <sstream>
+#include <string>
 #include <thread>
 
 #include "../../common/test_helpers_catch2.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include <boost/asio.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -30,6 +38,40 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
+class EnvGuard {
+public:
+    EnvGuard(const std::string& envName, const std::string& newValue) : name_(envName) {
+        if (const char* orig = std::getenv(name_.c_str())) {
+            originalValue_ = orig;
+        }
+#ifdef _WIN32
+        _putenv_s(name_.c_str(), newValue.c_str());
+#else
+        setenv(name_.c_str(), newValue.c_str(), 1);
+#endif
+    }
+
+    ~EnvGuard() {
+        if (originalValue_) {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), originalValue_->c_str());
+#else
+            setenv(name_.c_str(), originalValue_->c_str(), 1);
+#endif
+        } else {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), "");
+#else
+            unsetenv(name_.c_str());
+#endif
+        }
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> originalValue_;
+};
+
 class StubModelProvider : public yams::daemon::IModelProvider {
 public:
     yams::Result<std::vector<float>> generateEmbedding(const std::string& text) override {
@@ -347,6 +389,69 @@ bool containsCanonicalPath(const std::vector<std::string>& paths,
 
     return false;
 }
+
+class SimpleHttpRedirectServer {
+public:
+    explicit SimpleHttpRedirectServer(std::string location)
+        : io_(), acceptor_(io_), location_(std::move(location)) {
+        using boost::asio::ip::tcp;
+
+        tcp::endpoint endpoint(boost::asio::ip::make_address("127.0.0.1"), 0);
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(tcp::acceptor::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
+        port_ = acceptor_.local_endpoint().port();
+
+        ready_.set_value();
+        thread_ = std::thread([this]() { serveOnce(); });
+        ready_.get_future().wait();
+    }
+
+    ~SimpleHttpRedirectServer() {
+        boost::system::error_code ec;
+        acceptor_.close(ec);
+        io_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    uint16_t port() const { return port_; }
+
+private:
+    void serveOnce() {
+        using boost::asio::ip::tcp;
+
+        try {
+            tcp::socket socket(io_);
+            acceptor_.accept(socket);
+
+            std::array<char, 2048> buffer{};
+            boost::system::error_code readEc;
+            (void)socket.read_some(boost::asio::buffer(buffer), readEc);
+
+            std::ostringstream response;
+            response << "HTTP/1.1 302 Found\r\n";
+            response << "Location: " << location_ << "\r\n";
+            response << "Content-Length: 0\r\n";
+            response << "Connection: close\r\n\r\n";
+
+            boost::system::error_code writeEc;
+            boost::asio::write(socket, boost::asio::buffer(response.str()), writeEc);
+            socket.shutdown(tcp::socket::shutdown_both, writeEc);
+            socket.close(writeEc);
+        } catch (...) {
+        }
+    }
+
+    boost::asio::io_context io_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    std::string location_;
+    uint16_t port_{0};
+    std::promise<void> ready_;
+    std::thread thread_;
+};
 
 } // namespace
 
@@ -747,7 +852,17 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     ScopedEnvVar daemonDownloadEnabled("YAMS_ENABLE_DAEMON_DOWNLOAD", std::string("1"));
-    DaemonHarness harness;
+
+    DaemonHarnessOptions options;
+    options.configureDaemon = [](yams::daemon::DaemonConfig& cfg) {
+        cfg.downloadPolicy.enable = true;
+        cfg.downloadPolicy.allowedHosts = {"127.0.0.1", "example.com"};
+        cfg.downloadPolicy.allowedSchemes = {"http", "https"};
+        cfg.downloadPolicy.requireChecksum = false;
+        cfg.downloadPolicy.storeOnly = true;
+        cfg.downloadPolicy.timeout = 5s;
+    };
+    DaemonHarness harness(options);
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -829,12 +944,40 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
             listResult.value().jobs.begin(), listResult.value().jobs.end(),
             [&](const auto& job) { return job.jobId == seeded.jobId && job.state == "canceled"; }));
     }
+
+    SECTION("redirecting download is blocked and surfaced to the client") {
+        RequestDispatcher::__test_resetDownloadJobs();
+
+        SimpleHttpRedirectServer redirectServer("http://example.com/escaped.bin");
+
+        DownloadRequest downloadReq;
+        downloadReq.url =
+            "http://127.0.0.1:" + std::to_string(redirectServer.port()) + "/redirect.bin";
+
+        auto startResult = yams::cli::run_sync(client.call<DownloadRequest>(downloadReq), 10s);
+
+        REQUIRE(startResult.has_value());
+        CHECK(startResult.value().url == downloadReq.url);
+        CHECK_FALSE(startResult.value().jobId.empty());
+        CHECK(startResult.value().state == "queued");
+        CHECK_FALSE(startResult.value().success);
+
+        const auto finalStatus = waitForDownloadJobStatus(client, startResult.value().jobId, 10s);
+        CHECK(finalStatus.jobId == startResult.value().jobId);
+        CHECK(finalStatus.state == "failed");
+        CHECK_FALSE(finalStatus.success);
+        CHECK(finalStatus.error ==
+              "Redirect blocked by policy during probe (follow_redirects=false)");
+    }
 }
 
 TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][model]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
+    EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
+    DaemonHarnessOptions options;
+    options.useMockModelProvider = false;
+    DaemonHarness harness(options);
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -2315,18 +2458,8 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
         // so we don't require the IPC response to succeed. The important thing is that
         // the daemon eventually stops.
         (void)yams::cli::run_sync(client.shutdown(true), 10s);
-
-        // Wait for daemon to actually stop - this is the important assertion
-        bool stopped = false;
-        for (int i = 0; i < 50; ++i) {
-            std::this_thread::sleep_for(100ms);
-            if (!harness.daemon()->isRunning()) {
-                stopped = true;
-                break;
-            }
-        }
-
-        REQUIRE(stopped);
+        REQUIRE(harness.daemon() != nullptr);
+        REQUIRE(harness.daemon()->waitForStopCompletion(10s));
     }
 
     SECTION("socket file removed on stop") {

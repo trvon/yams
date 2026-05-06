@@ -33,6 +33,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 #include <spdlog/spdlog.h>
 
@@ -162,6 +163,8 @@ struct RunConfig {
     int workers{1};
     int repeat{1};
     bool enableEmbeddings{false};
+    bool requireTopologyFresh{false};
+    std::string embeddingModel{"simeon-default"};
     std::vector<std::string> args;
 };
 
@@ -213,6 +216,8 @@ BenchConfig loadConfig(const fs::path& configPath) {
         run.workers = entry.value("workers", 1);
         run.repeat = std::max(1, entry.value("repeat", 1));
         run.enableEmbeddings = entry.value("enable_embeddings", false);
+        run.requireTopologyFresh = entry.value("require_topology_fresh", run.enableEmbeddings);
+        run.embeddingModel = entry.value("embedding_model", std::string("simeon-default"));
         if (entry.contains("args")) {
             for (const auto& arg : entry["args"]) {
                 run.args.push_back(arg.get<std::string>());
@@ -497,7 +502,7 @@ std::optional<fs::path> writeMockEmbeddingConfig(const fs::path& root) {
 }
 
 void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enableEmbeddings,
-                                    bool useMockEmbeddings) {
+                                    bool useMockEmbeddings, const std::string& embeddingModel) {
     if (!enableEmbeddings || !daemon) {
         return;
     }
@@ -517,8 +522,8 @@ void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enabl
         serviceManager->__test_setModelProvider(sharedProvider);
     }
 
-    auto ready =
-        serviceManager->ensureEmbeddingModelReadySync("all-MiniLM-L6-v2", {}, 10000, false, false);
+    const std::string model = embeddingModel.empty() ? "simeon-default" : embeddingModel;
+    auto ready = serviceManager->ensureEmbeddingModelReadySync(model, {}, 10000, false, false);
     if (!ready) {
         spdlog::warn("[bench] Embedding model not ready for throughput run: {}",
                      ready.error().message);
@@ -537,6 +542,27 @@ struct RunResult {
     bool topologyValidated{false};
     std::uint64_t addDocumentsAdded{0};
     std::string addMessage;
+    std::uint64_t embedQueued{0};
+    std::uint64_t embedConsumed{0};
+    std::uint64_t embedDropped{0};
+    std::uint64_t embedPreparedDocsQueued{0};
+    std::uint64_t embedPreparedChunksQueued{0};
+    std::uint64_t embedHashOnlyDocsQueued{0};
+    std::uint64_t postQueued{0};
+    std::uint64_t postConsumed{0};
+    std::uint64_t postDropped{0};
+    std::uint64_t kgQueued{0};
+    std::uint64_t kgConsumed{0};
+    std::uint64_t kgDropped{0};
+    std::uint64_t symbolQueued{0};
+    std::uint64_t symbolConsumed{0};
+    std::uint64_t symbolDropped{0};
+    std::uint64_t entityQueued{0};
+    std::uint64_t entityConsumed{0};
+    std::uint64_t entityDropped{0};
+    std::uint64_t titleQueued{0};
+    std::uint64_t titleConsumed{0};
+    std::uint64_t titleDropped{0};
 };
 
 RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datasetCount,
@@ -565,6 +591,11 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         envSkipModelLoading.emplace("YAMS_SKIP_MODEL_LOADING", "1");
     }
     std::optional<ScopedEnv> envUseMockProvider;
+    std::optional<ScopedEnv> envEmbedBackend;
+    const bool useSimeon = run.embeddingModel == "simeon-default" || run.embeddingModel == "simeon";
+    if (run.enableEmbeddings && !useMockEmbeddings && useSimeon) {
+        envEmbedBackend.emplace("YAMS_EMBED_BACKEND", "simeon");
+    }
     if (run.enableEmbeddings && useMockEmbeddings) {
         envUseMockProvider.emplace("YAMS_USE_MOCK_PROVIDER", "1");
     }
@@ -586,11 +617,12 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     yams::test::DaemonHarness::Options harnessOptions;
     harnessOptions.enableModelProvider = true;
     harnessOptions.useMockModelProvider = !run.enableEmbeddings || useMockEmbeddings;
-    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddings;
+    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddings && !useSimeon;
     harnessOptions.configureModelPool = run.enableEmbeddings && !useMockEmbeddings;
     harnessOptions.modelPoolLazyLoading = false;
     if (run.enableEmbeddings && !useMockEmbeddings) {
-        harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
+        harnessOptions.preloadModels = {useSimeon ? std::string{"simeon-default"}
+                                                  : run.embeddingModel};
         if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
             harnessOptions.pluginDir = fs::path(envPluginDir);
         } else {
@@ -608,7 +640,8 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     if (!harness.start(std::chrono::seconds(30), [](yams::daemon::YamsDaemon*) {})) {
         throw std::runtime_error("Failed to start daemon harness for ingestion benchmark");
     }
-    ensureBenchmarkEmbeddingsReady(harness.daemon(), run.enableEmbeddings, useMockEmbeddings);
+    ensureBenchmarkEmbeddingsReady(harness.daemon(), run.enableEmbeddings, useMockEmbeddings,
+                                   useSimeon ? std::string{"simeon-default"} : run.embeddingModel);
 
     yams::daemon::ClientConfig clientCfg;
     clientCfg.socketPath = harness.socketPath();
@@ -639,13 +672,36 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         }
     }
 
+    auto& bus = yams::daemon::InternalEventBus::instance();
+    const auto baseEmbedQueued = bus.embedQueued();
+    const auto baseEmbedConsumed = bus.embedConsumed();
+    const auto baseEmbedDropped = bus.embedDropped();
+    const auto baseEmbedPreparedDocsQueued = bus.embedPreparedDocsQueued();
+    const auto baseEmbedPreparedChunksQueued = bus.embedPreparedChunksQueued();
+    const auto baseEmbedHashOnlyDocsQueued = bus.embedHashOnlyDocsQueued();
+    const auto basePostQueued = bus.postQueued();
+    const auto basePostConsumed = bus.postConsumed();
+    const auto basePostDropped = bus.postDropped();
+    const auto baseKgQueued = bus.kgQueued();
+    const auto baseKgConsumed = bus.kgConsumed();
+    const auto baseKgDropped = bus.kgDropped();
+    const auto baseSymbolQueued = bus.symbolQueued();
+    const auto baseSymbolConsumed = bus.symbolConsumed();
+    const auto baseSymbolDropped = bus.symbolDropped();
+    const auto baseEntityQueued = bus.entityQueued();
+    const auto baseEntityConsumed = bus.entityConsumed();
+    const auto baseEntityDropped = bus.entityDropped();
+    const auto baseTitleQueued = bus.titleQueued();
+    const auto baseTitleConsumed = bus.titleConsumed();
+    const auto baseTitleDropped = bus.titleDropped();
+
     const auto start = std::chrono::steady_clock::now();
     auto addResult = ingestion.addViaDaemon(addOptions);
     if (!addResult) {
         throw std::runtime_error("Daemon ingestion failed: " + addResult.error().message);
     }
-    auto waitResult =
-        waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs), run.enableEmbeddings);
+    auto waitResult = waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs),
+                                          run.requireTopologyFresh);
     const auto end = std::chrono::steady_clock::now();
 
     harness.stop();
@@ -676,9 +732,31 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.finalSnapshot = waitResult.lastSnapshot;
     result.drained = waitResult.completed;
     result.timedOut = !waitResult.completed;
-    result.topologyValidated = run.enableEmbeddings;
+    result.topologyValidated = run.requireTopologyFresh;
     result.addDocumentsAdded = addResult.value().documentsAdded;
     result.addMessage = addResult.value().message;
+    result.embedQueued = bus.embedQueued() - baseEmbedQueued;
+    result.embedConsumed = bus.embedConsumed() - baseEmbedConsumed;
+    result.embedDropped = bus.embedDropped() - baseEmbedDropped;
+    result.embedPreparedDocsQueued = bus.embedPreparedDocsQueued() - baseEmbedPreparedDocsQueued;
+    result.embedPreparedChunksQueued =
+        bus.embedPreparedChunksQueued() - baseEmbedPreparedChunksQueued;
+    result.embedHashOnlyDocsQueued = bus.embedHashOnlyDocsQueued() - baseEmbedHashOnlyDocsQueued;
+    result.postQueued = bus.postQueued() - basePostQueued;
+    result.postConsumed = bus.postConsumed() - basePostConsumed;
+    result.postDropped = bus.postDropped() - basePostDropped;
+    result.kgQueued = bus.kgQueued() - baseKgQueued;
+    result.kgConsumed = bus.kgConsumed() - baseKgConsumed;
+    result.kgDropped = bus.kgDropped() - baseKgDropped;
+    result.symbolQueued = bus.symbolQueued() - baseSymbolQueued;
+    result.symbolConsumed = bus.symbolConsumed() - baseSymbolConsumed;
+    result.symbolDropped = bus.symbolDropped() - baseSymbolDropped;
+    result.entityQueued = bus.entityQueued() - baseEntityQueued;
+    result.entityConsumed = bus.entityConsumed() - baseEntityConsumed;
+    result.entityDropped = bus.entityDropped() - baseEntityDropped;
+    result.titleQueued = bus.titleQueued() - baseTitleQueued;
+    result.titleConsumed = bus.titleConsumed() - baseTitleConsumed;
+    result.titleDropped = bus.titleDropped() - baseTitleDropped;
     return result;
 }
 
@@ -702,6 +780,17 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"label", run.label},
         {"iteration", iteration},
         {"workers", run.workers},
+        {"embedding_model", run.enableEmbeddings ? run.embeddingModel : std::string{}},
+        {"require_topology_fresh", run.requireTopologyFresh},
+        {"embedding_backend", run.enableEmbeddings ? ((run.embeddingModel == "simeon-default" ||
+                                                       run.embeddingModel == "simeon")
+                                                          ? "simeon"
+                                                          : "onnxruntime")
+                                                   : "disabled"},
+        {"simeon_recipe", run.enableEmbeddings && (run.embeddingModel == "simeon-default" ||
+                                                   run.embeddingModel == "simeon")
+                              ? yams::vector::simeonRecipeLabel()
+                              : std::string{}},
         {"exit_code", result.exitCode},
         {"duration_seconds", result.durationSeconds},
         {"dataset_files", datasetCount},
@@ -721,6 +810,34 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"post_ingest_inflight", result.finalSnapshot.postIngestInflight},
         {"post_ingest_processed", result.finalSnapshot.postIngestProcessed},
         {"post_ingest_failed", result.finalSnapshot.postIngestFailed},
+        {"pipeline_counters",
+         {{"embed",
+           {{"queued", result.embedQueued},
+            {"consumed", result.embedConsumed},
+            {"dropped", result.embedDropped},
+            {"prepared_docs_queued", result.embedPreparedDocsQueued},
+            {"prepared_chunks_queued", result.embedPreparedChunksQueued},
+            {"hash_only_docs_queued", result.embedHashOnlyDocsQueued}}},
+          {"post",
+           {{"queued", result.postQueued},
+            {"consumed", result.postConsumed},
+            {"dropped", result.postDropped}}},
+          {"kg",
+           {{"queued", result.kgQueued},
+            {"consumed", result.kgConsumed},
+            {"dropped", result.kgDropped}}},
+          {"symbol",
+           {{"queued", result.symbolQueued},
+            {"consumed", result.symbolConsumed},
+            {"dropped", result.symbolDropped}}},
+          {"entity",
+           {{"queued", result.entityQueued},
+            {"consumed", result.entityConsumed},
+            {"dropped", result.entityDropped}}},
+          {"title",
+           {{"queued", result.titleQueued},
+            {"consumed", result.titleConsumed},
+            {"dropped", result.titleDropped}}}}},
         {"topology_validated", result.topologyValidated},
         {"topology_artifacts_fresh", result.finalSnapshot.topologyArtifactsFresh},
         {"topology_rebuild_running", result.finalSnapshot.topologyRebuildRunning},

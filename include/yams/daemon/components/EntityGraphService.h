@@ -31,7 +31,7 @@ namespace daemon {
 class ServiceManager;
 class AbiSymbolExtractorAdapter;
 class AbiEntityExtractorAdapter;
-class KGWriteQueue;
+class WriteCoordinator;
 
 /**
  * EntityGraphService facade.
@@ -91,13 +91,13 @@ private:
                                 const Job& job, const yams_symbol_extraction_result_v1* result);
 
     /**
-     * Deferred symbol KG population using batched write queue.
+     * Deferred symbol KG population through WriteCoordinator.
      * Eliminates lock contention by queuing writes instead of immediate commits.
      */
     bool
     populateKnowledgeGraphDeferred(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                    const Job& job, const yams_symbol_extraction_result_v1* result,
-                                   KGWriteQueue* kgQueue);
+                                   WriteCoordinator* writeCoordinator);
 
     /**
      * Check if content type should use NL entity extraction instead of code symbol extraction.

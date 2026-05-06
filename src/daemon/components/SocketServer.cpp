@@ -21,7 +21,6 @@ bool stream_trace_enabled() {
     return false;
 }
 
-// Diagnostic thread removed - simplified architecture with fixed worker pool
 } // namespace
 
 #include <spdlog/spdlog.h>
@@ -40,7 +39,6 @@ bool stream_trace_enabled() {
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 
 #include <algorithm>
@@ -49,6 +47,7 @@ bool stream_trace_enabled() {
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
 
 #ifndef _WIN32
 #include <strings.h>
@@ -63,6 +62,248 @@ using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::use_awaitable;
 using local = boost::asio::local::stream_protocol;
+
+namespace {
+RequestHandler::Config::AdmissionDecision makeSocketBusyDecision(RequestDispatcher* dispatcher,
+                                                                 StateComponent* state,
+                                                                 std::size_t active,
+                                                                 std::size_t limit) {
+    const auto overload = admission::captureSnapshot(
+        dispatcher ? dispatcher->getServiceManager() : nullptr, state,
+        static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit));
+    const auto decisionCore = admission::makeBusyDecision("Server busy", overload);
+    RequestHandler::Config::AdmissionDecision decision;
+    decision.code = decisionCore.code;
+    decision.message = decisionCore.message;
+    decision.retry = ErrorResponse::RetryInfo{decisionCore.retryAfterMs, "overload"};
+    return decision;
+}
+} // namespace
+
+size_t SocketServer::mainActiveConnectionCount() const {
+    return mainActiveConnections_.load(std::memory_order_relaxed);
+}
+
+size_t SocketServer::connectionSlotsFreeForLimit(size_t limit) const {
+    const size_t mainActive = mainActiveConnectionCount();
+    return (mainActive < limit) ? (limit - mainActive) : 0;
+}
+
+bool SocketServer::mainSocketEmergencyGuardRejects() const {
+    const size_t active = mainActiveConnectionCount();
+    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
+    return active >= hardLimit;
+}
+
+void SocketServer::closeAcceptedSocket(local::socket& socket) const {
+    boost::system::error_code shutdown_ec;
+    socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
+    boost::system::error_code close_ec;
+    socket.close(close_ec);
+}
+
+boost::asio::awaitable<void>
+SocketServer::backoffAfterReject(std::chrono::milliseconds delay) const {
+    boost::asio::steady_timer timer(*ioCoordinator_->getIOContext());
+    timer.expires_after(delay);
+    try {
+        co_await timer.async_wait(use_awaitable);
+    } catch (const boost::system::system_error&) {
+        // Intentional best-effort path; keep the primary operation unaffected.
+    }
+}
+
+boost::asio::awaitable<void>
+SocketServer::rejectProxyAcceptForNoSlots(local::socket& socket, std::string_view loopLabel,
+                                          bool trace, uint32_t rejectStreak) const {
+    closeAcceptedSocket(socket);
+    if (state_) {
+        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+    }
+
+    if (trace) {
+        spdlog::debug("stream-trace: accept rejected (no slots)");
+    } else {
+        static std::atomic<uint64_t> s_noSlotRejects{0};
+        uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((n & 0x3FFu) == 0) {
+            spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}", loopLabel, n);
+        }
+    }
+
+    const auto maxBackoff =
+        std::max<std::chrono::milliseconds>(config_.acceptBackoffMs, std::chrono::milliseconds(4));
+    const auto adaptiveBackoff = std::min<std::chrono::milliseconds>(
+        maxBackoff, std::chrono::milliseconds(1u << rejectStreak));
+    co_await backoffAfterReject(adaptiveBackoff);
+}
+
+boost::asio::awaitable<void>
+SocketServer::rejectMainAcceptForEmergencyGuard(local::socket& socket,
+                                                std::string_view loopLabel) const {
+    const size_t active = mainActiveConnectionCount();
+    const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
+    const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
+
+    closeAcceptedSocket(socket);
+    if (state_) {
+        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+        state_->stats.forcedCloseCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    spdlog::debug("SocketServer: {} accept rejected by emergency session guard "
+                  "(active={} hard_limit={} soft_limit={})",
+                  loopLabel, active, hardLimit, softLimit);
+
+    co_await backoffAfterReject(
+        std::max<std::chrono::milliseconds>(config_.acceptBackoffMs, std::chrono::milliseconds(4)));
+}
+
+size_t SocketServer::recordAcceptedConnection(bool isProxy) {
+    auto current = activeConnections_.fetch_add(1) + 1;
+    totalConnections_.fetch_add(1);
+    if (isProxy) {
+        proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return current;
+}
+
+size_t SocketServer::releaseActiveConnection(bool isProxy) {
+    auto current = activeConnections_.fetch_sub(1) - 1;
+    if (isProxy) {
+        proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+    } else {
+        mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    return current;
+}
+
+void SocketServer::publishConnectionStats(size_t currentActiveConnections,
+                                          std::optional<size_t> slotLimitOverride) const {
+    if (!state_) {
+        return;
+    }
+
+    const auto slotLimit =
+        slotLimitOverride.value_or(state_->stats.maxConnections.load(std::memory_order_relaxed));
+    const auto effectiveLimit = (slotLimit == 0) ? size_t{1024} : slotLimit;
+    state_->stats.activeConnections.store(currentActiveConnections, std::memory_order_relaxed);
+    state_->stats.connectionSlotsFree.store(connectionSlotsFreeForLimit(effectiveLimit),
+                                            std::memory_order_relaxed);
+}
+
+SocketAdmissionVerdict SocketServer::evaluateRequestAdmission(const Request& request,
+                                                              bool isProxy) const {
+    const auto active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
+                                : mainActiveConnectionCount();
+    const auto limit = slotLimit_.load(std::memory_order_relaxed);
+    return AdmissionPolicy::evaluateSocketAdmission(active, limit, request, isProxy);
+}
+
+void SocketServer::ensureWriterBudget() {
+    if (writerBudget_) {
+        return;
+    }
+
+    std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+    if (initialBudget == 0) {
+        initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
+    }
+    if (initialBudget == 0) {
+        initialBudget = 256ULL * 1024;
+    }
+    writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
+}
+
+RequestDispatcher* SocketServer::currentDispatcher() const {
+    std::lock_guard<std::mutex> lk(dispatcherMutex_);
+    return dispatcher_;
+}
+
+RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
+                                                       RequestDispatcher* dispatcher) const {
+    RequestHandler::Config handlerConfig;
+    handlerConfig.writer_budget_ref = writerBudget_;
+    handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
+    handlerConfig.enable_streaming = true;
+    handlerConfig.enable_multiplexing = !isProxy;
+
+    if (dispatcher) {
+        try {
+            handlerConfig.worker_executor = dispatcher->getWorkerExecutor();
+            handlerConfig.cli_executor = dispatcher->getCliExecutor();
+            handlerConfig.worker_job_signal = dispatcher->getWorkerJobSignal();
+        } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
+        }
+    }
+
+    handlerConfig.chunk_size = TuneAdvisor::chunkSize();
+    handlerConfig.close_after_response = false;
+    handlerConfig.graceful_half_close = true;
+
+    auto connectionTimeout = config_.connectionTimeout;
+    if (connectionTimeout.count() == 0) {
+        connectionTimeout = std::chrono::milliseconds(TuneAdvisor::ipcTimeoutMs());
+    }
+    auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
+    if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
+        timeoutSeconds = std::chrono::seconds(1);
+    }
+    handlerConfig.read_timeout = timeoutSeconds;
+    handlerConfig.write_timeout = timeoutSeconds;
+
+    auto streamChunkTimeoutMs = TuneAdvisor::streamChunkTimeoutMs();
+    if (streamChunkTimeoutMs == 0 && connectionTimeout.count() > 0) {
+        streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
+    }
+    handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
+    handlerConfig.max_inflight_per_connection =
+        isProxy ? 1 : TuneAdvisor::serverMaxInflightPerConn();
+    if (!isProxy) {
+        handlerConfig.admission_control = [this, isProxy](const Request& request)
+            -> std::optional<RequestHandler::Config::AdmissionDecision> {
+            const auto verdict = evaluateRequestAdmission(request, isProxy);
+            if (verdict != SocketAdmissionVerdict::reject) {
+                return std::nullopt;
+            }
+
+            const size_t active = isProxy ? proxyActiveConnections_.load(std::memory_order_relaxed)
+                                          : mainActiveConnectionCount();
+            const size_t limit = slotLimit_.load(std::memory_order_relaxed);
+
+            if (state_) {
+                state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
+                state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
+            }
+            TuningManager::notifyWakeup();
+            return makeSocketBusyDecision(dispatcher_, state_, active, limit);
+        };
+    }
+
+    if (state_) {
+        handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
+    }
+    return handlerConfig;
+}
+
+void SocketServer::testing_setConnectionCounts(size_t mainActive, size_t proxyActive) {
+    mainActiveConnections_.store(mainActive, std::memory_order_relaxed);
+    proxyActiveConnections_.store(proxyActive, std::memory_order_relaxed);
+    activeConnections_.store(mainActive + proxyActive, std::memory_order_relaxed);
+}
+
+bool SocketServer::testing_mainSocketEmergencyGuardRejects() const {
+    return mainSocketEmergencyGuardRejects();
+}
+
+SocketAdmissionVerdict
+SocketServer::testing_mainSocketAdmissionVerdict(const Request& request) const {
+    return evaluateRequestAdmission(request, false);
+}
 
 SocketServer::SocketServer(const Config& config, IOCoordinator* ioCoordinator,
                            WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
@@ -188,13 +429,7 @@ Result<void> SocketServer::start() {
             initialBudget = 256ULL * 1024;
         setWriterBudget(initialBudget);
 
-        acceptLoopFuture_ = co_spawn(
-            ioCoordinator_->getExecutor(),
-            [this]() -> awaitable<void> {
-                co_await accept_loop(false);
-                co_return;
-            },
-            boost::asio::use_future);
+        acceptLoopState_ = schedule_accept_loop(false);
         spdlog::info("SocketServer: accept_loop scheduled on IOCoordinator");
 
         // Start proxy acceptor if configured
@@ -204,6 +439,7 @@ Result<void> SocketServer::start() {
                 try {
                     proxySockPath = std::filesystem::absolute(proxySockPath);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
 
@@ -248,13 +484,7 @@ Result<void> SocketServer::start() {
                     proxySocketPath_ = proxySockPath;
                 }
 
-                proxyAcceptLoopFuture_ = co_spawn(
-                    ioCoordinator_->getExecutor(),
-                    [this]() -> awaitable<void> {
-                        co_await accept_loop(true);
-                        co_return;
-                    },
-                    boost::asio::use_future);
+                proxyAcceptLoopState_ = schedule_accept_loop(true);
                 spdlog::info("SocketServer: proxy accept_loop scheduled on {}",
                              proxySockPath.string());
             }
@@ -274,6 +504,7 @@ Result<void> SocketServer::start() {
                               .count();
                 state_->initDurationsMs.emplace("ipc_server", static_cast<uint64_t>(ms));
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 
@@ -302,6 +533,7 @@ Result<void> SocketServer::stop() {
         try {
             stop_source_.request_stop();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         // Close all active sockets IMMEDIATELY for deterministic shutdown
@@ -353,38 +585,18 @@ Result<void> SocketServer::stop() {
                 spdlog::warn("SocketServer: failed to close proxy acceptor: {}", e.what());
             }
         }
-        if (proxyAcceptLoopFuture_.valid()) {
-            try {
-                auto status = proxyAcceptLoopFuture_.wait_for(std::chrono::seconds(2));
-                if (status == std::future_status::ready) {
-                    proxyAcceptLoopFuture_.get();
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Proxy accept_loop terminated: {}", e.what());
-            }
-            proxyAcceptLoopFuture_ = {};
+        if (proxyAcceptLoopState_) {
+            (void)wait_accept_loop(proxyAcceptLoopState_, std::chrono::seconds(2), "proxy");
+            proxyAcceptLoopState_.reset();
         }
         proxyAcceptor_.reset();
 
         // Close acceptor on executor thread and wait for accept loop completion
         close_acceptor_on_executor();
 
-        if (acceptLoopFuture_.valid()) {
-            try {
-                // Wait longer for accept loop to complete gracefully
-                auto status = acceptLoopFuture_.wait_for(std::chrono::seconds(3));
-                if (status == std::future_status::ready) {
-                    acceptLoopFuture_.get();
-                    spdlog::info("SocketServer: accept_loop completed");
-                } else {
-                    spdlog::warn("SocketServer: accept_loop timed out during shutdown after 3s");
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("SocketServer: accept_loop terminated with exception: {}", e.what());
-            } catch (...) {
-                spdlog::warn("SocketServer: accept_loop terminated with unknown exception");
-            }
-            acceptLoopFuture_ = {};
+        if (acceptLoopState_) {
+            (void)wait_accept_loop(acceptLoopState_, std::chrono::seconds(3), "main");
+            acceptLoopState_.reset();
         }
 
         // Destroy acceptor while WorkCoordinator is still alive to avoid dangling
@@ -579,6 +791,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                     try {
                         co_await timer.async_wait(use_awaitable);
                     } catch (const boost::system::system_error&) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     if (!running_ || stopping_)
                         break;
@@ -601,64 +814,15 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
             if (isProxy && !slotAcquired) {
                 noSlotRejectStreak = std::min<uint32_t>(noSlotRejectStreak + 1, 7);
-                boost::system::error_code shutdown_ec;
-                socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
-                boost::system::error_code close_ec;
-                socket.close(close_ec);
-                if (state_) {
-                    state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-                }
-
-                if (trace) {
-                    spdlog::debug("stream-trace: accept rejected (no slots)");
-                } else {
-                    static std::atomic<uint64_t> s_noSlotRejects{0};
-                    uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if ((n & 0x3FFu) == 0) { // log every 1024th reject
-                        spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}",
-                                      loopLabel, n);
-                    }
-                }
-
-                // Back off adaptively to avoid an accept/close spin loop under sustained
-                // overload. This reduces connection churn for short UX requests while still
-                // letting the accept loop recover quickly once slots free up.
-                const auto maxBackoff = std::max<std::chrono::milliseconds>(
-                    config_.acceptBackoffMs, std::chrono::milliseconds(4));
-                const auto adaptiveBackoff = std::min<std::chrono::milliseconds>(
-                    maxBackoff, std::chrono::milliseconds(1u << noSlotRejectStreak));
-                boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
-                slot_timer.expires_after(adaptiveBackoff);
-                co_await slot_timer.async_wait(use_awaitable);
-
+                co_await rejectProxyAcceptForNoSlots(socket, loopLabel, trace, noSlotRejectStreak);
                 continue;
             }
 
             noSlotRejectStreak = 0;
 
             if (!isProxy) {
-                const size_t active = activeConnections_.load(std::memory_order_relaxed);
-                const size_t softLimit = slotLimit_.load(std::memory_order_relaxed);
-                const size_t hardLimit = AdmissionPolicy::emergencySessionLimit(softLimit);
-                if (active >= hardLimit) {
-                    boost::system::error_code shutdown_ec;
-                    socket.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both,
-                                    shutdown_ec);
-                    boost::system::error_code close_ec;
-                    socket.close(close_ec);
-                    if (state_) {
-                        state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-                        state_->stats.forcedCloseCount.fetch_add(1, std::memory_order_relaxed);
-                    }
-
-                    spdlog::debug("SocketServer: {} accept rejected by emergency session guard "
-                                  "(active={} hard_limit={} soft_limit={})",
-                                  loopLabel, active, hardLimit, softLimit);
-
-                    boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
-                    slot_timer.expires_after(std::max<std::chrono::milliseconds>(
-                        config_.acceptBackoffMs, std::chrono::milliseconds(4)));
-                    co_await slot_timer.async_wait(use_awaitable);
+                if (mainSocketEmergencyGuardRejects()) {
+                    co_await rejectMainAcceptForEmergencyGuard(socket, loopLabel);
                     continue;
                 }
             }
@@ -683,25 +847,12 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                              totalConnections_.load(std::memory_order_relaxed));
             }
 
-            auto current = activeConnections_.fetch_add(1) + 1;
-            totalConnections_.fetch_add(1);
-            if (isProxy) {
-                proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
-            }
+            auto current = recordAcceptedConnection(isProxy);
 
             spdlog::debug("SocketServer: [conn={}] accepted {} connection, active={} total={}",
                           conn_token, loopLabel, current, totalConnections_.load());
 
-            if (state_) {
-                state_->stats.activeConnections.store(current);
-                auto maxConn = state_->stats.maxConnections.load(std::memory_order_relaxed);
-                if (maxConn == 0)
-                    maxConn = 1024;
-                auto slotsFree = (current < maxConn) ? (maxConn - current) : 0;
-                state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
-            }
+            publishConnectionStats(current);
             TuningManager::notifyWakeup();
 
             auto connectionExecutor = boost::asio::make_strand(ioCoordinator_->getExecutor());
@@ -801,25 +952,12 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         std::chrono::steady_clock::time_point start_time;
         bool proxyConn;
         ~CleanupGuard() {
-            auto current = server->activeConnections_.fetch_sub(1) - 1;
-            if (proxyConn) {
-                server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
-            } else {
-                server->mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
-            }
+            auto current = server->releaseActiveConnection(proxyConn);
             if (current == 0) {
                 std::lock_guard<std::mutex> lock(server->shutdownMutex_);
                 server->shutdownCv_.notify_all();
             }
-            if (server->state_) {
-                server->state_->stats.activeConnections.store(current);
-                auto maxConn = server->state_->stats.maxConnections.load(std::memory_order_relaxed);
-                if (maxConn == 0)
-                    maxConn = 1024;
-                auto slotsFree = (current < maxConn) ? (maxConn - current) : 0;
-                server->state_->stats.connectionSlotsFree.store(slotsFree,
-                                                                std::memory_order_relaxed);
-            }
+            server->publishConnectionStats(current);
             auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - start_time)
                                    .count();
@@ -841,94 +979,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
     }
 
     try {
-        if (!writerBudget_) {
-            std::size_t initialBudget = TuneAdvisor::serverWriterBudgetBytesPerTurn();
-            if (initialBudget == 0)
-                initialBudget = TuneAdvisor::writerBudgetBytesPerTurn();
-            if (initialBudget == 0)
-                initialBudget = 256ULL * 1024;
-            writerBudget_ = std::make_shared<std::atomic<std::size_t>>(initialBudget);
-        }
-
-        RequestHandler::Config handlerConfig;
-        handlerConfig.writer_budget_ref = writerBudget_;
-        handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
-        handlerConfig.enable_streaming = true;
-        handlerConfig.enable_multiplexing = true;
-        // Request coroutines run on the dedicated RequestExecutor (cli_executor).
-        if (dispatcher_) {
-            try {
-                handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
-                handlerConfig.cli_executor = dispatcher_->getCliExecutor();
-                handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
-            } catch (...) {
-            }
-        }
-        handlerConfig.chunk_size = TuneAdvisor::chunkSize();
-        handlerConfig.close_after_response = false;
-        handlerConfig.graceful_half_close = true;
-        auto connectionTimeout = config_.connectionTimeout;
-        if (connectionTimeout.count() == 0) {
-            connectionTimeout = std::chrono::milliseconds(TuneAdvisor::ipcTimeoutMs());
-        }
-        auto timeoutSeconds = std::chrono::duration_cast<std::chrono::seconds>(connectionTimeout);
-        if (timeoutSeconds.count() == 0 && connectionTimeout.count() > 0) {
-            timeoutSeconds = std::chrono::seconds(1);
-        }
-        handlerConfig.read_timeout = timeoutSeconds;
-        handlerConfig.write_timeout = timeoutSeconds;
-        auto streamChunkTimeoutMs = TuneAdvisor::streamChunkTimeoutMs();
-        if (streamChunkTimeoutMs == 0 && connectionTimeout.count() > 0) {
-            streamChunkTimeoutMs = static_cast<uint32_t>(connectionTimeout.count());
-        }
-        handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
-        handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        handlerConfig.admission_control = [this, isProxy](const Request& request)
-            -> std::optional<RequestHandler::Config::AdmissionDecision> {
-            const auto verdict = AdmissionPolicy::evaluateSocketAdmission(
-                activeConnections_.load(std::memory_order_relaxed),
-                slotLimit_.load(std::memory_order_relaxed), request, isProxy);
-            if (verdict != SocketAdmissionVerdict::reject) {
-                return std::nullopt;
-            }
-
-            const size_t active = activeConnections_.load(std::memory_order_relaxed);
-            const size_t limit = slotLimit_.load(std::memory_order_relaxed);
-
-            if (state_) {
-                state_->stats.acceptCapacityDelays.fetch_add(1, std::memory_order_relaxed);
-                state_->stats.connectionSlotsFree.store(0, std::memory_order_relaxed);
-            }
-            TuningManager::notifyWakeup();
-
-            const auto overload = admission::captureSnapshot(
-                dispatcher_ ? dispatcher_->getServiceManager() : nullptr, state_,
-                static_cast<std::uint64_t>(active), static_cast<std::uint64_t>(limit));
-            const auto decisionCore = admission::makeBusyDecision("Server busy", overload);
-            RequestHandler::Config::AdmissionDecision decision;
-            decision.code = decisionCore.code;
-            decision.message = decisionCore.message;
-            decision.retry = ErrorResponse::RetryInfo{decisionCore.retryAfterMs, "overload"};
-            return decision;
-        };
-        // Wire health-check counter so RequestHandler can tag ping/status connections
-        if (state_) {
-            handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
-        }
+        ensureWriterBudget();
+        auto* disp = currentDispatcher();
+        auto handlerConfig = makeHandlerConfig(isProxy, disp);
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
-        RequestDispatcher* disp = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(dispatcherMutex_);
-            disp = dispatcher_;
-        }
-        // Wire worker_job_signal for cross-executor coordination.
-        // worker_executor is already set above; this path only adds the signal.
-        try {
-            if (disp) {
-                handlerConfig.worker_job_signal = disp->getWorkerJobSignal();
-            }
-        } catch (...) {
-        }
         auto handler = std::make_shared<RequestHandler>(disp, handlerConfig);
 
         // Wrap socket in shared_ptr for tracking and use modern C++20 move semantics
@@ -947,93 +1001,94 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             auto connection_strand = boost::asio::make_strand(executor);
             auto lifetime = config_.maxConnectionLifetime;
             auto created_at = tracked_socket->created_at(); // Thread-safe read
+            auto tracked_for_timer = tracked_socket;        // share into timer closure
 
-            bool timedOut =
-                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                     void(std::exception_ptr, bool)>(
-                    [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
-                     created_at](auto completion_handler) mutable {
-                        // Shared state for race coordination
-                        auto completed = std::make_shared<std::atomic<bool>>(false);
-                        auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
-                        timer->expires_after(lifetime);
+            bool timedOut = co_await boost::asio::async_initiate<
+                decltype(boost::asio::use_awaitable), void(std::exception_ptr, bool)>(
+                [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
+                 created_at, tracked_for_timer](auto completion_handler) mutable {
+                    // Shared state for race coordination
+                    auto completed = std::make_shared<std::atomic<bool>>(false);
+                    auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
+                    timer->expires_after(lifetime);
 
-                        using HandlerT = std::decay_t<decltype(completion_handler)>;
-                        auto handlerPtr = std::make_shared<HandlerT>(std::move(completion_handler));
-                        auto completion_exec =
-                            boost::asio::get_associated_executor(*handlerPtr, executor);
+                    using HandlerT = std::decay_t<decltype(completion_handler)>;
+                    auto handlerPtr = std::make_shared<HandlerT>(std::move(completion_handler));
+                    auto completion_exec =
+                        boost::asio::get_associated_executor(*handlerPtr, executor);
 
-                        // Set up lifetime timer
-                        timer->async_wait([this, completed, handlerPtr, completion_exec, conn_token,
-                                           created_at, lifetime,
-                                           sock](const boost::system::error_code& ec) mutable {
-                            if (ec == boost::asio::error::operation_aborted)
-                                return; // Cancelled by handler completion
-                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                // Timer won - lifetime exceeded
-                                auto newCount =
-                                    forcedCloseCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-                                if (state_) {
-                                    state_->stats.forcedCloseCount.store(newCount,
-                                                                         std::memory_order_relaxed);
-                                }
-                                auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
-                                                 std::chrono::steady_clock::now() - created_at)
-                                                 .count();
-                                spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
-                                             "limit={}s) - forcing close",
-                                             conn_token, age_s, lifetime.count());
-                                // Cancel pending async ops so the detached coroutine's
-                                // async_read completes with operation_aborted.  Do NOT
-                                // close() here — closing from the timer callback while
-                                // the coroutine may be mid-resume on another IO thread
-                                // causes a double kqueue_reactor::deregister_descriptor
-                                // → SIGSEGV.
-                                //
-                                // cancel() is safe to call from any completion handler
-                                // on the same io_context (it uses internal locking on
-                                // the descriptor state).  The coroutine will observe
-                                // the read error (operation_aborted), exit its loop,
-                                // and close the socket itself.
-                                //
-                                // shutdown(both) ensures that even if the inner idle
-                                // timer wins the race (swallowing the cancel), the
-                                // *next* async_read returns EOF so the coroutine exits
-                                // promptly rather than lingering for idle-timeout cycles.
-                                if (sock && sock->is_open()) {
-                                    boost::system::error_code shutdown_ec;
-                                    sock->shutdown(boost::asio::socket_base::shutdown_both,
-                                                   shutdown_ec);
-                                    boost::system::error_code cancel_ec;
-                                    sock->cancel(cancel_ec);
-                                }
-                                boost::asio::post(
-                                    completion_exec, [h = std::move(*handlerPtr)]() mutable {
-                                        std::move(h)(std::exception_ptr{}, true); // timedOut = true
-                                    });
+                    auto on_timer_fire =
+                        std::make_shared<std::function<void(const boost::system::error_code&)>>();
+                    *on_timer_fire = [this, completed, handlerPtr, completion_exec, conn_token,
+                                      created_at, lifetime, sock, tracked_for_timer, timer,
+                                      on_timer_fire](const boost::system::error_code& ec) mutable {
+                        if (ec == boost::asio::error::operation_aborted)
+                            return;
+                        if (completed->load(std::memory_order_acquire))
+                            return;
+                        if (tracked_for_timer) {
+                            const auto now = std::chrono::steady_clock::now();
+                            const auto last = tracked_for_timer->last_activity_at();
+                            if (now - last < lifetime / 2) {
+                                timer->expires_after(lifetime / 2);
+                                timer->async_wait(*on_timer_fire);
+                                return;
                             }
-                        });
+                        }
+                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                            auto newCount =
+                                forcedCloseCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (state_) {
+                                state_->stats.forcedCloseCount.store(newCount,
+                                                                     std::memory_order_relaxed);
+                            }
+                            auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::steady_clock::now() - created_at)
+                                             .count();
+                            spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
+                                         "limit={}s, idle) - forcing close",
+                                         conn_token, age_s, lifetime.count());
+                            if (sock && sock->is_open()) {
+                                boost::system::error_code shutdown_ec;
+                                sock->shutdown(boost::asio::socket_base::shutdown_both,
+                                               shutdown_ec);
+                                boost::system::error_code cancel_ec;
+                                sock->cancel(cancel_ec);
+                            }
+                            boost::asio::post(completion_exec,
+                                              [h = std::move(*handlerPtr)]() mutable {
+                                                  std::move(h)(std::exception_ptr{}, true);
+                                              });
+                        }
+                    };
+                    timer->async_wait(*on_timer_fire);
 
-                        // Spawn connection handler
-                        boost::asio::co_spawn(
-                            connection_strand,
-                            [handler, sock, token, conn_token, timer, completed, handlerPtr,
-                             completion_exec]() mutable -> boost::asio::awaitable<void> {
-                                co_await handler->handle_connection(sock, token, conn_token);
+                    std::function<void()> on_activity;
+                    if (tracked_for_timer) {
+                        on_activity = [tracked_for_timer]() {
+                            tracked_for_timer->touch_activity();
+                        };
+                    }
+                    boost::asio::co_spawn(
+                        connection_strand,
+                        [handler, sock, token, conn_token, timer, completed, handlerPtr,
+                         completion_exec,
+                         on_activity =
+                             std::move(on_activity)]() mutable -> boost::asio::awaitable<void> {
+                            co_await handler->handle_connection(sock, token, conn_token,
+                                                                std::move(on_activity));
 
-                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                    // Handler completed first
-                                    timer->cancel();
-                                    boost::asio::post(completion_exec,
-                                                      [h = std::move(*handlerPtr)]() mutable {
-                                                          std::move(h)(std::exception_ptr{},
-                                                                       false); // timedOut = false
-                                                      });
-                                }
-                            },
-                            boost::asio::detached);
-                    },
-                    boost::asio::use_awaitable);
+                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                                timer->cancel();
+                                boost::asio::post(completion_exec,
+                                                  [h = std::move(*handlerPtr)]() mutable {
+                                                      std::move(h)(std::exception_ptr{}, false);
+                                                  });
+                            }
+                        },
+                        boost::asio::detached);
+                },
+                boost::asio::use_awaitable);
 
             if (timedOut) {
                 // The timer callback cancelled pending I/O via cancel().
@@ -1069,6 +1124,72 @@ void SocketServer::register_socket(std::shared_ptr<TrackedSocket> tracked_socket
                                         [](const auto& weak) { return weak.expired(); }),
                          activeSockets_.end());
     activeSockets_.push_back(tracked_socket);
+}
+
+std::shared_ptr<SocketServer::AcceptLoopState> SocketServer::schedule_accept_loop(bool isProxy) {
+    auto state = std::make_shared<AcceptLoopState>();
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->done = false;
+        state->error = nullptr;
+    }
+
+    co_spawn(
+        ioCoordinator_->getExecutor(),
+        [this, state, isProxy]() -> awaitable<void> {
+            try {
+                co_await accept_loop(isProxy);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->error = std::current_exception();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->done = true;
+            }
+            state->cv.notify_all();
+            co_return;
+        },
+        boost::asio::detached);
+
+    return state;
+}
+
+bool SocketServer::wait_accept_loop(const std::shared_ptr<AcceptLoopState>& state,
+                                    std::chrono::milliseconds timeout, std::string_view label) {
+    if (!state) {
+        return true;
+    }
+
+    bool completed = false;
+    std::exception_ptr error;
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        completed = state->cv.wait_for(lock, timeout, [&state]() { return state->done; });
+        if (completed) {
+            error = state->error;
+        }
+    }
+
+    if (!completed) {
+        spdlog::warn("SocketServer: {} accept_loop timed out during shutdown after {}ms", label,
+                     timeout.count());
+        return false;
+    }
+
+    if (error) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& e) {
+            spdlog::warn("SocketServer: {} accept_loop terminated with exception: {}", label,
+                         e.what());
+        } catch (...) {
+            spdlog::warn("SocketServer: {} accept_loop terminated with unknown exception", label);
+        }
+    }
+
+    return true;
 }
 
 void SocketServer::execute_on_io_context(std::function<void()> fn) {
@@ -1216,9 +1337,7 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
         // Update state stats
         if (state_) {
             state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
-            const size_t active = activeConnections_.load(std::memory_order_relaxed);
-            const auto slotsFree = (active < newSize) ? (newSize - active) : 0;
-            state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
+            publishConnectionStats(activeConnections_.load(std::memory_order_relaxed), newSize);
         }
 
         spdlog::debug("SocketServer: request admission slots grown from {} to {}", currentLimit,
@@ -1226,14 +1345,12 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
         return true;
     }
 
-    size_t active = activeConnections_.load(std::memory_order_relaxed);
     slotLimit_.store(newSize, std::memory_order_relaxed);
 
     // Update state stats
     if (state_) {
         state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
-        auto slotsFree = (active < newSize) ? (newSize - active) : 0;
-        state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
+        publishConnectionStats(activeConnections_.load(std::memory_order_relaxed), newSize);
     }
 
     spdlog::debug("SocketServer: request admission slots shrunk from {} to {}", currentLimit,
@@ -1243,7 +1360,7 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
 }
 
 double SocketServer::getSlotUtilization() const {
-    size_t active = activeConnections_.load(std::memory_order_relaxed);
+    size_t active = mainActiveConnectionCount();
     size_t limit = slotLimit_.load(std::memory_order_relaxed);
     if (limit == 0) {
         return 0.0;

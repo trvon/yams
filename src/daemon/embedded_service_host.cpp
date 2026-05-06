@@ -106,6 +106,7 @@ public:
         config_.enableAutoRepair = options_.enableAutoRepair;
         config_.autoLoadPlugins = options_.autoLoadPlugins;
         config_.enableModelProvider = options_.enableModelProvider;
+        config_.embeddedOneShot = options_.oneShot;
 
         ioContext_ = std::make_unique<boost::asio::io_context>();
         workGuard_.emplace(boost::asio::make_work_guard(*ioContext_));

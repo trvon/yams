@@ -3,6 +3,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/vector/dim_resolver.h>
+#include <yams/vector/embedding_generator.h>
 
 #include <array>
 #include <cstdlib>
@@ -101,6 +102,7 @@ static std::optional<size_t> readDimensionFromConfigFile(const fs::path& configP
         if (j.contains("n_embd") && j["n_embd"].is_number())
             return j.value("n_embd", 0u);
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     return std::nullopt;
 }

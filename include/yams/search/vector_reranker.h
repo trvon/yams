@@ -1,6 +1,7 @@
 #pragma once
 
-#include <yams/vector/vector_database.h>
+#include <yams/core/types.h>
+#include <yams/vector/vector_types.h>
 
 #include <cstddef>
 #include <memory>

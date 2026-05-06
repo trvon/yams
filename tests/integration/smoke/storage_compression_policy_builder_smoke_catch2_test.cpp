@@ -36,7 +36,8 @@ std::string write_config(const std::filesystem::path& root, const std::string& b
 } // namespace
 
 // When never_compress_below is large, small payloads should be stored uncompressed.
-TEST_CASE("StorageCompressionPolicyBuilderSmoke.ThresholdSkipsCompression", "[smoke][storagecompressionpolicybuildersmoke]") {
+TEST_CASE("StorageCompressionPolicyBuilderSmoke.ThresholdSkipsCompression",
+          "[smoke][storagecompressionpolicybuildersmoke]") {
     auto temp_root = std::filesystem::temp_directory_path() / "yams_builder_policy_skip";
     std::filesystem::remove_all(temp_root);
     std::filesystem::create_directories(temp_root);
@@ -78,7 +79,8 @@ async_compression = false
 }
 
 // When never_compress_below is tiny, payloads should be stored compressed.
-TEST_CASE("StorageCompressionPolicyBuilderSmoke.LowThresholdEnablesCompression", "[smoke][storagecompressionpolicybuildersmoke]") {
+TEST_CASE("StorageCompressionPolicyBuilderSmoke.LowThresholdEnablesCompression",
+          "[smoke][storagecompressionpolicybuildersmoke]") {
     auto temp_root = std::filesystem::temp_directory_path() / "yams_builder_policy_on";
     std::filesystem::remove_all(temp_root);
     std::filesystem::create_directories(temp_root);

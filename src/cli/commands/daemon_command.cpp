@@ -132,6 +132,39 @@ inline bool safe_exists(const std::filesystem::path& p) {
     std::error_code ec;
     return std::filesystem::exists(p, ec);
 }
+
+std::string repairOperationName(uint64_t code) {
+    switch (code) {
+        case 1:
+            return "stuck docs";
+        case 2:
+            return "orphans";
+        case 3:
+            return "mime";
+        case 4:
+            return "downloads";
+        case 5:
+            return "path tree";
+        case 6:
+            return "dedupe";
+        case 7:
+            return "chunks";
+        case 8:
+            return "block refs";
+        case 9:
+            return "graph";
+        case 10:
+            return "fts5";
+        case 11:
+            return "embeddings";
+        case 12:
+            return "topology";
+        case 13:
+            return "optimize";
+        default:
+            return "";
+    }
+}
 } // namespace
 
 namespace yams::cli {
@@ -1386,12 +1419,21 @@ private:
 #endif
         }
 
-        // Final verification: check if daemon is actually still running
-        // This catches cases where the daemon stopped between our attempts
+        // Final verification: poll for daemon exit since slow shutdown
+        // (WAL flush, vector index commit, maintenance tasks) can outlast the
+        // intermediate timeouts above. Replaces a one-shot check that raced
+        // shutdown completion when the daemon needed >~18s to fully exit.
 #ifndef _WIN32
-        if (!stopped && !isDaemonProcessRunningForSocket(effectiveSocket)) {
-            spdlog::debug("Daemon not running after stop attempts - treating as success");
-            stopped = true;
+        if (!stopped) {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!isDaemonProcessRunningForSocket(effectiveSocket) && !pidAlive()) {
+                    spdlog::debug("Daemon exited during extended grace; treating as success");
+                    stopped = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
         }
 #endif
 
@@ -1785,103 +1827,33 @@ private:
             setenv("YAMS_CLIENT_DEBUG", "1", 1);
         }
 
-        // Check if daemon is running (prefer socket; fall back to PID)
-        if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+        // Check if daemon is running (prefer socket; fall back to PID).
+        // If the socket preflight is flaky but the daemon process is clearly alive,
+        // continue on to the actual StatusRequest rather than bailing out early.
+        bool preflightUnavailable = !daemon::DaemonClient::isDaemonRunning(effectiveSocket);
+        if (preflightUnavailable) {
+            bool daemonLikelyAlive = false;
             // Try PID-based detection to distinguish "starting" vs "not running"
             pid_t pid = readPidFromFile(pidFile_);
 #ifndef _WIN32
             if (pid > 0 && kill(pid, 0) == 0) {
-                std::cout << "YAMS daemon is starting/initializing (IPC not yet available)\n";
-                if (effectiveSocket != configuredSocket) {
-                    std::cout << "Configured socket: " << configuredSocket << "\n";
-                    std::cout << "Live daemon socket: " << effectiveSocket << "\n";
-                }
-                if (detailed_) {
-                    try {
-                        auto logPath = daemon::YamsDaemon::resolveSystemPath(
-                                           daemon::YamsDaemon::PathType::LogFile)
-                                           .string();
-                        std::cout << "[INFO] Likely waiting on search stack (index, models).\n";
-                        std::cout << "[INFO] Tail log for details: " << logPath << "\n";
-                        // Try bootstrap status file for early readiness
-                        try {
-                            auto rt =
-                                daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
-                            std::ifstream bf(rt);
-                            if (bf) {
-                                json j;
-                                bf >> j;
-                                if (j.contains("readiness")) {
-                                    std::vector<std::string> waiting;
-                                    for (auto it = j["readiness"].begin();
-                                         it != j["readiness"].end(); ++it) {
-                                        if (!it.value().get<bool>()) {
-                                            std::ostringstream w;
-                                            w << it.key();
-                                            if (j.contains("progress") &&
-                                                j["progress"].contains(it.key())) {
-                                                try {
-                                                    w << " (" << j["progress"][it.key()].get<int>()
-                                                      << "%)";
-                                                } catch (...) {
-                                                }
-                                            }
-                                            if (j.contains("uptime_seconds")) {
-                                                try {
-                                                    w << ", elapsed ~"
-                                                      << j["uptime_seconds"].get<long>() << "s";
-                                                } catch (...) {
-                                                }
-                                            }
-                                            waiting.push_back(w.str());
-                                        }
-                                    }
-                                    if (!waiting.empty()) {
-                                        std::cout << "[INFO] Waiting on: ";
-                                        for (size_t i = 0; i < waiting.size() && i < 3; ++i) {
-                                            if (i)
-                                                std::cout << ", ";
-                                            std::cout << waiting[i];
-                                        }
-                                        if (waiting.size() > 3)
-                                            std::cout << ", …";
-                                        std::cout << "\n";
-                                    }
-                                    if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
-                                        !j["top_slowest"].empty()) {
-                                        std::cout << "[INFO] Top slow components: ";
-                                        auto arr = j["top_slowest"];
-                                        for (size_t i = 0; i < arr.size() && i < 3; ++i) {
-                                            const auto& e = arr[i];
-                                            std::string name =
-                                                e.value("name", std::string{"unknown"});
-                                            uint64_t ms = e.value("elapsed_ms", 0ULL);
-                                            if (i)
-                                                std::cout << ", ";
-                                            std::cout << name << " (" << ms << "ms)";
-                                        }
-                                        if (arr.size() > 3)
-                                            std::cout << ", …";
-                                        std::cout << "\n";
-                                    }
-                                }
-                            }
-                        } catch (...) {
-                        }
-                    } catch (...) {
-                    }
-                }
-                return;
+                daemonLikelyAlive = true;
             }
             // Do not guess by scanning /proc — if socket is down and no PID file, report not
             // running.
-#endif
-            std::cout << "YAMS daemon is not running\n";
-            if (effectiveSocket != configuredSocket) {
-                std::cout << "Configured socket: " << configuredSocket << "\n";
-                std::cout << "Last live daemon socket: " << effectiveSocket << "\n";
+#else
+            if (pid > 0) {
+                daemonLikelyAlive = true;
             }
-            return;
+#endif
+            if (!daemonLikelyAlive) {
+                std::cout << "YAMS daemon is not running\n";
+                if (effectiveSocket != configuredSocket) {
+                    std::cout << "Configured socket: " << configuredSocket << "\n";
+                    std::cout << "Last live daemon socket: " << effectiveSocket << "\n";
+                }
+                return;
+            }
         }
 
         if (!detailed_) {
@@ -1893,6 +1865,8 @@ private:
             }
             yams::daemon::ClientConfig cfg;
             cfg.socketPath = effectiveSocket;
+            // Status handler is non-blocking (cached snapshot, no subsystem calls).
+            // 5s is generous headroom for transient connect/framing issues.
             auto sres = runDaemonClient(
                 cfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
                 std::chrono::seconds(5));
@@ -1900,6 +1874,10 @@ private:
                 spinner->stop();
             }
             if (!sres) {
+                if (sres.error().code == ErrorCode::ResourceBusy) {
+                    std::cout << sres.error().message << "\n";
+                    return;
+                }
                 // IPC failed — the daemon is likely still initializing (VectorDB, model
                 // loading, etc.) and can't serve requests yet. Fall back to the bootstrap
                 // status file that the daemon writes throughout initialization so the
@@ -1970,8 +1948,10 @@ private:
                     }
                 } catch (...) {
                 }
-                // No bootstrap file available either — fall back to the original message
-                std::cout << "YAMS daemon status unavailable (IPC error)\n";
+                // No bootstrap file either — the daemon is not running or has not
+                // yet written any status. Match the "not running" message emitted
+                // by the pre-flight liveness check above.
+                std::cout << "YAMS daemon is not running\n";
                 return;
             }
 
@@ -2008,6 +1988,25 @@ private:
                     s.vectorDbInitAttempted && !s.vectorDbReady && s.embeddingAvailable;
                 if (emptyCorpusReady && (key == readiness::kSearchEngineVectorUsable ||
                                          key == readiness::kSearchEngineHybridUsable)) {
+                    return true;
+                }
+                // Simeon lexical enhancement is opt-in; when not configured or
+                // when the corpus exceeded the size budget, the daemon stays on
+                // FTS5 only — these keys reflect runtime state, not a blocker
+                // on readiness. Only surface during an active build.
+                auto find = [&](std::string_view k) {
+                    auto it = s.readinessStates.find(std::string(k));
+                    return it != s.readinessStates.end() && it->second;
+                };
+                const bool simeonConfigured =
+                    find(readiness::kSearchEngineLexicalEnhancementConfigured);
+                const bool simeonBuilding =
+                    find(readiness::kSearchEngineLexicalEnhancementBuilding);
+                if ((key == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                     key == readiness::kSearchEngineLexicalEnhancementReady ||
+                     key == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                     key == readiness::kSearchEngineFragmentGeometryReady) &&
+                    !(simeonConfigured && simeonBuilding)) {
                     return true;
                 }
                 return false;
@@ -2049,9 +2048,20 @@ private:
                 normalizePath(*daemonDataDir) != normalizePath(configuredDataDir);
             const bool daemonUsesEphemeralData =
                 hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
+            auto findCompactCount = [&](const char* key) -> uint64_t {
+                auto it = s.requestCounts.find(key);
+                return it != s.requestCounts.end() ? it->second : 0ULL;
+            };
             const auto searchMetrics = effectiveSearchMetrics(s);
+            const auto snapshotAge = findCompactCount("status_snapshot_age_ms");
+            const auto snapshotStale = findCompactCount("status_snapshot_stale") > 0;
 
             std::cout << title_banner("YAMS Daemon") << "\n\n";
+
+            if (!s.storageWarning.empty()) {
+                std::cout << colorize("⚠ Slow storage: ", Ansi::YELLOW) << s.storageWarning
+                          << "\n\n";
+            }
 
             // Single overview table with essential info
             std::vector<Row> overview;
@@ -2059,6 +2069,14 @@ private:
                                 s.version.empty() ? "" : "v" + s.version});
             overview.push_back({"Uptime", format_duration(s.uptimeSeconds),
                                 std::to_string(s.requestsProcessed) + " requests"});
+            {
+                std::ostringstream freshness;
+                freshness << snapshotAge << " ms";
+                overview.push_back(
+                    {"Freshness",
+                     paintStatus(snapshotStale ? Severity::Warn : Severity::Good, freshness.str()),
+                     snapshotStale ? "stale" : "fresh"});
+            }
 
             // Memory: show governor if available, else basic RSS
             if (s.governorBudgetBytes > 0) {
@@ -2081,6 +2099,57 @@ private:
                      ""});
             }
 
+            // Database phase visibility: lets the user tell a slow open / repair from a hang.
+            {
+                namespace dbphase = yams::daemon::dbphase;
+                const std::string& phase = s.databasePhase;
+                const uint64_t elapsedMs = s.databasePhaseElapsedMs;
+                const std::string elapsedSec =
+                    elapsedMs > 0 ? format_duration(elapsedMs / 1000) + " elapsed" : "";
+                std::string label;
+                std::string extra;
+                Severity dbSev = Severity::Good;
+
+                if (phase == dbphase::kOpening) {
+                    label = "Opening";
+                    extra = elapsedSec;
+                    dbSev = (elapsedMs > 30000) ? Severity::Warn : Severity::Good;
+                    if (!s.metadataDbPath.empty()) {
+                        if (!extra.empty())
+                            extra += " · ";
+                        extra += s.metadataDbPath;
+                    }
+                } else if (phase == dbphase::kRecovering) {
+                    label = "Repairing";
+                    extra = elapsedSec.empty() ? std::string("quarantining corrupt DB")
+                                               : elapsedSec + " · quarantining corrupt DB";
+                    dbSev = Severity::Warn;
+                } else if (phase == dbphase::kMigrating) {
+                    label = "Migrating";
+                    extra = elapsedSec;
+                    dbSev = Severity::Warn;
+                } else if (phase == dbphase::kReady ||
+                           s.readinessStates.count(std::string(readiness::kDatabase))) {
+                    auto it = s.readinessStates.find(std::string(readiness::kDatabase));
+                    const bool ready = (it != s.readinessStates.end()) ? it->second : true;
+                    if (!ready) {
+                        label = "Initializing";
+                        extra = elapsedSec;
+                        dbSev = Severity::Warn;
+                    } else {
+                        label = "Ready";
+                        if (!s.databaseRecoveredFrom.empty()) {
+                            extra = "recovered from " + s.databaseRecoveredFrom +
+                                    " · run 'yams repair --orphans'";
+                            dbSev = Severity::Warn;
+                        }
+                    }
+                }
+                if (!label.empty()) {
+                    overview.push_back({"Database", paintStatus(dbSev, label), extra});
+                }
+            }
+
             // Search summary
             Severity searchSev = searchMetrics.queued > 50   ? Severity::Bad
                                  : searchMetrics.queued > 10 ? Severity::Warn
@@ -2096,23 +2165,29 @@ private:
             overview.push_back({"Embeddings", paintStatus(embSev, embText), embExtra});
 
             // Repair summary
-            auto findCompactCount = [&](const char* key) -> uint64_t {
-                auto it = s.requestCounts.find(key);
-                return it != s.requestCounts.end() ? it->second : 0ULL;
-            };
             const bool repairRunning = findCompactCount("repair_running") > 0;
             const bool repairInProgress = findCompactCount("repair_in_progress") > 0;
             const uint64_t repairQueue = findCompactCount("repair_queue_depth");
             const uint64_t repairFailed = findCompactCount("repair_failed_operations");
-            Severity repairSev = !repairRunning       ? Severity::Warn
-                                 : (repairFailed > 0) ? Severity::Warn
-                                 : (repairInProgress) ? Severity::Warn
-                                 : (repairQueue > 0)  ? Severity::Warn
-                                                      : Severity::Good;
+            const uint64_t repairCurrentOp = findCompactCount("repair_current_operation_code");
+            const uint64_t repairCurrentElapsedMs =
+                findCompactCount("repair_current_operation_elapsed_ms");
+            Severity repairSev = !repairRunning          ? Severity::Warn
+                                 : (repairFailed > 0)    ? Severity::Warn
+                                 : (repairInProgress)    ? Severity::Warn
+                                 : (repairCurrentOp > 0) ? Severity::Warn
+                                 : (repairQueue > 0)     ? Severity::Warn
+                                                         : Severity::Good;
             std::ostringstream repairText;
             repairText << (repairRunning ? "Running" : "Stopped");
             if (repairInProgress) {
                 repairText << " · RPC active";
+            }
+            if (repairCurrentOp > 0) {
+                repairText << " · " << repairOperationName(repairCurrentOp);
+                if (repairCurrentElapsedMs > 0) {
+                    repairText << " " << format_duration(repairCurrentElapsedMs / 1000);
+                }
             }
             std::ostringstream repairExtra;
             repairExtra << repairQueue << " pending";
@@ -2121,6 +2196,66 @@ private:
             }
             overview.push_back(
                 {"Repair", paintStatus(repairSev, repairText.str()), repairExtra.str()});
+
+            // Maintenance / rebuild summary
+            const bool topologyRebuildRunning =
+                findCompactCount(
+                    std::string(yams::daemon::metrics::kTopologyRebuildRunning).c_str()) > 0;
+            const uint64_t topologyDirtyDocs = findCompactCount(
+                std::string(yams::daemon::metrics::kTopologyDirtyDocuments).c_str());
+            const uint64_t topologyRunAgeMs = findCompactCount(
+                std::string(yams::daemon::metrics::kTopologyRebuildRunningAgeMs).c_str());
+            const bool vectorIndexReady = [&]() {
+                auto it = s.readinessStates.find(std::string(readiness::kVectorIndex));
+                return it == s.readinessStates.end() ? true : it->second;
+            }();
+            const std::string& vectorIndexEngine = s.vectorIndexEngine;
+            const uint64_t vectorIndexProgress = [&]() -> uint64_t {
+                auto it = s.initProgress.find(std::string(readiness::kVectorIndex));
+                return it == s.initProgress.end() ? 0 : it->second;
+            }();
+
+            if (topologyRebuildRunning || !vectorIndexReady) {
+                std::vector<std::string> activity;
+                if (!vectorIndexReady) {
+                    std::ostringstream label;
+                    if (vectorIndexEngine == "simeon_pq_adc") {
+                        label << "PQ rebuild";
+                    } else if (vectorIndexEngine == "vec0_l2") {
+                        label << "vec0 rebuild";
+                    } else if (vectorIndexEngine == "hnsw_cosine") {
+                        label << "HNSW rebuild";
+                    } else {
+                        label << "vector index rebuild";
+                    }
+                    if (vectorIndexProgress > 0 && vectorIndexProgress < 100) {
+                        label << " " << vectorIndexProgress << "%";
+                    }
+                    activity.push_back(label.str());
+                }
+                if (topologyRebuildRunning) {
+                    activity.push_back("topology rebuild");
+                }
+
+                std::ostringstream maintText;
+                for (std::size_t i = 0; i < activity.size(); ++i) {
+                    if (i)
+                        maintText << " · ";
+                    maintText << activity[i];
+                }
+
+                std::ostringstream maintExtra;
+                if (topologyDirtyDocs > 0) {
+                    maintExtra << topologyDirtyDocs << " dirty";
+                }
+                if (topologyRebuildRunning && topologyRunAgeMs > 0) {
+                    if (maintExtra.tellp() > 0)
+                        maintExtra << " · ";
+                    maintExtra << format_duration(topologyRunAgeMs / 1000);
+                }
+                overview.push_back({"Maintenance", paintStatus(Severity::Warn, maintText.str()),
+                                    maintExtra.str()});
+            }
 
             render_rows(std::cout, overview);
 
@@ -2212,6 +2347,26 @@ private:
                                              key == readiness::kSearchEngineHybridUsable)) {
                         return true;
                     }
+                    // Simeon lexical enhancement is opt-in: when not configured (or
+                    // skipped because the corpus exceeded the size budget), the
+                    // daemon stays on FTS5 only — these keys reflect runtime state,
+                    // not a blocker on readiness. Only surface them when an active
+                    // build is in progress (configured + building).
+                    auto find = [&](std::string_view k) {
+                        auto it = status.readinessStates.find(std::string(k));
+                        return it != status.readinessStates.end() && it->second;
+                    };
+                    const bool simeonConfigured =
+                        find(readiness::kSearchEngineLexicalEnhancementConfigured);
+                    const bool simeonBuilding =
+                        find(readiness::kSearchEngineLexicalEnhancementBuilding);
+                    if ((key == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                         key == readiness::kSearchEngineLexicalEnhancementReady ||
+                         key == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                         key == readiness::kSearchEngineFragmentGeometryReady) &&
+                        !(simeonConfigured && simeonBuilding)) {
+                        return true;
+                    }
                     return false;
                 };
                 for (const auto& rd : readinessList) {
@@ -2295,6 +2450,47 @@ private:
                      paintStatus(status.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good,
                                  std::to_string(static_cast<int>(status.memoryUsageMb)) + " MB"),
                      ""});
+                {
+                    auto count = [&](std::string_view key) -> uint64_t {
+                        auto it = status.requestCounts.find(std::string(key));
+                        return it != status.requestCounts.end() ? it->second : 0ULL;
+                    };
+                    const uint64_t mslEnabled = count("status_diag_msl_enabled");
+                    const uint64_t sampleUs = count("status_diag_memory_sample_us");
+                    const uint64_t allocUs = count("status_diag_allocator_sample_us");
+                    const uint64_t logBytes = count("status_diag_msl_stack_log_bytes");
+                    const uint64_t logFiles = count("status_diag_msl_stack_log_files");
+                    uint64_t logWarnBytes = count("status_diag_msl_stack_log_warn_bytes");
+                    if (logWarnBytes == 0) {
+                        logWarnBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+                    }
+                    if (mslEnabled || sampleUs || allocUs || logBytes || logFiles) {
+                        std::ostringstream value;
+                        bool first = true;
+                        auto append = [&](std::string_view part) {
+                            if (!first)
+                                value << " · ";
+                            first = false;
+                            value << part;
+                        };
+                        if (mslEnabled)
+                            append("MSL on");
+                        if (sampleUs)
+                            append("mem_probe=" + std::to_string(sampleUs) + "µs");
+                        if (allocUs)
+                            append("alloc_probe=" + std::to_string(allocUs) + "µs");
+                        if (logBytes || logFiles) {
+                            append("stack_logs=" + std::to_string(logBytes / (1024ULL * 1024ULL)) +
+                                   " MB/" + std::to_string(logFiles) + " files");
+                        }
+                        const bool logPressure = logBytes >= logWarnBytes && logWarnBytes > 0;
+                        resourceRows.push_back(
+                            {"Memory Diagnostics",
+                             paintStatus(logPressure ? Severity::Warn : Severity::Good,
+                                         value.str()),
+                             logPressure ? "restart after profiling; use memory profile" : ""});
+                    }
+                }
                 resourceRows.push_back({"Pools",
                                         std::to_string(status.ipcPoolSize) + " ipc · " +
                                             std::to_string(status.ioPoolSize) + " io",
@@ -2623,6 +2819,10 @@ private:
                 const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
                 const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
                 const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+                const uint64_t repairCurrentOp =
+                    findPostIngestCount("repair_current_operation_code");
+                const uint64_t repairCurrentElapsedMs =
+                    findPostIngestCount("repair_current_operation_elapsed_ms");
 
                 std::string repairStatus = repairRunning ? "running" : "stopped";
                 Severity repairStatusSev = repairRunning ? Severity::Good : Severity::Warn;
@@ -2630,7 +2830,21 @@ private:
                     repairStatus += " · RPC active";
                     repairStatusSev = Severity::Warn;
                 }
+                if (repairCurrentOp > 0) {
+                    repairStatus += " · " + repairOperationName(repairCurrentOp);
+                    repairStatusSev = Severity::Warn;
+                }
                 repairRows.push_back({"Status", paintStatus(repairStatusSev, repairStatus), ""});
+
+                if (repairCurrentOp > 0) {
+                    std::ostringstream current;
+                    current << repairOperationName(repairCurrentOp);
+                    if (repairCurrentElapsedMs > 0) {
+                        current << " · elapsed " << format_duration(repairCurrentElapsedMs / 1000);
+                    }
+                    repairRows.push_back(
+                        {"Current", paintStatus(Severity::Warn, current.str()), ""});
+                }
 
                 if (repairBacklog > 0) {
                     const double fraction =
@@ -2655,6 +2869,75 @@ private:
                 repairRows.push_back({"Stats", paintStatus(repairStatsSev, repairStats.str()), ""});
 
                 render_rows(std::cout, repairRows);
+
+                const bool topologyRebuildRunning =
+                    findPostIngestCount("topology_rebuild_running") > 0;
+                const uint64_t topologyDirtyDocs = findPostIngestCount("topology_dirty_documents");
+                const uint64_t topologyRunAgeMs =
+                    findPostIngestCount("topology_rebuild_running_age_ms");
+                const uint64_t topologyLastDurationMs =
+                    findPostIngestCount("topology_last_duration_ms");
+                const bool vectorIndexReady = [&]() {
+                    auto it = status.readinessStates.find(std::string(readiness::kVectorIndex));
+                    return it == status.readinessStates.end() ? true : it->second;
+                }();
+                const std::string& vectorIndexEngine = status.vectorIndexEngine;
+                const uint64_t vectorIndexProgress = [&]() -> uint64_t {
+                    auto it = status.initProgress.find(std::string(readiness::kVectorIndex));
+                    return it == status.initProgress.end() ? 0 : it->second;
+                }();
+
+                if (topologyRebuildRunning || !vectorIndexReady) {
+                    std::cout << "\n" << section_header("Maintenance") << "\n\n";
+                    std::vector<Row> maintenanceRows;
+
+                    std::ostringstream indexState;
+                    std::string indexLabel = "Vector Index";
+                    if (vectorIndexEngine == "simeon_pq_adc") {
+                        indexLabel = "PQ Index";
+                    } else if (vectorIndexEngine == "vec0_l2") {
+                        indexLabel = "vec0 Index";
+                    } else if (vectorIndexEngine == "hnsw_cosine") {
+                        indexLabel = "HNSW Index";
+                    }
+                    if (vectorIndexReady) {
+                        indexState << "ready";
+                    } else {
+                        indexState << "rebuilding";
+                        if (vectorIndexProgress > 0 && vectorIndexProgress < 100) {
+                            indexState << " · " << vectorIndexProgress << "%";
+                        }
+                    }
+                    maintenanceRows.push_back(
+                        {indexLabel,
+                         paintStatus(vectorIndexReady ? Severity::Good : Severity::Warn,
+                                     indexState.str()),
+                         ""});
+
+                    if (topologyRebuildRunning) {
+                        std::ostringstream topoState;
+                        topoState << "running";
+                        std::ostringstream topoExtra;
+                        if (topologyDirtyDocs > 0) {
+                            topoExtra << topologyDirtyDocs << " dirty";
+                        }
+                        if (topologyRunAgeMs > 0) {
+                            if (topoExtra.tellp() > 0)
+                                topoExtra << " · ";
+                            topoExtra << "age " << format_duration(topologyRunAgeMs / 1000);
+                        }
+                        if (topologyLastDurationMs > 0) {
+                            if (topoExtra.tellp() > 0)
+                                topoExtra << " · ";
+                            topoExtra << "last " << format_duration(topologyLastDurationMs / 1000);
+                        }
+                        maintenanceRows.push_back({"Topology",
+                                                   paintStatus(Severity::Warn, topoState.str()),
+                                                   topoExtra.str()});
+                    }
+
+                    render_rows(std::cout, maintenanceRows);
+                }
 
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;
@@ -2858,6 +3141,19 @@ private:
                     }
                     return false;
                 };
+                auto matchesReady = [&](std::string_view k) {
+                    auto it = status.readinessStates.find(std::string(k));
+                    return it != status.readinessStates.end() && it->second;
+                };
+                auto isSimeonKey = [](std::string_view k) {
+                    return k == readiness::kSearchEngineLexicalEnhancementConfigured ||
+                           k == readiness::kSearchEngineLexicalEnhancementReady ||
+                           k == readiness::kSearchEngineLexicalEnhancementBuilding ||
+                           k == readiness::kSearchEngineFragmentGeometryReady;
+                };
+                const bool simeonActiveBuild =
+                    matchesReady(readiness::kSearchEngineLexicalEnhancementConfigured) &&
+                    matchesReady(readiness::kSearchEngineLexicalEnhancementBuilding);
                 for (const auto& rd : readinessList) {
                     // Skip "degraded" flags (inverses of ready flags) and items already shown
                     // elsewhere
@@ -2870,9 +3166,10 @@ private:
                     // Skip "build reason" keys - they're informational, not readiness indicators.
                     // The search_engine key itself indicates readiness.
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
+                    bool isSimeonSteady = isSimeonKey(rd.key) && !simeonActiveBuild;
 
-                    if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue &&
-                        !suppressDetailedIssue(lowerLabel)) {
+                    if (!isDegraded && !isAlreadyShown && !isBuildReason && !isSimeonSteady &&
+                        rd.issue && !suppressDetailedIssue(lowerLabel)) {
                         issueRows.push_back({rd.label, paintStatus(rd.severity, rd.text), ""});
                     }
                 }
@@ -3008,6 +3305,66 @@ private:
                     render_rows(std::cout, providerRows);
                 }
 
+                {
+                    auto getCount = [&](std::string_view key) -> uint64_t {
+                        auto it = status.requestCounts.find(std::string(key));
+                        return it == status.requestCounts.end() ? 0ULL : it->second;
+                    };
+                    const auto contentExtractorCount = getCount("content_extractors_loaded");
+                    const auto symbolExtractorCount = getCount("symbol_extractors_loaded");
+                    const auto entityExtractorCount = getCount("entity_extractors_loaded");
+                    const bool titleExtractorEnabled = getCount("title_extractor_enabled") != 0;
+                    const auto skippedPluginCount = getCount("plugin_skipped_count");
+                    if (contentExtractorCount > 0 || symbolExtractorCount > 0 ||
+                        entityExtractorCount > 0 || titleExtractorEnabled ||
+                        skippedPluginCount > 0) {
+                        std::cout << "\n" << section_header("Plugin Capabilities") << "\n\n";
+                        std::vector<Row> capabilityRows;
+                        capabilityRows.push_back(
+                            {"Content Extractors",
+                             paintStatus(contentExtractorCount > 0 ? Severity::Good
+                                                                   : Severity::Warn,
+                                         contentExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(contentExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Symbol Extractors",
+                             paintStatus(symbolExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         symbolExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(symbolExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Entity Extractors",
+                             paintStatus(entityExtractorCount > 0 ? Severity::Good : Severity::Warn,
+                                         entityExtractorCount > 0 ? "Ready" : "Unavailable"),
+                             std::to_string(entityExtractorCount) + " loaded"});
+                        capabilityRows.push_back(
+                            {"Title Extractor",
+                             paintStatus(titleExtractorEnabled ? Severity::Good : Severity::Warn,
+                                         titleExtractorEnabled ? "Enabled" : "Disabled"),
+                             titleExtractorEnabled ? "entity-backed title enrichment"
+                                                   : "requires entity extractors"});
+                        if (skippedPluginCount > 0) {
+                            capabilityRows.push_back(
+                                {"Plugin Warnings",
+                                 paintStatus(Severity::Warn, "Skipped during load"),
+                                 std::to_string(skippedPluginCount) + " plugin(s)"});
+                        }
+                        render_rows(std::cout, capabilityRows);
+                    }
+                }
+
+                if (!status.skippedPlugins.empty()) {
+                    std::cout << "\n" << section_header("Skipped Plugins") << "\n\n";
+                    std::vector<Row> skippedRows;
+                    const std::size_t limit =
+                        std::min<std::size_t>(status.skippedPlugins.size(), 8);
+                    for (std::size_t i = 0; i < limit; ++i) {
+                        const auto& sp = status.skippedPlugins[i];
+                        skippedRows.push_back({sp.path.empty() ? "(unknown)" : sp.path,
+                                               paintStatus(Severity::Warn, "Skipped"), sp.reason});
+                    }
+                    render_rows(std::cout, skippedRows);
+                }
+
                 if (!status.models.empty()) {
                     std::cout << "\n" << section_header("Models") << "\n\n";
                     std::vector<Row> modelRows;
@@ -3046,6 +3403,10 @@ private:
         }
         if (spinner) {
             spinner->stop();
+        }
+        if (lastErr.code == ErrorCode::ResourceBusy) {
+            std::cout << lastErr.message << "\n";
+            std::exit(2);
         }
         // All retries exhausted — fall back to bootstrap status file before giving up
         try {

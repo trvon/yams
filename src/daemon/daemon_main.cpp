@@ -485,95 +485,6 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Map search.reranker_model into plugins.onnx config for the ONNX plugin.
-            if (tomlConfig.find("search") != tomlConfig.end()) {
-                const auto& searchSection = tomlConfig.at("search");
-                auto it = searchSection.find("reranker_model");
-                auto pathIt = searchSection.find("reranker_model_path");
-                const bool hasModel = (it != searchSection.end() && !it->second.empty());
-                const bool hasPath = (pathIt != searchSection.end() && !pathIt->second.empty());
-                if (hasModel || hasPath) {
-                    nlohmann::json onnxCfg = nlohmann::json::object();
-                    const char* onnxKeys[] = {"onnx", "onnx_plugin", "yams_onnx"};
-                    for (const char* key : onnxKeys) {
-                        if (auto pc = config.pluginConfigs.find(key);
-                            pc != config.pluginConfigs.end()) {
-                            auto parsed = nlohmann::json::parse(pc->second, nullptr, false);
-                            if (!parsed.is_discarded() && parsed.is_object()) {
-                                onnxCfg = parsed;
-                            }
-                            break;
-                        }
-                    }
-                    if (hasModel) {
-                        onnxCfg["reranker_model"] = it->second;
-                    }
-                    if (hasPath) {
-                        onnxCfg["reranker_model_path"] = pathIt->second;
-                    }
-                    const auto cfgDump = onnxCfg.dump();
-                    bool updated = false;
-                    for (const char* key : onnxKeys) {
-                        if (config.pluginConfigs.find(key) != config.pluginConfigs.end()) {
-                            config.pluginConfigs[key] = cfgDump;
-                            updated = true;
-                        }
-                    }
-                    if (!updated) {
-                        config.pluginConfigs["onnx"] = cfgDump;
-                    }
-                }
-            }
-
-            // Fallback: parse search.reranker_model/reranker_model_path for plugin config even
-            // when search section isn't mapped into DaemonConfig.
-            if (tomlConfig.find("search") == tomlConfig.end()) {
-                try {
-                    auto flat = yams::daemon::ConfigResolver::parseSimpleTomlFlat(
-                        std::filesystem::path(configPath));
-                    std::string rerankerModel;
-                    std::string rerankerPath;
-                    if (auto it = flat.find("search.reranker_model"); it != flat.end()) {
-                        rerankerModel = it->second;
-                    }
-                    if (auto it = flat.find("search.reranker_model_path"); it != flat.end()) {
-                        rerankerPath = it->second;
-                    }
-                    if (!rerankerModel.empty() || !rerankerPath.empty()) {
-                        nlohmann::json onnxCfg = nlohmann::json::object();
-                        const char* onnxKeys[] = {"onnx", "onnx_plugin", "yams_onnx"};
-                        for (const char* key : onnxKeys) {
-                            if (auto pc = config.pluginConfigs.find(key);
-                                pc != config.pluginConfigs.end()) {
-                                auto parsed = nlohmann::json::parse(pc->second, nullptr, false);
-                                if (!parsed.is_discarded() && parsed.is_object()) {
-                                    onnxCfg = parsed;
-                                }
-                                break;
-                            }
-                        }
-                        if (!rerankerModel.empty()) {
-                            onnxCfg["reranker_model"] = rerankerModel;
-                        }
-                        if (!rerankerPath.empty()) {
-                            onnxCfg["reranker_model_path"] = rerankerPath;
-                        }
-                        const auto cfgDump = onnxCfg.dump();
-                        bool updated = false;
-                        for (const char* key : onnxKeys) {
-                            if (config.pluginConfigs.find(key) != config.pluginConfigs.end()) {
-                                config.pluginConfigs[key] = cfgDump;
-                                updated = true;
-                            }
-                        }
-                        if (!updated) {
-                            config.pluginConfigs["onnx"] = cfgDump;
-                        }
-                    }
-                } catch (...) {
-                }
-            }
-
             // Apply [tuning] overrides to TuneAdvisor if present
             if (tomlConfig.find("tuning") != tomlConfig.end()) {
                 const auto& tune = tomlConfig.at("tuning");
@@ -719,6 +630,42 @@ int main(int argc, char* argv[]) {
                 } catch (const std::exception& e) {
                     spdlog::warn("Config: error applying tuning config: {}", e.what());
                 }
+            }
+
+            // Apply [tuning.post_ingest] concurrency caps via ConfigResolver.
+            // Env vars (YAMS_POST_*_CONCURRENT) win over config — we only push
+            // the config value when the env var is unset.
+            {
+                auto caps = yams::daemon::ConfigResolver::resolvePostIngestCaps();
+                auto applyIfNoEnv = [](const char* envName, std::optional<std::uint32_t> v,
+                                       void (*setter)(uint32_t), const char* logName) {
+                    if (!v.has_value())
+                        return;
+                    if (std::getenv(envName) != nullptr)
+                        return;
+                    setter(*v);
+                    spdlog::info("TuneAdvisor {} applied via config: {}", logName, *v);
+                };
+                applyIfNoEnv("YAMS_POST_INGEST_TOTAL_CONCURRENT", caps.totalConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostIngestTotalConcurrent,
+                             "postIngestTotalConcurrent");
+                applyIfNoEnv("YAMS_POST_EMBED_CONCURRENT", caps.embedConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostEmbedConcurrent,
+                             "postEmbedConcurrent");
+                applyIfNoEnv("YAMS_POST_EXTRACTION_CONCURRENT", caps.extractionConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostExtractionConcurrent,
+                             "postExtractionConcurrent");
+                applyIfNoEnv("YAMS_POST_KG_CONCURRENT", caps.kgConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostKgConcurrent, "postKgConcurrent");
+                applyIfNoEnv("YAMS_POST_SYMBOL_CONCURRENT", caps.symbolConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostSymbolConcurrent,
+                             "postSymbolConcurrent");
+                applyIfNoEnv("YAMS_POST_ENTITY_CONCURRENT", caps.entityConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostEntityConcurrent,
+                             "postEntityConcurrent");
+                applyIfNoEnv("YAMS_POST_TITLE_CONCURRENT", caps.titleConcurrent,
+                             &yams::daemon::TuneAdvisor::setPostTitleConcurrent,
+                             "postTitleConcurrent");
             }
 
             // Apply [gradient_limiter] overrides to TuneAdvisor if present
@@ -1034,6 +981,19 @@ int main(int argc, char* argv[]) {
             yams::daemon::YamsDaemon::PathType::LogFile);
     }
 
+    {
+        const auto policy = yams::daemon::ConfigResolver::resolveInstrumentationPolicy(config);
+        config.instrumentation.profile = policy.profile;
+        config.instrumentation.memoryProfileActive = policy.memoryProfileActive;
+        config.instrumentation.suppressAutoRepair = policy.suppressAutoRepair;
+        config.instrumentation.suppressSimeonLexicalBuild = policy.suppressSimeonLexicalBuild;
+        config.instrumentation.suppressVectorIndexBuild = policy.suppressVectorIndexBuild;
+        config.instrumentation.mslStackLogWarnBytes = policy.mslStackLogWarnBytes;
+        if (config.instrumentation.suppressAutoRepair) {
+            config.enableAutoRepair = false;
+        }
+    }
+
     // Create log directory if needed
     try {
         yams::common::ensureDirectories(config.logFile.parent_path());
@@ -1084,6 +1044,16 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(spdlog::level::warn);
     } else if (config.logLevel == "error") {
         spdlog::set_level(spdlog::level::err);
+    }
+
+    if (config.instrumentation.memoryProfileActive) {
+        spdlog::warn("Memory instrumentation profile active: suppress_auto_repair={} "
+                     "suppress_simeon_lexical_build={} suppress_vector_index_build={} "
+                     "msl_stack_log_warn_mb={}",
+                     config.instrumentation.suppressAutoRepair,
+                     config.instrumentation.suppressSimeonLexicalBuild,
+                     config.instrumentation.suppressVectorIndexBuild,
+                     config.instrumentation.mslStackLogWarnBytes / (1024ULL * 1024ULL));
     }
 
     // Configure FSM metrics based on log level

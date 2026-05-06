@@ -1,13 +1,15 @@
 spdlog_dep = dependency('spdlog', required: true)
 nlohmann_json_dep = dependency('nlohmann_json', required: true)
-boost_dep = dependency('boost', required: true)
+# boost_dep is defined at top-level meson.build; do not re-invoke
+# dependency('boost') here — it bypasses meson's override_dependency on
+# the modules: form (see meson #14146).
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 yams_topology = dependency('yams_topology', required: false)
 yams_vector = dependency('yams_vector', required: false)
 
-# SymSpell dependency (defined in third_party/symspell/meson.build)
-# Note: symspell_dep must be declared before this file is processed
+#SymSpell dependency(defined in third_party / symspell / meson.build)
+#Note : symspell_dep must be declared before this file is processed
 
 yams_search = static_library('yams_search',
   [
@@ -25,11 +27,17 @@ yams_search = static_library('yams_search',
     'chunk_coverage.cpp',
     'parallel_post_processor.cpp',
     'search_execution_context.cpp',
+    'lexical_scoring.cpp',
+    'search_lexical_pipeline.cpp',
     'search_engine.cpp',
+    'search_result_fusion.cpp',
+    'search_vector_pipeline.cpp',
     'search_tuner.cpp',
     'tuning_pipeline.cpp',
     'tuning_features.cpp',
     'tuning_reward.cpp',
+    'tuner_mab.cpp',
+    'topological_quality.cpp',
     'kg_scorer_simple.cpp',
     'search_engine_builder.cpp',
     'hotzone_manager.cpp',
@@ -40,6 +48,8 @@ yams_search = static_library('yams_search',
     'symspell_search.cpp',
     'query_concept_extractor.cpp',
     'turboquant_packed_reranker.cpp',
+    'simeon_lexical_backend.cpp',
+    'meta_path_router.cpp',
   ],
   include_directories: [
     include_directories('../../include'),
@@ -57,7 +67,9 @@ pkg.generate(yams_search,
 )
 
 yams_search_dep = declare_dependency(
-  link_with: yams_search,
+#yams_search owns simeon_lexical_backend.cpp, so consumers also need the
+#vendored simeon archive that provides QueryRouter / recipe_name.
+  link_with: [yams_search, simeon_lib],
   include_directories: [
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),

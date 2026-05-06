@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -58,8 +59,26 @@ struct DaemonConfig {
     bool enableAutoRepair = true;
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
-    bool autoRebuildOnDimMismatch = true;
+    bool autoRebuildOnDimMismatch = false;
     size_t maxPendingRepairs = 1000;
+    // Embedded one-shot clients (sandboxed CLIs, Codex) should avoid startup maintenance that can
+    // outlive the command and make teardown expensive. Request handlers may still perform explicit
+    // writes, but opportunistic reconcile/rebuild work is suppressed.
+    bool embeddedOneShot = false;
+
+    // Typed runtime instrumentation profile. The "memory" profile suppresses
+    // opportunistic startup maintenance that creates large transient allocator
+    // churn, which is especially expensive under macOS MallocStackLogging.
+    struct InstrumentationPolicy {
+        // "auto" enables the memory profile when MallocStackLogging is present;
+        // "memory" forces it; "normal"/"off" disables it.
+        std::string profile{"auto"};
+        bool memoryProfileActive{false};
+        bool suppressAutoRepair{false};
+        bool suppressSimeonLexicalBuild{false};
+        bool suppressVectorIndexBuild{false};
+        std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
+    } instrumentation;
 
     // Per-plugin configuration: plugin name -> JSON config string
     // Parsed from [plugins.<name>] sections in config.toml
@@ -163,7 +182,7 @@ public:
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> reloadRequested_{false};
     std::atomic<bool> runLoopStarted_{false};
-    // Note: daemonThread_ removed - main loop runs on calling thread via runLoop()
+    // Main loop runs on the calling thread via runLoop().
     std::mutex stop_mutex_;
     std::condition_variable stop_cv_;
     bool stopCompleted_{true};

@@ -52,6 +52,7 @@ captureSnapshot(const ServiceManager* services, const StateComponent* state,
         auto mux = MuxMetricsRegistry::instance().snapshot();
         snapshot.muxQueuedBytes = mux.queuedBytes;
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     snapshot.maxMuxBytes = TuneAdvisor::maxMuxBytes();
 

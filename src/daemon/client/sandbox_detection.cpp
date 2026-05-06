@@ -8,6 +8,7 @@
 
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/sandbox_probe.h>
 
 namespace yams::daemon {
 namespace {
@@ -30,17 +31,6 @@ bool is_false(std::string_view raw) {
 
 bool is_auto(std::string_view raw) {
     return normalize(std::string(raw)) == "auto";
-}
-
-bool in_container() {
-    std::error_code ec;
-    if (std::filesystem::exists("/.dockerenv", ec)) {
-        return true;
-    }
-    if (const char* container = std::getenv("container"); container && *container) {
-        return true;
-    }
-    return false;
 }
 
 } // namespace
@@ -82,16 +72,16 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
         }
     }
 
-    if (!autoProbe) {
-        return ClientTransportMode::Socket;
-    }
-
     if (const char* inDaemon = std::getenv("YAMS_IN_DAEMON"); inDaemon && *inDaemon) {
         return ClientTransportMode::Socket;
     }
 
-    if (in_container()) {
+    if (!unix_socket_io_permitted()) {
         return ClientTransportMode::InProcess;
+    }
+
+    if (!autoProbe) {
+        return ClientTransportMode::Socket;
     }
 
     std::optional<std::filesystem::path> resolvedSocketPath;

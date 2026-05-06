@@ -211,6 +211,25 @@ void SearchTraceCollector::markStageResult(const std::string& name,
     stage.uniqueDocCount = uniqueDocs.size();
     stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
     std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+
+    if (!results.empty()) {
+        double minScore = std::numeric_limits<double>::infinity();
+        double maxScore = -std::numeric_limits<double>::infinity();
+        for (const auto& comp : results) {
+            const double score = static_cast<double>(comp.score);
+            if (score < minScore)
+                minScore = score;
+            if (score > maxScore)
+                maxScore = score;
+        }
+        stage.scoreStatsValid = true;
+        stage.minScore = minScore;
+        stage.maxScore = maxScore;
+    } else {
+        stage.scoreStatsValid = false;
+        stage.minScore = 0.0;
+        stage.maxScore = 0.0;
+    }
 }
 
 void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {
@@ -249,9 +268,18 @@ void SearchTraceCollector::markStageSkipped(const std::string& name, std::string
     stage.skipReason = std::move(reason);
 }
 
+void SearchTraceCollector::recordStageCounter(const std::string& name, const std::string& key,
+                                              std::int64_t value) {
+    stages_[name].extraCounters[key] = value;
+}
+
 nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
     nlohmann::json out = nlohmann::json::object();
     for (const auto& [name, stage] : stages_) {
+        nlohmann::json counters = nlohmann::json::object();
+        for (const auto& [key, value] : stage.extraCounters) {
+            counters[key] = value;
+        }
         out[name] = {
             {"enabled", stage.enabled},
             {"attempted", stage.attempted},
@@ -264,6 +292,10 @@ nlohmann::json SearchTraceCollector::buildStageSummaryJson() const {
             {"unique_doc_count", stage.uniqueDocCount},
             {"unique_doc_ids", stage.uniqueDocIds},
             {"duration_ms", static_cast<double>(stage.durationMicros) / 1000.0},
+            {"score_stats_valid", stage.scoreStatsValid},
+            {"min_score", stage.minScore},
+            {"max_score", stage.maxScore},
+            {"counters", std::move(counters)},
         };
     }
     return out;
@@ -356,7 +388,6 @@ nlohmann::json buildFusionTopSummaryJson(const std::vector<SearchResult>& result
             {"path_score", res.pathScore.value_or(0.0)},
             {"tag_score", res.tagScore.value_or(0.0)},
             {"symbol_score", res.symbolScore.value_or(0.0)},
-            {"reranker_score", res.rerankerScore.value_or(0.0)},
         });
     }
     return out;

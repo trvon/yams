@@ -52,6 +52,14 @@ constexpr Crc32Tables generate_crc32_tables() noexcept {
 
 constexpr auto CRC32_TABLES = generate_crc32_tables();
 
+MessageFramer::FrameHeader readFrameHeader(const uint8_t* data) noexcept {
+    MessageFramer::FrameHeader header{};
+    std::memcpy(&header, data,
+                sizeof(header)); // nosemgrep: yams.cpp.memcpy-non-pod-object -- FrameHeader is the
+                                 // fixed wire POD and is byte-copied before endian conversion.
+    return header;
+}
+
 uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) noexcept {
     uint32_t crc = 0xFFFFFFFF;
     const auto& t = CRC32_TABLES.t;
@@ -61,8 +69,8 @@ uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) noexcept {
         // Read 8 bytes. XOR first 4 with current CRC (little-endian assumed).
         uint32_t lo;
         uint32_t hi;
-        std::memcpy(&lo, data, 4);
-        std::memcpy(&hi, data + 4, 4);
+        std::memcpy(&lo, data, sizeof(lo));
+        std::memcpy(&hi, data + sizeof(lo), sizeof(hi));
         lo ^= crc;
 
         crc = t[7][(lo >> 0) & 0xFF] ^ t[6][(lo >> 8) & 0xFF] ^ t[5][(lo >> 16) & 0xFF] ^
@@ -206,8 +214,7 @@ Result<Message> MessageFramer::parse_frame(std::span<const uint8_t> frame) {
     }
 
     // Extract and convert header from network byte order
-    FrameHeader header;
-    std::memcpy(&header, frame.data(), sizeof(FrameHeader));
+    FrameHeader header = readFrameHeader(frame.data());
     header.from_network();
 
     // Validate magic number
@@ -314,8 +321,7 @@ FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
         if (buffer_.size() == expected_size_) {
             if (state_ == State::WaitingForHeader) {
                 // Parse header
-                MessageFramer::FrameHeader header;
-                std::memcpy(&header, buffer_.data(), sizeof(MessageFramer::FrameHeader));
+                MessageFramer::FrameHeader header = readFrameHeader(buffer_.data());
                 header.from_network();
 
                 // Store current header for later use

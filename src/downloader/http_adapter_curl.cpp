@@ -75,6 +75,9 @@ static Error makeCurlError(CURLcode code, std::string_view where) {
         case CURLE_GOT_NOTHING:
             err.code = ErrorCode::NetworkError;
             break;
+        case CURLE_TOO_MANY_REDIRECTS:
+            err.code = ErrorCode::PolicyViolation;
+            break;
         default:
             err.code = ErrorCode::Unknown;
             break;
@@ -140,7 +143,8 @@ static size_t header_cb(char* buffer, size_t size, size_t nitems, void* userdata
             try {
                 std::uint64_t tmp = std::stoull(sv);
                 ctx->contentLength = tmp;
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                spdlog::debug("Ignoring invalid Content-Length header '{}': {}", sv, ex.what());
                 // Invalid content-length, ignore
             }
         }
@@ -310,7 +314,7 @@ public:
                          /*out*/ std::optional<std::string>& contentType,
                          /*out*/ std::optional<std::string>& suggestedFilename,
                          const TlsConfig& tls, const std::optional<std::string>& proxy,
-                         std::chrono::milliseconds timeout) override {
+                         bool followRedirects, std::chrono::milliseconds timeout) override {
         resumeSupported = false;
         contentLength.reset();
 
@@ -329,7 +333,7 @@ public:
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hctx);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
 
-        configure_common(curl, timeout, tls, proxy, /*followRedirects=*/true);
+        configure_common(curl, timeout, tls, proxy, followRedirects);
 
         CURLcode rc = curl_easy_perform(curl);
 
@@ -377,6 +381,10 @@ public:
         lastModified = hctx.lastModified;
         contentType = hctx.contentType;
         suggestedFilename = hctx.suggestedFilename;
+        if (!followRedirects && http_status >= 300 && http_status < 400) {
+            return Error{ErrorCode::PolicyViolation,
+                         "Redirect blocked by policy during probe (follow_redirects=false)"};
+        }
         if (hctx.etag) {
             spdlog::debug("HTTP probe captured ETag: {}", *hctx.etag);
         }

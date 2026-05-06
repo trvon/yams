@@ -1,9 +1,12 @@
+#include <array>
+#include <optional>
+#include <string_view>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
 
 namespace yams::cli {
 
-// External factory functions from command implementations (in this namespace)
+// Factory functions provided by the individual command implementation units.
 std::unique_ptr<ICommand> createInitCommand();
 std::unique_ptr<ICommand> createAddCommand();
 std::unique_ptr<ICommand> createGetCommand();
@@ -37,160 +40,104 @@ std::unique_ptr<ICommand> createTuneCommand();
 std::unique_ptr<ICommand> createServeCommand();
 #endif
 
-void CommandRegistry::registerAllCommands(YamsCLI* cli) {
-    cli->registerCommand(CommandRegistry::createInitCommand());
-    cli->registerCommand(CommandRegistry::createAddCommand());
-    cli->registerCommand(CommandRegistry::createGetCommand());
-    cli->registerCommand(CommandRegistry::createRestoreCommand());
-    cli->registerCommand(CommandRegistry::createCatCommand());
-    cli->registerCommand(CommandRegistry::createDeleteCommand());
-    cli->registerCommand(CommandRegistry::createListCommand());
-    cli->registerCommand(CommandRegistry::createTreeCommand());
-    cli->registerCommand(CommandRegistry::createSearchCommand());
-    cli->registerCommand(CommandRegistry::createGrepCommand());
-    cli->registerCommand(CommandRegistry::createConfigCommand());
-    cli->registerCommand(CommandRegistry::createAuthCommand());
-    cli->registerCommand(CommandRegistry::createStatusCommand());
-    cli->registerCommand(CommandRegistry::createUninstallCommand());
-    cli->registerCommand(CommandRegistry::createMigrateCommand());
-    cli->registerCommand(CommandRegistry::createUpdateCommand());
-    cli->registerCommand(::yams::cli::createDownloadCommand());
-    cli->registerCommand(::yams::cli::createSessionCommand());
-    cli->registerCommand(CommandRegistry::createWatchCommand());
-    cli->registerCommand(CommandRegistry::createCompletionCommand());
-    cli->registerCommand(CommandRegistry::createRepairCommand());
-    cli->registerCommand(CommandRegistry::createModelCommand());
-    cli->registerCommand(CommandRegistry::createDaemonCommand());
-    cli->registerCommand(CommandRegistry::createPluginCommand());
-    cli->registerCommand(::yams::cli::createDoctorCommand());
-    // Direct-call the free factory to avoid requiring a CommandRegistry member
-    cli->registerCommand(::yams::cli::createDrCommand());
-    // New: knowledge graph exploration command
-    cli->registerCommand(::yams::cli::createGraphCommand());
-    // New: snapshot diff command (PBI-043)
-    cli->registerCommand(::yams::cli::createDiffCommand());
-    // Top-level interactive relevance tuner (F1+T)
-    cli->registerCommand(::yams::cli::createTuneCommand());
+namespace {
+
+using CommandFactory = std::unique_ptr<ICommand> (*)();
+
+struct CommandRegistration {
+    std::string_view name;
+    CommandFactory factory;
+};
+
+constexpr auto kCoreCommandRegistrations = std::to_array<CommandRegistration>({
+    {"init", &createInitCommand},
+    {"add", &createAddCommand},
+    {"get", &createGetCommand},
+    {"restore", &createRestoreCommand},
+    {"cat", &createCatCommand},
+    {"delete", &createDeleteCommand},
+    {"list", &createListCommand},
+    {"tree", &createTreeCommand},
+    {"search", &createSearchCommand},
+    {"grep", &createGrepCommand},
+});
+
+constexpr auto kConfigCommandRegistrations = std::to_array<CommandRegistration>({
+    {"config", &createConfigCommand},
+    {"auth", &createAuthCommand},
+    {"status", &createStatusCommand},
+    {"uninstall", &createUninstallCommand},
+    {"migrate", &createMigrateCommand},
+    {"update", &createUpdateCommand},
+});
+
+constexpr auto kWorkflowCommandRegistrations = std::to_array<CommandRegistration>({
+    {"download", &createDownloadCommand},
+    {"session", &createSessionCommand},
+    {"watch", &createWatchCommand},
+    {"completion", &createCompletionCommand},
+    {"repair", &createRepairCommand},
+});
+
+constexpr auto kRuntimeCommandRegistrations = std::to_array<CommandRegistration>({
+    {"model", &createModelCommand},
+    {"daemon", &createDaemonCommand},
+    {"plugin", &createPluginCommand},
+    {"doctor", &createDoctorCommand},
+    {"dr", &createDrCommand},
+});
+
+constexpr auto kAnalysisCommandRegistrations = std::to_array<CommandRegistration>({
+    {"graph", &createGraphCommand},
+    {"diff", &createDiffCommand},
+    {"tune", &createTuneCommand},
+});
+
+constexpr auto kTransportCommandRegistrations = std::to_array<CommandRegistration>({
 #ifdef YAMS_BUILD_MCP_SERVER
-    cli->registerCommand(CommandRegistry::createServeCommand());
+    {"serve", &createServeCommand},
 #endif
+});
+
+constexpr auto kMinimalCommandRegistrations = std::to_array<CommandRegistration>({
+    {"status", &createStatusCommand},
+    {"list", &createListCommand},
+    {"search", &createSearchCommand},
+});
+
+void registerCommandSet(YamsCLI* cli, const auto& registrations) {
+    for (const auto& entry : registrations) {
+        cli->registerCommand(entry.factory());
+    }
+}
+
+std::optional<CommandRegistration> findRegistration(std::string_view commandName,
+                                                    const auto& registrations) {
+    for (const auto& entry : registrations) {
+        if (entry.name == commandName) {
+            return entry;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+void CommandRegistry::registerAllCommands(YamsCLI* cli) {
+    registerCommandSet(cli, kCoreCommandRegistrations);
+    registerCommandSet(cli, kConfigCommandRegistrations);
+    registerCommandSet(cli, kWorkflowCommandRegistrations);
+    registerCommandSet(cli, kRuntimeCommandRegistrations);
+    registerCommandSet(cli, kAnalysisCommandRegistrations);
+    registerCommandSet(cli, kTransportCommandRegistrations);
 }
 
 bool CommandRegistry::registerMinimalCommandSet(YamsCLI* cli, std::string_view commandName) {
-    if (commandName == "status") {
-        cli->registerCommand(CommandRegistry::createStatusCommand());
-        return true;
-    }
-    if (commandName == "list") {
-        cli->registerCommand(CommandRegistry::createListCommand());
-        return true;
-    }
-    if (commandName == "search") {
-        cli->registerCommand(CommandRegistry::createSearchCommand());
+    if (const auto entry = findRegistration(commandName, kMinimalCommandRegistrations)) {
+        cli->registerCommand(entry->factory());
         return true;
     }
     return false;
 }
-
-std::unique_ptr<ICommand> CommandRegistry::createInitCommand() {
-    return ::yams::cli::createInitCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createSessionCommand() {
-    return ::yams::cli::createSessionCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createWatchCommand() {
-    return ::yams::cli::createWatchCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createAddCommand() {
-    return ::yams::cli::createAddCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createGetCommand() {
-    return ::yams::cli::createGetCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createRestoreCommand() {
-    return ::yams::cli::createRestoreCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createCatCommand() {
-    return ::yams::cli::createCatCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createDeleteCommand() {
-    return ::yams::cli::createDeleteCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createListCommand() {
-    return ::yams::cli::createListCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createTreeCommand() {
-    return ::yams::cli::createTreeCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createSearchCommand() {
-    return ::yams::cli::createSearchCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createGrepCommand() {
-    return ::yams::cli::createGrepCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createConfigCommand() {
-    return ::yams::cli::createConfigCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createAuthCommand() {
-    return ::yams::cli::createAuthCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createStatusCommand() {
-    return ::yams::cli::createStatusCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createUninstallCommand() {
-    return ::yams::cli::createUninstallCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createMigrateCommand() {
-    return ::yams::cli::createMigrateCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createUpdateCommand() {
-    return ::yams::cli::createUpdateCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createCompletionCommand() {
-    return ::yams::cli::createCompletionCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createRepairCommand() {
-    return ::yams::cli::createRepairCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createModelCommand() {
-    // The standalone createModelCommand function is in this namespace
-    return ::yams::cli::createModelCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createDaemonCommand() {
-    return ::yams::cli::createDaemonCommand();
-}
-
-std::unique_ptr<ICommand> CommandRegistry::createPluginCommand() {
-    return ::yams::cli::createPluginCommand();
-}
-
-// (no CommandRegistry::createDrCommand; we directly call the free factory above)
-
-#ifdef YAMS_BUILD_MCP_SERVER
-std::unique_ptr<ICommand> CommandRegistry::createServeCommand() {
-    return ::yams::cli::createServeCommand();
-}
-#endif
 
 } // namespace yams::cli

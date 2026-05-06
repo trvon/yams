@@ -771,3 +771,71 @@ TEST_CASE("EMA smoothed RTT converges toward actual RTT", "[daemon][gradient][ca
     CHECK(m.smoothedRtt > target_ns * 0.8);
     CHECK(m.smoothedRtt < target_ns * 1.2);
 }
+
+TEST_CASE("setMaxLimit raises ceiling and bumps current limit when capped",
+          "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.initialLimit = 1.0;
+    cfg.minLimit = 1.0;
+    cfg.maxLimit = 1.0;
+    GradientLimiter lim("setmax_raise", cfg);
+
+    REQUIRE(lim.effectiveLimit() == 1);
+    REQUIRE(lim.currentMaxLimit() == Approx(1.0));
+
+    lim.setMaxLimit(8.0);
+
+    CHECK(lim.currentMaxLimit() == Approx(8.0));
+    CHECK(lim.effectiveLimit() == 8);
+}
+
+TEST_CASE("setMaxLimit lowering ceiling clamps current limit down", "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.initialLimit = 8.0;
+    cfg.minLimit = 1.0;
+    cfg.maxLimit = 16.0;
+    GradientLimiter lim("setmax_lower", cfg);
+
+    REQUIRE(lim.effectiveLimit() == 8);
+
+    lim.setMaxLimit(4.0);
+
+    CHECK(lim.currentMaxLimit() == Approx(4.0));
+    CHECK(lim.effectiveLimit() == 4);
+}
+
+TEST_CASE("setMaxLimit floors at config minLimit", "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.minLimit = 2.0;
+    cfg.maxLimit = 8.0;
+    cfg.initialLimit = 4.0;
+    GradientLimiter lim("setmax_floor", cfg);
+
+    lim.setMaxLimit(0.5);
+
+    CHECK(lim.currentMaxLimit() == Approx(2.0));
+}
+
+TEST_CASE("setMaxLimit unblocks growth that was clamped by stale ceiling",
+          "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.initialLimit = 1.0;
+    cfg.minLimit = 1.0;
+    cfg.maxLimit = 1.0;
+    cfg.warmupSamples = 0;
+    cfg.windowSize = 1;
+    GradientLimiter lim("setmax_growth", cfg);
+
+    for (int i = 0; i < 20; ++i) {
+        simulateBatch(lim, 1, std::chrono::milliseconds(5));
+    }
+    CHECK(lim.effectiveLimit() == 1);
+
+    lim.setMaxLimit(8.0);
+    REQUIRE(lim.effectiveLimit() == 8);
+
+    for (int i = 0; i < 30; ++i) {
+        simulateBatch(lim, 8, std::chrono::milliseconds(5));
+    }
+    CHECK(lim.effectiveLimit() > 1);
+}

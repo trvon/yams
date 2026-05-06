@@ -213,6 +213,18 @@ public:
     // Clean up expired/idle models
     void performMaintenance();
 
+#ifdef YAMS_TESTING
+    struct TestingModelPoolStats {
+        bool loaded{false};
+        bool isHot{false};
+        size_t totalResources{0};
+        size_t availableResources{0};
+        size_t inUseResources{0};
+    };
+
+    std::optional<TestingModelPoolStats> testingModelPoolStats(const std::string& modelName) const;
+#endif
+
     // Optional per-model resolution hints (e.g., HF revision, offline only)
     struct ResolutionHints {
         std::string hfRevision;   // e.g., "main" or snapshot hash

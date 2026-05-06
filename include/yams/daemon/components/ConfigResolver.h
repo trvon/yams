@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -38,12 +39,103 @@ public:
         std::size_t maxCharsPerDoc{24000};
         double headingBoost{1.25};
         double introBoost{0.75};
+        // When false, ingestion still generates/stores embeddings but defers
+        // semantic-neighbor KG maintenance to an explicit corpus-wide rebuild.
+        bool updateSemanticGraphDuringIngest{true};
     };
 
     struct EmbeddingChunkingPolicy {
         yams::vector::ChunkingStrategy strategy{yams::vector::ChunkingStrategy::PARAGRAPH_BASED};
         yams::vector::ChunkingConfig config{};
         bool overridden{false};
+    };
+
+    struct TopologyRoutingPolicy {
+        std::optional<float> rrfK;
+    };
+
+    struct TopologyEnginePolicy {
+        std::optional<std::string> engine;
+        std::optional<std::size_t> hdbscanMinPoints;
+        std::optional<std::size_t> hdbscanMinClusterSize;
+        std::optional<std::size_t> featureSmoothingHops;
+    };
+
+    // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
+    // by default; opt-in via [topology.tuner] in TOML. Reward weights default
+    // to the Phase G plan values when not overridden.
+    struct TopologyTunerPolicy {
+        std::optional<bool> enabled;
+        std::optional<std::uint32_t> cooldownMinutes;
+        std::optional<std::size_t> docCountDelta;
+        std::optional<double> rewardAlphaSingleton;
+        std::optional<double> rewardBetaGiantCluster;
+        std::optional<double> rewardGammaGiniDeviation;
+        std::optional<double> rewardDeltaIntraEdge;
+        // Phase H-TDA: reward mode. "geometric" (default) | "persistence" | "hybrid"
+        std::optional<std::string> rewardMode;
+        // Sample size for persistence computation (default 512). Higher → more
+        // stable signal but O(n^2) cost growth.
+        std::optional<std::size_t> persistenceSampleSize;
+    };
+
+    struct PostIngestCaps {
+        std::optional<std::uint32_t> totalConcurrent;
+        std::optional<std::uint32_t> embedConcurrent;
+        std::optional<std::uint32_t> extractionConcurrent;
+        std::optional<std::uint32_t> kgConcurrent;
+        std::optional<std::uint32_t> symbolConcurrent;
+        std::optional<std::uint32_t> entityConcurrent;
+        std::optional<std::uint32_t> titleConcurrent;
+    };
+
+    struct SimeonEncoderPolicy {
+        std::optional<std::string> ngramMode;
+        std::optional<std::uint32_t> ngramMin;
+        std::optional<std::uint32_t> ngramMax;
+        std::optional<std::uint32_t> sketchDim;
+        std::optional<std::uint32_t> outputDim;
+        std::optional<std::string> projection;
+        std::optional<bool> l2Normalize;
+        std::optional<std::uint32_t> pqBytes;
+    };
+
+    struct SimeonBm25Policy {
+        std::optional<bool> enabled;
+        std::optional<std::string> variant;
+        std::optional<float> subwordGamma;
+        std::optional<std::size_t> maxCorpusDocs;
+        std::optional<std::size_t> maxCorpusBytes;
+        std::optional<std::size_t> buildDocChunkBytes;
+        std::optional<std::size_t> buildDocMaxChunks;
+        std::optional<bool> fragmentGeometryEnabled;
+        std::optional<std::size_t> fragmentGeometryMaxDocs;
+        std::optional<std::size_t> fragmentGeometryMaxCorpusBytes;
+        std::optional<std::size_t> fragmentGeometryPmiSampleDocs;
+        std::optional<std::size_t> fragmentGeometryPmiSampleBytes;
+        // Per-query router over {Atire, SabSmooth}. When enabled, the
+        // backend builds both indexes and dispatches via simeon::QueryRouter
+        // using `routerPreset`. Recognized presets: "passE_scq0_clar3"
+        // (default — best BEIR result from simeon bench), "off" (disable).
+        std::optional<bool> routerEnabled;
+        std::optional<std::string> routerPreset;
+    };
+
+    struct VectorBackendPolicy {
+        std::optional<std::string> backend; // "sqlite_vec" (default) | "faiss"
+    };
+
+    struct RerankerBackendPolicy {
+        std::optional<std::string> backend;
+    };
+
+    struct InstrumentationPolicy {
+        std::string profile{"auto"};
+        bool memoryProfileActive{false};
+        bool suppressAutoRepair{false};
+        bool suppressSimeonLexicalBuild{false};
+        bool suppressVectorIndexBuild{false};
+        std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
     };
 
     ConfigResolver() = delete; // Static-only class
@@ -105,6 +197,24 @@ public:
      * @return Dimension if found and > 0, nullopt otherwise
      */
     static std::optional<size_t> readVectorSentinelDim(const std::filesystem::path& dataDir);
+
+    /**
+     * @brief Resolve embedding backend selection.
+     *
+     * Priority:
+     *   1. YAMS_EMBED_BACKEND environment variable (highest)
+     *   2. `embeddings.backend` key in TOML config
+     *   3. defaultValue fallback
+     *
+     * Recognized values: "auto", "daemon", "simeon", "onnxruntime", "mock".
+     * "auto" means: let PluginManager pick ABI plugin first, fall back to any
+     * registered in-process provider.
+     * "onnxruntime" means: prefer the bundled ONNX Runtime model_provider plugin.
+     *
+     * @param defaultValue Value returned when neither env nor TOML is set.
+     * @return Lower-cased backend name.
+     */
+    static std::string resolveEmbeddingBackend(const std::string& defaultValue = "simeon");
 
     /**
      * @brief Write vector sentinel file with dimension and schema info.
@@ -211,6 +321,135 @@ public:
      * - YAMS_EMBED_CHUNK_PRESERVE_SENTENCES
      */
     static EmbeddingChunkingPolicy resolveEmbeddingChunkingPolicy();
+
+    /**
+     * @brief Resolve topology-aware routing policy from config file.
+     *
+     * Reads [search.topology] keys. Callers apply these as defaults, then
+     * overlay env vars (YAMS_SEARCH_TOPOLOGY_*) which take final precedence.
+     * All fields are optional; unset keys are left nullopt.
+     *
+     * Config keys:
+     * - search.topology.enable_weak_query_routing = true|false
+     * - search.topology.max_clusters = int
+     * - search.topology.max_docs = int
+     * - search.topology.medoid_boost = float
+     * - search.topology.bridge_boost = float
+     * - search.topology.routed_base_multiplier = float
+     * - search.topology.routing_variant = baseline|vector_seed|kg_walk|score_replace|medoid_promote
+     * - search.topology.integration = boost|recall_expand|rrf|both
+     * - search.topology.recall_expand_per_cluster = int
+     * - search.topology.rrf_k = float
+     * - search.topology.route_scoring = current|size_weighted|seed_coverage
+     */
+    static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+
+    /**
+     * @brief Resolve topology cluster-engine selection from config file.
+     *
+     * Reads [topology] keys. Callers apply `engine` to
+     * TuningConfig::topologyAlgorithm (which seeds topology::makeEngine
+     * dispatch) and the hdbscan_* knobs to TopologyBuildConfig.
+     *
+     * Config keys:
+     * - topology.engine = connected|hdbscan
+     * - topology.hdbscan_min_points = int (0 = auto from corpus size)
+     * - topology.hdbscan_min_cluster_size = int (0 = auto from corpus size)
+     * - topology.feature_smoothing_hops = int (0 = off; SGC K for embedding
+     *   propagation over the semantic-neighbor graph before clustering)
+     */
+    static TopologyEnginePolicy resolveTopologyEnginePolicy();
+
+    /**
+     * @brief Resolve topology corpus-adaptive tuner config (Phase G).
+     *
+     * Disabled by default. Recognized TOML keys:
+     * - topology.tuner.enabled                     = bool
+     * - topology.tuner.cooldown_minutes            = int
+     * - topology.tuner.doc_count_delta             = int
+     * - topology.tuner.reward.alpha_singleton      = float
+     * - topology.tuner.reward.beta_giant_cluster   = float
+     * - topology.tuner.reward.gamma_gini_deviation = float
+     * - topology.tuner.reward.delta_intra_edge     = float
+     */
+    static TopologyTunerPolicy resolveTopologyTunerPolicy();
+
+    /**
+     * @brief Resolve Simeon encoder config from env + config file.
+     *
+     * Precedence: env var > TOML > default. Env vars map to legacy
+     * YAMS_SIMEON_* names kept for test-only overrides. Canonical keys:
+     * - embeddings.simeon.ngram_mode     = "char" | "word" | "char_and_word"
+     * - embeddings.simeon.ngram_min      = int
+     * - embeddings.simeon.ngram_max      = int
+     * - embeddings.simeon.sketch_dim     = int (power of two for fwht)
+     * - embeddings.simeon.output_dim     = int
+     * - embeddings.simeon.projection     = "achlioptas_sparse" | "dense_gaussian"
+     *                                    | "very_sparse" | "sparse_jl" | "fwht"
+     * - embeddings.simeon.l2_normalize   = bool
+     * - embeddings.simeon.pq_bytes       = int (0 = off; reserved for
+     *                                          post-encode PQ in storage layer)
+     */
+    static VectorBackendPolicy resolveVectorBackendPolicy();
+
+    /**
+     * @brief Resolve Simeon encoder config from env + config file.
+     *
+     * Reads [embeddings.simeon] section from config.toml, with env
+     * overrides YAMS_SIMEON_NGRAM_MODE, YAMS_SIMEON_NGRAM_MIN, etc.
+     */
+    static SimeonEncoderPolicy resolveSimeonEncoderPolicy();
+
+    /**
+     * @brief Resolve Simeon BM25 reranker config from env + config file.
+     *
+     * Precedence: env var > TOML > default. Canonical keys:
+     * - embeddings.simeon.bm25.enabled         = bool (default true when
+     *                                                 backend=simeon)
+     * - embeddings.simeon.bm25.variant         = "atire" | "sab_smooth"
+     * - embeddings.simeon.bm25.subword_gamma   = float
+     * - embeddings.simeon.bm25.max_corpus_docs = int
+     */
+    static SimeonBm25Policy resolveSimeonBm25Policy();
+
+    /**
+     * @brief Resolve reranker backend selection from config.
+     *
+     * Canonical key:
+     * - search.reranker_backend = "simeon" | "onnx" | "colbert" | "auto"
+     *
+     * When unset, callers should default to "simeon".
+     */
+    static RerankerBackendPolicy resolveRerankerBackendPolicy();
+    static RerankerBackendPolicy resolveRerankerBackendPolicy(const DaemonConfig& config);
+
+    /**
+     * @brief Resolve runtime instrumentation profile from [daemon.instrumentation].
+     *
+     * profile = "auto" (default) activates the memory profile when macOS
+     * MallocStackLogging is active. profile = "memory" forces it; "normal"/"off"
+     * disables it. Per-action suppression keys override profile defaults.
+     */
+    static InstrumentationPolicy resolveInstrumentationPolicy();
+    static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
+
+    /**
+     * @brief Resolve post-ingest concurrency caps from config file.
+     *
+     * Reads [tuning.post_ingest] keys. Each entry is optional; callers apply
+     * values via TuneAdvisor::setPost*Concurrent() only when the corresponding
+     * YAMS_POST_*_CONCURRENT env var is not set (env wins).
+     *
+     * Config keys:
+     * - tuning.post_ingest.total_concurrent    = int (1..256)
+     * - tuning.post_ingest.embed_concurrent    = int (1..32)
+     * - tuning.post_ingest.extraction_concurrent = int (1..64)
+     * - tuning.post_ingest.kg_concurrent       = int (1..64)
+     * - tuning.post_ingest.symbol_concurrent   = int (1..32)
+     * - tuning.post_ingest.entity_concurrent   = int (1..16)
+     * - tuning.post_ingest.title_concurrent    = int (1..16)
+     */
+    static PostIngestCaps resolvePostIngestCaps();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

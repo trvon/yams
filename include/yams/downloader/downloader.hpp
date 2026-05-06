@@ -292,7 +292,7 @@ public:
           /* out */ std::optional<std::string>& lastModified,
           /* out */ std::optional<std::string>& contentType,
           /* out */ std::optional<std::string>& suggestedFilename, const TlsConfig& tls,
-          const std::optional<std::string>& proxy,
+          const std::optional<std::string>& proxy, bool followRedirects,
           std::chrono::milliseconds timeout) = 0; // TODO(parallel): consider exposing server part
                                                   // size/alignment for multi-range planning
 

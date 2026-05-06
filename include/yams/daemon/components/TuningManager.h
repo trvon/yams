@@ -12,12 +12,22 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <yams/daemon/components/ResourceGovernor.h>
 
 namespace yams::daemon {
 
 class ServiceManager;
 class WorkCoordinator;
 struct StateComponent;
+
+struct RepairHoldHints {
+    uint32_t degradeHoldMs;
+    uint32_t readyHoldMs;
+};
+
+RepairHoldHints computeRepairHoldHints(ResourcePressureLevel level, std::uint64_t repairBacklog,
+                                       uint32_t baseDegradeMs = 750,
+                                       uint32_t baseReadyMs = 1500) noexcept;
 
 // Centralized tuning controller owned by ServiceManager.
 // Periodically reads metrics and TuneAdvisor policies and coordinates

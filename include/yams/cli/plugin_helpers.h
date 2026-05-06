@@ -76,6 +76,7 @@ parse_plugins_json_interfaces(const std::string& jsonStr) {
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     return ifaceMap;
 }
@@ -93,6 +94,7 @@ inline std::map<std::string, std::string> parse_plugins_json_types(const std::st
             }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     return typeMap;
 }

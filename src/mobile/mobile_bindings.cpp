@@ -247,17 +247,11 @@ nlohmann::json make_empty_corpus_stats_json() {
     stats["path_depth_avg"] = 0.0;
     stats["path_depth_max"] = 0.0;
     stats["top_extensions"] = nlohmann::json::object();
-    stats["classification"] = {{"has_embeddings", false},
-                               {"has_kg", false},
-                               {"has_tags", false},
-                               {"has_paths", false},
-                               {"is_minimal", true},
-                               {"is_small", true},
-                               {"is_large", false},
-                               {"is_code_dominant", false},
-                               {"is_prose_dominant", false},
-                               {"is_mixed", false},
-                               {"is_scientific", false}};
+    stats["classification"] = {
+        {"has_embeddings", false}, {"has_kg", false},           {"has_tags", false},
+        {"has_paths", false},      {"is_minimal", true},        {"is_small", true},
+        {"is_large", false},       {"is_code_dominant", false}, {"is_prose_dominant", false},
+        {"is_mixed", false},       {"is_scientific", false}};
     return stats;
 }
 
@@ -505,8 +499,8 @@ nlohmann::json list_response_to_json(const ListDocumentsResponse& resp) {
 
 nlohmann::json build_update_result_json(const std::string& hash, bool contentUpdated,
                                         bool metadataUpdated, bool tagsUpdated,
-                                        std::size_t metadataUpdatesApplied,
-                                        std::size_t tagsAdded, std::size_t tagsRemoved,
+                                        std::size_t metadataUpdatesApplied, std::size_t tagsAdded,
+                                        std::size_t tagsRemoved,
                                         std::optional<std::int64_t> documentId = std::nullopt,
                                         std::string backupHash = {}) {
     nlohmann::json root;
@@ -538,8 +532,8 @@ nlohmann::json build_delete_result_json(bool dryRun, std::size_t count, nlohmann
 nlohmann::json daemon_search_response_to_json(const yams::daemon::SearchResponse& resp,
                                               const std::string& requestedType) {
     std::string effectiveType = requestedType;
-    if (const auto it = resp.searchStats.find("effective_type"); it != resp.searchStats.end() &&
-                                                             !it->second.empty()) {
+    if (const auto it = resp.searchStats.find("effective_type");
+        it != resp.searchStats.end() && !it->second.empty()) {
         effectiveType = it->second;
     }
 
@@ -586,7 +580,8 @@ nlohmann::json daemon_list_response_to_json(const yams::daemon::ListResponse& re
     root["count"] = static_cast<std::uint64_t>(resp.items.size());
     root["totalFound"] = resp.totalCount;
     root["hasMore"] = resp.items.size() < resp.totalCount;
-    if (const auto it = resp.listStats.find("service_execution_time_ms"); it != resp.listStats.end()) {
+    if (const auto it = resp.listStats.find("service_execution_time_ms");
+        it != resp.listStats.end()) {
         try {
             root["executionTimeMs"] = std::stoll(it->second);
         } catch (...) {
@@ -782,12 +777,9 @@ Result<yams::daemon::ResponseOfT<Req>> daemon_call(MobileState& state, Req req) 
     }
 
     const auto& err = result.error();
-    const bool shouldRetry =
-        err.message.empty() ||
-        err.code == ErrorCode::InvalidState ||
-        err.code == ErrorCode::NetworkError ||
-        err.code == ErrorCode::Timeout ||
-        err.code == ErrorCode::InternalError;
+    const bool shouldRetry = err.message.empty() || err.code == ErrorCode::InvalidState ||
+                             err.code == ErrorCode::NetworkError ||
+                             err.code == ErrorCode::Timeout || err.code == ErrorCode::InternalError;
     if (!shouldRetry) {
         return result;
     }
@@ -1489,8 +1481,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_conte
                 errMsg = result.value().results[0].error;
             set_last_error(errMsg);
             if (result.value().successCount == 0 &&
-                (result.value().results.empty() ||
-                 errMsg.find("not found") != std::string::npos ||
+                (result.value().results.empty() || errMsg.find("not found") != std::string::npos ||
                  errMsg.find("Not found") != std::string::npos)) {
                 return YAMS_MOBILE_STATUS_NOT_FOUND;
             }
@@ -1780,12 +1771,11 @@ yams_mobile_update_document(yams_mobile_context_t* ctx, const yams_mobile_update
 
     auto wrapper = std::make_unique<yams_mobile_update_result_t>();
     wrapper->json =
-        build_update_result_json(result.value().hash, result.value().contentUpdated,
-                                 result.value().updatesApplied > 0,
-                                 (result.value().tagsAdded > 0) || (result.value().tagsRemoved > 0),
-                                 result.value().updatesApplied, result.value().tagsAdded,
-                                 result.value().tagsRemoved, result.value().documentId,
-                                 result.value().backupHash)
+        build_update_result_json(
+            result.value().hash, result.value().contentUpdated, result.value().updatesApplied > 0,
+            (result.value().tagsAdded > 0) || (result.value().tagsRemoved > 0),
+            result.value().updatesApplied, result.value().tagsAdded, result.value().tagsRemoved,
+            result.value().documentId, result.value().backupHash)
             .dump();
 
     if (out_result)
@@ -1840,8 +1830,8 @@ yams_mobile_delete_by_name(yams_mobile_context_t* ctx, const yams_mobile_delete_
             if (result.error().code == ErrorCode::NotFound) {
                 auto wrapper = std::make_unique<yams_mobile_delete_result_t>();
                 wrapper->json =
-                    build_delete_result_json(request->dry_run != 0, 0U,
-                                             nlohmann::json::array(), nlohmann::json::array())
+                    build_delete_result_json(request->dry_run != 0, 0U, nlohmann::json::array(),
+                                             nlohmann::json::array())
                         .dump();
                 if (out_result)
                     *out_result = wrapper.release();
@@ -1868,10 +1858,9 @@ yams_mobile_delete_by_name(yams_mobile_context_t* ctx, const yams_mobile_delete_
             else
                 errors.push_back(std::move(item));
         }
-        wrapper->json =
-            build_delete_result_json(resp.dryRun, resp.successCount, std::move(deleted),
-                                     std::move(errors))
-                .dump();
+        wrapper->json = build_delete_result_json(resp.dryRun, resp.successCount, std::move(deleted),
+                                                 std::move(errors))
+                            .dump();
         if (out_result)
             *out_result = wrapper.release();
 
@@ -2327,14 +2316,11 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
         auto& resp = result.value();
         const bool warmupRequested = request && request->warmup != 0;
         const auto corpusStatsIt = resp.additionalStats.find("corpus_stats");
-        const auto corpusStats =
-            parse_corpus_stats_or_default(corpusStatsIt != resp.additionalStats.end()
-                                              ? &corpusStatsIt->second
-                                              : nullptr);
-        const auto effectiveDocuments = static_cast<uint64_t>(
-            std::max<uint64_t>(static_cast<uint64_t>(resp.totalDocuments),
-                               static_cast<uint64_t>(std::max<std::int64_t>(
-                                   corpusStats.value("doc_count", 0), 0))));
+        const auto corpusStats = parse_corpus_stats_or_default(
+            corpusStatsIt != resp.additionalStats.end() ? &corpusStatsIt->second : nullptr);
+        const auto effectiveDocuments = static_cast<uint64_t>(std::max<uint64_t>(
+            static_cast<uint64_t>(resp.totalDocuments),
+            static_cast<uint64_t>(std::max<std::int64_t>(corpusStats.value("doc_count", 0), 0))));
         const auto effectiveIndexedDocuments = static_cast<uint64_t>(
             std::max<uint64_t>(static_cast<uint64_t>(resp.indexedDocuments), effectiveDocuments));
         const bool notReady =
@@ -2347,9 +2333,8 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
             resp.compressionRatio > 0.0 ? resp.totalSize * resp.compressionRatio : 0);
         nlohmann::json j = build_corpus_status_json(
             effectiveDocuments, effectiveIndexedDocuments, static_cast<uint64_t>(resp.totalSize),
-            dedupBytes,
-            static_cast<uint64_t>(resp.vectorIndexSize), resp.compressionRatio, corpusStats,
-            !notReady, indexReady, warmupRequested, "daemon");
+            dedupBytes, static_cast<uint64_t>(resp.vectorIndexSize), resp.compressionRatio,
+            corpusStats, !notReady, indexReady, warmupRequested, "daemon");
 
         if (out_result) {
             auto res = std::make_unique<yams_mobile_vector_status_result_t>();

@@ -36,8 +36,7 @@ COPY . .
 RUN conan export conan/zstd --name=zstd --version=1.5.5
 
 # Export other custom recipes
-RUN conan export conan/qpdf && \
-    conan export conan/onnxruntime
+RUN conan export conan/onnxruntime
 
 # Build fuzzers with AFL++ instrumentation
 RUN mkdir -p build/fuzzing && \

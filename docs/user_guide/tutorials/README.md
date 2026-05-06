@@ -42,43 +42,43 @@ Pro tips:
 
 ## Tutorials (Index)
 
-These guides are short, practical walkthroughs. They’ll be added incrementally; meanwhile, use the TL;DR above and the CLI reference for complete flags.
+These short walkthroughs are usable now. Each entry points to the shortest stable path in this guide, the CLI reference, or a focused reference page.
 
-1) **Quickstart: Add, Search, Retrieve** (coming soon)
-   - Goal: ingest a folder of docs, list with rich metadata, search and retrieve.
-   - Concepts: storage init, bulk add, list formats, keyword/fuzzy search.
+1) **Quickstart: Add, Search, Retrieve**
+   - Goal: ingest a folder of docs, list with rich metadata, search, and retrieve.
+   - Start here: use the TL;DR above, then see [CLI Reference](../cli.md).
 
-2) **Bulk Import with Filters** (coming soon)
-   - Goal: import only certain file types/extensions and tag them on the way in.
-   - Concepts: `--include`, `--recursive`, tagging, metadata KV pairs.
+2) **Bulk Import with Filters**
+   - Goal: import selected file types/extensions and tag them on ingest.
+   - Start here: [CLI Reference: add/import options](../cli.md#add-documents).
 
-3) **Scripting YAMS with JSON & jq** (coming soon)
-   - Goal: pipe machine-readable results into jq or scripts for automation.
-   - Concepts: `--format json`, selecting fields, composing commands.
+3) **Scripting YAMS with JSON & jq**
+   - Goal: pipe machine-readable results into `jq` or shell scripts.
+   - Start here: [CLI Reference](../cli.md) sections that support `--format json`.
 
-4) **Fuzzy Search & Snippets** (coming soon)
-   - Goal: approximate matches with readable snippets and highlights.
-   - Concepts: `--fuzzy`, `--similarity`, result interpretation.
+4) **Fuzzy Search & Snippets**
+   - Goal: find approximate matches with readable snippets and highlights.
+   - Start here: [CLI Reference: grep/search examples](../cli.md#grep-search-file-contents).
 
-5) **Semantic & Hybrid Search** (coming soon)
-   - Goal: meaning-based discovery and hybrid strategies.
-   - Concepts: vector search configuration and query best practices.
+5) **Semantic & Hybrid Search**
+   - Goal: use meaning-based discovery and hybrid ranking strategies.
+   - Start here: [Embeddings](../embeddings.md) and [CLI Reference](../cli.md#search-semantic-and-hybrid-retrieval).
 
-6) **Per-Project Storage Isolation** (coming soon)
-   - Goal: maintain independent data roots for different repos/projects.
-   - Concepts: `YAMS_STORAGE`, environment scoping, cleanup patterns.
+6) **Per-Project Storage Isolation**
+   - Goal: keep independent data roots for different repos/projects.
+   - Start here: the `YAMS_STORAGE` examples above and [Installation](../installation.md).
 
-7) **Symbol Extraction Setup** (coming soon)
+7) **Symbol Extraction Setup**
    - Goal: set up tree-sitter grammars for code symbol extraction.
-   - Concepts: `yams init --auto`, grammar downloads, supported languages.
+   - Start here: `yams init --auto` and [CLI Reference](../cli.md).
 
-8) **MCP Server: Claude Integration** (coming soon)
-   - Goal: configure YAMS as an MCP server for Claude Desktop.
-   - Concepts: `yams serve`, claude_desktop_config.json, tools.
+8) **MCP Server Integration**
+   - Goal: configure YAMS as an MCP server for a desktop or IDE client.
+   - Start here: [MCP Server](../mcp.md).
 
-9) **Docker Deployment** (coming soon)
+9) **Docker Deployment**
    - Goal: run YAMS in a container with persistent storage.
-   - Concepts: volume mounts, environment variables, MCP over stdio.
+   - Start here: [MCP Server: Docker](../mcp.md#docker) and [Installation](../installation.md).
 
 ---
 

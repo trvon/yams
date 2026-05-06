@@ -1,7 +1,13 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <random>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "../common/test_data_generator.h"
@@ -92,16 +98,70 @@ protected:
         if (!compressor_) {
             throw std::runtime_error("Zstandard compressor not available");
         }
-        data_ =
-            test::TestDataGenerator().generateRandomBytes(dataSize_); // Simplified data generation
+        data_ = generatePatternData(dataSize_, pattern_);
     }
 
     size_t runIteration() override {
         auto result = compressor_->compress(data_, level_);
         if (result.has_value()) {
+            lastOriginalSize_ = result.value().originalSize;
+            lastCompressedSize_ = result.value().compressedSize;
+            lastRatio_ = result.value().ratio();
+            lastSpaceSavedPct_ = result.value().spaceSaved();
             return 1;
         }
         return 0;
+    }
+
+    void collectCustomMetrics(std::map<std::string, double>& metrics) override {
+        metrics["bytes_processed"] = static_cast<double>(dataSize_);
+        metrics["compressed_bytes"] = static_cast<double>(lastCompressedSize_);
+        metrics["compression_ratio"] = lastRatio_;
+        metrics["space_saved_pct"] = lastSpaceSavedPct_;
+        metrics["is_smaller_than_input"] = lastCompressedSize_ < lastOriginalSize_ ? 1.0 : 0.0;
+    }
+
+    static std::vector<std::byte> generatePatternData(size_t size, const std::string& pattern) {
+        if (pattern == "text") {
+            static constexpr std::string_view words[] = {"storage ", "compression ", "manifest ",
+                                                         "chunk ",   "integrity ",   "verify "};
+            std::vector<std::byte> out;
+            out.reserve(size);
+            size_t index = 0;
+            while (out.size() < size) {
+                const auto word = words[index++ % (sizeof(words) / sizeof(words[0]))];
+                for (char c : word) {
+                    if (out.size() == size) {
+                        break;
+                    }
+                    out.push_back(std::byte{static_cast<unsigned char>(c)});
+                }
+            }
+            return out;
+        }
+
+        if (pattern == "repeating") {
+            std::vector<std::byte> out(size);
+            for (size_t i = 0; i < size; ++i) {
+                out[i] = std::byte{static_cast<unsigned char>((i / 64) & 0x0F)};
+            }
+            return out;
+        }
+
+        if (pattern == "high_entropy") {
+            std::vector<std::byte> out(size);
+            uint64_t state = 0x9e3779b97f4a7c15ULL;
+            for (size_t i = 0; i < size; ++i) {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                out[i] =
+                    std::byte{static_cast<unsigned char>((state * 0x2545F4914F6CDD1DULL) >> 56)};
+            }
+            return out;
+        }
+
+        return test::TestDataGenerator(0x5eed5eed).generateRandomBytes(size);
     }
 
     std::unique_ptr<compression::ICompressor> compressor_;
@@ -109,6 +169,10 @@ protected:
     size_t dataSize_;
     std::string pattern_;
     uint8_t level_;
+    size_t lastOriginalSize_{0};
+    size_t lastCompressedSize_{0};
+    double lastRatio_{0.0};
+    double lastSpaceSavedPct_{0.0};
 };
 
 } // namespace yams::benchmark
@@ -169,6 +233,8 @@ int main(int argc, char** argv) {
         std::make_unique<CompressionBenchmark>("Zstd_10KB_Text_L3", 10 * 1024, "text", 3, config));
     benchmarks.push_back(
         std::make_unique<CompressionBenchmark>("Zstd_1MB_Text_L9", 1024 * 1024, "text", 9, config));
+    benchmarks.push_back(std::make_unique<CompressionBenchmark>(
+        "Zstd_1MB_HighEntropy_L3", 1024 * 1024, "high_entropy", 3, config));
 
     for (auto& benchmark : benchmarks) {
         if (!matchesAnyFilter(benchmark->name(), cli.filters)) {

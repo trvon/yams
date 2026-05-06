@@ -249,8 +249,7 @@ public:
     }
 
     [[nodiscard]] auto extractText(const std::vector<std::byte>& bytes, const std::string& mime,
-                                   const std::string& extension)
-        -> std::optional<std::string> {
+                                   const std::string& extension) -> std::optional<std::string> {
         if (!is_initialized_) {
             spdlog::error("Plugin not initialized");
             return std::nullopt;

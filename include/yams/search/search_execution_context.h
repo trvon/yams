@@ -25,6 +25,10 @@ struct IndexFreshnessSnapshot {
     bool kgReady{false};
     bool topologyReady{false};
     bool awaitingDrain{false};
+    bool simeonLexicalConfigured{false};
+    bool simeonLexicalReady{false};
+    bool simeonLexicalBuilding{false};
+    bool simeonFragmentGeometryReady{false};
 
     [[nodiscard]] bool corpusWarming() const noexcept {
         return ingestQueued > 0 || ingestInFlight > 0 || postIngestQueued > 0 ||

@@ -376,3 +376,52 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine storage size", "[storage][
     REQUIRE(sizeResult.has_value());
     CHECK(sizeResult.value() == totalSize);
 }
+
+TEST_CASE("StorageEngine rejects path traversal storage keys", "[storage][security][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_storage_traversal_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    };
+
+    StorageConfig config{.basePath = testDir / "storage", .shardDepth = 2, .mutexPoolSize = 64};
+    StorageEngine engine(std::move(config));
+    std::vector<std::byte> data{std::byte{0x01}, std::byte{0x02}};
+
+    const std::string traversalKey = std::string("..") + std::string(62, 'a');
+    auto storeResult = engine.store(traversalKey, data);
+    CHECK_FALSE(storeResult.has_value());
+    CHECK(storeResult.error().code == ErrorCode::InvalidArgument);
+    CHECK_FALSE(std::filesystem::exists((testDir / std::string(62, 'a'))));
+
+    const std::string manifestTraversalKey = std::string("..") + std::string(62, 'b') + ".manifest";
+    auto manifestResult = engine.store(manifestTraversalKey, data);
+    CHECK_FALSE(manifestResult.has_value());
+    CHECK(manifestResult.error().code == ErrorCode::InvalidArgument);
+
+    cleanup();
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine verify detects content hash mismatch",
+                 "[storage][integrity][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+    REQUIRE(storage->store(hash, data).has_value());
+    REQUIRE(storage->verify().has_value());
+
+    auto objectPath = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2);
+    {
+        std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(static_cast<bool>(file));
+        file.seekp(0);
+        const char corrupt = static_cast<char>(0xff);
+        file.write(&corrupt, 1);
+        REQUIRE(static_cast<bool>(file));
+    }
+
+    auto verifyResult = storage->verify();
+    REQUIRE_FALSE(verifyResult.has_value());
+    CHECK(verifyResult.error().code == ErrorCode::CorruptedData);
+}

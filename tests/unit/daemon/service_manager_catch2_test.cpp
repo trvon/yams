@@ -135,14 +135,6 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor
     SUCCEED();
 }
 
-TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager worker pool methods don't crash",
-                 "[daemon][service_manager]") {
-    ServiceManager sm(config_, state_, lifecycleFsm_);
-    auto pool = sm.getWorkerPool();
-    (void)pool;
-    SUCCEED();
-}
-
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager tuning config getter doesn't crash",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
@@ -161,14 +153,6 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn'
     tc.postIngestThreadsMax = 4;
 
     REQUIRE_NOTHROW(sm.setTuningConfig(tc));
-}
-
-TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager resize worker pool returns result",
-                 "[daemon][service_manager]") {
-    ServiceManager sm(config_, state_, lifecycleFsm_);
-    bool result = sm.resizeWorkerPool(4);
-    (void)result;
-    SUCCEED();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getWorkerQueueDepth doesn't crash",

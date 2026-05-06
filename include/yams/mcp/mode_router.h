@@ -1,7 +1,7 @@
 #pragma once
 
-#include <boost/asio/awaitable.hpp>
 #include <nlohmann/json.hpp>
+#include <boost/asio/awaitable.hpp>
 
 #include <cstddef>
 #include <functional>
@@ -48,6 +48,7 @@ struct ModeRouterConfig {
     FinalResultBuilderFn finalResultBuilder;
 
     bool defaultContinueOnError = false;
+    bool dispatchErrorsAreFatal = true;
     bool singleStepUnwrap = false;
 };
 

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include "../../common/test_helpers_catch2.h"
 #include <filesystem>
@@ -125,13 +126,13 @@ public:
         TuneAdvisor::setHardwareConcurrencyForTests(32);
         TuneAdvisor::setPostIngestTotalConcurrent(totalConcurrent);
         TuneAdvisor::setPostExtractionConcurrent(extractionConcurrent);
-        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
     }
     ~PostIngestConcurrencyGuard() {
         TuneAdvisor::setHardwareConcurrencyForTests(prevHw_);
         TuneAdvisor::setPostIngestTotalConcurrent(prevTotal_);
         TuneAdvisor::setPostExtractionConcurrent(prevExtraction_);
-        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
     }
 
 private:
@@ -160,6 +161,17 @@ public:
             return Error{ErrorCode::NotFound, "content not found"};
         }
         return it->second;
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        auto r = retrieveBytes(hash);
+        if (!r)
+            return r;
+        auto& v = r.value();
+        if (v.size() > maxBytes)
+            v.resize(maxBytes);
+        return r;
     }
 
     Result<api::IContentStore::RawContent> retrieveRaw(const std::string& hash) override {

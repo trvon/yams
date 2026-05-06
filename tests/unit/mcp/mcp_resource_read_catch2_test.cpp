@@ -60,7 +60,9 @@ TEST_CASE("MCP resources/read returns TextResourceContents array for yams://stat
 
     REQUIRE(payload->is_object());
     if (payload->contains("error")) {
-        CHECK((*payload)["error"].get<std::string>().find("status error:") == 0);
+        const auto error = (*payload)["error"].get<std::string>();
+        CHECK((error.find("status error:") == 0 || error == "status unavailable" ||
+               error == "status exception"));
     } else {
         CHECK(payload->contains("running"));
         CHECK(payload->contains("ready"));

@@ -3,9 +3,14 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <string>
+#include <string_view>
 
+#include <yams/daemon/components/TopologyTuner.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/topological_quality.h>
 #include <yams/vector/vector_database.h>
 
 #include <yams/topology/topology_baseline.h>
@@ -18,6 +23,36 @@ namespace yams::daemon {
 using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
+
+namespace {
+
+std::string envOr(const char* name, std::string_view fallback) {
+    const char* raw = std::getenv(name);
+    if (raw != nullptr && *raw != '\0') {
+        return raw;
+    }
+    return std::string{fallback};
+}
+
+std::string computeCellIdentity() {
+    std::string identity;
+    identity.reserve(128);
+    identity.append("topk=");
+    identity.append(envOr("YAMS_GRAPH_SEMANTIC_TOPK", "default"));
+    identity.append(";thr=");
+    identity.append(envOr("YAMS_GRAPH_SEMANTIC_THRESHOLD", "default"));
+    identity.append(";engine=");
+    identity.append(envOr("YAMS_TOPOLOGY_ENGINE", "default"));
+    identity.append(";reciprocal=");
+    identity.append(envOr("YAMS_TOPOLOGY_RECIPROCAL_ONLY", "default"));
+    identity.append(";min_edge=");
+    identity.append(envOr("YAMS_TOPOLOGY_MIN_EDGE_SCORE", "default"));
+    identity.append(";max_neighbors=");
+    identity.append(envOr("YAMS_TOPOLOGY_MAX_NEIGHBORS", "default"));
+    return identity;
+}
+
+} // namespace
 
 TopologyManager::TopologyManager(Dependencies deps) : deps_(std::move(deps)) {}
 
@@ -87,11 +122,37 @@ bool TopologyManager::hasDirtyHashes() const {
 }
 
 bool TopologyManager::tryScheduleRebuild() {
+    if (!autoRebuildEnabled_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    // Audit-fix #1: throttle between rebuild completions. During bulk ingest,
+    // every embedding batch fires a tryScheduleRebuild via post_ingest_drain.
+    // Without throttling, the daemon spends most of its wall time running
+    // HDBSCAN on the growing corpus instead of ingesting docs (O(N²) total).
+    // The throttle delays scheduling a NEW rebuild until rebuildMinIntervalMs
+    // has elapsed since the last rebuild ENDED. Dirty hashes accumulate in
+    // dirtyHashes_; the next successful schedule picks them all up at once.
+    const auto throttleMs = rebuildMinIntervalMs_.load(std::memory_order_acquire);
+    if (throttleMs > 0) {
+        const auto nowSteadyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+        const auto lastEndMs = lastRebuildEndSteadyMillis_.load(std::memory_order_acquire);
+        if (lastEndMs > 0 && (nowSteadyMs - lastEndMs) < throttleMs) {
+            return false;
+        }
+    }
     bool expected = false;
     return rebuildScheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
 }
 
 void TopologyManager::clearScheduled() {
+    // Audit-fix #1: stamp rebuild-end timestamp so the throttle window starts
+    // from the moment the prior rebuild finished (not from when it started).
+    lastRebuildEndSteadyMillis_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count(),
+                                      std::memory_order_release);
     rebuildScheduled_.store(false, std::memory_order_release);
 }
 
@@ -128,6 +189,15 @@ TopologyManager::TelemetrySnapshot TopologyManager::getTelemetrySnapshot() const
     return snapshot;
 }
 
+void TopologyManager::setTopologyTuner(std::shared_ptr<TopologyTuner> tuner) {
+    std::lock_guard<std::mutex> lock(tunerMutex_);
+    tuner_ = std::move(tuner);
+    tunerCurrentArmId_.clear();
+    tunerLastPullTime_ = std::chrono::steady_clock::time_point{};
+    tunerLastDuration_ = std::chrono::milliseconds{0};
+    tunerLastPullDocCount_ = 0;
+}
+
 Result<TopologyManager::RebuildStats>
 TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                                   const std::vector<std::string>& documentHashes,
@@ -149,6 +219,7 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
     } guard{rebuildRunning_};
 
     const auto startedAt = std::chrono::steady_clock::now();
+    const std::string cellIdentity = computeCellIdentity();
     {
         std::lock_guard<std::mutex> lock(telemetryMutex_);
         ++telemetry_.rebuildsTotal;
@@ -159,9 +230,51 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastRunFullRebuild = documentHashes.empty();
         telemetry_.lastStartedUnixSeconds = nowUnixSeconds();
         telemetry_.lastDocumentsRequested = documentHashes.size();
+        telemetry_.lastCellIdentity = cellIdentity;
     }
 
-    auto result = runRebuild(reason, dryRun, documentHashes, topologyAlgorithm);
+    std::string effectiveAlgorithm = topologyAlgorithm;
+    std::string pulledArmId;
+    {
+        std::lock_guard<std::mutex> lock(tunerMutex_);
+        if (tuner_ && tuner_->config().enabled) {
+            const auto now = std::chrono::steady_clock::now();
+            const std::size_t curDocCount = documentHashes.size();
+            // Rebuild arm grid against current corpus size so cluster-size
+            // candidates (log2(n), sqrt(n), 0.05·n) stay meaningful as the
+            // corpus grows. No-op when the new grid's arm ids match the
+            // current set — preserves MAB state across non-trivial rebuilds.
+            if (curDocCount > 0 && tuner_->rebuildArmGridForCorpusSize(curDocCount)) {
+                spdlog::info("[TopologyManager] tuner arm grid resized for "
+                             "corpus={} → {} arms",
+                             curDocCount, tuner_->arms().size());
+            }
+            if (tuner_->canPullArm(now, tunerLastPullTime_, tunerLastDuration_, curDocCount,
+                                   tunerLastPullDocCount_)) {
+                if (auto arm = tuner_->selectArm()) {
+                    pulledArmId = arm->id;
+                    tunerCurrentArmId_ = arm->id;
+                    tunerLastPullTime_ = now;
+                    tunerLastPullDocCount_ = curDocCount;
+                    setHdbscanMinClusterSize(arm->hdbscanMinClusterSize);
+                    setHdbscanMinPoints(arm->hdbscanMinPoints);
+                    setFeatureSmoothingHops(arm->featureSmoothingHops);
+                    if (!arm->engine.empty()) {
+                        effectiveAlgorithm = arm->engine;
+                    }
+                    spdlog::info("[TopologyManager] tuner pulled arm '{}' (engine={} minc={} "
+                                 "minp={} hops={})",
+                                 arm->id, arm->engine, arm->hdbscanMinClusterSize,
+                                 arm->hdbscanMinPoints, arm->featureSmoothingHops);
+                }
+            }
+        }
+    }
+
+    auto result = runRebuild(reason, dryRun, documentHashes, effectiveAlgorithm);
+    if (result) {
+        result.value().cellIdentity = cellIdentity;
+    }
     if (!result) {
         spdlog::warn("[TopologyManager] rebuild failed (reason={}): {}", reason,
                      result.error().message);
@@ -198,16 +311,70 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         telemetry_.lastDirtyRegionDocs = stats.dirtyRegionDocs;
         telemetry_.lastCoalescedDirtySets = stats.coalescedDirtySets;
         telemetry_.lastFallbackFullRebuilds = stats.fallbackFullRebuilds;
+        telemetry_.lastClusterSizeMax = stats.clusterSizeMax;
+        telemetry_.lastClusterSizeP50 = stats.clusterSizeP50;
+        telemetry_.lastClusterSizeP90 = stats.clusterSizeP90;
+        telemetry_.lastSingletonCount = stats.singletonCount;
+        telemetry_.lastOrphanDocCount = stats.orphanDocCount;
+        telemetry_.lastSingletonRatio = stats.singletonRatio;
+        telemetry_.lastGiantClusterRatio = stats.giantClusterRatio;
+        telemetry_.lastClusterSizeGini = stats.clusterSizeGini;
+        telemetry_.lastAvgIntraEdgeWeight = stats.avgIntraEdgeWeight;
     }
     if (stats.skipped) {
-        spdlog::info("[TopologyManager] rebuild skipped (reason={}, docs={}, issues={})", reason,
-                     stats.documentsProcessed, stats.issues.empty() ? 0 : stats.issues.size());
+        spdlog::info(
+            "[TopologyManager] rebuild skipped (reason={}, docs={}, missing_embeddings={}, "
+            "missing_graph_nodes={}, issues={})",
+            reason, stats.documentsProcessed, stats.documentsMissingEmbeddings,
+            stats.documentsMissingGraphNodes, stats.issues.empty() ? 0 : stats.issues.size());
     } else {
         spdlog::info("[TopologyManager] rebuild complete (reason={}, docs={}, clusters={}, "
                      "memberships={}, stored={}, snapshot={})",
                      reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
                      stats.stored ? 1 : 0, stats.snapshotId);
     }
+
+    {
+        std::lock_guard<std::mutex> lock(tunerMutex_);
+        if (tuner_ && !tunerCurrentArmId_.empty()) {
+            tunerLastDuration_ =
+                std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - startedAt)
+                        .count())};
+            const auto rewardMode = tuner_->config().rewardMode;
+            if (rewardMode == TunerRewardMode::Geometric) {
+                tuner_->observeRebuildStats(tunerCurrentArmId_, stats);
+                const double reward = computeIntrinsicReward(stats, tuner_->config().weights);
+                spdlog::info("[TopologyManager] tuner observed arm '{}' reward={:.4f} "
+                             "(singleton={:.3f} giant={:.3f} gini={:.3f} intra={:.3f})",
+                             tunerCurrentArmId_, reward, stats.singletonRatio,
+                             stats.giantClusterRatio, stats.clusterSizeGini,
+                             stats.avgIntraEdgeWeight);
+            } else {
+                // Phase H-TDA wiring fix: persistence now comes from the per-arm
+                // cluster centroids computed inside runRebuild (not from a
+                // sample of raw doc embeddings, which was corpus-constant).
+                const double persistence = stats.clusterCentroidPersistence;
+                const double scale = stats.clusterCentroidCount > 1
+                                         ? static_cast<double>(stats.clusterCentroidCount - 1)
+                                         : 1.0;
+                tuner_->observeRebuildStatsWithPersistence(tunerCurrentArmId_, stats, persistence,
+                                                           scale);
+                const double geometric = computeIntrinsicReward(stats, tuner_->config().weights);
+                const char* modeStr =
+                    (rewardMode == TunerRewardMode::Persistence) ? "persistence" : "hybrid";
+                spdlog::info("[TopologyManager] tuner observed arm '{}' mode={} "
+                             "geometric={:.4f} persistence={:.4f} scale={:.1f} centroids={} "
+                             "(singleton={:.3f} giant={:.3f})",
+                             tunerCurrentArmId_, modeStr, geometric, persistence, scale,
+                             stats.clusterCentroidCount, stats.singletonRatio,
+                             stats.giantClusterRatio);
+            }
+            tunerCurrentArmId_.clear();
+        }
+    }
+
     return result;
 }
 
@@ -292,11 +459,60 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     extractionConfig.requireEmbeddings = true;
     extractionConfig.requireGraphNode = true;
 
+    // Phase V feature composer configuration via env (default off → composer is no-op).
+    {
+        auto& fc = extractionConfig.featureComposition;
+        const auto envBool = [](const char* n) -> bool {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return false;
+            }
+            const std::string v{r};
+            return v == "1" || v == "true" || v == "yes" || v == "on";
+        };
+        const auto envSize = [](const char* n, std::size_t fallback) -> std::size_t {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return fallback;
+            }
+            try {
+                return static_cast<std::size_t>(std::stoull(r));
+            } catch (...) {
+                return fallback;
+            }
+        };
+        const auto envFloat = [](const char* n, float fallback) -> float {
+            const char* r = std::getenv(n);
+            if (r == nullptr || *r == '\0') {
+                return fallback;
+            }
+            try {
+                return std::stof(r);
+            } catch (...) {
+                return fallback;
+            }
+        };
+        fc.enableEntityFusion = envBool("YAMS_TOPOLOGY_FEATURE_ENTITY_FUSION");
+        fc.entitySignatureK = envSize("YAMS_TOPOLOGY_FEATURE_ENTITY_K", fc.entitySignatureK);
+        fc.entityFusionAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_ALPHA", fc.entityFusionAlpha);
+        fc.entityMinConfidence =
+            envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_MIN_CONF", fc.entityMinConfidence);
+        fc.enableMatryoshkaCoarseView = envBool("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA");
+        fc.matryoshkaTargetDim =
+            envSize("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA_DIM", fc.matryoshkaTargetDim);
+        fc.enableMinHashSketch = envBool("YAMS_TOPOLOGY_FEATURE_MINHASH");
+        fc.minhashSketchDim = envSize("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", fc.minhashSketchDim);
+        fc.minhashAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", fc.minhashAlpha);
+    }
+
     topology::TopologyBuildConfig buildConfig;
     buildConfig.mode = topology::TopologyBuildMode::Approximate;
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
+    buildConfig.hdbscanMinPoints = hdbscanMinPoints_.load(std::memory_order_acquire);
+    buildConfig.hdbscanMinClusterSize = hdbscanMinClusterSize_.load(std::memory_order_acquire);
+    buildConfig.featureSmoothingHops = featureSmoothingHops_.load(std::memory_order_acquire);
 
     topology::TopologyExtractionStats extractionStats;
     auto extracted = extractor->extract(extractionConfig, &extractionStats);
@@ -359,6 +575,118 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                                                             : extractionStats.regionDocuments;
     stats.coalescedDirtySets = updateStats.coalescedDirtySets;
     stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
+
+    if (!artifacts.clusters.empty()) {
+        std::vector<std::size_t> sizes;
+        sizes.reserve(artifacts.clusters.size());
+        double cohesionSum = 0.0;
+        std::size_t cohesionCount = 0;
+        std::size_t totalMembers = 0;
+        std::size_t singletons = 0;
+        std::size_t maxSize = 0;
+        for (const auto& cluster : artifacts.clusters) {
+            const std::size_t sz =
+                cluster.memberCount > 0 ? cluster.memberCount : cluster.memberDocumentHashes.size();
+            sizes.push_back(sz);
+            totalMembers += sz;
+            if (sz == 1)
+                ++singletons;
+            if (sz > maxSize)
+                maxSize = sz;
+            if (cluster.cohesionScore > 0.0) {
+                cohesionSum += cluster.cohesionScore;
+                ++cohesionCount;
+            }
+        }
+        std::sort(sizes.begin(), sizes.end());
+        const auto pct = [&](double p) -> std::size_t {
+            if (sizes.empty())
+                return 0;
+            const auto idx = std::min<std::size_t>(
+                sizes.size() - 1, static_cast<std::size_t>(p * (sizes.size() - 1)));
+            return sizes[idx];
+        };
+        stats.clusterSizeMax = static_cast<std::uint64_t>(maxSize);
+        stats.clusterSizeP50 = static_cast<std::uint64_t>(pct(0.5));
+        stats.clusterSizeP90 = static_cast<std::uint64_t>(pct(0.9));
+        stats.singletonCount = static_cast<std::uint64_t>(singletons);
+        stats.singletonRatio =
+            sizes.empty() ? 0.0
+                          : static_cast<double>(singletons) / static_cast<double>(sizes.size());
+        stats.giantClusterRatio =
+            totalMembers > 0 ? static_cast<double>(maxSize) / static_cast<double>(totalMembers)
+                             : 0.0;
+
+        if (!sizes.empty()) {
+            double cumulative = 0.0;
+            double weightedSum = 0.0;
+            for (std::size_t i = 0; i < sizes.size(); ++i) {
+                cumulative += static_cast<double>(sizes[i]);
+                weightedSum += static_cast<double>(i + 1) * static_cast<double>(sizes[i]);
+            }
+            if (cumulative > 0.0) {
+                const double n = static_cast<double>(sizes.size());
+                stats.clusterSizeGini =
+                    std::clamp((2.0 * weightedSum) / (n * cumulative) - (n + 1.0) / n, 0.0, 1.0);
+            }
+        }
+        stats.avgIntraEdgeWeight =
+            cohesionCount > 0 ? cohesionSum / static_cast<double>(cohesionCount) : 0.0;
+
+        // Phase H-TDA wiring fix: compute H_0 persistence on cluster
+        // centroids. Each cluster's centroid is the mean of its members'
+        // embeddings; the resulting centroid cloud varies per arm because
+        // the clustering does. Skip clusters with < 2 members (singletons
+        // would give a centroid == the doc itself, biasing toward dispersed
+        // shapes regardless of arm).
+        try {
+            std::vector<std::vector<float>> centroids;
+            centroids.reserve(artifacts.clusters.size());
+            for (const auto& cluster : artifacts.clusters) {
+                if (cluster.memberDocumentHashes.size() < 2) {
+                    continue;
+                }
+                std::vector<float> centroid;
+                std::size_t accumCount = 0;
+                for (const auto& hash : cluster.memberDocumentHashes) {
+                    auto recs = vectorDb->getVectorsByDocument(hash);
+                    if (recs.empty()) {
+                        continue;
+                    }
+                    const auto& emb = recs.front().embedding;
+                    if (emb.empty()) {
+                        continue;
+                    }
+                    if (centroid.empty()) {
+                        centroid.assign(emb.size(), 0.0F);
+                    } else if (centroid.size() != emb.size()) {
+                        continue;
+                    }
+                    for (std::size_t i = 0; i < emb.size(); ++i) {
+                        centroid[i] += emb[i];
+                    }
+                    ++accumCount;
+                }
+                if (accumCount > 0 && !centroid.empty()) {
+                    for (auto& v : centroid) {
+                        v /= static_cast<float>(accumCount);
+                    }
+                    centroids.push_back(std::move(centroid));
+                }
+            }
+            stats.clusterCentroidCount = centroids.size();
+            if (centroids.size() >= 2) {
+                stats.clusterCentroidPersistence = yams::search::computePersistenceH0(centroids);
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("[TopologyManager] centroid persistence failed: {}", e.what());
+        }
+    }
+
+    const auto processed = static_cast<std::uint64_t>(extractionStats.documentsReturned);
+    const auto membershipCount = static_cast<std::uint64_t>(artifacts.memberships.size());
+    stats.orphanDocCount = processed > membershipCount ? processed - membershipCount : 0;
+
     stats.issues.push_back(std::string{"topology_algorithm="} + std::string{algorithmKey});
 
     if (!documentHashes.empty()) {

@@ -31,7 +31,8 @@ std::string hash_of(std::span<const std::byte> data) {
 // Verifies that when compression is enabled in the storage wrapper, data is
 // stored in compressed form (with YAMS compression header) and transparently
 // decompressed on retrieval.
-TEST_CASE("StorageCompressionSmoke.CompressionEnabledStoresCompressed", "[smoke][storagecompressionsmoke]") {
+TEST_CASE("StorageCompressionSmoke.CompressionEnabledStoresCompressed",
+          "[smoke][storagecompressionsmoke]") {
     // Temp directory for on-disk object storage
     auto temp_root = std::filesystem::temp_directory_path() / "yams_compression_smoke";
     std::filesystem::create_directories(temp_root);
@@ -69,11 +70,12 @@ TEST_CASE("StorageCompressionSmoke.CompressionEnabledStoresCompressed", "[smoke]
     REQUIRE(roundtrip.has_value());
     CHECK(roundtrip.value().size() == payload.size());
     CHECK(std::equal(roundtrip.value().begin(), roundtrip.value().end(), payload.begin(),
-                           payload.end()));
+                     payload.end()));
 }
 
 // Verifies that when compression is disabled, data is stored verbatim.
-TEST_CASE("StorageCompressionSmoke.CompressionDisabledStoresPlain", "[smoke][storagecompressionsmoke]") {
+TEST_CASE("StorageCompressionSmoke.CompressionDisabledStoresPlain",
+          "[smoke][storagecompressionsmoke]") {
     auto temp_root = std::filesystem::temp_directory_path() / "yams_compression_smoke_off";
     std::filesystem::create_directories(temp_root);
 
@@ -105,5 +107,5 @@ TEST_CASE("StorageCompressionSmoke.CompressionDisabledStoresPlain", "[smoke][sto
     REQUIRE(roundtrip.has_value());
     CHECK(roundtrip.value().size() == payload.size());
     CHECK(std::equal(roundtrip.value().begin(), roundtrip.value().end(), payload.begin(),
-                           payload.end()));
+                     payload.end()));
 }

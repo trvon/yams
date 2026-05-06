@@ -32,10 +32,12 @@ struct stop_token {
     constexpr bool stop_requested() const noexcept { return false; }
 };
 
-// Fallback stop_source: no-op implementation
+// Fallback stop_source: no-op implementation. request_stop() returns
+// bool to match std::stop_source (true if this call requested stop,
+// false if already requested).
 struct stop_source {
     stop_token get_token() const noexcept { return stop_token{}; }
-    void request_stop() noexcept { /* no-op */ }
+    bool request_stop() noexcept { return true; }
     bool stop_requested() const noexcept { return false; }
     constexpr bool stop_possible() const noexcept { return true; }
 };

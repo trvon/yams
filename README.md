@@ -19,8 +19,8 @@
 - Tree-sitter symbol extraction for 18 languages ([list](docs/user_guide/cli.md#symbol-extraction))
 - Snapshot management with Merkle tree diffs and rename detection
 - WAL-backed durability, high-throughput I/O, thread-safe
-- CLI, MCP server, and C-ABI plugins (ONNX embeddings, S3 storage, PDF via ZYP)
-- Interactive relevance tuning: [`yams tune`](docs/guides/interactive-tuning.md)
+- CLI, MCP server, and C-ABI plugins (ONNX/GLiNER/ColBERT, S3 storage, PDF via ZYP)
+- Interactive relevance tuning through CLI tuning and doctor workflows
 
 ## Documentation
 
@@ -107,7 +107,7 @@ yams serve
 }
 ```
 
-Tool reference and Claude Desktop setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
+Tool reference and MCP client setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
 
 ## Plugins
 
@@ -134,29 +134,6 @@ Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|m
 ### Simeon backend
 
 YAMS uses `simeon` by default for both dense vector embeddings and lexical (BM25) search — no model download required. Set `embeddings.backend = "simeon"` in your TOML config (or leave it unset; simeon is the default). Fine-grained knobs live under `[embeddings.simeon]`.
-
-Simeon research now points to a practical ceiling-closing path for YAMS: pair
-retrieval with **corpus adapters** that expose structure the generic vector
-backend cannot infer alone — file paths, titles, sections, headings, issue IDs,
-citations, or domain-specific anchors. English ArguAna experiments moved from
-~0.32 nDCG@10 with BM25 to ~0.76 with a topic adapter, while schema diagnostics
-showed the remaining headroom is structure recognition rather than more vector
-similarity.
-
-YAMS now exposes this as a first-class search component: implement
-`yams::search::CorpusAdapter`, register it with `SearchEngine::addCorpusAdapter()`,
-or rely on the built-in `YamsNativeCorpusAdapter` for path-fragment and
-agent-memory metadata queries such as `pbi=PBI-043 task=list-json-refresh`.
-The native adapter uses English-first query seeding: it breaks natural-language
-requests into compact content/path fragments, keeps structured tokens such as
-`docs/research` or `PBI-043`, and records `adapter_us`, `seed_count`, and
-`path_seed_queries` in debug metadata for profiling. The component is enabled
-by default with `SearchEngineConfig::enableCorpusAdapters` and fused as
-`corpus_adapter` evidence.
-
-PRs are welcome for qrel-backed English corpora, yams-specific corpus adapters,
-and language/profile contributions that make this retrieval path testable beyond
-the current research fixture.
 
 Full config reference and dim tradeoffs: [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md).
 

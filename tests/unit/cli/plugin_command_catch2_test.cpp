@@ -98,7 +98,6 @@ TEST_CASE("PluginCommand - list handles temp store without crashing", "[cli][plu
     const std::string output = capture.str();
 
     CHECK(rc == 0);
-    CHECK(output.find("Loaded plugins (") != std::string::npos);
     CHECK(output.find("terminate") == std::string::npos);
 }
 

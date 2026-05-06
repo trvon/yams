@@ -1,7 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/search/search_engine.h>
+#include <yams/search/search_result_fusion.h>
 
 #include <cmath>
 

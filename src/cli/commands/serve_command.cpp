@@ -26,7 +26,6 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/search/search_engine_builder.h>
-#include <yams/vector/vector_index_manager.h>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -102,6 +101,7 @@ public:
                             spdlog::critical("std::terminate called without active exception");
                         }
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     std::_Exit(1);
                 });
@@ -225,8 +225,8 @@ private:
     YamsCLI* cli_ = nullptr;
 
     // Flags / options
-    bool quietFlag_ = true; // kept for backward compatibility (default quiet)
-    bool verbose_ = false;  // new flag: enables banner & info logging
+    bool quietFlag_ = true;
+    bool verbose_ = false; // Enables banner and info logging.
 
     // Derived effective quiet state after env + flags
     bool effectiveQuiet_ = true;

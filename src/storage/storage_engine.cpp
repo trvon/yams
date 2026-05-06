@@ -1,6 +1,9 @@
 #include <spdlog/spdlog.h>
-#include <yams/core/atomic_utils.h>
 #include <yams/common/fs_utils.h>
+#include <yams/compression/compression_utils.h>
+#include <yams/compression/compressor_interface.h>
+#include <yams/core/atomic_utils.h>
+#include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -12,12 +15,102 @@ namespace yamsfmt = fmt;
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <random>
 #include <source_location>
 #include <thread>
 
 namespace yams::storage {
+
+namespace {
+
+bool isHexHash(std::string_view hash) noexcept {
+    return hash.size() == HASH_STRING_SIZE &&
+           std::ranges::all_of(hash, [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+bool isValidStorageKey(std::string_view key) noexcept {
+    if (isHexHash(key)) {
+        return true;
+    }
+    constexpr std::string_view manifestSuffix = ".manifest";
+    if (!key.ends_with(manifestSuffix)) {
+        return false;
+    }
+    return isHexHash(key.substr(0, key.size() - manifestSuffix.size()));
+}
+
+std::string storageHashFromObjectPath(const std::filesystem::path& objectsRoot,
+                                      const std::filesystem::path& objectPath) {
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(objectPath, objectsRoot, ec);
+    if (ec || relative.empty()) {
+        return {};
+    }
+
+    std::string hash;
+    for (const auto& part : relative) {
+        hash += part.string();
+    }
+    return hash;
+}
+
+std::optional<compression::CompressionHeader>
+parseExactCompressionHeader(std::span<const std::byte> data) {
+    auto parsed = compression::CompressionHeader::parse(data);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    const auto& header = parsed.value();
+    if (header.compressedSize >
+        std::numeric_limits<size_t>::max() - compression::CompressionHeader::SIZE) {
+        return std::nullopt;
+    }
+    const auto expectedSize =
+        compression::CompressionHeader::SIZE + static_cast<size_t>(header.compressedSize);
+    if (data.size() != expectedSize) {
+        return std::nullopt;
+    }
+    return header;
+}
+
+Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> storedBytes) {
+    auto header = parseExactCompressionHeader(storedBytes);
+    if (!header) {
+        return std::vector<std::byte>(storedBytes.begin(), storedBytes.end());
+    }
+
+    const auto compressedBytes = storedBytes.subspan(compression::CompressionHeader::SIZE,
+                                                     static_cast<size_t>(header->compressedSize));
+    if (compression::calculateCRC32(compressedBytes) != header->compressedCRC32) {
+        return Error(ErrorCode::HashMismatch, "Compressed object CRC mismatch");
+    }
+
+    const auto algorithm = static_cast<compression::CompressionAlgorithm>(header->algorithm);
+    auto compressor = compression::CompressionRegistry::instance().createCompressor(algorithm);
+    if (!compressor) {
+        return Error(ErrorCode::InvalidArgument, "Compressor not available for stored object");
+    }
+
+    auto decompressed = compressor->decompress(compressedBytes, header->uncompressedSize);
+    if (!decompressed) {
+        return decompressed.error();
+    }
+    if (decompressed.value().size() != header->uncompressedSize) {
+        return Error(ErrorCode::CorruptedData, "Decompressed object size mismatch");
+    }
+    if (compression::calculateCRC32(std::span<const std::byte>(decompressed.value())) !=
+        header->uncompressedCRC32) {
+        return Error(ErrorCode::HashMismatch, "Decompressed object CRC mismatch");
+    }
+
+    return std::move(decompressed.value());
+}
+
+} // namespace
 
 // Constants
 constexpr size_t TEMP_NAME_LENGTH = 16;
@@ -182,11 +275,12 @@ std::filesystem::path StorageEngine::getBasePath() const {
 }
 
 Result<void> StorageEngine::store(std::string_view hash, std::span<const std::byte> data) {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
-        spdlog::error("Invalid hash length for store: expected {} characters, got {} for hash '{}'",
-                      HASH_STRING_SIZE, hash.length(), hash);
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
+        spdlog::error(
+            "Invalid storage key for store: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<void>(ErrorCode::InvalidArgument);
     }
 
@@ -225,12 +319,12 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
 }
 
 Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view hash) const {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
         spdlog::error(
-            "Invalid hash length for retrieve: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+            "Invalid storage key for retrieve: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<IStorageEngine::RawObject>(ErrorCode::InvalidArgument);
     }
 
@@ -249,6 +343,10 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
 
     auto fileSize = file.tellg();
+    if (fileSize < 0) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Result<IStorageEngine::RawObject>(ErrorCode::IOError);
+    }
     file.seekg(0, std::ios::beg);
 
     std::vector<std::byte> data(static_cast<size_t>(fileSize));
@@ -278,12 +376,12 @@ Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) co
 
 Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
     try {
-        // Allow manifest keys (hash.manifest) and regular hashes
-        bool isManifest = hash.ends_with(".manifest");
-        if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+        // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+        // to keep sharded paths below the storage root.
+        if (!isValidStorageKey(hash)) {
             spdlog::error(
-                "Invalid hash length for exists: expected {} characters, got {} for hash '{}'",
-                HASH_STRING_SIZE, hash.length(), hash);
+                "Invalid storage key for exists: expected hex hash or hex hash manifest, got '{}'",
+                hash);
             return Result<bool>(ErrorCode::InvalidArgument);
         }
 
@@ -299,12 +397,12 @@ Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {
 }
 
 Result<void> StorageEngine::remove(std::string_view hash) {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
         spdlog::error(
-            "Invalid hash length for remove: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+            "Invalid storage key for remove: expected hex hash or hex hash manifest, got '{}'",
+            hash);
         return Result<void>(ErrorCode::InvalidArgument);
     }
 
@@ -340,12 +438,12 @@ Result<void> StorageEngine::remove(std::string_view hash) {
 }
 
 Result<uint64_t> StorageEngine::getBlockSize(std::string_view hash) const {
-    // Allow manifest keys (hash.manifest) and regular hashes
-    bool isManifest = hash.ends_with(".manifest");
-    if (!isManifest && hash.length() != HASH_STRING_SIZE) {
-        spdlog::error(
-            "Invalid hash length for getBlockSize: expected {} characters, got {} for hash '{}'",
-            HASH_STRING_SIZE, hash.length(), hash);
+    // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
+    // to keep sharded paths below the storage root.
+    if (!isValidStorageKey(hash)) {
+        spdlog::error("Invalid storage key for getBlockSize: expected hex hash or hex hash "
+                      "manifest, got '{}'",
+                      hash);
         return Result<uint64_t>(ErrorCode::InvalidArgument);
     }
 
@@ -420,14 +518,78 @@ Result<void> StorageEngine::verify() const {
 
     size_t verifiedCount = 0;
     size_t errorCount = 0;
+    const auto objectsRoot = pImpl->config.basePath / "objects";
 
     try {
-        for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(pImpl->config.basePath / "objects")) {
-            if (entry.is_regular_file()) {
-                // TODO: Verify file integrity by recalculating hash
-                verifiedCount++;
+        if (!std::filesystem::exists(objectsRoot)) {
+            return Result<void>(ErrorCode::ChunkNotFound);
+        }
+
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(objectsRoot)) {
+            if (!entry.is_regular_file()) {
+                continue;
             }
+
+            const auto expectedKey = storageHashFromObjectPath(objectsRoot, entry.path());
+            if (!isValidStorageKey(expectedKey)) {
+                spdlog::warn("Storage verification found invalid object path: {}",
+                             entry.path().string());
+                ++errorCount;
+                continue;
+            }
+            if (expectedKey.ends_with(".manifest")) {
+                // Manifest integrity is content-store scoped: the manifest payload is not named by
+                // its own content hash. ContentStore::verify() deserializes and validates manifests
+                // against chunk objects and reference counts.
+                ++verifiedCount;
+                continue;
+            }
+            const auto expectedHash = expectedKey;
+
+            std::ifstream file(entry.path(), std::ios::binary | std::ios::ate);
+            if (!file) {
+                spdlog::warn("Storage verification failed to open object: {}",
+                             entry.path().string());
+                ++errorCount;
+                continue;
+            }
+
+            const auto fileSize = file.tellg();
+            if (fileSize < 0) {
+                spdlog::warn("Storage verification failed to size object: {}",
+                             entry.path().string());
+                ++errorCount;
+                continue;
+            }
+            file.seekg(0, std::ios::beg);
+
+            std::vector<std::byte> storedBytes(static_cast<size_t>(fileSize));
+            file.read(reinterpret_cast<char*>(storedBytes.data()), fileSize);
+            if (!file) {
+                spdlog::warn("Storage verification failed to read object: {}",
+                             entry.path().string());
+                ++errorCount;
+                continue;
+            }
+
+            auto contentBytes = bytesForContentHash(storedBytes);
+            if (!contentBytes) {
+                spdlog::warn("Storage verification failed to decode object {}: {}", expectedHash,
+                             contentBytes.error().message);
+                ++errorCount;
+                continue;
+            }
+
+            const auto actualHash = crypto::SHA256Hasher::hash(std::span<const std::byte>(
+                contentBytes.value().data(), contentBytes.value().size()));
+            if (actualHash != expectedHash) {
+                spdlog::warn("Storage verification hash mismatch for {}: calculated {}",
+                             expectedHash, actualHash);
+                ++errorCount;
+                continue;
+            }
+
+            ++verifiedCount;
         }
 
         spdlog::debug("Storage verification complete: {} objects verified, {} errors",

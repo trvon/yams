@@ -90,14 +90,18 @@ TEST_CASE_METHOD(ConcurrencyTest, "ConcurrentDocumentAddition", "[integration][c
     }
 
     // Verify results
-    INFO("Some additions failed"); CHECK(successCount.load() == numThreads * docsPerThread);
-    INFO("There were failures"); CHECK(failCount.load() == 0);
-    INFO("Hash count mismatch"); CHECK(allHashes.size() == numThreads * docsPerThread);
+    INFO("Some additions failed");
+    CHECK(successCount.load() == numThreads * docsPerThread);
+    INFO("There were failures");
+    CHECK(failCount.load() == 0);
+    INFO("Hash count mismatch");
+    CHECK(allHashes.size() == numThreads * docsPerThread);
 
     // Verify all documents are retrievable
     for (const auto& hash : allHashes) {
         auto content = contentStore_->getContent(hash);
-        INFO("Failed to retrieve document: " << hash); CHECK(content.has_value());
+        INFO("Failed to retrieve document: " << hash);
+        CHECK(content.has_value());
     }
 }
 
@@ -154,8 +158,10 @@ TEST_CASE_METHOD(ConcurrencyTest, "ConcurrentSearchOperations", "[integration][c
         thread.join();
     }
 
-    INFO("No search results found"); CHECK(totalResults.load() > 0);
-    INFO("Some searches failed"); CHECK(searchFailures.load() == 0);
+    INFO("No search results found");
+    CHECK(totalResults.load() > 0);
+    INFO("Some searches failed");
+    CHECK(searchFailures.load() == 0);
 }
 
 TEST_CASE_METHOD(ConcurrencyTest, "ConcurrentMetadataUpdates", "[integration][concurrencytest]") {
@@ -210,13 +216,16 @@ TEST_CASE_METHOD(ConcurrencyTest, "ConcurrentMetadataUpdates", "[integration][co
         thread.join();
     }
 
-    INFO("No successful updates"); CHECK(updateSuccess.load() > 0);
-    INFO("Some updates failed"); CHECK(updateFailure.load() == 0);
+    INFO("No successful updates");
+    CHECK(updateSuccess.load() > 0);
+    INFO("Some updates failed");
+    CHECK(updateFailure.load() == 0);
 
     // Verify metadata persistence
     for (const auto& docId : docIds) {
         auto allMetadata = metadataRepo_->getAllMetadata(docId);
-        INFO("Failed to get metadata for " << docId); CHECK(allMetadata.has_value());
+        INFO("Failed to get metadata for " << docId);
+        CHECK(allMetadata.has_value());
     }
 }
 
@@ -282,11 +291,14 @@ TEST_CASE_METHOD(ConcurrencyTest, "RaceConditionDetection", "[integration][concu
 
     // Due to race conditions, final value may be less than total operations
     // This is expected and demonstrates the need for proper synchronization
-    INFO("Counter exceeded maximum possible value"); CHECK(finalValue <= numThreads * 100);
-    INFO("Counter was not updated at all"); CHECK(finalValue > 0);
+    INFO("Counter exceeded maximum possible value");
+    CHECK(finalValue <= numThreads * 100);
+    INFO("Counter was not updated at all");
+    CHECK(finalValue > 0);
 
     // Verify shared counter
-    INFO("Shared counter mismatch"); CHECK(sharedCounter.load() == numThreads * 100);
+    INFO("Shared counter mismatch");
+    CHECK(sharedCounter.load() == numThreads * 100);
 }
 
 TEST_CASE_METHOD(ConcurrencyTest, "DataIntegrityUnderLoad", "[integration][concurrencytest]") {
@@ -366,7 +378,8 @@ TEST_CASE_METHOD(ConcurrencyTest, "DataIntegrityUnderLoad", "[integration][concu
                             if (content.has_value()) {
                                 getCount++;
                                 // Verify content is not corrupted
-                                INFO("Empty content retrieved"); CHECK(content->size() > 0);
+                                INFO("Empty content retrieved");
+                                CHECK(content->size() > 0);
                             }
                         }
                         break;
@@ -385,17 +398,23 @@ TEST_CASE_METHOD(ConcurrencyTest, "DataIntegrityUnderLoad", "[integration][concu
               << ", Search: " << searchCount.load() << ", Update: " << updateCount.load()
               << ", Get: " << getCount.load() << std::endl;
 
-    INFO("No documents added"); CHECK(addCount.load() > 0);
-    INFO("No searches performed"); CHECK(searchCount.load() > 0);
-    INFO("No updates performed"); CHECK(updateCount.load() > 0);
-    INFO("No gets performed"); CHECK(getCount.load() > 0);
+    INFO("No documents added");
+    CHECK(addCount.load() > 0);
+    INFO("No searches performed");
+    CHECK(searchCount.load() > 0);
+    INFO("No updates performed");
+    CHECK(updateCount.load() > 0);
+    INFO("No gets performed");
+    CHECK(getCount.load() > 0);
 
     // Final integrity check - all documents should be retrievable
     for (const auto& hash : documentHashes) {
         auto content = contentStore_->getContent(hash);
-        INFO("Document lost: " << hash); CHECK(content.has_value());
+        INFO("Document lost: " << hash);
+        CHECK(content.has_value());
         if (content.has_value()) {
-            INFO("Document corrupted: " << hash); CHECK(content->size() > 0);
+            INFO("Document corrupted: " << hash);
+            CHECK(content->size() > 0);
         }
     }
 }
@@ -517,5 +536,6 @@ TEST_CASE_METHOD(ConcurrencyTest, "DeadlockPrevention", "[integration][concurren
         }
     }
 
-    INFO("Potential deadlock detected (timeout)"); CHECK_FALSE(deadlockDetected.load());
+    INFO("Potential deadlock detected (timeout)");
+    CHECK_FALSE(deadlockDetected.load());
 }

@@ -330,6 +330,33 @@ TEST_CASE("ResourceGovernor snapshot contains valid metrics", "[daemon][governan
     CHECK(snapshot.timestamp.time_since_epoch().count() >= 0);
 }
 
+TEST_CASE("ResourceGovernor::recommendVectorRebuildBudgetBytes scales with budget",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    const std::uint64_t prev = TuneAdvisor::memoryBudgetBytes();
+
+    SECTION("8 GiB budget yields 1 GiB cap (12.5%)") {
+        TuneAdvisor::setMemoryBudgetBytes(8ULL * 1024ULL * 1024ULL * 1024ULL);
+        const auto cap = governor.recommendVectorRebuildBudgetBytes();
+        CHECK(cap == 1024ULL * 1024ULL * 1024ULL);
+    }
+
+    SECTION("64 GiB budget clamps at 6 GiB ceiling") {
+        TuneAdvisor::setMemoryBudgetBytes(64ULL * 1024ULL * 1024ULL * 1024ULL);
+        const auto cap = governor.recommendVectorRebuildBudgetBytes();
+        CHECK(cap == 6ULL * 1024ULL * 1024ULL * 1024ULL);
+    }
+
+    SECTION("1 GiB budget clamps at 256 MiB floor") {
+        TuneAdvisor::setMemoryBudgetBytes(1ULL * 1024ULL * 1024ULL * 1024ULL);
+        const auto cap = governor.recommendVectorRebuildBudgetBytes();
+        CHECK(cap == 256ULL * 1024ULL * 1024ULL);
+    }
+
+    TuneAdvisor::setMemoryBudgetBytes(prev);
+}
+
 // =============================================================================
 // Profile-Aware Configuration Tests
 // =============================================================================

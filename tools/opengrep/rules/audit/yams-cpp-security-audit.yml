@@ -1,0 +1,188 @@
+rules:
+  - id: yams.cpp.curl-tls-verification-disabled
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      libcurl TLS certificate or hostname verification is disabled. Do not ship this in production;
+      use test-only mocks, configured trust stores, or explicit certificate pinning instead.
+    metadata:
+      category: security
+      cwe: "CWE-295"
+      confidence: high
+      precision: high
+      yams_triage: network-security
+      references:
+        - https://curl.se/libcurl/c/CURLOPT_SSL_VERIFYPEER.html
+        - https://curl.se/libcurl/c/CURLOPT_SSL_VERIFYHOST.html
+    pattern-either:
+      - pattern-regex: 'curl_easy_setopt\s*\([^;]*CURLOPT_SSL_VERIFYPEER\s*,\s*(?:0L|false)\s*\)'
+      - pattern-regex: 'curl_easy_setopt\s*\([^;]*CURLOPT_SSL_VERIFYHOST\s*,\s*0L?\s*\)'
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.shell-command-execution
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      Shell command execution from C++ code. Prefer execve-style APIs with argv arrays, or keep this
+      in audited developer tooling with fixed command strings and no user-controlled input.
+    metadata:
+      category: security
+      cwe: "CWE-78"
+      confidence: medium
+      precision: medium
+      yams_triage: process-boundary
+    patterns:
+      - pattern-either:
+          - pattern: std::system(...)
+          - pattern: system(...)
+          - pattern: popen(...)
+          - pattern: ::popen(...)
+      - pattern-not: std::system("...")
+      - pattern-not: system("...")
+      - pattern-not: popen("...", "...")
+      - pattern-not: ::popen("...", "...")
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.insecure-temp-name
+    languages: [cpp]
+    severity: ERROR
+    message: >-
+      Insecure temporary filename API. Use mkstemp/open with O_EXCL, std::filesystem plus random
+      directory creation, or the repo's atomic/temp-file helpers.
+    metadata:
+      category: security
+      cwe: "CWE-377"
+      confidence: high
+      precision: high
+      yams_triage: filesystem-boundary
+    pattern-either:
+      - pattern: mktemp(...)
+      - pattern: tmpnam(...)
+      - pattern: std::tmpnam(...)
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.empty-catch-block
+    languages: [cpp]
+    severity: INFO
+    message: >-
+      Empty catch block suppresses failures. Prefer logging, returning Result errors, or a comment
+      documenting why best-effort failure is intentionally ignored.
+    metadata:
+      category: maintainability
+      cwe: "CWE-703"
+      confidence: medium
+      precision: medium
+      yams_triage: error-handling
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try { ... } catch (...) { }
+          - pattern: |
+              try { ... } catch (const $TYPE& $E) { }
+          - pattern: |
+              try { ... } catch (const $TYPE&) { }
+          - pattern: |
+              try { ... } catch ($TYPE& $E) { }
+          - pattern: |
+              try { ... } catch ($TYPE&) { }
+      - pattern-not: |
+          try { spdlog::$LEVEL(...); } catch (...) { }
+      - pattern-not: |
+          try { spdlog::$LEVEL(...); } catch (const $TYPE& $E) { }
+      - pattern-not: |
+          try { spdlog::$LEVEL(...); } catch (const $TYPE&) { }
+      - pattern-not: |
+          try { spdlog::$LEVEL(...); } catch ($TYPE& $E) { }
+      - pattern-not: |
+          try { spdlog::$LEVEL(...); } catch ($TYPE&) { }
+      - pattern-not-regex: 'catch\s*\([^)]*\)\s*\{\s*//[^\n]*(?:\n\s*//[^\n]*)*\s*\}'
+      - pattern-not-regex: 'catch\s*\([^)]*\)\s*\{\s*/\*.*?\*/\s*\}'
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**
+
+  - id: yams.cpp.recursive-delete-remove-all
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      Recursive delete via std::filesystem::remove_all(). Ensure the path is scoped to a temp/test
+      directory or validated storage root, and checkpoint/index before deleting repo/user data.
+    metadata:
+      category: security
+      cwe: "CWE-22"
+      confidence: medium
+      precision: medium
+      yams_triage: destructive-filesystem
+    patterns:
+      - pattern-either:
+          - pattern: std::filesystem::remove_all($PATH)
+          - pattern: std::filesystem::remove_all($PATH, $EC)
+          - pattern: fs::remove_all($PATH)
+          - pattern: fs::remove_all($PATH, $EC)
+      - pattern-not-inside: |
+          Result<void> removeAllScoped(...) {
+            ...
+          }
+      - pattern-not-inside: |
+          void removeAllScoped(...) {
+            ...
+          }
+    paths:
+      include:
+        - /src/**/*.cpp
+        - /src/**/*.h
+        - /include/**/*.h
+        - /tools/opengrep/tests/**/*.cpp
+        - tools/opengrep/tests/**/*.cpp
+      exclude:
+        - /tests/**
+        - /third_party/**
+        - /external/**
+        - /build/**
+        - /build*/**

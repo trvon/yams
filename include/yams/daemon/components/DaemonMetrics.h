@@ -53,6 +53,9 @@ struct MetricsSnapshot {
     // Optional memory breakdown (bytes) for deeper diagnostics
     // Keys: rss_bytes, pss_bytes (if available), provider_bytes, vector_index_bytes
     std::map<std::string, std::uint64_t> memoryBreakdownBytes;
+    // Low-cost instrumentation counters for memory probes and allocator debug modes.
+    // Keys use units in the suffix (for example, memory_sample_us, msl_stack_log_bytes).
+    std::map<std::string, std::uint64_t> diagnosticCounters;
 
     // FSM/MUX
     uint64_t fsmTransitions{0};
@@ -169,6 +172,14 @@ struct MetricsSnapshot {
     bool vectorDbReady{false};
     uint32_t vectorDbDim{0};
 
+    // Database init phase visibility (surfaced in `yams daemon status`).
+    // databasePhase is "" | "opening" | "recovering" | "migrating" | "ready".
+    std::string databasePhase;
+    std::uint64_t databasePhaseElapsedMs{0};
+    std::string databaseRecoveredAt;
+    std::string databaseRecoveredFrom;
+    std::string storageWarning;
+
     // Service states (centralized)
     std::string serviceContentStore; // "running"|"unavailable"
     std::string serviceMetadataRepo; // "running"|"unavailable"
@@ -218,6 +229,10 @@ struct MetricsSnapshot {
     std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
     std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
     std::uint64_t physicalTotalBytes{0};    // sum of above components
+    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the
+                                            // mount holding the data dir; instant fast-path
+                                            // populated every status tick (independent of the
+                                            // adaptive deep-walk TTL)
 
     // Resolved data directory
     std::string dataDir;
@@ -353,6 +368,8 @@ struct MetricsSnapshot {
     std::uint64_t repairBusyTicks{0};
     std::uint64_t repairTotalBacklog{0};
     std::uint64_t repairProcessed{0};
+    std::uint64_t repairCurrentOperationCode{0};
+    std::uint64_t repairCurrentOperationElapsedMs{0};
 
     // Topology rebuild telemetry
     bool topologyRebuildRunning{false};
@@ -381,6 +398,15 @@ struct MetricsSnapshot {
     std::string topologyLastReason;
     std::string topologyLastSnapshotId;
     std::string topologyLastAlgorithm;
+
+    // Freshness metadata for status consumers. The daemon publishes a fast snapshot on a short
+    // cadence and an optional detailed enrichment snapshot on a slower cadence. Request-time
+    // status calls should return immediately and use these fields to communicate staleness.
+    std::uint64_t statusSnapshotAgeMs{0};
+    bool statusSnapshotStale{false};
+    std::uint64_t statusDetailAgeMs{0};
+    bool statusDetailStale{true};
+    bool statusDetailAvailable{false};
 };
 
 class SocketServer; // Forward declaration
@@ -416,7 +442,40 @@ public:
     void setSocketServer(const SocketServer* socketServer);
 
 private:
+    struct CachedSnapshotState {
+        std::shared_ptr<const MetricsSnapshot> fast;
+        std::shared_ptr<const MetricsSnapshot> detailed;
+        std::chrono::steady_clock::time_point fastAt{};
+        std::chrono::steady_clock::time_point detailedAt{};
+    };
+
+    struct SnapshotFreshness {
+        std::uint64_t snapshotAgeMs{0};
+        bool snapshotStale{false};
+        std::uint64_t detailAgeMs{0};
+        bool detailStale{true};
+        bool detailAvailable{false};
+        [[nodiscard]] bool needsSyncRefresh(bool detailedRequest) const {
+            return snapshotStale || (detailedRequest && detailStale);
+        }
+    };
+
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop
+    std::shared_ptr<const MetricsSnapshot> buildDecoratedSnapshot(bool detailed) const;
+    MetricsSnapshot buildMinimalSnapshot() const;
+    MetricsSnapshot collectSnapshot(bool detailed) const;
+    void populateCommonSnapshot(MetricsSnapshot& snapshot, bool detailed) const;
+    void enrichDetailedSnapshot(MetricsSnapshot& snapshot) const;
+    CachedSnapshotState loadCachedSnapshotState() const;
+    SnapshotFreshness evaluateSnapshotFreshness(const CachedSnapshotState& state,
+                                                std::chrono::steady_clock::time_point now) const;
+    void applySnapshotFreshness(MetricsSnapshot& snapshot,
+                                const SnapshotFreshness& freshness) const;
+    std::shared_ptr<const MetricsSnapshot> collectAndPublishSnapshot(bool detailed) const;
+    void publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& fastSnapshot,
+                             const std::shared_ptr<MetricsSnapshot>& detailedSnapshot,
+                             std::chrono::steady_clock::time_point publishedAt) const;
+    void scheduleBackgroundRefresh(bool detailed) const;
 
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
@@ -429,9 +488,13 @@ private:
     // Shared mutex for concurrent reads, exclusive writes
     mutable std::shared_mutex cacheMutex_;
     mutable std::shared_ptr<MetricsSnapshot> cachedSnapshot_{nullptr};
+    mutable std::shared_ptr<MetricsSnapshot> cachedDetailedSnapshot_{nullptr};
     mutable std::chrono::steady_clock::time_point lastUpdate_{};
+    mutable std::chrono::steady_clock::time_point lastDetailedUpdate_{};
     // Physical storage breakdown (updated separately with TTL, reuses cacheMutex_)
     mutable MetricsSnapshot cached_{}; // Only physical storage breakdown fields used
+    mutable std::atomic<bool> refreshQueued_{false};
+    mutable std::atomic<bool> detailedRefreshQueued_{false};
 
     // Background polling control
     std::atomic<bool> pollingActive_{false};
@@ -446,10 +509,41 @@ private:
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
 
-    // TTL cache for physical storage scan
+    // TTL cache for physical storage scan.
+    // The disk walk can touch millions of CAS objects on large corpora. It is
+    // dispatched off the polling strand so a slow walk cannot starve snapshot
+    // publishes. At most one walk is in flight at any moment.
     mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
     mutable std::uint64_t lastPhysicalBytes_{0};
-    uint32_t physicalTtlMs_{60000}; // default 60s; may be tuned via env later
+    mutable std::uint64_t lastWalkDurationMs_{0};
+    mutable std::atomic<bool> physicalWalkInFlight_{false};
+    mutable std::atomic<bool> detailedCollectInFlight_{false};
+    mutable std::atomic<bool> storeStatsCollectInFlight_{false};
+    WorkCoordinator* coordinator_{nullptr};
+
+    // Cached ContentStore::getStats() result. cs->getStats() triggers a
+    // full-table aggregate on block_references via ReferenceCounter::getStats()
+    // — seconds on large corpora. Refreshed off the polling strand; readers
+    // (populateCommonSnapshot) use the cached value.
+    struct CachedStoreStats {
+        std::uint64_t totalObjects{0};
+        std::uint64_t totalBytes{0};
+        std::uint64_t totalUncompressedBytes{0};
+        std::uint64_t deduplicatedBytes{0};
+        std::uint64_t uniqueBlocks{0};
+        std::uint64_t compressionSaved{0};
+        double dedupRatio{0.0};
+        bool populated{false};
+    };
+    mutable CachedStoreStats cachedStoreStats_{};
+    mutable std::chrono::steady_clock::time_point lastStoreStatsAt_{};
+    uint32_t storeStatsTtlMs_{5000};
+
+    void dispatchPhysicalWalk() const;
+    void dispatchDetailedCollect() const;
+    void dispatchStoreStatsRefresh() const;
+    void dispatchOffStrand(std::atomic<bool>& guard, const char* name,
+                           std::function<void()> op) const;
 
     // TTL cache for expensive document counts (avoid blocking DB queries on hot path)
     mutable std::chrono::steady_clock::time_point lastDocCountsAt_{};
@@ -469,5 +563,7 @@ private:
     mutable std::uint64_t cachedTunerDocCount_{0}; // docCount when tuner was cached
     uint32_t tunerStateTtlMs_{30000}; // 30s TTL for tuner state (matches CorpusStats cache)
 };
+
+std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept;
 
 } // namespace yams::daemon

@@ -343,8 +343,8 @@ TEST_CASE("WeightSlots: normalize with all non-pinned zero", "[unit][tuning_slot
     w.normalize();
 
     CHECK(w.text.value == Approx(0.60f));
-    // Budget distributed equally among 6 unpinned slots
-    float expectedShare = 0.40f / 6.0f;
+    // Budget distributed equally among 7 unpinned slots (includes new simeonText)
+    float expectedShare = 0.40f / 7.0f;
     CHECK(w.vector.value == Approx(expectedShare));
     CHECK(w.entityVector.value == Approx(expectedShare));
     CHECK(w.pathTree.value == Approx(expectedShare));

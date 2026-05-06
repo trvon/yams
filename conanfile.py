@@ -45,7 +45,7 @@ def _tool_on_path_satisfies(name: str, minimum: tuple[int, int, int]) -> bool:
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.13.0"  # x-release-please-version
+    version = "0.14.1"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
@@ -57,19 +57,18 @@ class YamsConan(ConanFile):
         "build_tests": [True, False],
         "build_benchmarks": [True, False],
         "enable_profiling": [True, False],
-        "enable_onnx": [True, False],  # Gate ONNX Runtime and its
-        # transitive graph
-        "enable_symbol_extraction": [True, False],  # Gate symbol extraction
-        # features and deps
-        "enable_re2": [True, False],  # Gate RE2 regex engine for grep
+        "enable_onnx": [True, False],
+        "enable_faiss": [False, True],
+        "enable_symbol_extraction": [True, False],
+        "enable_re2": [True, False],
     }
     default_options = {
         "build_tests": False,
         "build_benchmarks": False,
         "enable_profiling": False,
-        "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
-        "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
-        "enable_re2": True,  # RE2 regex engine for grep (10-50x faster than std::regex)
+        "enable_onnx": True,
+        "enable_symbol_extraction": True,
+        "enable_re2": True,
     }
 
     generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
@@ -103,7 +102,6 @@ class YamsConan(ConanFile):
         self.requires("boost/1.85.0")
 
         if self.options.build_tests:  # type: ignore
-            self.requires("gtest/1.15.0")
             # Catch2 must be a regular requirement so Meson dependency()
             # can resolve catch2/catch2-with-main via generated deps.
             self.requires("catch2/3.5.2")
@@ -124,17 +122,23 @@ class YamsConan(ConanFile):
                 self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
                 self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
                 self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
-            # Ensure TBB is available (required by ONNX Runtime)
-            try:
-                self.requires("onetbb/2021.12.0")
-            except Exception:
-                pass
+            # Windows uses the packaged ONNX Runtime binaries directly and does
+            # not need the extra oneTBB/hwloc graph that breaks local MSVC 195
+            # builds in Conan Center's hwloc recipe.
+            if self.settings.os != "Windows":  # type: ignore
+                try:
+                    self.requires("onetbb/2021.12.0")
+                except Exception:
+                    pass
 
-        self.requires("xz_utils/5.4.5")
+        self.requires("xz_utils/5.8.3")
 
         # RE2 regex engine for high-performance grep (optional)
         if self.options.enable_re2:  # type: ignore
             self.requires("re2/20251105")
+
+        if self.options.enable_faiss:  # type: ignore
+            self.requires("faiss/1.12.0")
 
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
@@ -157,7 +161,51 @@ class YamsConan(ConanFile):
         if self.options.enable_profiling:  # type: ignore
             self.requires("tracy/0.13.1")
 
+    def _has_openmp(self):
+        """Check whether the current compiler can compile OpenMP code.
+
+        GCC and MSVC have built-in OpenMP.  Linux clang needs libomp-dev;
+        the faiss recipe itself rejects apple-clang entirely so that case
+        is handled separately in configure().
+        """
+        import os
+        compiler = str(self.settings.compiler)
+        if compiler in ("gcc", "msvc"):
+            return True
+        if compiler == "clang":
+            # Probe common libomp-dev install locations on Linux
+            paths = (
+                "/usr/lib/llvm-18/lib/libomp.so",
+                "/usr/lib/llvm-18/lib/libomp.a",
+                "/usr/lib/llvm-19/lib/libomp.so",
+                "/usr/lib/x86_64-linux-gnu/libomp.so",
+                "/usr/lib/aarch64-linux-gnu/libomp.so",
+            )
+            for p in paths:
+                if os.path.isfile(p):
+                    return True
+            return False
+        return False
+
     def configure(self):
+        # Enable faiss unless OpenMP is unavailable for the current compiler.
+        # Apple Clang is always rejected by the faiss recipe regardless of
+        # libomp availability; all other compilers need a working OpenMP.
+        enable_faiss = True
+        compiler = str(self.settings.compiler)
+        if compiler == "apple-clang":  # type: ignore
+            enable_faiss = False
+            self.output.info(
+                "faiss recipe rejects Apple Clang; disabling faiss on macOS"
+            )
+        elif not self._has_openmp():
+            enable_faiss = False
+            self.output.info(
+                "OpenMP not found for compiler=" + compiler +
+                "; disabling faiss. Install libomp-dev (Linux) or brew libomp (macOS)."
+            )
+        self.options.enable_faiss = enable_faiss  # type: ignore
+
         # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)
         if self.settings.os == "Linux":  # type: ignore
             if self.settings.compiler in ["gcc", "clang"]:  # type: ignore
@@ -227,8 +275,9 @@ class YamsConan(ConanFile):
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
             self.options["onnxruntime"].shared = True
-            # OneTBB requires hwloc with shared=True
-            self.options["hwloc"].shared = True
+            if self.settings.os != "Windows":  # type: ignore
+                # oneTBB requires hwloc with shared=True on non-Windows builds.
+                self.options["hwloc"].shared = True
 
     def validate(self):
         check_min_cppstd(self, "20")
@@ -242,10 +291,6 @@ class YamsConan(ConanFile):
             from conan.tools.gnu import PkgConfigDeps
             from conan.tools.cmake import CMakeDeps
             from conan.tools.env import VirtualBuildEnv
-
-            # Ensure PowerShell scripts are generated on Windows for setup.ps1
-            if self.settings.os == "Windows":
-                self.conf.define("tools.env.virtualenv:powershell", True)
 
             VirtualBuildEnv(self).generate()
             tc = MesonToolchain(self)

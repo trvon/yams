@@ -214,8 +214,8 @@ void applyExtensionHint(FileSignature& signature, const std::string& extension) 
         return;
     }
 
-    const bool lowConfidenceText =
-        signature.confidence <= 0.3f && (signature.fileType == "text" || detectedMime == "text/plain");
+    const bool lowConfidenceText = signature.confidence <= 0.3f &&
+                                   (signature.fileType == "text" || detectedMime == "text/plain");
     if (!lowConfidenceText)
         return;
 
@@ -225,7 +225,8 @@ void applyExtensionHint(FileSignature& signature, const std::string& extension) 
         signature.mimeType = extensionMime;
         signature.fileType = extensionFileType;
         signature.isBinary = true;
-        signature.description = extensionFileType == "executable" ? "Executable file" : "Binary file";
+        signature.description =
+            extensionFileType == "executable" ? "Executable file" : "Binary file";
         signature.confidence = 0.6f;
         return;
     }
@@ -542,8 +543,8 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
                 const std::string normalizedMime = normalizeMimeType(pattern.mimeType);
                 pImpl->mimeToFileType[normalizedMime] = classifyMimeCategory(normalizedMime);
                 pImpl->mimeToIsBinary[normalizedMime] = !isStructuredTextMime(normalizedMime) &&
-                                                       normalizedMime.find("text/") != 0 &&
-                                                       !isCodeMime(normalizedMime);
+                                                        normalizedMime.find("text/") != 0 &&
+                                                        !isCodeMime(normalizedMime);
             }
         }
     }
@@ -765,7 +766,8 @@ Result<FileSignature> FileTypeDetector::detectFromFile(const std::filesystem::pa
     if (result) {
         result.value().mimeType = normalizeMimeType(result.value().mimeType);
         result.value().fileType = classifyMimeCategory(result.value().mimeType);
-        result.value().isBinary = (result.value().fileType != "text" && result.value().fileType != "code");
+        result.value().isBinary =
+            (result.value().fileType != "text" && result.value().fileType != "code");
         applyExtensionHint(result.value(), path.extension().string());
     }
 
@@ -834,8 +836,8 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
                 const std::string normalizedMime = normalizeMimeType(pattern.mimeType);
                 pImpl->mimeToFileType[normalizedMime] = classifyMimeCategory(normalizedMime);
                 pImpl->mimeToIsBinary[normalizedMime] = !isStructuredTextMime(normalizedMime) &&
-                                                       normalizedMime.find("text/") != 0 &&
-                                                       !isCodeMime(normalizedMime);
+                                                        normalizedMime.find("text/") != 0 &&
+                                                        !isCodeMime(normalizedMime);
             }
         }
 

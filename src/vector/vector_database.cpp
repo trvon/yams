@@ -7,7 +7,11 @@
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
+#include <yams/vector/vector_utils.h>
+
+#ifdef YAMS_HAS_FAISS
+#include <yams/vector/faiss_backend.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -29,10 +33,18 @@ namespace yams::vector {
 class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
-        : config_(config), initialized_(false), has_error_(false) {
-        // Create backend based on configuration
-        // For now, always use sqlite-vec for persistence
-        // Mirror TurboQuant settings from VectorDatabaseConfig into SqliteVecBackend config
+        : config_(config), initialized_{false}, has_error_(false) {
+        if (config_.backend_type == VectorBackendType::Faiss) {
+#ifdef YAMS_HAS_FAISS
+            FaissBackendConfig faissConfig;
+            faissConfig.embeddingDim = config_.embedding_dim;
+            backend_ = std::make_unique<FaissBackend>(faissConfig);
+            return;
+#endif
+            // Fall through to SqliteVec when faiss not built
+        }
+
+        // Default: SqliteVec backend
         SqliteVecBackend::Config backend_config;
         backend_config.embedding_dim = config_.embedding_dim;
         backend_config.enable_turboquant_storage = config_.enable_turboquant_storage;
@@ -40,8 +52,14 @@ public:
         backend_config.turboquant_bits = config_.turboquant_bits;
         backend_config.turboquant_seed = config_.turboquant_seed;
         backend_config.search_engine = config_.search_engine;
-        backend_config.quantized_hnsw_mode = config_.quantized_hnsw_mode;
-        backend_config.quantized_hnsw_rerank_factor = config_.quantized_hnsw_rerank_factor;
+        backend_config.vec0_phss_enabled = config_.vec0_phss_enabled;
+        backend_config.vec0_phss_candidates = config_.vec0_phss_candidates;
+        backend_config.simeon_pq_subquantizers = config_.simeon_pq_subquantizers;
+        backend_config.simeon_pq_centroids = config_.simeon_pq_centroids;
+        backend_config.simeon_pq_train_limit = config_.simeon_pq_train_limit;
+        backend_config.simeon_pq_rerank_factor = config_.simeon_pq_rerank_factor;
+        backend_config.simeon_pq_seed = config_.simeon_pq_seed;
+        backend_config.suppress_search_index_builds = config_.suppress_search_index_builds;
         backend_ = std::make_unique<SqliteVecBackend>(backend_config);
     }
 
@@ -154,6 +172,10 @@ public:
                 // Tables exist; verify stored dimension vs configured and optionally self-heal.
                 try {
                     if (auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get())) {
+                        if (auto er = sqliteBackend->ensurePersistenceSchema(); !er) {
+                            spdlog::warn("Vector DB persistence schema ensure failed: {}",
+                                         er.error().message);
+                        }
                         if (auto er = sqliteBackend->ensureEmbeddingRowIdColumn(); !er) {
                             spdlog::warn("Vector DB embedding_rowid migration failed: {}",
                                          er.error().message);
@@ -227,7 +249,7 @@ public:
                 }
             }
 
-            initialized_ = true;
+            initialized_.store(true, std::memory_order_release);
             has_error_ = false;
             return true;
 
@@ -237,9 +259,11 @@ public:
         }
     }
 
-    bool isInitialized() const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        return initialized_;
+    bool isInitialized() const noexcept {
+        // Lock-free: readiness flag is published with release after init, read with
+        // acquire. Keeps status/health paths from blocking behind long-held rebuild
+        // writer locks on mutex_.
+        return initialized_.load(std::memory_order_acquire);
     }
 
     void close() {
@@ -247,7 +271,7 @@ public:
         if (backend_) {
             backend_->close();
         }
-        initialized_ = false;
+        initialized_.store(false, std::memory_order_release);
         has_error_ = false;
         last_error_.clear();
     }
@@ -273,6 +297,8 @@ public:
         // Return cached count (no DB query)
         return cachedVectorCount_.load(std::memory_order_relaxed);
     }
+
+    size_t getEmbeddingDim() const { return config_.embedding_dim; }
 
     void initializeCounter() {
         if (counterInitialized_.exchange(true, std::memory_order_acquire)) {
@@ -597,6 +623,32 @@ public:
         }
     }
 
+    std::vector<std::vector<VectorRecord>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                       const VectorSearchParams& params, size_t num_threads) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_ || query_embeddings.empty()) {
+            return {};
+        }
+        for (const auto& query : query_embeddings) {
+            if (query.size() != config_.embedding_dim) {
+                return {};
+            }
+        }
+
+        try {
+            auto result = backend_->searchSimilarBatch(query_embeddings, params.k,
+                                                       params.similarity_threshold, num_threads);
+            if (!result) {
+                return {};
+            }
+            return result.value();
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -673,6 +725,51 @@ public:
         }
 
         return records;
+    }
+
+    std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        auto result = backend_->getDocumentLevelVectorsAll();
+        if (!result) {
+            return {};
+        }
+
+        auto records = std::move(result.value());
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            TurboQuantMSE* tq = ensureTurboQuant();
+            for (auto& [_hash, rec] : records) {
+                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                         config_.embedding_dim, tq);
+                }
+            }
+        }
+
+        return records;
+    }
+
+    Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) const {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "forEachDocumentLevelVector visitor is empty"};
+        }
+
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        TurboQuantMSE* tq = (config_.enable_turboquant_storage || config_.quantized_primary_storage)
+                                ? ensureTurboQuant()
+                                : nullptr;
+
+        return backend_->forEachDocumentLevelVector([&](VectorRecord&& rec) {
+            if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
+                rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
+                rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
+                                                                     config_.embedding_dim, tq);
+            }
+            return visitor(std::move(rec));
+        });
     }
 
     bool hasEmbedding(const std::string& document_hash) const {
@@ -966,6 +1063,73 @@ public:
         }
     }
 
+    bool persistIndex() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        try {
+            auto result = backend_->persistIndex();
+            if (!result) {
+                setError("Backend persistIndex failed: " + result.error().message);
+                return false;
+            }
+            has_error_ = false;
+            return true;
+
+        } catch (const std::exception& e) {
+            setError("Index persistence failed: " + std::string(e.what()));
+            return false;
+        }
+    }
+
+    bool beginBulkLoad() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return true;
+        }
+
+        auto result = sqliteBackend->beginBulkLoad();
+        if (!result) {
+            setError("Bulk-load begin failed: " + result.error().message);
+            return false;
+        }
+        has_error_ = false;
+        return true;
+    }
+
+    bool finalizeBulkLoad() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            setError("Database not initialized");
+            return false;
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return true;
+        }
+
+        auto result = sqliteBackend->finalizeBulkLoad();
+        if (!result) {
+            setError("Bulk-load finalize failed: " + result.error().message);
+            return false;
+        }
+        has_error_ = false;
+        return true;
+    }
+
     Result<void> checkpointWal() {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -1052,7 +1216,7 @@ private:
 
     VectorDatabaseConfig config_;
     std::unique_ptr<IVectorBackend> backend_;
-    bool initialized_;
+    std::atomic<bool> initialized_;
     mutable bool has_error_;
     mutable std::string last_error_;
     mutable std::shared_mutex mutex_;
@@ -1134,6 +1298,10 @@ size_t VectorDatabase::getVectorCount() const {
     return pImpl->getVectorCount();
 }
 
+size_t VectorDatabase::getEmbeddingDim() const {
+    return pImpl->getEmbeddingDim();
+}
+
 bool VectorDatabase::insertVector(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("VectorDB::insertVector");
     YAMS_PLOT("vector_db::insert_embedding_dim", static_cast<int64_t>(record.embedding.size()));
@@ -1165,6 +1333,17 @@ std::vector<VectorRecord> VectorDatabase::searchSimilar(const std::vector<float>
     YAMS_PLOT("vector_db::search_k", static_cast<int64_t>(params.k));
     auto results = pImpl->searchSimilar(query_embedding, params);
     YAMS_PLOT("vector_db::search_results", static_cast<int64_t>(results.size()));
+    return results;
+}
+
+std::vector<std::vector<VectorRecord>>
+VectorDatabase::searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                                   const VectorSearchParams& params, size_t num_threads) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::searchSimilarBatch");
+    YAMS_PLOT("vector_db::batch_search_queries", static_cast<int64_t>(query_embeddings.size()));
+    YAMS_PLOT("vector_db::batch_search_k", static_cast<int64_t>(params.k));
+    auto results = pImpl->searchSimilarBatch(query_embeddings, params, num_threads);
+    YAMS_PLOT("vector_db::batch_search_result_sets", static_cast<int64_t>(results.size()));
     return results;
 }
 
@@ -1227,6 +1406,24 @@ VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
     return result;
 }
 
+std::unordered_map<std::string, VectorRecord> VectorDatabase::getDocumentLevelVectorsAll() const {
+    YAMS_ZONE_SCOPED_N("VectorDB::getDocumentLevelVectorsAll");
+    auto result = pImpl->getDocumentLevelVectorsAll();
+    YAMS_PLOT("vector_db::document_level_vectors_all", static_cast<int64_t>(result.size()));
+    return result;
+}
+
+Result<size_t> VectorDatabase::forEachDocumentLevelVector(
+    const std::function<bool(VectorRecord&&)>& visitor) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::forEachDocumentLevelVector");
+    auto result = pImpl->forEachDocumentLevelVector(visitor);
+    if (result) {
+        YAMS_PLOT("vector_db::document_level_vectors_streamed",
+                  static_cast<int64_t>(result.value()));
+    }
+    return result;
+}
+
 bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
     YAMS_ZONE_SCOPED_N("VectorDB::hasEmbedding");
     auto has = pImpl->hasEmbedding(document_hash);
@@ -1263,12 +1460,24 @@ bool VectorDatabase::optimizeIndex() {
     return pImpl->optimizeIndex();
 }
 
+bool VectorDatabase::persistIndex() {
+    return pImpl->persistIndex();
+}
+
 void VectorDatabase::compactDatabase() {
     pImpl->optimizeIndex(); // For now, optimization serves as compaction
 }
 
 bool VectorDatabase::rebuildIndex() {
     return pImpl->buildIndex();
+}
+
+bool VectorDatabase::beginBulkLoad() {
+    return pImpl->beginBulkLoad();
+}
+
+bool VectorDatabase::finalizeBulkLoad() {
+    return pImpl->finalizeBulkLoad();
 }
 
 Result<void> VectorDatabase::checkpointWal() {

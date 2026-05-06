@@ -15,6 +15,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/repair/embedding_repair_util.h>
 
 #include <spdlog/spdlog.h>
@@ -246,7 +247,7 @@ RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::
 
 boost::asio::awaitable<void> RequestHandler::handle_connection(
     std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
-    yams::compat::stop_token token, uint64_t conn_token) {
+    yams::compat::stop_token token, uint64_t conn_token, std::function<void()> on_activity) {
     using boost::asio::use_awaitable;
     const bool stream_trace = stream_trace_enabled_local();
     const auto handler_start = std::chrono::steady_clock::now();
@@ -298,8 +299,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 using namespace boost::asio;
                 steady_timer bp_timer(co_await this_coro::executor);
                 auto pauseMs = ResourceGovernor::instance().recommendBackpressureReadPauseMs(
-                    TuneAdvisor::backpressureReadPauseMs(),
-                    TuneAdvisor::requestQueueBackpressure());
+                    TuneAdvisor::backpressureReadPauseMs());
                 bp_timer.expires_after(std::chrono::milliseconds(pauseMs));
                 co_await bp_timer.async_wait(use_awaitable);
                 continue;
@@ -348,8 +348,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 : (fsm_guard_fail_count > 2000) ? 4
                                 : (fsm_guard_fail_count > 500)  ? 2
                                                                 : 1;
-                uint32_t delay_ms = ResourceGovernor::instance().recommendBackpressureReadPauseMs(
-                    base * mult, TuneAdvisor::requestQueueBackpressure());
+                uint32_t delay_ms =
+                    ResourceGovernor::instance().recommendBackpressureReadPauseMs(base * mult);
                 delay_ms = std::min<uint32_t>(delay_ms, 1500);
                 wait.expires_after(std::chrono::milliseconds(delay_ms));
                 co_await wait.async_wait(use_awaitable);
@@ -499,6 +499,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 }
                 spdlog::debug("socket.async_read returned {} bytes", bytes_read);
                 consecutive_idle_timeouts = 0; // traffic observed, reset idle counter
+                if (on_activity && bytes_read > 0) {
+                    on_activity();
+                }
                 if (bytes_read == 0) {
                     spdlog::debug("Closing connection: peer sent EOF");
                     fsm.on_close_request();
@@ -689,10 +692,16 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             auto request_id = message.requestId;
                             auto expects_streaming = message.expectsStreamingResponse;
                             auto routed_request = std::move(*request_ptr);
-                            auto spawn_exec = config_.cli_executor ? config_.cli_executor
-                                                                   : (config_.worker_executor
-                                                                          ? config_.worker_executor
-                                                                          : sock->get_executor());
+                            const bool long_running_stream =
+                                std::holds_alternative<RepairRequest>(routed_request) ||
+                                std::holds_alternative<EmbedDocumentsRequest>(routed_request);
+                            auto spawn_exec =
+                                (long_running_stream && config_.worker_executor)
+                                    ? config_.worker_executor
+                                : config_.cli_executor
+                                    ? config_.cli_executor
+                                    : (config_.worker_executor ? config_.worker_executor
+                                                               : sock->get_executor());
                             if (stream_trace) {
                                 spdlog::info(
                                     "stream-trace: [conn={}] spawning req_id={} type={} expects={}",
@@ -1075,6 +1084,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // This eliminates the blocking co_await proc->process(StatusRequest) that
         // tied up all worker threads waiting for status responses.
 
+        // Force streaming for long-running progress-producing requests so they cannot fall back
+        // to legacy unary execution on the IPC request pool.
+        const bool force_streaming = std::holds_alternative<RepairRequest>(request) ||
+                                     std::holds_alternative<EmbedDocumentsRequest>(request);
+
         // Always-unary requests (control/health) regardless of client hint
         const bool always_unary = std::holds_alternative<ShutdownRequest>(request) ||
                                   std::holds_alternative<PingRequest>(request) ||
@@ -1082,7 +1096,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                   std::holds_alternative<GetStatsRequest>(request) ||
                                   std::holds_alternative<PrepareSessionRequest>(request);
 
-        if (!client_expects_streaming || force_unary || always_unary) {
+        if ((!client_expects_streaming && !force_streaming) || force_unary || always_unary) {
             spdlog::debug("[HSR] req_id={} taking unary path", request_id);
             response_opt = co_await proc->process(request);
             spdlog::debug("[HSR] req_id={} process returned has_value={}", request_id,
@@ -1803,6 +1817,8 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
     while (true) {
         uint64_t rid;
         std::vector<FrameItem> frames_to_write;
+        frames_to_write.reserve(
+            std::min<std::size_t>(config_.per_request_queue_cap, std::size_t{32}));
         size_t budget;
 
         // Extract work under lock
@@ -2165,7 +2181,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, progress, contentExtractors);
+                    req.documentHashes, progress, contentExtractors,
+                    sm ? sm->getVectorIndexCoordinator().get() : nullptr);
                 if (!stats) {
                     finishWithError(stats.error().code, stats.error().message);
                     return;
@@ -2212,6 +2229,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         });
 
         const auto wait_timeout = config_.stream_chunk_timeout;
+        auto next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
         while (true) {
             auto cancel_result = co_await maybe_write_canceled_stream_response(
                 socket, request_id,
@@ -2238,16 +2256,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             Response final;
 
             {
-                std::unique_lock<std::mutex> lk(state->mu);
-                auto pred = [&] { return state->aborted || !state->queued.empty() || state->done; };
-                if (!pred()) {
-                    if (wait_timeout.count() > 0) {
-                        (void)state->cv.wait_for(lk, wait_timeout, pred);
-                    } else {
-                        state->cv.wait(lk, pred);
-                    }
-                }
-
+                std::lock_guard<std::mutex> lk(state->mu);
                 if (state->aborted) {
                     have_next = false;
                     have_final = false;
@@ -2276,6 +2285,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     co_return wr.error();
                 }
                 chunk_count++;
+                next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
                 continue;
             }
 
@@ -2291,6 +2301,18 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             }
 
             if (wait_timeout.count() > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now < next_keepalive) {
+                    boost::asio::steady_timer poll_timer(co_await boost::asio::this_coro::executor);
+                    poll_timer.expires_after(std::min<std::chrono::milliseconds>(
+                        std::chrono::milliseconds(25),
+                        std::chrono::duration_cast<std::chrono::milliseconds>(next_keepalive -
+                                                                              now)));
+                    boost::system::error_code timer_ec;
+                    co_await poll_timer.async_wait(
+                        boost::asio::redirect_error(boost::asio::use_awaitable, timer_ec));
+                    continue;
+                }
                 SuccessResponse ok{"keepalive"};
                 auto wr = co_await write_chunk(socket, Response{std::move(ok)}, request_id,
                                                /*last_chunk=*/false, /*flush=*/true, fsm);
@@ -2305,6 +2327,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     co_return wr.error();
                 }
                 chunk_count++;
+                next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
+            } else {
+                boost::asio::steady_timer poll_timer(co_await boost::asio::this_coro::executor);
+                poll_timer.expires_after(std::chrono::milliseconds(25));
+                boost::system::error_code timer_ec;
+                co_await poll_timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, timer_ec));
             }
         }
 
@@ -2397,6 +2426,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         // Consumer loop: write queued events, then the final response as last chunk.
         const auto wait_timeout = config_.stream_chunk_timeout;
+        auto next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
         while (true) {
             // Honor cancellation
             auto cancel_result = co_await maybe_write_canceled_stream_response(
@@ -2424,16 +2454,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             Response final;
 
             {
-                std::unique_lock<std::mutex> lk(state->mu);
-                auto pred = [&] { return state->aborted || !state->queued.empty() || state->done; };
-                if (!pred()) {
-                    if (wait_timeout.count() > 0) {
-                        (void)state->cv.wait_for(lk, wait_timeout, pred);
-                    } else {
-                        state->cv.wait(lk, pred);
-                    }
-                }
-
+                std::lock_guard<std::mutex> lk(state->mu);
                 if (state->aborted) {
                     // Already handled by cancellation path.
                     have_next = false;
@@ -2463,6 +2484,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     co_return wr.error();
                 }
                 chunk_count++;
+                next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
                 continue;
             }
 
@@ -2482,6 +2504,18 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             // Timeout keepalive: send a tiny success chunk (client ignores; prevents read
             // timeouts).
             if (wait_timeout.count() > 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now < next_keepalive) {
+                    boost::asio::steady_timer poll_timer(co_await boost::asio::this_coro::executor);
+                    poll_timer.expires_after(std::min<std::chrono::milliseconds>(
+                        std::chrono::milliseconds(25),
+                        std::chrono::duration_cast<std::chrono::milliseconds>(next_keepalive -
+                                                                              now)));
+                    boost::system::error_code timer_ec;
+                    co_await poll_timer.async_wait(
+                        boost::asio::redirect_error(boost::asio::use_awaitable, timer_ec));
+                    continue;
+                }
                 SuccessResponse ok{"keepalive"};
                 auto wr = co_await write_chunk(socket, Response{std::move(ok)}, request_id,
                                                /*last_chunk=*/false, /*flush=*/true, fsm);
@@ -2496,6 +2530,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     co_return wr.error();
                 }
                 chunk_count++;
+                next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
+            } else {
+                boost::asio::steady_timer poll_timer(co_await boost::asio::this_coro::executor);
+                poll_timer.expires_after(std::chrono::milliseconds(25));
+                boost::system::error_code timer_ec;
+                co_await poll_timer.async_wait(
+                    boost::asio::redirect_error(boost::asio::use_awaitable, timer_ec));
             }
         }
 

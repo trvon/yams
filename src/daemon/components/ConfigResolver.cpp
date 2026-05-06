@@ -10,6 +10,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
@@ -21,37 +23,86 @@ namespace yams::daemon {
 
 namespace {
 
-std::optional<std::size_t> parseSize(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return static_cast<std::size_t>(std::stoull(raw));
-    } catch (...) {
-        return std::nullopt;
+std::string_view trimView(std::string_view raw) {
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front())) != 0) {
+        raw.remove_prefix(1);
     }
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back())) != 0) {
+        raw.remove_suffix(1);
+    }
+    return raw;
 }
 
-std::optional<bool> parseBool01(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return std::stoll(raw) != 0;
-    } catch (...) {
+template <typename T> std::optional<T> parseUnsignedIntegral(std::string_view raw) {
+    raw = trimView(raw);
+    if (raw.empty() || raw.front() == '-') {
         return std::nullopt;
     }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+template <typename T> std::optional<T> parseSignedIntegral(std::string_view raw) {
+    raw = trimView(raw);
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<std::size_t> parseSize(std::string_view raw) {
+    return parseUnsignedIntegral<std::size_t>(raw);
+}
+
+std::optional<bool> parseBool01(std::string_view raw) {
+    auto parsed = parseSignedIntegral<long long>(raw);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    return *parsed != 0;
+}
+
+std::optional<bool> parseBoolValue(std::string raw) {
+    raw.erase(std::remove_if(raw.begin(), raw.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              raw.end());
+    std::transform(raw.begin(), raw.end(), raw.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (raw == "true" || raw == "yes" || raw == "on" || raw == "1") {
+        return true;
+    }
+    if (raw == "false" || raw == "no" || raw == "off" || raw == "0") {
+        return false;
+    }
+    return std::nullopt;
 }
 
 std::optional<double> parseDouble(const std::string& raw) {
-    try {
-        if (raw.empty()) {
-            return std::nullopt;
-        }
-        return std::stod(raw);
-    } catch (...) {
+    auto view = trimView(raw);
+    if (view.empty()) {
         return std::nullopt;
     }
+    std::string value{view};
+    char* end = nullptr;
+    errno = 0;
+    double parsed = std::strtod(value.c_str(), &end);
+    if (errno != 0 || end == value.c_str() || *end != '\0') {
+        return std::nullopt;
+    }
+    return parsed;
 }
 
 std::optional<yams::vector::ChunkingStrategy> parseChunkingStrategy(const std::string& raw) {
@@ -97,6 +148,14 @@ bool ConfigResolver::envTruthy(const char* value) {
 std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
     if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
         std::filesystem::path p{explicitPath};
+        if (std::filesystem::exists(p))
+            return p;
+    }
+    // YAMS_CONFIG is the canonical env var used by test fixtures and
+    // config_helpers.cpp; accept it here so resolver-based policies (topology
+    // engine, routing, integration, ...) respect the harness-supplied TOML.
+    if (const char* fixtureConfig = std::getenv("YAMS_CONFIG")) {
+        std::filesystem::path p{fixtureConfig};
         if (std::filesystem::exists(p))
             return p;
     }
@@ -333,8 +392,15 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
             if (auto it = kv.find("embeddings.selection.intro_boost"); it != kv.end()) {
                 policy.introBoost = parseDouble(it->second, policy.introBoost);
             }
+            if (auto it = kv.find("embeddings.selection.update_semantic_graph_during_ingest");
+                it != kv.end()) {
+                if (auto v = parseBoolValue(it->second); v.has_value()) {
+                    policy.updateSemanticGraphDuringIngest = *v;
+                }
+            }
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Env overrides (config component owns this precedence)
@@ -441,6 +507,7 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
             applyFromKv(parseSimpleTomlFlat(cfgPath));
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Env overrides (backwards compatible with existing embedding pipeline vars).
@@ -551,7 +618,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             auto preload = kv.find("daemon.models.preload_models");
             if (preload != kv.end()) {
                 const auto& v = preload->second;
-                if (v.find("embeddinggemma-300m") != std::string::npos) {
+                if (v.find("simeon-default") != std::string::npos) {
+                    preferred = "simeon-default";
+                } else if (v.find("embeddinggemma-300m") != std::string::npos) {
                     preferred = "embeddinggemma-300m";
                 } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                     preferred = "all-MiniLM-L6-v2";
@@ -602,7 +671,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                     if (eq != std::string::npos) {
                         std::string v = l.substr(eq + 1);
                         trim(v);
-                        if (v.find("embeddinggemma-300m") != std::string::npos) {
+                        if (v.find("simeon-default") != std::string::npos) {
+                            preferred = "simeon-default";
+                        } else if (v.find("embeddinggemma-300m") != std::string::npos) {
                             preferred = "embeddinggemma-300m";
                         } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
                             preferred = "all-MiniLM-L6-v2";
@@ -619,6 +690,14 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for preferred model: {}", e.what());
+    }
+
+    // If simeon is the selected backend and nothing else named a preferred
+    // model above, return the simeon-default sentinel instead of scanning
+    // the ONNX models directory (which would pick an incompatible model).
+    if (resolveEmbeddingBackend("auto") == "simeon") {
+        spdlog::debug("Preferred model defaulted to simeon-default (backend=simeon)");
+        return "simeon-default";
     }
 
     try {
@@ -642,6 +721,531 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
     }
 
     return preferred;
+}
+
+std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {
+    auto normalize = [](std::string s) {
+        for (auto& c : s)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
+            s == "local_onnx") {
+            return std::string("onnxruntime");
+        }
+        if (s == "hybrid" || s == "local") {
+            return std::string("daemon");
+        }
+        return s;
+    };
+
+    if (const char* envp = std::getenv("YAMS_EMBED_BACKEND")) {
+        std::string v(envp);
+        if (!v.empty()) {
+            return normalize(std::move(v));
+        }
+    }
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto it = kv.find("embeddings.backend");
+            if (it != kv.end() && !it->second.empty()) {
+                return normalize(it->second);
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for embedding backend: {}", e.what());
+    }
+
+    return normalize(defaultValue);
+}
+
+ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
+    TopologyRoutingPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+        auto parseFloat = [](const std::string& s) -> std::optional<float> {
+            try {
+                return std::stof(s);
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+        if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
+            policy.rrfK = parseFloat(it->second);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology routing policy: {}", e.what());
+    }
+
+    return policy;
+}
+
+ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy() {
+    TopologyEnginePolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        if (auto it = kv.find("topology.engine"); it != kv.end()) {
+            if (!it->second.empty()) {
+                policy.engine = it->second;
+            }
+        }
+        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end())
+            policy.hdbscanMinPoints = parseSize(it->second);
+        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end())
+            policy.hdbscanMinClusterSize = parseSize(it->second);
+        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end())
+            policy.featureSmoothingHops = parseSize(it->second);
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology engine policy: {}", e.what());
+    }
+
+    return policy;
+}
+
+ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy() {
+    TopologyTunerPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        if (auto it = kv.find("topology.tuner.enabled"); it != kv.end()) {
+            policy.enabled = ConfigResolver::envTruthy(it->second.c_str());
+        }
+        if (auto it = kv.find("topology.tuner.cooldown_minutes"); it != kv.end())
+            policy.cooldownMinutes = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (auto it = kv.find("topology.tuner.doc_count_delta"); it != kv.end())
+            policy.docCountDelta = parseSize(it->second);
+        if (auto it = kv.find("topology.tuner.reward.alpha_singleton"); it != kv.end()) {
+            policy.rewardAlphaSingleton = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.beta_giant_cluster"); it != kv.end()) {
+            policy.rewardBetaGiantCluster = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.gamma_gini_deviation"); it != kv.end()) {
+            policy.rewardGammaGiniDeviation = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward.delta_intra_edge"); it != kv.end()) {
+            policy.rewardDeltaIntraEdge = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.tuner.reward_mode"); it != kv.end()) {
+            if (!it->second.empty()) {
+                policy.rewardMode = it->second;
+            }
+        }
+        if (auto it = kv.find("topology.tuner.persistence_sample_size"); it != kv.end())
+            policy.persistenceSampleSize = parseSize(it->second);
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for topology tuner policy: {}", e.what());
+    }
+
+    return policy;
+}
+
+namespace {
+
+std::optional<std::string> readEnvString(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    return std::string(raw);
+}
+
+std::optional<std::uint32_t> readEnvU32(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    return parseUnsignedIntegral<std::uint32_t>(raw);
+}
+
+std::optional<float> readEnvFloat(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw)
+        return std::nullopt;
+    auto parsed = parseDouble(raw);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    return static_cast<float>(*parsed);
+}
+
+std::optional<std::uint32_t> parseTomlU32(const std::string& s) {
+    return parseUnsignedIntegral<std::uint32_t>(s);
+}
+
+std::optional<std::size_t> parseTomlSize(const std::string& s) {
+    return parseSize(s);
+}
+
+std::optional<float> parseTomlFloat(const std::string& s) {
+    auto parsed = parseDouble(s);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    return static_cast<float>(*parsed);
+}
+
+std::optional<bool> parseTomlBool(const std::string& s) {
+    std::string v;
+    v.reserve(s.size());
+    for (char c : s)
+        v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (v == "true" || v == "1" || v == "yes" || v == "on")
+        return true;
+    if (v == "false" || v == "0" || v == "no" || v == "off")
+        return false;
+    return std::nullopt;
+}
+
+} // namespace
+
+ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy() {
+    SimeonEncoderPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.simeon.ngram_mode");
+                it != kv.end() && !it->second.empty())
+                policy.ngramMode = it->second;
+            if (auto it = kv.find("embeddings.simeon.ngram_min"); it != kv.end())
+                policy.ngramMin = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.ngram_max"); it != kv.end())
+                policy.ngramMax = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.sketch_dim"); it != kv.end())
+                policy.sketchDim = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.output_dim"); it != kv.end())
+                policy.outputDim = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.projection");
+                it != kv.end() && !it->second.empty())
+                policy.projection = it->second;
+            if (auto it = kv.find("embeddings.simeon.l2_normalize"); it != kv.end())
+                policy.l2Normalize = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.pq_bytes"); it != kv.end())
+                policy.pqBytes = parseTomlU32(it->second);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for simeon encoder policy: {}", e.what());
+    }
+
+    if (auto v = readEnvString("YAMS_SIMEON_NGRAM_MODE"))
+        policy.ngramMode = std::move(v);
+    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MIN"))
+        policy.ngramMin = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MAX"))
+        policy.ngramMax = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_SKETCH_DIM"))
+        policy.sketchDim = v;
+    if (auto v = readEnvU32("YAMS_SIMEON_OUTPUT_DIM"))
+        policy.outputDim = v;
+    if (auto v = readEnvString("YAMS_SIMEON_PROJECTION"))
+        policy.projection = std::move(v);
+    if (auto v = readEnvU32("YAMS_SIMEON_PQ_BYTES"))
+        policy.pqBytes = v;
+
+    return policy;
+}
+
+ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy() {
+    VectorBackendPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("vector_database.backend"); it != kv.end() && !it->second.empty())
+                policy.backend = it->second;
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for vector backend: {}", e.what());
+    }
+
+    if (auto v = readEnvString("YAMS_VECTOR_BACKEND"))
+        policy.backend = std::move(v);
+
+    return policy;
+}
+
+ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
+    SimeonBm25Policy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.simeon.bm25.enabled"); it != kv.end())
+                policy.enabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.variant");
+                it != kv.end() && !it->second.empty())
+                policy.variant = it->second;
+            if (auto it = kv.find("embeddings.simeon.bm25.subword_gamma"); it != kv.end())
+                policy.subwordGamma = parseTomlFloat(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_docs"); it != kv.end())
+                policy.maxCorpusDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_bytes"); it != kv.end())
+                policy.maxCorpusBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_chunk_bytes"); it != kv.end())
+                policy.buildDocChunkBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_max_chunks"); it != kv.end())
+                policy.buildDocMaxChunks = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.enabled");
+                it != kv.end())
+                policy.fragmentGeometryEnabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_docs");
+                it != kv.end())
+                policy.fragmentGeometryMaxDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_corpus_bytes");
+                it != kv.end())
+                policy.fragmentGeometryMaxCorpusBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_docs");
+                it != kv.end())
+                policy.fragmentGeometryPmiSampleDocs = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_bytes");
+                it != kv.end())
+                policy.fragmentGeometryPmiSampleBytes = parseTomlSize(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.router.enabled"); it != kv.end())
+                policy.routerEnabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.router.preset");
+                it != kv.end() && !it->second.empty())
+                policy.routerPreset = it->second;
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for simeon bm25 policy: {}", e.what());
+    }
+
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.enabled = b;
+    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_VARIANT"))
+        policy.variant = std::move(v);
+    if (auto v = readEnvFloat("YAMS_SIMEON_BM25_SUBWORD_GAMMA"))
+        policy.subwordGamma = v;
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"))
+        policy.maxCorpusDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES"))
+        policy.maxCorpusBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES"))
+        policy.buildDocChunkBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
+        policy.buildDocMaxChunks = parseSize(*v);
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.fragmentGeometryEnabled = b;
+    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
+        policy.fragmentGeometryMaxDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES"))
+        policy.fragmentGeometryMaxCorpusBytes = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS"))
+        policy.fragmentGeometryPmiSampleDocs = parseSize(*v);
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
+        policy.fragmentGeometryPmiSampleBytes = parseSize(*v);
+    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ROUTER_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.routerEnabled = b;
+    }
+    if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
+        policy.routerPreset = std::move(v);
+
+    return policy;
+}
+
+ConfigResolver::RerankerBackendPolicy ConfigResolver::resolveRerankerBackendPolicy() {
+    return resolveRerankerBackendPolicy(DaemonConfig{});
+}
+
+ConfigResolver::RerankerBackendPolicy
+ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
+    RerankerBackendPolicy policy;
+
+    auto normalize = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("search.reranker_backend");
+                it != kv.end() && !it->second.empty()) {
+                policy.backend = normalize(it->second);
+                return policy;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for reranker backend: {}", e.what());
+    }
+
+    return policy;
+}
+
+ConfigResolver::InstrumentationPolicy ConfigResolver::resolveInstrumentationPolicy() {
+    return resolveInstrumentationPolicy(DaemonConfig{});
+}
+
+ConfigResolver::InstrumentationPolicy
+ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
+    InstrumentationPolicy policy;
+
+    auto normalize = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+    auto readBool = [](const std::map<std::string, std::string>& kv,
+                       const char* key) -> std::optional<bool> {
+        auto it = kv.find(key);
+        if (it == kv.end()) {
+            return std::nullopt;
+        }
+        return parseTomlBool(it->second);
+    };
+    auto readU64 = [](const std::map<std::string, std::string>& kv,
+                      const char* key) -> std::optional<std::uint64_t> {
+        auto it = kv.find(key);
+        if (it == kv.end()) {
+            return std::nullopt;
+        }
+        try {
+            return static_cast<std::uint64_t>(std::stoull(it->second));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+
+    std::optional<bool> suppressAutoRepair;
+    std::optional<bool> suppressSimeonLexicalBuild;
+    std::optional<bool> suppressVectorIndexBuild;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("daemon.instrumentation.profile");
+                it != kv.end() && !it->second.empty()) {
+                policy.profile = normalize(it->second);
+            }
+            suppressAutoRepair = readBool(kv, "daemon.instrumentation.suppress_auto_repair");
+            suppressSimeonLexicalBuild =
+                readBool(kv, "daemon.instrumentation.suppress_simeon_lexical_build");
+            suppressVectorIndexBuild =
+                readBool(kv, "daemon.instrumentation.suppress_vector_index_build");
+            if (auto warnMb = readU64(kv, "daemon.instrumentation.msl_stack_log_warn_mb")) {
+                policy.mslStackLogWarnBytes = *warnMb * 1024ULL * 1024ULL;
+            }
+            if (auto warnBytes = readU64(kv, "daemon.instrumentation.msl_stack_log_warn_bytes")) {
+                policy.mslStackLogWarnBytes = *warnBytes;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for instrumentation policy: {}", e.what());
+    }
+
+    const bool mslActive = envTruthy(std::getenv("MallocStackLogging")) ||
+                           envTruthy(std::getenv("MallocStackLoggingNoCompact"));
+    if (policy.profile.empty()) {
+        policy.profile = "auto";
+    }
+    policy.profile = normalize(policy.profile);
+    if (policy.profile == "msl") {
+        policy.profile = "memory";
+    }
+
+    policy.memoryProfileActive = policy.profile == "memory" ||
+                                 policy.profile == "memory_instrumentation" ||
+                                 (policy.profile == "auto" && mslActive);
+
+    const bool defaultSuppress = policy.memoryProfileActive;
+    policy.suppressAutoRepair = suppressAutoRepair.value_or(defaultSuppress);
+    policy.suppressSimeonLexicalBuild = suppressSimeonLexicalBuild.value_or(defaultSuppress);
+    policy.suppressVectorIndexBuild = suppressVectorIndexBuild.value_or(defaultSuppress);
+
+    return policy;
+}
+
+ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
+    PostIngestCaps caps;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return caps;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        auto parseBounded = [](const std::string& s, std::uint32_t lo,
+                               std::uint32_t hi) -> std::optional<std::uint32_t> {
+            try {
+                auto raw = static_cast<std::uint32_t>(std::stoul(s));
+                if (raw < lo || raw > hi)
+                    return std::nullopt;
+                return raw;
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+
+        if (auto it = kv.find("tuning.post_ingest.total_concurrent"); it != kv.end()) {
+            caps.totalConcurrent = parseBounded(it->second, 1, 256);
+        }
+        if (auto it = kv.find("tuning.post_ingest.embed_concurrent"); it != kv.end()) {
+            caps.embedConcurrent = parseBounded(it->second, 1, 32);
+        }
+        if (auto it = kv.find("tuning.post_ingest.extraction_concurrent"); it != kv.end()) {
+            caps.extractionConcurrent = parseBounded(it->second, 1, 64);
+        }
+        if (auto it = kv.find("tuning.post_ingest.kg_concurrent"); it != kv.end()) {
+            caps.kgConcurrent = parseBounded(it->second, 1, 64);
+        }
+        if (auto it = kv.find("tuning.post_ingest.symbol_concurrent"); it != kv.end()) {
+            caps.symbolConcurrent = parseBounded(it->second, 1, 32);
+        }
+        if (auto it = kv.find("tuning.post_ingest.entity_concurrent"); it != kv.end()) {
+            caps.entityConcurrent = parseBounded(it->second, 1, 16);
+        }
+        if (auto it = kv.find("tuning.post_ingest.title_concurrent"); it != kv.end()) {
+            caps.titleConcurrent = parseBounded(it->second, 1, 16);
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for post-ingest caps: {}", e.what());
+    }
+
+    return caps;
 }
 
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
@@ -702,12 +1306,10 @@ bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
-    try {
-        if (const char* v = std::getenv(envName)) {
-            int val = std::stoi(v);
-            return std::max(minMs, val);
+    if (const char* v = std::getenv(envName)) {
+        if (auto val = parseSignedIntegral<int>(v)) {
+            return std::max(minMs, *val);
         }
-    } catch (...) {
     }
     return defaultMs;
 }

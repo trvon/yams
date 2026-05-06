@@ -70,46 +70,17 @@ public:
     void shutdown() override;
 
     /**
-     * @brief Open database asynchronously with timeout.
+     * @brief Initialize write + optional read-only connection pools and MetadataRepository.
      *
-     * @param dbPath Path to database file
-     * @param timeoutMs Timeout in milliseconds
-     * @param executor Executor for async operations
-     * @return Awaitable<bool> - true if opened successfully
-     */
-    boost::asio::awaitable<bool> open(const std::filesystem::path& dbPath, int timeoutMs,
-                                      boost::asio::any_io_executor executor);
-
-    /**
-     * @brief Run database migrations with timeout.
-     *
-     * @param timeoutMs Timeout in milliseconds
-     * @param executor Executor for async operations
-     * @return Awaitable<bool> - true if migrations succeeded
-     */
-    boost::asio::awaitable<bool> migrate(int timeoutMs, boost::asio::any_io_executor executor);
-
-    /**
-     * @brief Initialize connection pool and repositories.
-     *
-     * Should be called after open() and migrate() succeed.
+     * Should be called after the database is open and migrations are complete.
      *
      * @param dbPath Path to database file
      * @return true if initialization succeeded
      */
-    bool initializeRepositories(const std::filesystem::path& dbPath);
-
-    /**
-     * @brief Initialize write + optional read-only connection pools and MetadataRepository.
-     *
-     * Honors env overrides (YAMS_DB_POOL_MIN/MAX, YAMS_DB_DUAL_POOL,
-     * YAMS_DB_READ_POOL_MIN/MAX, YAMS_DB_READ_POOL_PREWARM). Updates TuneAdvisor
-     * with the chosen pool size and prewarms the read pool.
-     *
-     * @param dbPath Path to database file
-     * @return true if pools and repository initialized successfully
-     */
     bool initializePools(const std::filesystem::path& dbPath);
+
+    // NOTE: initializeRepositories() was removed (orphaned). Pools + repo init is unified
+    // in initializePools() which is called by ServiceManager after DB open/migrate.
 
     // Accessors
     std::shared_ptr<metadata::Database> getDatabase() const { return database_; }

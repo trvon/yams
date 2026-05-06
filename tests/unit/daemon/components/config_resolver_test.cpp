@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <yams/compat/unistd.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -295,6 +296,170 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     }
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolveEmbeddingBackend defaults to simeon for new installs",
+                 "[daemon][components][config][catch2]") {
+    EnvGuard backendGuard("YAMS_EMBED_BACKEND", "");
+    auto configPath = writeToml("embedding_backend_default.toml", R"(
+[core]
+data_dir = "~/.yams/data"
+)");
+    EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+
+    CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
+    CHECK(ConfigResolver::resolveEmbeddingBackend("auto") == "auto");
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolveEmbeddingBackend reads and normalizes configured backend",
+                 "[daemon][components][config][catch2]") {
+    EnvGuard backendGuard("YAMS_EMBED_BACKEND", "");
+
+    SECTION("reads daemon from config") {
+        auto configPath = writeToml("embedding_backend_daemon.toml", R"(
+[embeddings]
+backend = "daemon"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+
+    SECTION("normalizes uppercase simeon from config") {
+        auto configPath = writeToml("embedding_backend_simeon_upper.toml", R"(
+[embeddings]
+backend = "SIMEON"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
+    }
+
+    SECTION("maps legacy onnx backend names to onnxruntime") {
+        auto configPath = writeToml("embedding_backend_legacy_onnx.toml", R"(
+[embeddings]
+backend = "local_onnx"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("normalizes explicit onnxruntime from config") {
+        auto configPath = writeToml("embedding_backend_onnxruntime.toml", R"(
+[embeddings]
+backend = "ONNX-RUNTIME"
+)");
+        EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolveEmbeddingBackend maps ONNX env aliases to onnxruntime",
+                 "[daemon][components][config][catch2]") {
+    SECTION("maps onnx env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "onnx");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("maps local_onnx env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "local_onnx");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("maps ort env alias") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "ort");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+    }
+
+    SECTION("keeps daemon env selection distinct") {
+        EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
+        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy defaults are empty when missing",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[daemon]
+socket_path = "/tmp/test.sock"
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    CHECK_FALSE(policy.enabled.has_value());
+    CHECK_FALSE(policy.cooldownMinutes.has_value());
+    CHECK_FALSE(policy.docCountDelta.has_value());
+    CHECK_FALSE(policy.rewardAlphaSingleton.has_value());
+    CHECK_FALSE(policy.rewardBetaGiantCluster.has_value());
+    CHECK_FALSE(policy.rewardGammaGiniDeviation.has_value());
+    CHECK_FALSE(policy.rewardDeltaIntraEdge.has_value());
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveEmbeddingSelectionPolicy reads semantic graph ingest flag",
+                 "[daemon][components][config][embeddings][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[embeddings.selection]
+update_semantic_graph_during_ingest = false
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveEmbeddingSelectionPolicy();
+
+    CHECK(policy.updateSemanticGraphDuringIngest == false);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy reads populated TOML block",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology.tuner]
+enabled = true
+cooldown_minutes = 30
+doc_count_delta = 250
+
+[topology.tuner.reward]
+alpha_singleton = 0.5
+beta_giant_cluster = 0.3
+gamma_gini_deviation = 0.15
+delta_intra_edge = 0.05
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    REQUIRE(policy.enabled.has_value());
+    CHECK(*policy.enabled == true);
+    REQUIRE(policy.cooldownMinutes.has_value());
+    CHECK(*policy.cooldownMinutes == 30u);
+    REQUIRE(policy.docCountDelta.has_value());
+    CHECK(*policy.docCountDelta == 250u);
+    REQUIRE(policy.rewardAlphaSingleton.has_value());
+    CHECK(*policy.rewardAlphaSingleton == 0.5);
+    REQUIRE(policy.rewardBetaGiantCluster.has_value());
+    CHECK(*policy.rewardBetaGiantCluster == 0.3);
+    REQUIRE(policy.rewardGammaGiniDeviation.has_value());
+    CHECK(*policy.rewardGammaGiniDeviation == 0.15);
+    REQUIRE(policy.rewardDeltaIntraEdge.has_value());
+    CHECK(*policy.rewardDeltaIntraEdge == 0.05);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyTunerPolicy honors disabled flag explicitly",
+                 "[daemon][components][config][topology_tuner][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology.tuner]
+enabled = false
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyTunerPolicy();
+
+    REQUIRE(policy.enabled.has_value());
+    CHECK(*policy.enabled == false);
+}
+
 TEST_CASE("ConfigResolver vector sentinel operations",
           "[daemon][components][config][catch2][sentinel]") {
     auto tempDir = std::filesystem::temp_directory_path() /
@@ -528,5 +693,339 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
         CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolvePostIngestCaps reads [tuning.post_ingest]",
+                 "[daemon][components][config][post_ingest][catch2]") {
+    SECTION("missing section returns all nullopt") {
+        auto configPath = writeToml("no_post_ingest.toml", R"(
+[tuning]
+profile = "balanced"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        CHECK_FALSE(caps.embedConcurrent.has_value());
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        CHECK_FALSE(caps.kgConcurrent.has_value());
+        CHECK_FALSE(caps.symbolConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+        CHECK_FALSE(caps.titleConcurrent.has_value());
+    }
+
+    SECTION("all keys populate the struct") {
+        auto configPath = writeToml("post_ingest.toml", R"(
+[tuning.post_ingest]
+total_concurrent = 12
+embed_concurrent = 4
+extraction_concurrent = 5
+kg_concurrent = 6
+symbol_concurrent = 3
+entity_concurrent = 2
+title_concurrent = 2
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        REQUIRE(caps.totalConcurrent.has_value());
+        CHECK(*caps.totalConcurrent == 12u);
+        REQUIRE(caps.embedConcurrent.has_value());
+        CHECK(*caps.embedConcurrent == 4u);
+        REQUIRE(caps.extractionConcurrent.has_value());
+        CHECK(*caps.extractionConcurrent == 5u);
+        REQUIRE(caps.kgConcurrent.has_value());
+        CHECK(*caps.kgConcurrent == 6u);
+        REQUIRE(caps.symbolConcurrent.has_value());
+        CHECK(*caps.symbolConcurrent == 3u);
+        REQUIRE(caps.entityConcurrent.has_value());
+        CHECK(*caps.entityConcurrent == 2u);
+        REQUIRE(caps.titleConcurrent.has_value());
+        CHECK(*caps.titleConcurrent == 2u);
+    }
+
+    SECTION("out-of-range values are dropped (nullopt)") {
+        auto configPath = writeToml("oor.toml", R"(
+[tuning.post_ingest]
+total_concurrent = 0
+embed_concurrent = 99
+extraction_concurrent = 500
+entity_concurrent = 17
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        CHECK_FALSE(caps.embedConcurrent.has_value());
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+    }
+
+    SECTION("partial population — only set keys populate") {
+        auto configPath = writeToml("partial.toml", R"(
+[tuning.post_ingest]
+embed_concurrent = 3
+kg_concurrent = 5
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto caps = ConfigResolver::resolvePostIngestCaps();
+        CHECK_FALSE(caps.totalConcurrent.has_value());
+        REQUIRE(caps.embedConcurrent.has_value());
+        CHECK(*caps.embedConcurrent == 3u);
+        CHECK_FALSE(caps.extractionConcurrent.has_value());
+        REQUIRE(caps.kgConcurrent.has_value());
+        CHECK(*caps.kgConcurrent == 5u);
+        CHECK_FALSE(caps.symbolConcurrent.has_value());
+        CHECK_FALSE(caps.entityConcurrent.has_value());
+        CHECK_FALSE(caps.titleConcurrent.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveSimeonEncoderPolicy reads [embeddings.simeon]",
+                 "[daemon][components][config][simeon][catch2]") {
+    SECTION("missing section returns all nullopt") {
+        auto configPath = writeToml("no_simeon.toml", R"(
+[daemon]
+log_level = "info"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        for (auto* env :
+             {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
+              "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+              "YAMS_SIMEON_PQ_BYTES"}) {
+            unsetenv(env);
+        }
+        auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        CHECK_FALSE(policy.ngramMode.has_value());
+        CHECK_FALSE(policy.ngramMin.has_value());
+        CHECK_FALSE(policy.ngramMax.has_value());
+        CHECK_FALSE(policy.sketchDim.has_value());
+        CHECK_FALSE(policy.outputDim.has_value());
+        CHECK_FALSE(policy.projection.has_value());
+        CHECK_FALSE(policy.l2Normalize.has_value());
+        CHECK_FALSE(policy.pqBytes.has_value());
+    }
+
+    SECTION("populated TOML section fills every field") {
+        auto configPath = writeToml("simeon_encoder.toml", R"(
+[embeddings.simeon]
+ngram_mode = "char_and_word"
+ngram_min = 3
+ngram_max = 5
+sketch_dim = 4096
+output_dim = 384
+projection = "fwht"
+l2_normalize = true
+pq_bytes = 64
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        for (auto* env :
+             {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
+              "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+              "YAMS_SIMEON_PQ_BYTES"}) {
+            unsetenv(env);
+        }
+        auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        REQUIRE(policy.ngramMode.has_value());
+        CHECK(*policy.ngramMode == "char_and_word");
+        REQUIRE(policy.ngramMin.has_value());
+        CHECK(*policy.ngramMin == 3u);
+        REQUIRE(policy.ngramMax.has_value());
+        CHECK(*policy.ngramMax == 5u);
+        REQUIRE(policy.sketchDim.has_value());
+        CHECK(*policy.sketchDim == 4096u);
+        REQUIRE(policy.outputDim.has_value());
+        CHECK(*policy.outputDim == 384u);
+        REQUIRE(policy.projection.has_value());
+        CHECK(*policy.projection == "fwht");
+        REQUIRE(policy.l2Normalize.has_value());
+        CHECK(*policy.l2Normalize);
+        REQUIRE(policy.pqBytes.has_value());
+        CHECK(*policy.pqBytes == 64u);
+    }
+
+    SECTION("env vars override TOML values") {
+        auto configPath = writeToml("override_encoder.toml", R"(
+[embeddings.simeon]
+projection = "achlioptas_sparse"
+sketch_dim = 2048
+output_dim = 256
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard proj("YAMS_SIMEON_PROJECTION", "fwht");
+        EnvGuard sketch("YAMS_SIMEON_SKETCH_DIM", "8192");
+        EnvGuard out("YAMS_SIMEON_OUTPUT_DIM", "1024");
+
+        auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        REQUIRE(policy.projection.has_value());
+        CHECK(*policy.projection == "fwht");
+        REQUIRE(policy.sketchDim.has_value());
+        CHECK(*policy.sketchDim == 8192u);
+        REQUIRE(policy.outputDim.has_value());
+        CHECK(*policy.outputDim == 1024u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveSimeonBm25Policy reads [embeddings.simeon.bm25]",
+                 "[daemon][components][config][simeon][catch2]") {
+    SECTION("missing section returns all nullopt") {
+        auto configPath = writeToml("no_bm25.toml", R"(
+[daemon]
+log_level = "info"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        for (auto* env : {"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
+                          "YAMS_SIMEON_BM25_SUBWORD_GAMMA", "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"}) {
+            unsetenv(env);
+        }
+        auto policy = ConfigResolver::resolveSimeonBm25Policy();
+        CHECK_FALSE(policy.enabled.has_value());
+        CHECK_FALSE(policy.variant.has_value());
+        CHECK_FALSE(policy.subwordGamma.has_value());
+        CHECK_FALSE(policy.maxCorpusDocs.has_value());
+    }
+
+    SECTION("populated TOML section fills every field") {
+        auto configPath = writeToml("bm25.toml", R"(
+[embeddings.simeon.bm25]
+enabled = true
+variant = "sab_smooth"
+subword_gamma = 5.0
+max_corpus_docs = 200000
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        for (auto* env : {"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
+                          "YAMS_SIMEON_BM25_SUBWORD_GAMMA", "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"}) {
+            unsetenv(env);
+        }
+        auto policy = ConfigResolver::resolveSimeonBm25Policy();
+        REQUIRE(policy.enabled.has_value());
+        CHECK(*policy.enabled);
+        REQUIRE(policy.variant.has_value());
+        CHECK(*policy.variant == "sab_smooth");
+        REQUIRE(policy.subwordGamma.has_value());
+        CHECK(*policy.subwordGamma == 5.0f);
+        REQUIRE(policy.maxCorpusDocs.has_value());
+        CHECK(*policy.maxCorpusDocs == 200000u);
+    }
+
+    SECTION("env vars override TOML values") {
+        auto configPath = writeToml("override_bm25.toml", R"(
+[embeddings.simeon.bm25]
+variant = "atire"
+subword_gamma = 3.0
+max_corpus_docs = 50000
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard variantEnv("YAMS_SIMEON_BM25_VARIANT", "sab_smooth");
+        EnvGuard gammaEnv("YAMS_SIMEON_BM25_SUBWORD_GAMMA", "7.5");
+        EnvGuard capEnv("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS", "123456");
+
+        auto policy = ConfigResolver::resolveSimeonBm25Policy();
+        REQUIRE(policy.variant.has_value());
+        CHECK(*policy.variant == "sab_smooth");
+        REQUIRE(policy.subwordGamma.has_value());
+        CHECK(*policy.subwordGamma == 7.5f);
+        REQUIRE(policy.maxCorpusDocs.has_value());
+        CHECK(*policy.maxCorpusDocs == 123456u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveRerankerBackendPolicy reads [search]",
+                 "[daemon][components][config][reranker][catch2]") {
+    SECTION("returns unset when not configured") {
+        auto configPath = writeToml("reranker_default.toml", R"(
+[search]
+default_limit = 10
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        CHECK_FALSE(policy.backend.has_value());
+    }
+
+    SECTION("reads explicit reranker backend") {
+        auto configPath = writeToml("reranker_backend.toml", R"(
+[search]
+reranker_backend = "colbert"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        REQUIRE(policy.backend.has_value());
+        CHECK(*policy.backend == "colbert");
+    }
+
+    SECTION("normalizes reranker backend to lowercase") {
+        auto configPath = writeToml("reranker_backend_upper.toml", R"(
+[search]
+reranker_backend = "ONNX"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        REQUIRE(policy.backend.has_value());
+        CHECK(*policy.backend == "onnx");
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveInstrumentationPolicy applies memory profile",
+                 "[daemon][components][config][instrumentation][catch2]") {
+    SECTION("auto profile activates when MallocStackLoggingNoCompact is present") {
+        auto configPath = writeToml("instrumentation_auto.toml", R"(
+[daemon]
+log_level = "info"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLoggingNoCompact", "1");
+        EnvGuard mslCompact("MallocStackLogging", "0");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "auto");
+        CHECK(policy.memoryProfileActive);
+        CHECK(policy.suppressAutoRepair);
+        CHECK(policy.suppressSimeonLexicalBuild);
+        CHECK(policy.suppressVectorIndexBuild);
+    }
+
+    SECTION("normal profile disables auto MSL suppression") {
+        auto configPath = writeToml("instrumentation_normal.toml", R"(
+[daemon.instrumentation]
+profile = "normal"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLoggingNoCompact", "1");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "normal");
+        CHECK_FALSE(policy.memoryProfileActive);
+        CHECK_FALSE(policy.suppressAutoRepair);
+        CHECK_FALSE(policy.suppressSimeonLexicalBuild);
+        CHECK_FALSE(policy.suppressVectorIndexBuild);
+    }
+
+    SECTION("memory profile supports explicit overrides and stack-log threshold") {
+        auto configPath = writeToml("instrumentation_memory.toml", R"(
+[daemon.instrumentation]
+profile = "memory"
+suppress_auto_repair = false
+suppress_simeon_lexical_build = true
+suppress_vector_index_build = true
+msl_stack_log_warn_mb = 1536
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        EnvGuard msl("MallocStackLogging", "0");
+        EnvGuard mslCompact("MallocStackLoggingNoCompact", "0");
+
+        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        CHECK(policy.profile == "memory");
+        CHECK(policy.memoryProfileActive);
+        CHECK_FALSE(policy.suppressAutoRepair);
+        CHECK(policy.suppressSimeonLexicalBuild);
+        CHECK(policy.suppressVectorIndexBuild);
+        CHECK(policy.mslStackLogWarnBytes == 1536ULL * 1024ULL * 1024ULL);
     }
 }

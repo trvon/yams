@@ -118,6 +118,8 @@ public:
 
     const KnowledgeGraphStoreConfig& getConfig() const override { return cfg_; }
 
+    void setReadPool(ConnectionPool* readPool) override { readPool_ = readPool; }
+
     Result<std::unique_ptr<WriteBatch>> beginWriteBatch() override;
     KGEntityCountSnapshot getEntityCountSnapshot() const override {
         return {static_cast<std::int64_t>(entityCount_.load(std::memory_order_relaxed)),
@@ -216,7 +218,7 @@ public:
     }
 
     Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
             auto stmtR = db.prepare(
                 "SELECT id, node_key, label, type, created_time, updated_time, properties "
                 "FROM kg_nodes WHERE id = ? LIMIT 1");
@@ -249,7 +251,7 @@ public:
     }
 
     Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
             auto stmtR = db.prepare(
                 "SELECT id, node_key, label, type, created_time, updated_time, properties "
                 "FROM kg_nodes WHERE node_key = ? LIMIT 1");
@@ -281,11 +283,65 @@ public:
         });
     }
 
+    Result<std::vector<KGNode>> getNodesByKeys(const std::vector<std::string>& nodeKeys) override {
+        if (nodeKeys.empty()) {
+            return std::vector<KGNode>{};
+        }
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            std::string placeholders;
+            for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
+                if (i > 0)
+                    placeholders += ", ";
+                placeholders += "?";
+            }
+            std::string sql =
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE node_key IN (" +
+                placeholders + ")";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
+                auto br = stmt.bind(static_cast<int>(i + 1), nodeKeys[i]);
+                if (!br)
+                    return br.error();
+            }
+
+            std::vector<KGNode> out;
+            out.reserve(nodeKeys.size());
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGNode n;
+                n.id = stmt.getInt64(0);
+                n.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    n.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    n.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    n.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    n.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    n.properties = stmt.getString(6);
+                out.push_back(std::move(n));
+            }
+            return out;
+        });
+    }
+
     Result<std::vector<KGNode>> getNodesByIds(const std::vector<std::int64_t>& nodeIds) override {
         if (nodeIds.empty()) {
             return std::vector<KGNode>{};
         }
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
             // Build IN clause with placeholders: WHERE id IN (?, ?, ...)
             std::string placeholders;
             for (std::size_t i = 0; i < nodeIds.size(); ++i) {
@@ -339,7 +395,7 @@ public:
 
     Result<std::vector<KGNode>> findNodesByType(std::string_view type, std::size_t limit,
                                                 std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
             auto stmtR = db.prepare(
                 "SELECT id, node_key, label, type, created_time, updated_time, properties "
                 "FROM kg_nodes WHERE type = ? LIMIT ? OFFSET ?");
@@ -382,7 +438,7 @@ public:
     }
 
     Result<std::size_t> countNodesByType(std::string_view type) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::size_t> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::size_t> {
             auto stmtR = db.prepare("SELECT COUNT(1) FROM kg_nodes WHERE type = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -499,38 +555,39 @@ public:
 
     Result<std::vector<AliasResolution>> resolveAliasExact(std::string_view alias,
                                                            std::size_t limit) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<AliasResolution>> {
-            auto stmtR = db.prepare("SELECT node_id FROM kg_aliases WHERE alias = ? LIMIT ?");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
+        return readPool()->withConnection(
+            [&](Database& db) -> Result<std::vector<AliasResolution>> {
+                auto stmtR = db.prepare("SELECT node_id FROM kg_aliases WHERE alias = ? LIMIT ?");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
 
-            auto br = stmt.bind(1, alias);
-            if (!br)
-                return br.error();
-            br = stmt.bind(2, static_cast<int64_t>(limit));
-            if (!br)
-                return br.error();
+                auto br = stmt.bind(1, alias);
+                if (!br)
+                    return br.error();
+                br = stmt.bind(2, static_cast<int64_t>(limit));
+                if (!br)
+                    return br.error();
 
-            std::vector<AliasResolution> out;
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                AliasResolution ar;
-                ar.nodeId = stmt.getInt64(0);
-                ar.score = 1.0f;
-                out.push_back(ar);
-            }
-            return out;
-        });
+                std::vector<AliasResolution> out;
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+                    AliasResolution ar;
+                    ar.nodeId = stmt.getInt64(0);
+                    ar.score = 1.0f;
+                    out.push_back(ar);
+                }
+                return out;
+            });
     }
 
     Result<std::vector<KGAlias>> getAliasesForNode(std::int64_t nodeId, std::size_t limit,
                                                    std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGAlias>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGAlias>> {
             auto stmtR = db.prepare("SELECT id, node_id, alias, source, confidence "
                                     "FROM kg_aliases WHERE node_id = ? "
                                     "ORDER BY confidence DESC, alias ASC LIMIT ? OFFSET ?");
@@ -573,45 +630,46 @@ public:
         if (!cfg_.enable_alias_fts) {
             return resolveAliasExact(aliasQuery, limit);
         }
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<AliasResolution>> {
-            // Use FTS if available; fall back to exact if table is missing
-            auto existsR = db.tableExists("kg_aliases_fts");
-            if (!existsR)
-                return existsR.error();
-            if (!existsR.value()) {
-                return resolveAliasExact(aliasQuery, limit);
-            }
+        return readPool()->withConnection(
+            [&](Database& db) -> Result<std::vector<AliasResolution>> {
+                // Use FTS if available; fall back to exact if table is missing
+                auto existsR = db.tableExists("kg_aliases_fts");
+                if (!existsR)
+                    return existsR.error();
+                if (!existsR.value()) {
+                    return resolveAliasExact(aliasQuery, limit);
+                }
 
-            auto stmtR = db.prepare("SELECT a.node_id, 1.0 AS score "
-                                    "FROM kg_aliases_fts f "
-                                    "JOIN kg_aliases a ON a.id = f.rowid "
-                                    "WHERE kg_aliases_fts MATCH ? "
-                                    "LIMIT ?");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
+                auto stmtR = db.prepare("SELECT a.node_id, 1.0 AS score "
+                                        "FROM kg_aliases_fts f "
+                                        "JOIN kg_aliases a ON a.id = f.rowid "
+                                        "WHERE kg_aliases_fts MATCH ? "
+                                        "LIMIT ?");
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
 
-            auto br = stmt.bind(1, aliasQuery);
-            if (!br)
-                return br.error();
-            br = stmt.bind(2, static_cast<int64_t>(limit));
-            if (!br)
-                return br.error();
+                auto br = stmt.bind(1, aliasQuery);
+                if (!br)
+                    return br.error();
+                br = stmt.bind(2, static_cast<int64_t>(limit));
+                if (!br)
+                    return br.error();
 
-            std::vector<AliasResolution> out;
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                AliasResolution ar;
-                ar.nodeId = stmt.getInt64(0);
-                ar.score = 1.0f;
-                out.push_back(ar);
-            }
-            return out;
-        });
+                std::vector<AliasResolution> out;
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+                    AliasResolution ar;
+                    ar.nodeId = stmt.getInt64(0);
+                    ar.score = 1.0f;
+                    out.push_back(ar);
+                }
+                return out;
+            });
     }
 
     Result<void> removeAliasById(std::int64_t aliasId) override {
@@ -744,14 +802,21 @@ public:
             return Result<void>();
         return pool_->withConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
-                // Use INSERT ... SELECT ... WHERE NOT EXISTS to avoid duplicates without requiring
-                // a unique index
-                auto stmtR = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, "
-                                        "weight, created_time, properties) "
-                                        "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
-                                        "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND "
-                                        "dst_node_id = ? AND relation = ?"
-                                        ")");
+                // Rely on the unique index `idx_kg_edges_uq` over
+                // (src_node_id, dst_node_id, relation) for dedup, but refresh
+                // existing semantic/derived edges instead of freezing stale scores.
+                auto stmtR = db.prepare(
+                    "INSERT INTO kg_edges "
+                    "(src_node_id, dst_node_id, relation, weight, created_time, "
+                    "properties) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(src_node_id, dst_node_id, relation) DO UPDATE SET "
+                    "weight = MAX(kg_edges.weight, excluded.weight), "
+                    "created_time = COALESCE(excluded.created_time, kg_edges.created_time), "
+                    "properties = CASE "
+                    "  WHEN excluded.weight >= kg_edges.weight "
+                    "  THEN COALESCE(excluded.properties, kg_edges.properties) "
+                    "  ELSE kg_edges.properties "
+                    "END");
                 if (!stmtR)
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
@@ -760,7 +825,6 @@ public:
                     auto br = stmt.clearBindings();
                     if (!br)
                         return br.error();
-                    // Insert value params
                     br = stmt.bind(1, e.srcNodeId);
                     if (!br)
                         return br.error();
@@ -785,16 +849,6 @@ public:
                         br = stmt.bind(6, nullptr);
                     if (!br)
                         return br.error();
-                    // WHERE NOT EXISTS params
-                    br = stmt.bind(7, e.srcNodeId);
-                    if (!br)
-                        return br.error();
-                    br = stmt.bind(8, e.dstNodeId);
-                    if (!br)
-                        return br.error();
-                    br = stmt.bind(9, e.relation);
-                    if (!br)
-                        return br.error();
                     auto ex = stmt.execute();
                     if (!ex)
                         return ex.error();
@@ -810,14 +864,14 @@ public:
     Result<std::vector<KGEdge>> getEdgesFrom(std::int64_t srcNodeId,
                                              std::optional<std::string_view> relation,
                                              std::size_t limit, std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
             std::string sql =
                 "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
                 "FROM kg_edges WHERE src_node_id = ?";
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " LIMIT ? OFFSET ?";
+            sql += " ORDER BY weight DESC, created_time DESC, id DESC LIMIT ? OFFSET ?";
 
             auto stmtR = db.prepare(sql);
             if (!stmtR)
@@ -863,10 +917,84 @@ public:
         });
     }
 
+    Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
+                      std::optional<std::string_view> relation, std::size_t limitPerNode) override {
+        using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
+
+        if (srcNodeIds.empty()) {
+            return ResultMap{};
+        }
+
+        return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
+            std::string placeholders;
+            for (size_t i = 0; i < srcNodeIds.size(); ++i) {
+                if (i > 0)
+                    placeholders += ",";
+                placeholders += "?";
+            }
+
+            std::string sql =
+                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
+                "FROM ("
+                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY src_node_id "
+                "    ORDER BY weight DESC, created_time DESC, id DESC) as rn "
+                "  FROM kg_edges "
+                "  WHERE src_node_id IN (" +
+                placeholders + ")";
+            if (relation.has_value()) {
+                sql += " AND relation = ?";
+            }
+            sql += ") WHERE rn <= ?";
+
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            int idx = 1;
+            for (const auto& nodeId : srcNodeIds) {
+                auto br = stmt.bind(idx++, nodeId);
+                if (!br)
+                    return br.error();
+            }
+            if (relation.has_value()) {
+                auto br = stmt.bind(idx++, relation.value());
+                if (!br)
+                    return br.error();
+            }
+            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
+            if (!br)
+                return br.error();
+
+            ResultMap out;
+            out.reserve(srcNodeIds.size());
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                KGEdge e;
+                e.id = stmt.getInt64(0);
+                e.srcNodeId = stmt.getInt64(1);
+                e.dstNodeId = stmt.getInt64(2);
+                e.relation = stmt.getString(3);
+                e.weight = static_cast<float>(stmt.getDouble(4));
+                if (!stmt.isNull(5))
+                    e.createdTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    e.properties = stmt.getString(6);
+                out[e.srcNodeId].push_back(std::move(e));
+            }
+            return out;
+        });
+    }
+
     Result<std::vector<KGEdge>> getEdgesTo(std::int64_t dstNodeId,
                                            std::optional<std::string_view> relation,
                                            std::size_t limit, std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
             std::string sql =
                 "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
                 "FROM kg_edges WHERE dst_node_id = ?";
@@ -928,7 +1056,7 @@ public:
             return ResultMap{};
         }
 
-        return pool_->withConnection([&](Database& db) -> Result<ResultMap> {
+        return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
             // Build SQL with IN clause for batch lookup
             // Using window function to limit results per destination node
             std::string placeholders;
@@ -1001,7 +1129,7 @@ public:
     Result<std::vector<KGEdge>> getEdgesBidirectional(std::int64_t nodeId,
                                                       std::optional<std::string_view> relation,
                                                       std::size_t limit) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
             // Single query for both incoming and outgoing edges using UNION
             std::string sql =
                 "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
@@ -1016,7 +1144,7 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " LIMIT ?";
+            sql += " ORDER BY id LIMIT ?";
 
             auto stmtR = db.prepare(sql);
             if (!stmtR)
@@ -1069,9 +1197,52 @@ public:
         });
     }
 
+    Result<void>
+    forEachEdgeByRelation(std::string_view relation,
+                          const std::function<bool(std::int64_t edgeId, std::int64_t srcNodeId,
+                                                   std::int64_t dstNodeId, float weight)>& visitor,
+                          std::size_t limit) override {
+        if (!visitor) {
+            return Error{ErrorCode::InvalidArgument, "edge visitor callback is required"};
+        }
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto stmtR = limit > 0 ? db.prepare("SELECT id, src_node_id, dst_node_id, weight "
+                                                "FROM kg_edges WHERE relation = ? ORDER BY id "
+                                                "LIMIT ?")
+                                   : db.prepare("SELECT id, src_node_id, dst_node_id, weight "
+                                                "FROM kg_edges WHERE relation = ? ORDER BY id");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+
+            auto br = stmt.bind(1, relation);
+            if (!br)
+                return br.error();
+            if (limit > 0) {
+                br = stmt.bind(2, static_cast<int64_t>(limit));
+                if (!br)
+                    return br.error();
+            }
+
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                const auto keepGoing = visitor(stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2),
+                                               static_cast<float>(stmt.getDouble(3)));
+                if (!keepGoing) {
+                    break;
+                }
+            }
+            return Result<void>();
+        });
+    }
+
     Result<std::vector<std::int64_t>> neighbors(std::int64_t nodeId,
                                                 std::size_t maxNeighbors) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<std::int64_t>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<std::int64_t>> {
             auto stmtR =
                 db.prepare("SELECT dst_node_id FROM kg_edges WHERE src_node_id = ? LIMIT ?");
             if (!stmtR)
@@ -1198,7 +1369,7 @@ public:
     }
 
     Result<std::optional<std::int64_t>> getDocumentIdByHash(std::string_view sha256) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
             auto stmtR = db.prepare("SELECT id FROM documents WHERE sha256_hash = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
@@ -1216,7 +1387,7 @@ public:
     }
 
     Result<std::optional<std::int64_t>> getDocumentIdByPath(std::string_view file_path) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
             auto stmtR = db.prepare("SELECT id FROM documents WHERE file_path = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
@@ -1234,7 +1405,7 @@ public:
     }
 
     Result<std::optional<std::int64_t>> getDocumentIdByName(std::string_view file_name) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
             auto stmtR = db.prepare("SELECT id FROM documents WHERE file_name = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
@@ -1252,7 +1423,7 @@ public:
     }
 
     Result<std::optional<std::string>> getDocumentHashById(std::int64_t documentId) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::optional<std::string>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::string>> {
             auto stmtR = db.prepare("SELECT sha256_hash FROM documents WHERE id = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
@@ -1272,7 +1443,7 @@ public:
     Result<std::vector<DocEntity>> getDocEntitiesForDocument(std::int64_t documentId,
                                                              std::size_t limit,
                                                              std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<DocEntity>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<DocEntity>> {
             auto stmtR = db.prepare("SELECT id, document_id, entity_text, node_id, start_offset, "
                                     "end_offset, confidence, extractor "
                                     "FROM kg_doc_entities WHERE document_id = ? LIMIT ? OFFSET ?");
@@ -1344,7 +1515,7 @@ public:
     // Symbol Extraction State
     Result<std::optional<SymbolExtractionState>>
     getSymbolExtractionState(std::string_view documentHash) override {
-        return pool_->withConnection(
+        return readPool()->withConnection(
             [&](Database& db) -> Result<std::optional<SymbolExtractionState>> {
                 auto stmtR = db.prepare(R"(
                 SELECT ses.document_id, ses.extractor_id, ses.extractor_config_hash,
@@ -1485,6 +1656,25 @@ public:
         });
     }
 
+    Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare("DELETE FROM kg_edges WHERE relation = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, relation);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteEdgesByRelation: deleted {} edges for relation {}", deleted,
+                          relation);
+            return deleted;
+        });
+    }
+
     Result<std::int64_t> deleteOrphanedEdges() override {
         constexpr std::int64_t kBatchSize = 1000;
         std::int64_t totalDeleted = 0;
@@ -1560,7 +1750,7 @@ public:
     Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,
                                                   std::string_view relation,
                                                   std::size_t limit) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
             auto stmtR = db.prepare(R"(
                 SELECT n.id, n.node_key, n.label, n.type, n.created_time, n.updated_time, n.properties
                 FROM kg_nodes n
@@ -1614,8 +1804,65 @@ public:
         });
     }
 
+    Result<std::vector<KGNode>> findNodesLackingOutboundEdges(std::string_view nodeType,
+                                                              std::string_view relation,
+                                                              std::size_t limit) override {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            auto stmtR = db.prepare(R"(
+                SELECT n.id, n.node_key, n.label, n.type, n.created_time, n.updated_time, n.properties
+                FROM kg_nodes n
+                WHERE n.type = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM kg_edges e
+                      WHERE e.src_node_id = n.id AND e.relation = ?
+                  )
+                ORDER BY n.id
+                LIMIT ?
+            )");
+            if (!stmtR)
+                return stmtR.error();
+
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, nodeType);
+            if (!br)
+                return br.error();
+            br = stmt.bind(2, relation);
+            if (!br)
+                return br.error();
+            br = stmt.bind(3, static_cast<std::int64_t>(limit));
+            if (!br)
+                return br.error();
+
+            std::vector<KGNode> results;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+
+                KGNode node;
+                node.id = stmt.getInt64(0);
+                node.nodeKey = stmt.getString(1);
+                if (!stmt.isNull(2))
+                    node.label = stmt.getString(2);
+                if (!stmt.isNull(3))
+                    node.type = stmt.getString(3);
+                if (!stmt.isNull(4))
+                    node.createdTime = stmt.getInt64(4);
+                if (!stmt.isNull(5))
+                    node.updatedTime = stmt.getInt64(5);
+                if (!stmt.isNull(6))
+                    node.properties = stmt.getString(6);
+
+                results.push_back(std::move(node));
+            }
+            return results;
+        });
+    }
+
     Result<std::vector<std::pair<std::string, std::size_t>>> getNodeTypeCounts() override {
-        return pool_->withConnection(
+        return readPool()->withConnection(
             [&](Database& db) -> Result<std::vector<std::pair<std::string, std::size_t>>> {
                 auto stmtR = db.prepare(R"(
                 SELECT type, COUNT(*) as cnt
@@ -1645,7 +1892,7 @@ public:
     }
 
     Result<std::vector<std::pair<std::string, std::size_t>>> getRelationTypeCounts() override {
-        return pool_->withConnection(
+        return readPool()->withConnection(
             [&](Database& db) -> Result<std::vector<std::pair<std::string, std::size_t>>> {
                 auto stmtR = db.prepare(R"(
                 SELECT relation, COUNT(*) as cnt
@@ -1676,7 +1923,7 @@ public:
 
     Result<std::vector<KGNode>> searchNodesByLabel(std::string_view pattern, std::size_t limit,
                                                    std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
             // Convert user pattern to SQL LIKE pattern
             // User can use * for wildcard, we convert to %
             std::string sqlPattern;
@@ -2027,12 +2274,13 @@ public:
 
     Result<std::vector<PathHistoryRecord>> fetchPathHistory(std::string_view logicalPath,
                                                             std::size_t limit) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<PathHistoryRecord>> {
-            std::vector<PathHistoryRecord> history;
+        return readPool()->withConnection(
+            [&](Database& db) -> Result<std::vector<PathHistoryRecord>> {
+                std::vector<PathHistoryRecord> history;
 
-            // Query path nodes that match the logical path across all snapshots
-            // Then follow rename edges to find the complete history
-            auto queryStmt = db.prepare(R"(
+                // Query path nodes that match the logical path across all snapshots
+                // Then follow rename edges to find the complete history
+                auto queryStmt = db.prepare(R"(
                 WITH RECURSIVE rename_chain AS (
                     -- Base case: find all path nodes matching the logical path
                     SELECT 
@@ -2073,47 +2321,47 @@ public:
                 LIMIT ?
             )");
 
-            if (!queryStmt)
-                return queryStmt.error();
+                if (!queryStmt)
+                    return queryStmt.error();
 
-            auto& stmt = queryStmt.value();
-            auto bindRes = stmt.bindAll(logicalPath, static_cast<std::int64_t>(limit));
-            if (!bindRes)
-                return bindRes.error();
+                auto& stmt = queryStmt.value();
+                auto bindRes = stmt.bindAll(logicalPath, static_cast<std::int64_t>(limit));
+                if (!bindRes)
+                    return bindRes.error();
 
-            while (true) {
-                auto stepRes = stmt.step();
-                if (!stepRes)
-                    return stepRes.error();
+                while (true) {
+                    auto stepRes = stmt.step();
+                    if (!stepRes)
+                        return stepRes.error();
 
-                if (!stepRes.value())
-                    break;
+                    if (!stepRes.value())
+                        break;
 
-                PathHistoryRecord record;
-                record.snapshotId = stmt.getString(0);
-                record.path = stmt.getString(1);
+                    PathHistoryRecord record;
+                    record.snapshotId = stmt.getString(0);
+                    record.path = stmt.getString(1);
 
-                // blob_hash column (handle NULL)
-                if (!stmt.isNull(2)) {
-                    std::string blobNodeKey = stmt.getString(2);
-                    // Extract hash from node_key format "blob:hash"
-                    if (blobNodeKey.starts_with("blob:")) {
-                        record.blobHash = blobNodeKey.substr(5);
+                    // blob_hash column (handle NULL)
+                    if (!stmt.isNull(2)) {
+                        std::string blobNodeKey = stmt.getString(2);
+                        // Extract hash from node_key format "blob:hash"
+                        if (blobNodeKey.starts_with("blob:")) {
+                            record.blobHash = blobNodeKey.substr(5);
+                        }
                     }
+
+                    // diff_id column (handle NULL)
+                    if (!stmt.isNull(3)) {
+                        record.diffId = stmt.getInt64(3);
+                    }
+
+                    record.changeType = std::nullopt; // Could be enhanced later
+
+                    history.push_back(record);
                 }
 
-                // diff_id column (handle NULL)
-                if (!stmt.isNull(3)) {
-                    record.diffId = stmt.getInt64(3);
-                }
-
-                record.changeType = std::nullopt; // Could be enhanced later
-
-                history.push_back(record);
-            }
-
-            return history;
-        });
+                return history;
+            });
     }
 
     // Maintenance
@@ -2427,8 +2675,11 @@ private:
         }
     }
 
+    ConnectionPool* readPool() const noexcept { return readPool_ ? readPool_ : pool_; }
+
     KnowledgeGraphStoreConfig cfg_{};
     ConnectionPool* pool_{nullptr};                       // Non-owning
+    ConnectionPool* readPool_{nullptr};                   // Non-owning; falls back to pool_
     std::unique_ptr<ConnectionPool> owned_pool_{nullptr}; // Owns pool when created from path
     std::atomic<std::uint64_t> entityCount_{0};
     std::atomic<std::uint64_t> nativeEntityCount_{0};
@@ -2590,12 +2841,20 @@ public:
         }
         Database& db = **conn_;
 
+        // Upsert via the unique index `idx_kg_edges_uq` so graph maintenance can
+        // refresh stale derived-edge scores/properties without duplicating rows.
         auto stmtR = db.prepareCached(
-            "INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight, created_time, "
-            "properties) "
-            "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
-            "  SELECT 1 FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? AND relation = ?"
-            ")");
+            "INSERT INTO kg_edges "
+            "(src_node_id, dst_node_id, relation, weight, created_time, properties) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(src_node_id, dst_node_id, relation) DO UPDATE SET "
+            "weight = MAX(kg_edges.weight, excluded.weight), "
+            "created_time = COALESCE(excluded.created_time, kg_edges.created_time), "
+            "properties = CASE "
+            "  WHEN excluded.weight >= kg_edges.weight "
+            "  THEN COALESCE(excluded.properties, kg_edges.properties) "
+            "  ELSE kg_edges.properties "
+            "END");
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();
@@ -2604,7 +2863,6 @@ public:
             auto br = stmt.clearBindings();
             if (!br)
                 return br.error();
-            // Insert value params
             br = stmt.bind(1, e.srcNodeId);
             if (!br)
                 return br.error();
@@ -2623,16 +2881,6 @@ public:
                 return br.error();
             br = e.properties.has_value() ? stmt.bind(6, e.properties.value())
                                           : stmt.bind(6, nullptr);
-            if (!br)
-                return br.error();
-            // WHERE NOT EXISTS params
-            br = stmt.bind(7, e.srcNodeId);
-            if (!br)
-                return br.error();
-            br = stmt.bind(8, e.dstNodeId);
-            if (!br)
-                return br.error();
-            br = stmt.bind(9, e.relation);
             if (!br)
                 return br.error();
 
@@ -2749,6 +2997,59 @@ public:
         return Result<void>();
     }
 
+    Result<void> deleteNodeById(std::int64_t nodeId) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached("DELETE FROM kg_nodes WHERE id = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, nodeId);
+        if (!br)
+            return br.error();
+        return stmt.execute();
+    }
+
+    Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        std::int64_t totalDeleted = 0;
+
+        std::string docNodeKey = "doc:" + std::string(documentHash);
+        auto docStmtR = db.prepare("DELETE FROM kg_nodes WHERE node_key = ?");
+        if (!docStmtR)
+            return docStmtR.error();
+        auto docStmt = std::move(docStmtR).value();
+        auto br = docStmt.bind(1, docNodeKey);
+        if (!br)
+            return br.error();
+        auto execR = docStmt.execute();
+        if (!execR)
+            return execR.error();
+        totalDeleted += db.changes();
+
+        auto symStmtR = db.prepare(
+            "DELETE FROM kg_nodes WHERE json_extract(properties, '$.document_hash') = ?");
+        if (!symStmtR)
+            return symStmtR.error();
+        auto symStmt = std::move(symStmtR).value();
+        br = symStmt.bind(1, documentHash);
+        if (!br)
+            return br.error();
+        execR = symStmt.execute();
+        if (!execR)
+            return execR.error();
+        totalDeleted += db.changes();
+
+        spdlog::debug("WriteBatch::deleteNodesForDocumentHash: deleted {} nodes for hash {}",
+                      totalDeleted, documentHash);
+        return totalDeleted;
+    }
+
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
         if (!transactionStarted_) {
             return Error{ErrorCode::InvalidState, "Transaction not started"};
@@ -2797,6 +3098,102 @@ public:
         spdlog::debug("WriteBatch::deleteEdgesForSourceFile: deleted {} edges for path {}", deleted,
                       filePath);
         return deleted;
+    }
+
+    Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        auto stmtR = db.prepareCached("DELETE FROM kg_edges WHERE relation = ?");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        auto br = stmt.bind(1, relation);
+        if (!br)
+            return br.error();
+        auto execR = stmt.execute();
+        if (!execR)
+            return execR.error();
+        auto deleted = db.changes();
+        spdlog::debug("WriteBatch::deleteEdgesByRelation: deleted {} edges for relation {}",
+                      deleted, relation);
+        return deleted;
+    }
+
+    Result<std::int64_t> deleteOrphanedEdges() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_edges WHERE rowid IN (
+                    SELECT rowid FROM kg_edges
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.src_node_id
+                    ) OR NOT EXISTS (
+                        SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.dst_node_id
+                    )
+                    LIMIT ?
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, kBatchSize);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            totalDeleted += deleted;
+            if (deleted < kBatchSize)
+                break;
+        }
+        spdlog::debug("WriteBatch::deleteOrphanedEdges: deleted {} edges", totalDeleted);
+        return totalDeleted;
+    }
+
+    Result<std::int64_t> deleteOrphanedDocEntities() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+
+        constexpr std::int64_t kBatchSize = 1000;
+        std::int64_t totalDeleted = 0;
+        while (true) {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_doc_entities WHERE rowid IN (
+                    SELECT rowid FROM kg_doc_entities
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM documents d WHERE d.id = kg_doc_entities.document_id
+                    )
+                    LIMIT ?
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto br = stmt.bind(1, kBatchSize);
+            if (!br)
+                return br.error();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            totalDeleted += deleted;
+            if (deleted < kBatchSize)
+                break;
+        }
+        spdlog::debug("WriteBatch::deleteOrphanedDocEntities: deleted {} rows", totalDeleted);
+        return totalDeleted;
     }
 
     Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) override {
@@ -2917,7 +3314,8 @@ private:
 // Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)
 Result<std::unique_ptr<KnowledgeGraphStore::WriteBatch>>
 SqliteKnowledgeGraphStore::beginWriteBatch() {
-    auto connResult = pool_->acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+    auto connResult = pool_->acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal,
+                                     "KnowledgeGraphStore::beginWriteBatch");
     if (!connResult) {
         return Error{ErrorCode::ResourceExhausted, "Failed to acquire connection for write batch"};
     }

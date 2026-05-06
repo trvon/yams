@@ -354,6 +354,11 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
         addIntParam(params, *options.repairAttemptedBefore);
     }
 
+    if (options.idGreaterThan) {
+        conditions.emplace_back("documents.id > ?");
+        addIntParam(params, *options.idGreaterThan);
+    }
+
     if (options.excludeBinaryMimeTypes) {
         // Exclude obviously-ungrepable MIME types at the SQL level.
         // This reduces the candidate set before C++ processing.

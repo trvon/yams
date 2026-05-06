@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/search/search_engine.h>
 
+#include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/search_tuner.h>
 
 #include <chrono>
@@ -79,6 +80,10 @@ public:
         // When set, the builder loads prior state at construction time and enables
         // throttled auto-save from SearchTuner::observe(). Empty => disabled.
         std::filesystem::path tunerStatePath{};
+
+        // Optional first-class lexical backend injection. When set, the builder
+        // installs Simeon lexical rescoring before returning the engine.
+        std::optional<SimeonLexicalBackend::Config> simeonLexicalConfig{};
 
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {

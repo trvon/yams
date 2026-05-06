@@ -122,6 +122,7 @@ struct FileLock {
                         _write(fd, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd, 0, SEEK_SET);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
             } else {
@@ -151,6 +152,7 @@ struct FileLock {
                     (void)::write(fd, stamp.data(), stamp.size());
                     (void)lseek(fd, 0, SEEK_SET);
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
@@ -612,6 +614,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     targetDbDim = probeDb->getConfig().embedding_dim;
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
 
@@ -661,18 +664,31 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         size_t provDim = modelDim(selectedModel);
         embConfig.embedding_dim = provDim > 0 ? provDim : targetDbDim;
 
-        // Backend selection override via environment or special model name
         embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
         if (const char* be = std::getenv("YAMS_EMBED_BACKEND")) {
             std::string s(be);
             for (auto& c : s)
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-            if (s != "daemon" && s != "hybrid" && s != "local") {
+            if (s == "simeon") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::Simeon;
+            } else if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
+                       s == "local_onnx") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::OnnxRuntime;
+                if (s == "local_onnx") {
+                    spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND={} is deprecated; using "
+                                 "onnxruntime backend",
+                                 s);
+                }
+            } else if (s == "daemon" || s == "hybrid" || s == "local") {
+                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
+                if (s != "daemon") {
+                    spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND={} is deprecated; using "
+                                 "daemon backend",
+                                 s);
+                }
+            } else {
                 spdlog::warn("EmbeddingService: unsupported YAMS_EMBED_BACKEND='{}'; using daemon",
                              s);
-            } else if (s == "local") {
-                spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND=local is deprecated; using "
-                             "daemon backend");
             }
         }
 
@@ -694,8 +710,14 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             modelMaxSeq = 512;
         vdbConfig.embedding_dim =
             yams::vector::dimres::resolve_dim(dataPath_, actualDim, actualDim);
-        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend=Daemon", selectedModel,
-                     actualDim, modelMaxSeq);
+        const char* backendName =
+            (embConfig.backend == vector::EmbeddingConfig::Backend::Simeon)
+                ? "Simeon"
+                : (embConfig.backend == vector::EmbeddingConfig::Backend::OnnxRuntime
+                       ? "OnnxRuntime"
+                       : "Daemon");
+        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend={}", selectedModel,
+                     actualDim, modelMaxSeq, backendName);
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
         if (!vectorDb->initialize()) {
@@ -744,6 +766,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 return Error{ErrorCode::InvalidState, ss.str()};
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         // 4. Process documents using dynamic batching (use model-reported seq length)
@@ -753,6 +776,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             try {
                 advisoryDocCap = static_cast<std::size_t>(std::stoul(adv));
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         DynamicBatcherConfig bcfg;
@@ -886,7 +910,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     vector::VectorRecord record;
                     record.document_hash = hashes[k];
                     record.chunk_id = vector::utils::generateChunkId(hashes[k], 999999);
-                    record.embedding = embeddings[k];
+                    record.embedding = std::move(embeddings[k]);
                     record.content = texts[k].substr(0, 1000); // Store snippet
                     record.level = vector::EmbeddingLevel::DOCUMENT;
 
@@ -929,6 +953,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                         try {
                             timeout_ms = std::stoull(std::string(env_ms));
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
                     auto deadline =
@@ -977,6 +1002,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                             spdlog::error("[vectordb] batch insert failed: {}",
                                           vectorDb->getLastError());
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
                     // Optional pause between dynamic batches (cooperative throttling)

@@ -241,7 +241,7 @@ Description:
 - Ingests the specified file or standard input and stores it in the content-addressed store.
 - Rich metadata support for tagging, naming, and custom properties.
 - Content is automatically indexed for full-text and fuzzy search.
-- **Automatic snapshots (PBI-043):** Every `yams add` operation automatically creates a snapshot with a timestamp-based ID (e.g., `2025-10-01T14:30:00.123Z`). A Merkle tree is built and stored for efficient diff operations.
+- **Automatic snapshots (snapshot improvements):** Every `yams add` operation automatically creates a snapshot with a timestamp-based ID (e.g., `2025-10-01T14:30:00.123Z`). A Merkle tree is built and stored for efficient diff operations.
 - **Invocation-level snapshot consistency:** A single `yams add` command invocation reuses one snapshot ID across all provided inputs (multiple files, stdin, and directories) unless `--snapshot-id` is explicitly set.
 - **Snapshot listing parity:** Non-directory adds (single file/stdin) are also persisted into `tree_snapshots`, so `yams list --snapshots` reflects both directory and non-directory snapshot operations.
 - Trees enable fast `yams diff` operations using O(log n) subtree matching.
@@ -558,7 +558,7 @@ yams list --name "src/**" --tags "test" --extension ".cpp" --mime "text/x-c++"
 - Combine multiple filters to narrow results efficiently
 - Use `--format json` with tree queries for programmatic processing
 
-### Snapshot Operations (Enhanced in PBI-043)
+### Snapshot Operations (Enhanced in snapshot improvements)
 
 The `list` command has been enhanced with smart snapshot and file history capabilities:
 
@@ -630,7 +630,7 @@ The command classifies inputs by meaning instead of just checking for `/` or `.`
 
 Compare two snapshots and show file changes with tree diff.
 
-**New in PBI-043:** Efficient snapshot comparison using Merkle tree diffs with rename detection.
+**New in snapshot improvements:** Efficient snapshot comparison using Merkle tree diffs with rename detection.
 
 Synopsis:
 - yams diff <snapshotA> <snapshotB> [options]
@@ -823,7 +823,7 @@ Description:
 - Full-text search with FTS5 indexing provides fast document content queries with robust special character handling.
 - Hash search allows finding documents by their SHA256 hash (full 64-character hash or partial prefix).
 - Automatic fallback: if FTS5 query fails (due to special characters), automatically falls back to fuzzy search.
-- Robust query sanitization handles special characters like hyphens, quotes, and operators (e.g., "PBI-6", "task 4-").
+- Robust query sanitization handles special characters like hyphens, quotes, and operators (e.g., "task-6", "task 4-").
 - JSON output includes relevance scores, execution times, and content snippets.
 - Searches document names, content, tags, and metadata fields.
 - Auto-detects hash format: if query looks like a hash (8-64 hex chars), automatically searches by hash.
@@ -1509,7 +1509,7 @@ Pin an existing grammar manually with `YAMS_TS_<LANG>_LIB=/path/to/libtree-sitte
 
 ## Snapshot Workflows
 
-**New in PBI-043:** Efficient snapshot management with Merkle tree diffs and rename detection.
+**New in snapshot improvements:** Efficient snapshot management with Merkle tree diffs and rename detection.
 
 ### Overview
 

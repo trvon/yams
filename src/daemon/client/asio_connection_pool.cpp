@@ -505,6 +505,50 @@ void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
     }
 }
 
+AsioConnectionPool::RegistryStats AsioConnectionPool::registry_stats() {
+    RegistryStats stats;
+    std::vector<std::shared_ptr<AsioConnectionPool>> pools;
+    {
+        std::shared_lock<std::shared_mutex> lk(registry_mutex());
+        auto& map = registry_map();
+        pools.reserve(map.size());
+        for (auto& [_, pool] : map) {
+            if (pool) {
+                pools.push_back(pool);
+            }
+        }
+    }
+
+    stats.pools = pools.size();
+    for (auto& pool : pools) {
+        if (!pool) {
+            continue;
+        }
+        if (pool->shared_) {
+            ++stats.sharedPools;
+        }
+        std::lock_guard<std::mutex> lk(pool->mutex_);
+        stats.trackedConnections += pool->connection_pool_.size();
+        for (const auto& weak : pool->connection_pool_) {
+            auto conn = weak.lock();
+            if (!conn) {
+                continue;
+            }
+            ++stats.liveConnections;
+            if (conn->alive.load(std::memory_order_acquire)) {
+                ++stats.aliveConnections;
+            }
+            if (conn->in_use.load(std::memory_order_acquire)) {
+                ++stats.inUseConnections;
+            }
+            if (conn->socket && conn->socket->is_open()) {
+                ++stats.openSockets;
+            }
+        }
+    }
+    return stats;
+}
+
 void AsioConnectionPool::cleanup_stale_connections() {
     std::erase_if(connection_pool_, [](const std::weak_ptr<AsioConnection>& weak) {
         auto conn = weak.lock();

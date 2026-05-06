@@ -8,6 +8,10 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <future>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <thread>
 #include <vector>
@@ -15,6 +19,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_policy.h>
 #include <yams/compression/compression_stats.h>
+#include <yams/crypto/hasher.h>
 #include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/storage_engine.h>
 
@@ -35,6 +40,18 @@ std::vector<std::byte> generateCompressibleData(size_t size) {
             patternByte = static_cast<std::byte>(pattern(gen));
         }
         data[i] = patternByte;
+    }
+    return data;
+}
+
+std::vector<std::byte> generateHighEntropyData(size_t size) {
+    std::vector<std::byte> data(size);
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (size_t i = 0; i < size; ++i) {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        data[i] = static_cast<std::byte>((state * 0x2545F4914F6CDD1DULL) >> 56);
     }
     return data;
 }
@@ -61,6 +78,111 @@ struct CompressedStorageFixture {
     std::filesystem::path testDir;
     std::filesystem::path storagePath;
     std::shared_ptr<StorageEngine> underlying;
+};
+
+class CapturingStorageEngine final : public IStorageEngine {
+public:
+    Result<void> store(std::string_view hash, std::span<const std::byte> data) override {
+        std::lock_guard lock(mutex_);
+        objects_[std::string(hash)] = std::vector<std::byte>(data.begin(), data.end());
+        return {};
+    }
+
+    Result<std::vector<std::byte>> retrieve(std::string_view hash) const override {
+        auto raw = retrieveRaw(hash);
+        if (!raw) {
+            return raw.error();
+        }
+        return raw.value().data;
+    }
+
+    Result<RawObject> retrieveRaw(std::string_view hash) const override {
+        std::lock_guard lock(mutex_);
+        auto it = objects_.find(std::string(hash));
+        if (it == objects_.end()) {
+            return Error{ErrorCode::ChunkNotFound, "captured key not found"};
+        }
+        RawObject out;
+        out.data = it->second;
+        auto parsed = CompressionHeader::parse(out.data);
+        if (parsed) {
+            out.header = parsed.value();
+        }
+        return out;
+    }
+
+    Result<bool> exists(std::string_view hash) const noexcept override {
+        try {
+            std::lock_guard lock(mutex_);
+            return objects_.contains(std::string(hash));
+        } catch (...) {
+            return Error{ErrorCode::InternalError, "exists failed"};
+        }
+    }
+
+    Result<void> remove(std::string_view hash) override {
+        std::lock_guard lock(mutex_);
+        objects_.erase(std::string(hash));
+        return {};
+    }
+
+    Result<uint64_t> getBlockSize(std::string_view hash) const override {
+        auto raw = retrieveRaw(hash);
+        if (!raw) {
+            return raw.error();
+        }
+        return static_cast<uint64_t>(raw.value().data.size());
+    }
+
+    std::future<Result<void>> storeAsync(std::string_view hash,
+                                         std::span<const std::byte> data) override {
+        return std::async(std::launch::async,
+                          [this, hash = std::string(hash),
+                           copy = std::vector<std::byte>(data.begin(), data.end())]() {
+                              return store(hash, copy);
+                          });
+    }
+
+    std::future<Result<std::vector<std::byte>>>
+    retrieveAsync(std::string_view hash) const override {
+        return std::async(std::launch::async,
+                          [this, hash = std::string(hash)]() { return retrieve(hash); });
+    }
+
+    std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const override {
+        return std::async(std::launch::async,
+                          [this, hash = std::string(hash)]() { return retrieveRaw(hash); });
+    }
+
+    std::vector<Result<void>>
+    storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
+        std::vector<Result<void>> out;
+        out.reserve(items.size());
+        for (const auto& [hash, data] : items) {
+            out.push_back(store(hash, data));
+        }
+        return out;
+    }
+
+    yams::storage::StorageStats getStats() const noexcept override { return {}; }
+
+    Result<uint64_t> getStorageSize() const override {
+        std::lock_guard lock(mutex_);
+        uint64_t total = 0;
+        for (const auto& [_, data] : objects_) {
+            total += data.size();
+        }
+        return total;
+    }
+
+    std::vector<std::byte> captured(std::string_view hash) const {
+        std::lock_guard lock(mutex_);
+        return objects_.at(std::string(hash));
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, std::vector<std::byte>> objects_;
 };
 
 } // namespace
@@ -211,6 +333,15 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
     auto updatedRules = engine->getPolicyRules();
     CHECK(updatedRules.neverCompressBelow == 8192);
     CHECK(updatedRules.alwaysCompressAbove == 5 * 1024 * 1024);
+
+    auto data = generateCompressibleData(4096);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+    REQUIRE(engine->store(hash, data).has_value());
+
+    auto raw = underlying->retrieveRaw(hash);
+    REQUIRE(raw.has_value());
+    CHECK_FALSE(raw.value().header.has_value());
+    CHECK(raw.value().data == data);
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine concurrent access",
@@ -292,4 +423,120 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operat
         }
     }
     CHECK(successCount == static_cast<int>(items.size()));
+}
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine does not treat KRNC-prefixed raw data as compressed",
+                 "[storage][compressed][header][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    std::string hash = std::format("{:064x}", 0xabc123);
+    std::vector<std::byte> data(CompressionHeader::SIZE, std::byte{0x42});
+    const uint32_t magic = CompressionHeader::MAGIC;
+    std::memcpy(data.data(), &magic, sizeof(magic));
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto retrieveResult = engine->retrieve(hash);
+    REQUIRE(retrieveResult.has_value());
+    CHECK(retrieveResult.value() == data);
+}
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine stores blocks that base StorageEngine can verify",
+                 "[storage][compressed][integrity][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    auto data = generateCompressibleData(8192);
+    auto hasher = yams::crypto::createSHA256Hasher();
+    auto hash = hasher->hash(data);
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto verifyResult = underlying->verify();
+    REQUIRE(verifyResult.has_value());
+}
+
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine stores original bytes when compression is not smaller",
+                 "[storage][compressed][optimality][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    auto data = generateHighEntropyData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
+
+    auto raw = underlying->retrieveRaw(hash);
+    REQUIRE(raw.has_value());
+    CHECK_FALSE(raw.value().header.has_value());
+    CHECK(raw.value().data.size() == data.size());
+    CHECK(raw.value().data == data);
+}
+
+TEST_CASE("CompressedStorageEngine compresses before generic backend store",
+          "[storage][compressed][backend][remote][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+
+    auto uploaded = capturing->captured(hash);
+    CHECK(uploaded.size() < data.size());
+    CHECK(CompressionHeader::parse(uploaded).has_value());
+
+    auto readBack = engine.retrieve(hash);
+    REQUIRE(readBack.has_value());
+    CHECK(readBack.value() == data);
+}
+
+TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for generic backend",
+          "[storage][compressed][backend][remote][optimality][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateHighEntropyData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+
+    auto uploaded = capturing->captured(hash);
+    CHECK(uploaded == data);
+    CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
 }

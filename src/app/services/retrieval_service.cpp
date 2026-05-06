@@ -774,6 +774,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
             try {
                 stem = std::filesystem::path(name).stem().string();
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
             cand = try_list_pattern(std::string("%/") + stem + "%", 64);
         }
@@ -847,6 +848,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
             return get(greq_opts, opts);
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     return Error{ErrorCode::NotFound, "document not found by name"};

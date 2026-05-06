@@ -83,6 +83,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         try {
             was_loaded = provider->isModelLoaded(req.modelName);
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         int timeout_ms = 30000;
@@ -92,6 +93,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                 if (timeout_ms < 1000)
                     timeout_ms = 1000;
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
@@ -128,6 +130,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                 }
                             }
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
 
@@ -149,9 +152,11 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                       req.modelName);
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         ModelLoadResponse resp;
         resp.success = true;

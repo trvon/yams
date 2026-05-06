@@ -20,15 +20,17 @@ namespace yams::vector {
 struct EmbeddingConfig {
     // Backend selection
     enum class Backend {
-        Daemon, // Use daemon service
-        Hybrid  // Legacy alias; treated as daemon-only
+        Daemon,      // Use daemon service / daemon-selected model provider
+        Hybrid,      // Legacy alias; treated as daemon-only
+        Simeon,      // In-process SIMD model-free (third_party/simeon)
+        OnnxRuntime, // ONNX Runtime embeddings via the daemon/plugin model provider path
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
 
     // Model configuration (used by daemon and fallback/mock providers)
     std::string model_name = "all-MiniLM-L6-v2";
     size_t max_sequence_length = 512;
-    size_t embedding_dim = 384;
+    size_t embedding_dim = 1024;
     size_t batch_size = 32;
     bool normalize_embeddings = true;
     float padding_token_id = 0.0f;
@@ -40,6 +42,11 @@ struct EmbeddingConfig {
     bool enable_gpu = false;
     int num_threads = -1;      // -1 for auto-detect
     int inter_op_threads = -1; // -1 for auto-detect
+
+    // When true, force deterministic ONNX runtime: sequential execution,
+    // IntraOpNumThreads=1. Throughput cost is absorbed by bench harnesses; set
+    // from [embeddings].deterministic TOML / bench config — never from env.
+    bool deterministic = false;
 
     // Daemon backend settings
     std::string daemon_socket; // Empty = auto-resolve based on runtime environment
@@ -118,87 +125,8 @@ struct GenerationStats {
     }
 };
 
-/**
- * Text preprocessing utilities
- */
-class TextPreprocessor {
-public:
-    explicit TextPreprocessor(const EmbeddingConfig& config);
-    ~TextPreprocessor();
-
-    // Text normalization
-    std::string normalizeText(const std::string& text);
-
-    // Tokenization (basic implementation - can be extended with proper tokenizers)
-    std::vector<int32_t> tokenize(const std::string& text);
-    std::vector<std::vector<int32_t>> tokenizeBatch(const std::vector<std::string>& texts);
-
-    // Token processing
-    std::vector<int32_t> truncateTokens(const std::vector<int32_t>& tokens, size_t max_length);
-    std::vector<int32_t> padTokens(const std::vector<int32_t>& tokens, size_t target_length);
-
-    // Attention mask generation
-    std::vector<int32_t> generateAttentionMask(const std::vector<int32_t>& tokens);
-
-    // Utility functions
-    size_t getVocabSize() const;
-    bool isValidToken(int32_t token_id) const;
-    std::string decodeToken(int32_t token_id) const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl;
-};
-
-/**
- * ONNX model management for embeddings
- */
-class ModelManager {
-public:
-    ModelManager();
-    ~ModelManager();
-
-    // Non-copyable but movable
-    ModelManager(const ModelManager&) = delete;
-    ModelManager& operator=(const ModelManager&) = delete;
-    ModelManager(ModelManager&&) noexcept;
-    ModelManager& operator=(ModelManager&&) noexcept;
-
-    // Model loading and management
-    bool loadModel(const std::string& model_name, const std::string& model_path);
-    bool isModelLoaded(const std::string& model_name) const;
-    void unloadModel(const std::string& model_name);
-    void clearCache();
-
-    // Model inference
-    std::vector<std::vector<float>>
-    runInference(const std::string& model_name,
-                 const std::vector<std::vector<int32_t>>& input_tokens,
-                 const std::vector<std::vector<int32_t>>& attention_masks = {});
-
-    // Model information
-    size_t getModelEmbeddingDim(const std::string& model_name) const;
-    size_t getModelMaxLength(const std::string& model_name) const;
-
-    // Performance and monitoring
-    struct ModelStats {
-        size_t inference_count = 0;
-        std::chrono::milliseconds total_inference_time{0};
-        size_t model_size_bytes = 0;
-        size_t memory_usage_bytes = 0;
-    };
-
-    ModelStats getModelStats(const std::string& model_name) const;
-    std::vector<std::string> getLoadedModels() const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl;
-};
-
 // Forward declarations for backend implementations
 class IEmbeddingBackend;
-class LocalOnnxBackend;
 class DaemonBackend;
 class HybridBackend;
 

@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <map>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -16,6 +15,19 @@ namespace yams::topology {
 namespace {
 
 using PairKey = std::pair<std::size_t, std::size_t>;
+
+struct PairKeyHash {
+    std::size_t operator()(const PairKey& k) const noexcept {
+        // Mix via splitmix-style combine; both halves fit in 64 bits on 64-bit.
+        const std::uint64_t a = static_cast<std::uint64_t>(k.first);
+        const std::uint64_t b = static_cast<std::uint64_t>(k.second);
+        std::uint64_t x = a * 0x9E3779B97F4A7C15ULL + b;
+        x ^= x >> 33;
+        x *= 0xFF51AFD7ED558CCDULL;
+        x ^= x >> 33;
+        return static_cast<std::size_t>(x);
+    }
+};
 
 std::string makeSnapshotId(std::uint64_t unixSeconds) {
     return "topology-" + std::to_string(unixSeconds);
@@ -52,7 +64,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    std::map<PairKey, float> pairWeights;
+    std::unordered_map<PairKey, float, PairKeyHash> pairWeights;
     for (std::size_t i = 0; i < documents.size(); ++i) {
         for (const auto& neighbor : documents[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -135,18 +147,18 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                 }
                 weightedDegree[idx] += weight;
                 ++degree;
+                // Each undirected edge is stored twice in adjacency (u->v and
+                // v->u). Count it once for cohesion/persistence by only
+                // accumulating on the ordered half.
+                if (idx < neighborIdx) {
+                    cohesion += weight;
+                    persistence =
+                        internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
+                    ++internalEdgeCount;
+                }
             }
             if (component.size() > 2 && degree >= 2) {
                 ++bridgeCount;
-            }
-        }
-
-        for (const auto& [key, weight] : pairWeights) {
-            if (componentSet.contains(key.first) && componentSet.contains(key.second)) {
-                cohesion += weight;
-                persistence =
-                    internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
-                ++internalEdgeCount;
             }
         }
 
@@ -523,22 +535,51 @@ StableClusterTopologyRouter::route(const TopologyRouteRequest& request,
                                    const TopologyArtifactBatch& artifacts) const {
     std::unordered_set<std::string> seeds(request.seedDocumentHashes.begin(),
                                           request.seedDocumentHashes.end());
+    const double totalSeeds = static_cast<double>(seeds.size());
     std::vector<ClusterRoute> routes;
     routes.reserve(artifacts.clusters.size());
 
     for (const auto& cluster : artifacts.clusters) {
-        double routeScore = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
-        bool matchedSeed = false;
+        std::size_t seedsInCluster = 0;
         for (const auto& documentHash : cluster.memberDocumentHashes) {
             if (seeds.contains(documentHash)) {
-                matchedSeed = true;
+                ++seedsInCluster;
+            }
+        }
+        const bool matchedSeed = seedsInCluster > 0;
+
+        double routeScore = 0.0;
+        switch (request.scoringMode) {
+            case RouteScoringMode::SizeWeighted: {
+                double base = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
+                if (matchedSeed) {
+                    base += 1.0;
+                }
+                base += std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
+                const double sizeDamp =
+                    1.0 / (1.0 + std::log1p(static_cast<double>(cluster.memberCount)));
+                routeScore = base * sizeDamp;
+                break;
+            }
+            case RouteScoringMode::SeedCoverage: {
+                const double coverage =
+                    totalSeeds > 0.0 ? static_cast<double>(seedsInCluster) / totalSeeds : 0.0;
+                routeScore =
+                    coverage + (cluster.persistenceScore * 0.1) +
+                    std::min<double>(0.1, static_cast<double>(cluster.memberCount) / 200.0);
+                break;
+            }
+            case RouteScoringMode::Current:
+            default: {
+                routeScore = cluster.persistenceScore + (cluster.cohesionScore * 0.5);
+                if (matchedSeed) {
+                    routeScore += 1.0;
+                }
+                routeScore +=
+                    std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
                 break;
             }
         }
-        if (matchedSeed) {
-            routeScore += 1.0;
-        }
-        routeScore += std::min<double>(0.25, static_cast<double>(cluster.memberCount) / 40.0);
 
         routes.push_back(ClusterRoute{
             .clusterId = cluster.clusterId,
@@ -557,6 +598,104 @@ StableClusterTopologyRouter::route(const TopologyRouteRequest& request,
         return lhs.clusterId < rhs.clusterId;
     });
 
+    if (request.limit > 0 && routes.size() > request.limit) {
+        routes.resize(request.limit);
+    }
+    return routes;
+}
+
+namespace {
+
+float dotProduct(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size() || a.empty()) {
+        return 0.0F;
+    }
+    double acc = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        acc += static_cast<double>(a[i]) * static_cast<double>(b[i]);
+    }
+    return static_cast<float>(acc);
+}
+
+float vectorNorm(const std::vector<float>& a) {
+    if (a.empty()) {
+        return 0.0F;
+    }
+    double acc = 0.0;
+    for (const float v : a) {
+        acc += static_cast<double>(v) * static_cast<double>(v);
+    }
+    return static_cast<float>(std::sqrt(acc));
+}
+
+float cosineCentroid(const std::vector<float>& q, const std::vector<float>& c) {
+    const float qn = vectorNorm(q);
+    const float cn = vectorNorm(c);
+    if (qn <= 0.0F || cn <= 0.0F) {
+        return 0.0F;
+    }
+    return dotProduct(q, c) / (qn * cn);
+}
+
+} // namespace
+
+Result<std::vector<ClusterRoute>>
+SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
+                                 const TopologyArtifactBatch& artifacts) const {
+    std::unordered_set<std::string> seeds(request.seedDocumentHashes.begin(),
+                                          request.seedDocumentHashes.end());
+
+    std::vector<std::pair<const ClusterArtifact*, std::pair<std::size_t, float>>> scored;
+    scored.reserve(artifacts.clusters.size());
+
+    std::size_t maxBm25Mass = 0;
+    for (const auto& cluster : artifacts.clusters) {
+        std::size_t mass = 0;
+        if (!seeds.empty()) {
+            for (const auto& h : cluster.memberDocumentHashes) {
+                if (seeds.contains(h)) {
+                    ++mass;
+                }
+            }
+        }
+        if (mass > maxBm25Mass) {
+            maxBm25Mass = mass;
+        }
+        float dense = 0.0F;
+        if (!request.queryEmbedding.empty() && !cluster.centroidEmbedding.empty()) {
+            dense = cosineCentroid(request.queryEmbedding, cluster.centroidEmbedding);
+            // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
+            dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
+        }
+        scored.emplace_back(&cluster, std::make_pair(mass, dense));
+    }
+
+    const float alpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
+    std::vector<ClusterRoute> routes;
+    routes.reserve(scored.size());
+    for (const auto& [cluster, signals] : scored) {
+        const std::size_t mass = signals.first;
+        const float dense = signals.second;
+        const float sparseNorm =
+            (maxBm25Mass > 0) ? static_cast<float>(mass) / static_cast<float>(maxBm25Mass) : 0.0F;
+        const double routeScore = static_cast<double>(alpha * sparseNorm + (1.0F - alpha) * dense) +
+                                  (cluster->persistenceScore * 0.05);
+        routes.push_back(ClusterRoute{
+            .clusterId = cluster->clusterId,
+            .medoidDocumentHash = cluster->medoid.has_value()
+                                      ? std::optional<std::string>(cluster->medoid->documentHash)
+                                      : std::nullopt,
+            .routeScore = routeScore,
+            .stabilityScore = cluster->persistenceScore,
+            .memberCount = cluster->memberCount});
+    }
+
+    std::sort(routes.begin(), routes.end(), [](const ClusterRoute& lhs, const ClusterRoute& rhs) {
+        if (lhs.routeScore != rhs.routeScore) {
+            return lhs.routeScore > rhs.routeScore;
+        }
+        return lhs.clusterId < rhs.clusterId;
+    });
     if (request.limit > 0 && routes.size() > request.limit) {
         routes.resize(request.limit);
     }

@@ -334,7 +334,6 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"max_log_size", "104857600"},
               {"sync_interval", "1000"},
               {"sync_timeout_ms", "100"},
-              {"compress_old_logs", "true"},
               {"max_open_files", "10"},
               {"enable_group_commit", "true"}}},
 
@@ -356,12 +355,13 @@ ConfigMigrator::getLatestConfigDefaults() {
 
             {"embeddings",
              {{"enable", "true"},
+              {"backend", "simeon"},
               {"auto_generate", "false"},
               {"auto_on_add", "false"},
-              {"preferred_model", "all-MiniLM-L6-v2"},
+              {"preferred_model", "simeon-default"},
               {"tokenizer_path", "models/tokenizer.json"},
               {"max_sequence_length", "512"},
-              {"embedding_dim", "384"},
+              {"embedding_dim", "1024"},
               {"batch_size", "32"},
               {"normalize_embeddings", "true"},
               {"enable_gpu", "false"},
@@ -416,6 +416,17 @@ ConfigMigrator::getLatestConfigDefaults() {
 
             {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
 
+            {"search.topology",
+             {{"enable_weak_query_routing", "false"},
+              {"max_clusters", "2"},
+              {"max_docs", "64"},
+              {"medoid_boost", "0.05"},
+              {"bridge_boost", "0.03"},
+              {"routed_base_multiplier", "0.85"},
+              {"routing_variant", "baseline"}}},
+
+            {"indexing", {{"sync_threshold", "10"}}},
+
             // Daemon service defaults: enable model provider + plugin autoload by default
             {"daemon",
              {{"enable", "true"},
@@ -431,7 +442,7 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"plugin_dir_strict", "false"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
-              {"auto_rebuild_on_dim_mismatch", "true"},
+              {"auto_rebuild_on_dim_mismatch", "false"},
               {"socket_path", "/tmp/yams-daemon.sock"},
               {"pid_file", "/tmp/yams-daemon.pid"},
               {"worker_threads", "0"},
@@ -439,6 +450,8 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"connect_timeout_ms", "1000"},
               {"request_timeout_ms", "5000"},
               {"log_level", "info"}}},
+
+            {"daemon.instrumentation", {{"profile", "auto"}, {"msl_stack_log_warn_mb", "2048"}}},
 
             {"tuning",
              {{"profile", "balanced"},
@@ -526,36 +539,11 @@ ConfigMigrator::getLatestConfigDefaults() {
             {"experimental", {{"enable", "false"}}},
 
             {"plugins.symbol_extraction", {{"enable", "true"}, {"auto_download_grammars", "true"}}},
-            {"experimental.bert_ner",
-             {{"enable", "false"},
-              {"model_path", ""},
-              {"model_name", "bert-base-NER"},
-              {"batch_size", "16"},
-              {"confidence_threshold", "0.8"},
-              {"auto_tag", "false"},
-              {"update_knowledge_graph", "false"},
-              {"entity_types", "[\"PERSON\", \"ORG\", \"LOC\", \"MISC\"]"}}},
-
-            {"experimental.auto_tagging",
-             {{"enable", "false"},
-              {"use_bert_ner", "false"},
-              {"use_keyword_extraction", "true"},
-              {"use_topic_modeling", "false"},
-              {"min_tag_confidence", "0.7"},
-              {"max_tags_per_document", "10"},
-              {"tag_update_frequency_hours", "24"}}},
-
-            {"experimental.smart_chunking",
-             {{"enable", "false"},
-              {"use_semantic_boundaries", "false"},
-              {"use_sentence_detection", "true"},
-              {"preserve_code_blocks", "true"},
-              {"preserve_markdown_sections", "true"}}},
 
             {"daemon.models",
              {{"max_loaded_models", "4"},
               {"hot_pool_size", "2"},
-              {"preload_models", "[\"all-MiniLM-L6-v2\", \"bart-large-mnli\"]"},
+              {"preload_models", "[]"},
               {"lazy_loading", "false"},
               {"model_idle_timeout_s", "300"},
               {"enable_gpu", "false"},
@@ -756,6 +744,8 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "search",
                                              "search.path_tree",
                                              "search.hybrid",
+                                             "search.topology",
+                                             "indexing",
                                              "knowledge_graph",
                                              "file_detection",
                                              "downloader",
@@ -763,6 +753,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "downloader.proxy",
                                              "mcp_server",
                                              "daemon",
+                                             "daemon.instrumentation",
                                              "daemon.models",
                                              "daemon.resource_pool",
                                              "daemon.client",
@@ -771,12 +762,10 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "cli.pool",
                                              "plugins.symbol_extraction",
                                              "experimental",
-                                             "experimental.bert_ner",
-                                             "experimental.auto_tagging",
-                                             "experimental.smart_chunking",
                                              "classification",
                                              "search.hotzones",
                                              "search.enhanced",
+                                             "repair",
                                              "migrations"};
 
     std::set<std::string> written;
@@ -952,6 +941,28 @@ Result<void> ConfigMigrator::validateLatestConfig(const fs::path& configPath) {
         if (comp.find("lzma_level") != comp.end()) {
             if (!validateRange(comp.at("lzma_level"), 0, 9)) {
                 return Error{ErrorCode::InvalidData, "Invalid lzma_level (must be 0-9)"};
+            }
+        }
+    }
+
+    // Check daemon instrumentation profile and warning threshold.
+    if (config.find("daemon.instrumentation") != config.end()) {
+        const auto& instr = config.at("daemon.instrumentation");
+        if (instr.find("profile") != instr.end()) {
+            std::string profile = instr.at("profile");
+            std::transform(profile.begin(), profile.end(), profile.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::set<std::string> allowedProfiles = {
+                "auto", "memory", "msl", "normal", "off", "memory_instrumentation"};
+            if (allowedProfiles.find(profile) == allowedProfiles.end()) {
+                return Error{ErrorCode::InvalidData, "Invalid daemon.instrumentation.profile "
+                                                     "(must be auto, memory, msl, normal, or off)"};
+            }
+        }
+        if (instr.find("msl_stack_log_warn_mb") != instr.end()) {
+            if (!validateRange(instr.at("msl_stack_log_warn_mb"), 0, 1048576)) {
+                return Error{ErrorCode::InvalidData,
+                             "Invalid daemon.instrumentation.msl_stack_log_warn_mb"};
             }
         }
     }

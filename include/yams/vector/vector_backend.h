@@ -1,12 +1,14 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
-#include <yams/vector/vector_database.h>
+#include <yams/vector/vector_types.h>
 
 namespace yams::vector {
 
@@ -123,6 +125,26 @@ public:
     getVectorsByDocument(const std::string& document_hash) = 0;
 
     /**
+     * @brief Fetch every document-level vector in one pass, keyed by document hash.
+     *
+     * Avoids the N-call loop through `getVectorsByDocument` when a caller needs
+     * doc-level embeddings for the whole corpus (topology rebuild, semantic
+     * neighbor graph). One prepared-statement reset cycle instead of N — on
+     * macOS this sidesteps libsqlite3's `purgeableCacheShrink` per-reset cost.
+     */
+    virtual Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() = 0;
+
+    /**
+     * @brief Stream every document-level vector to a visitor without building an
+     * intermediate corpus map in the backend.
+     *
+     * The visitor returns false to stop early. The returned size is the number
+     * of records delivered to the visitor.
+     */
+    virtual Result<size_t>
+    forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) = 0;
+
+    /**
      * @brief Check if a document has embeddings
      */
     virtual Result<bool> hasEmbedding(const std::string& document_hash) = 0;
@@ -141,7 +163,7 @@ public:
     /**
      * @brief Get storage statistics
      */
-    virtual Result<VectorDatabase::DatabaseStats> getStats() = 0;
+    virtual Result<VectorDatabaseStats> getStats() = 0;
 
     /**
      * @brief Build or rebuild search index
@@ -162,6 +184,11 @@ public:
      * @brief Optimize storage and indices
      */
     virtual Result<void> optimize() = 0;
+
+    /**
+     * @brief Persist an already-prepared search index without triggering heavyweight rebuild work.
+     */
+    virtual Result<void> persistIndex() { return optimize(); }
 
     // =========================================================================
     // Entity Vector Operations (for symbols, functions, classes, etc.)
@@ -263,12 +290,6 @@ public:
 /**
  * @brief Factory function for creating vector backends
  */
-enum class VectorBackendType {
-    SqliteVec, // sqlite-vec extension (default)
-    LanceDB,   // LanceDB (future)
-    InMemory   // In-memory only (testing)
-};
-
 std::unique_ptr<IVectorBackend>
 createVectorBackend(VectorBackendType type = VectorBackendType::SqliteVec);
 

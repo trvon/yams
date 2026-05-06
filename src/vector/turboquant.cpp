@@ -906,7 +906,7 @@ std::vector<uint8_t> TurboQuantMSE::saveFittedModel() const {
     size_t offset = 0;
 
     // version (4 bytes, little-endian)
-    std::memcpy(&blob[offset], &version, 4);
+    std::memcpy(blob.data() + offset, &version, sizeof(version));
     offset += 4;
     // bits (1 byte)
     blob[offset] = config_.bits_per_channel;
@@ -916,13 +916,13 @@ std::vector<uint8_t> TurboQuantMSE::saveFittedModel() const {
 
     // scales (dim floats)
     if (!per_coord_scales_.empty()) {
-        std::memcpy(&blob[offset], per_coord_scales_.data(), scales_bytes);
+        std::memcpy(blob.data() + offset, per_coord_scales_.data(), scales_bytes);
     }
     offset += scales_bytes;
 
     // per-coord centroids
     if (!per_coord_centroids_.empty()) {
-        std::memcpy(&blob[offset], per_coord_centroids_.data(), centroids_bytes);
+        std::memcpy(blob.data() + offset, per_coord_centroids_.data(), centroids_bytes);
     }
 
     return blob;
@@ -934,7 +934,7 @@ bool TurboQuantMSE::loadFittedModel(std::span<const uint8_t> blob) {
     size_t offset = 0;
 
     uint32_t version = 0;
-    std::memcpy(&version, &blob[offset], 4);
+    std::memcpy(&version, blob.data() + offset, sizeof(version));
     offset += 4;
 
     uint8_t bits = blob[offset];

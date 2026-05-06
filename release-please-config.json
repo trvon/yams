@@ -9,12 +9,13 @@
   "changelog-sections": [
     { "type": "feat", "section": "Added" },
     { "type": "fix", "section": "Fixed" },
+    { "type": "security", "section": "Security" },
     { "type": "perf", "section": "Performance" },
-    { "type": "docs", "section": "Documentation" },
-    { "type": "chore", "section": "Maintenance" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "chore", "section": "Maintenance", "hidden": true },
     { "type": "ci", "section": "CI/CD", "hidden": true },
     { "type": "test", "section": "Testing", "hidden": true },
-    { "type": "refactor", "section": "Changed" },
+    { "type": "refactor", "section": "Changed", "hidden": true },
     { "type": "build", "section": "Build", "hidden": true }
   ],
   "packages": {

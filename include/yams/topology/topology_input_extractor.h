@@ -3,11 +3,36 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/topology/topology_artifacts.h>
-#include <yams/vector/vector_database.h>
 
 #include <memory>
 
+namespace yams::vector {
+class VectorDatabase;
+}
+
 namespace yams::topology {
+
+// Phase V: per-doc feature composition for clustering input.
+// Composer concatenates: w_dense * dense_view + w_entity * entity_signature + w_minhash *
+// minhash_sketch. Each branch is a no-op when its enable flag is false; V0 baseline (all off)
+// reproduces the pre-Phase-V dense-only feature exactly (modulo L2 normalization, which matches
+// HDBSCAN's prior input).
+struct FeatureComposition {
+    // V-A: GLiNER entity-type histogram fused with dense embedding.
+    bool enableEntityFusion{false};
+    std::size_t entitySignatureK{16}; // top-K most frequent canonical entity types in corpus
+    float entityFusionAlpha{0.25F};   // weight on the entity signature; dense gets (1 - α_e - α_m)
+    float entityMinConfidence{0.45F}; // drop GLiNER tags below this confidence
+
+    // V-B: Simeon matryoshka coarse-view replacement of the dense embedding.
+    bool enableMatryoshkaCoarseView{false};
+    std::size_t matryoshkaTargetDim{1024}; // 0 or >= dense dim = no-op; 64/128/256 = coarsen
+
+    // V-C: per-doc MinHash signature sketch (requires Phase V-C ingest persistence).
+    bool enableMinHashSketch{false};
+    std::size_t minhashSketchDim{16}; // bucket-count sketch dim
+    float minhashAlpha{0.10F};        // weight on the MinHash sketch
+};
 
 struct TopologyExtractionConfig {
     std::vector<std::string> documentHashes;
@@ -17,6 +42,7 @@ struct TopologyExtractionConfig {
     bool includeMetadata{true};
     bool requireEmbeddings{false};
     bool requireGraphNode{false};
+    FeatureComposition featureComposition{};
 };
 
 struct TopologyExtractionStats {
@@ -30,6 +56,13 @@ struct TopologyExtractionStats {
     std::size_t neighborEdgesScanned{0};
     std::size_t neighborsReturned{0};
     std::size_t regionDocuments{0};
+    // Phase V: feature composer telemetry.
+    std::size_t composedFeatureDim{0}; // final per-doc vector length
+    std::size_t composedDocsWithEntitySignature{
+        0};                                       // docs that produced a non-zero entity signature
+    std::size_t composedDocsWithMinHashSketch{0}; // docs that produced a non-zero minhash sketch
+    std::size_t composedFilteredLowConfidenceCount{0};
+    std::size_t composedTopKEntityTypeCount{0}; // size of the corpus top-K entity-type cache
 };
 
 class TopologyInputExtractor {

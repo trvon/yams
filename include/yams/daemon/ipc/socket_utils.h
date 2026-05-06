@@ -13,4 +13,8 @@ std::filesystem::path resolve_socket_path();
 // daemon.socket_path. If not found, fall back to resolve_socket_path().
 std::filesystem::path resolve_socket_path_config_first();
 
+// Derive the proxy/control socket path from the main daemon socket path.
+// Example: /tmp/yams-daemon.sock -> /tmp/yams-daemon.proxy.sock
+std::filesystem::path derive_proxy_socket_path(const std::filesystem::path& mainSocketPath);
+
 } // namespace yams::daemon::socket_utils

@@ -75,6 +75,12 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
     const auto lastBuildCount = lastBuildDocCount_.load();
     const auto growth = currentCount > lastBuildCount ? currentCount - lastBuildCount : 0;
 
+    if (lastBuildCount == 0 && currentCount > 0) {
+        spdlog::info("[SearchComponent] Forcing first populated search rebuild (0 -> {} docs)",
+                     currentCount);
+        return true;
+    }
+
     if (state_.readiness.searchEngineReady.load(std::memory_order_relaxed) && growth > 0) {
         const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
         const bool lexicalOverlayCoversGrowth = freshness.lexicalDeltaPublishedDocs >= growth ||
@@ -87,6 +93,7 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
                     vectorUsable = true;
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         if (lexicalOverlayCoversGrowth && vectorUsable) {
@@ -177,6 +184,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
                 return false;
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -188,6 +196,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
@@ -210,6 +219,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     // Check for concurrent rebuild

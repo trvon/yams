@@ -13,7 +13,7 @@ Site landing: [index.md](index.md) • Project README: [../README.md](../README.
 | MCP server        | [user_guide/mcp.md](user_guide/mcp.md)           |
 | Embeddings        | [user_guide/embeddings.md](user_guide/embeddings.md) |
 | Tutorials         | [user_guide/tutorials/](user_guide/tutorials/)   |
-| Interactive tuning| [guides/interactive-tuning.md](guides/interactive-tuning.md) |
+| Tuning / diagnostics | [user_guide/cli.md](user_guide/cli.md) |
 | Plugins           | [PLUGINS.md](PLUGINS.md)                         |
 | Build from source | [BUILD.md](BUILD.md)                             |
 | Admin / ops       | [admin/operations.md](admin/operations.md)       |

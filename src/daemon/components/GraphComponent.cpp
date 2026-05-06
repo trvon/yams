@@ -4,6 +4,7 @@
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -44,6 +45,7 @@ collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
     if (!kgStore) {
         return Error{ErrorCode::InvalidArgument, "KnowledgeGraphStore is required"};
     }
+    (void)batchSize;
 
     auto docsResult = kgStore->findNodesByType("document", 1'000'000, 0);
     if (!docsResult) {
@@ -59,37 +61,20 @@ collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
     std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash> edgeIdsByPair;
     edgeIdsByPair.reserve(documentIds.size() * 4);
 
-    for (const auto& doc : docsResult.value()) {
-        std::size_t offset = 0;
-        while (true) {
-            auto edgesResult = kgStore->getEdgesFrom(doc.id, std::string_view("semantic_neighbor"),
-                                                     batchSize, offset);
-            if (!edgesResult) {
-                return edgesResult.error();
+    auto streamResult = kgStore->forEachEdgeByRelation(
+        std::string_view("semantic_neighbor"),
+        [&](std::int64_t edgeId, std::int64_t srcNodeId, std::int64_t dstNodeId, float) {
+            if (!documentIds.contains(srcNodeId)) {
+                return true;
             }
-
-            const auto& edges = edgesResult.value();
-            if (edges.empty()) {
-                break;
+            if (srcNodeId != dstNodeId && !documentIds.contains(dstNodeId)) {
+                return true;
             }
-
-            for (const auto& edge : edges) {
-                if (edge.srcNodeId == edge.dstNodeId) {
-                    edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId},
-                                          edge.id);
-                    continue;
-                }
-                if (!documentIds.contains(edge.dstNodeId)) {
-                    continue;
-                }
-                edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId}, edge.id);
-            }
-
-            offset += edges.size();
-            if (edges.size() < batchSize) {
-                break;
-            }
-        }
+            edgeIdsByPair.emplace(DirectedNodePair{srcNodeId, dstNodeId}, edgeId);
+            return true;
+        });
+    if (!streamResult) {
+        return streamResult.error();
     }
 
     return edgeIdsByPair;
@@ -299,97 +284,87 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     auto startTime = std::chrono::steady_clock::now();
     std::size_t skipped = 0;
 
-    // Collect all extraction jobs for batch submission
+    if (!entityService_ || !serviceManager_) {
+        return Error{ErrorCode::NotInitialized,
+                     "GraphComponent batch ingest requires entity service + service manager"};
+    }
+    auto contentStore = serviceManager_->getContentStore();
+    if (!contentStore) {
+        return Error{ErrorCode::NotInitialized, "ContentStore unavailable"};
+    }
+
+    std::unordered_map<std::string, std::string> extToLang;
+    {
+        const auto& extractors = serviceManager_->getSymbolExtractors();
+        for (const auto& extractor : extractors) {
+            if (!extractor)
+                continue;
+            for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
+                extToLang.emplace(ext, lang);
+            }
+        }
+    }
+    const auto& nlExtractors = serviceManager_->getEntityExtractors();
+    auto nlSupports = [&](std::string_view contentType) {
+        for (const auto& ex : nlExtractors) {
+            if (ex && ex->supportsContentType(std::string(contentType)))
+                return true;
+        }
+        return false;
+    };
+
     std::vector<EntityExtractionJob> extractionJobs;
     extractionJobs.reserve(contexts.size());
 
     for (auto& ctx : contexts) {
-        // Skip if entity extraction disabled or no service
-        if (ctx.skipEntityExtraction || !entityService_) {
+        if (ctx.skipEntityExtraction) {
             skipped++;
             continue;
         }
 
-        // Need ServiceManager to access content store
-        if (!serviceManager_) {
-            skipped++;
-            continue;
-        }
-
-        // Get content store to load document content
-        auto contentStore = serviceManager_->getContentStore();
-        if (!contentStore) {
-            skipped++;
-            continue;
-        }
-
-        // Detect language from file extension
         std::string language;
+        std::string ext;
         if (!ctx.filePath.empty()) {
             std::filesystem::path path(ctx.filePath);
-            std::string ext = path.extension().string();
+            ext = path.extension().string();
             if (!ext.empty() && ext[0] == '.') {
                 ext = ext.substr(1);
             }
-
-            // Query symbol extractors for language mapping
-            const auto& extractors = serviceManager_->getSymbolExtractors();
-            for (const auto& extractor : extractors) {
-                if (!extractor)
-                    continue;
-                auto supported = extractor->getSupportedExtensions();
-                auto it = supported.find(ext);
-                if (it != supported.end()) {
-                    language = it->second;
-                    break;
-                }
+            if (auto it = extToLang.find(ext); it != extToLang.end()) {
+                language = it->second;
             }
         }
 
-        // Check if NL entity extractors support this file type
         bool hasNlExtractor = false;
-        std::string contentType;
         if (language.empty() && !ctx.filePath.empty()) {
-            std::filesystem::path path(ctx.filePath);
-            std::string ext = path.extension().string();
-
-            // Map extension to content type for NL extractors
-            if (ext == ".md" || ext == ".markdown") {
+            std::string_view contentType;
+            if (ext == "md" || ext == "markdown") {
                 contentType = "text/markdown";
-            } else if (ext == ".json" || ext == ".jsonl") {
+            } else if (ext == "json" || ext == "jsonl") {
                 contentType = "application/json";
-            } else if (ext == ".txt" || ext.empty()) {
+            } else if (ext == "txt" || ext.empty()) {
                 contentType = "text/plain";
             }
-
-            // Check if any NL entity extractor supports this content type
             if (!contentType.empty()) {
-                const auto& nlExtractors = serviceManager_->getEntityExtractors();
-                for (const auto& ex : nlExtractors) {
-                    if (ex && ex->supportsContentType(contentType)) {
-                        hasNlExtractor = true;
-                        break;
-                    }
-                }
+                hasNlExtractor = nlSupports(contentType);
             }
         }
 
-        // Skip if no language detected AND no NL extractor supports the content type
         if (language.empty() && !hasNlExtractor) {
             spdlog::debug(
                 "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
-                ctx.filePath,
-                ctx.filePath.empty() ? ""
-                                     : std::filesystem::path(ctx.filePath).extension().string());
+                ctx.filePath, ext);
             skipped++;
             continue;
         }
 
-        std::vector<std::byte> bytes;
+        const std::byte* dataPtr = nullptr;
+        std::size_t dataLen = 0;
+        std::vector<std::byte> ownedFallback;
         if (ctx.contentBytes) {
-            bytes = *ctx.contentBytes;
+            dataPtr = ctx.contentBytes->data();
+            dataLen = ctx.contentBytes->size();
         } else {
-            // Load document content
             auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
             if (!contentResult) {
                 spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
@@ -397,11 +372,12 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
                 skipped++;
                 continue;
             }
-            bytes = std::move(contentResult.value());
+            ownedFallback = std::move(contentResult.value());
+            dataPtr = ownedFallback.data();
+            dataLen = ownedFallback.size();
         }
 
-        // Convert bytes to UTF-8 string
-        std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        std::string contentUtf8(reinterpret_cast<const char*>(dataPtr), dataLen);
 
         // Build extraction job
         EntityExtractionJob job;
@@ -566,26 +542,26 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
     if (!dryRun) {
         emit(processed);
-        auto orphanEdgesRes = runWithHeartbeat([&] { return kgStore_->deleteOrphanedEdges(); });
-        if (!orphanEdgesRes) {
+        auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+        if (!coord) {
             ++stats.errors;
-            stats.issues.push_back("deleteOrphanedEdges failed: " + orphanEdgesRes.error().message);
-        } else if (orphanEdgesRes.value() > 0) {
-            stats.issues.push_back("removed orphaned edges: " +
-                                   std::to_string(orphanEdgesRes.value()));
+            stats.issues.push_back("WriteCoordinator unavailable for orphan cleanup");
+        } else {
+            auto wb = std::make_unique<WriteBatch>();
+            wb->source = "GraphComponent::orphanCleanup";
+            wb->ops.emplace_back(DeleteOrphanedEdgesOp{});
+            wb->ops.emplace_back(DeleteOrphanedDocEntitiesOp{});
+            coord->enqueue(std::move(wb));
+            auto cleanupRes = runWithHeartbeat([&] { return coord->flush(); });
+            if (!cleanupRes) {
+                ++stats.errors;
+                stats.issues.push_back("orphan cleanup flush failed: " +
+                                       cleanupRes.error().message);
+            } else {
+                stats.issues.push_back("orphan cleanup queued via WriteCoordinator");
+            }
         }
-
         emit(processed);
-        auto orphanEntitiesRes =
-            runWithHeartbeat([&] { return kgStore_->deleteOrphanedDocEntities(); });
-        if (!orphanEntitiesRes) {
-            ++stats.errors;
-            stats.issues.push_back("deleteOrphanedDocEntities failed: " +
-                                   orphanEntitiesRes.error().message);
-        } else if (orphanEntitiesRes.value() > 0) {
-            stats.issues.push_back("removed orphaned doc_entities: " +
-                                   std::to_string(orphanEntitiesRes.value()));
-        }
     }
 
     std::size_t offset = 0;
@@ -623,19 +599,9 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         const auto tagsByDocId =
             tagsRes ? tagsRes.value() : std::unordered_map<int64_t, std::vector<std::string>>{};
 
-        auto batchRes = kgStore_->beginWriteBatch();
-        if (!batchRes) {
-            ++stats.errors;
-            stats.issues.push_back("beginWriteBatch failed: " + batchRes.error().message);
-            break;
-        }
-        auto batch = std::move(batchRes).value();
-
         // Collect unique nodes for this batch.
         std::vector<metadata::KGNode> nodes;
-        std::vector<std::string> nodeKeys;
         nodes.reserve(docs.size() * 3);
-        nodeKeys.reserve(docs.size() * 3);
 
         std::unordered_map<std::string, std::size_t> nodeIndex;
         nodeIndex.reserve(docs.size() * 3);
@@ -646,7 +612,6 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
                 return;
             }
             nodeIndex.emplace(node.nodeKey, nodes.size());
-            nodeKeys.push_back(node.nodeKey);
             nodes.push_back(std::move(node));
         };
 
@@ -734,25 +699,18 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
             }
         }
 
-        auto idsRes = batch->upsertNodes(nodes);
-        if (!idsRes) {
-            ++stats.errors;
-            stats.issues.push_back("upsertNodes failed: " + idsRes.error().message);
-            // Let WriteBatch destructor rollback.
-            break;
-        }
-        const auto& ids = idsRes.value();
-        stats.nodesCreated += static_cast<uint64_t>(ids.size()); // attempted upserts
+        stats.nodesCreated += static_cast<uint64_t>(nodes.size()); // attempted upserts
         emit(processed);
 
-        std::unordered_map<std::string, std::int64_t> idByKey;
-        idByKey.reserve(ids.size());
-        for (std::size_t i = 0; i < ids.size(); ++i) {
-            idByKey.emplace(nodeKeys[i], ids[i]);
-        }
-
-        std::vector<metadata::KGEdge> edges;
+        std::vector<DeferredEdge> edges;
         edges.reserve(docs.size() * 4);
+        auto addDeferredEdge = [&](std::string srcKey, std::string dstKey, std::string relation) {
+            DeferredEdge e;
+            e.srcNodeKey = std::move(srcKey);
+            e.dstNodeKey = std::move(dstKey);
+            e.relation = std::move(relation);
+            edges.push_back(std::move(e));
+        };
 
         for (const auto& d : docs) {
             if (d.sha256Hash.empty())
@@ -761,22 +719,8 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
             const std::string blobKey = "blob:" + d.sha256Hash;
             const std::string docKey = "doc:" + d.sha256Hash;
 
-            auto blobIdIt = idByKey.find(blobKey);
-            auto docIdIt = idByKey.find(docKey);
-            if (blobIdIt == idByKey.end() || docIdIt == idByKey.end())
-                continue;
-
-            const auto blobId = blobIdIt->second;
-            const auto docNodeId = docIdIt->second;
-
             // doc -> blob (optional bridge)
-            {
-                metadata::KGEdge e;
-                e.srcNodeId = docNodeId;
-                e.dstNodeId = blobId;
-                e.relation = "has_blob";
-                edges.push_back(std::move(e));
-            }
+            addDeferredEdge(docKey, blobKey, "has_blob");
 
             std::string normalizedPath;
             std::string parentPath;
@@ -793,39 +737,16 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
             if (!normalizedPath.empty()) {
                 const std::string fileKey = "path:file:" + normalizedPath;
-                auto fileIdIt = idByKey.find(fileKey);
-                if (fileIdIt != idByKey.end()) {
-                    const auto fileId = fileIdIt->second;
 
-                    // file -> blob (has_version) for GraphQueryService hash resolution.
-                    {
-                        metadata::KGEdge e;
-                        e.srcNodeId = fileId;
-                        e.dstNodeId = blobId;
-                        e.relation = "has_version";
-                        edges.push_back(std::move(e));
-                    }
+                // file -> blob (has_version) for GraphQueryService hash resolution.
+                addDeferredEdge(fileKey, blobKey, "has_version");
 
-                    // blob -> file (blob_at_path) helps traversals from blob.
-                    {
-                        metadata::KGEdge e;
-                        e.srcNodeId = blobId;
-                        e.dstNodeId = fileId;
-                        e.relation = "blob_at_path";
-                        edges.push_back(std::move(e));
-                    }
+                // blob -> file (blob_at_path) helps traversals from blob.
+                addDeferredEdge(blobKey, fileKey, "blob_at_path");
 
-                    if (!parentPath.empty()) {
-                        const std::string dirKey = "path:dir:" + parentPath;
-                        auto dirIdIt = idByKey.find(dirKey);
-                        if (dirIdIt != idByKey.end()) {
-                            metadata::KGEdge e;
-                            e.srcNodeId = dirIdIt->second;
-                            e.dstNodeId = fileId;
-                            e.relation = "contains";
-                            edges.push_back(std::move(e));
-                        }
-                    }
+                if (!parentPath.empty()) {
+                    const std::string dirKey = "path:dir:" + parentPath;
+                    addDeferredEdge(dirKey, fileKey, "contains");
                 }
             }
 
@@ -835,34 +756,106 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
                 for (const auto& t : tagIt->second) {
                     if (t.empty())
                         continue;
-                    const std::string tagKey = "tag:" + t;
-                    auto tagIdIt = idByKey.find(tagKey);
-                    if (tagIdIt == idByKey.end())
-                        continue;
-                    metadata::KGEdge e;
-                    e.srcNodeId = docNodeId;
-                    e.dstNodeId = tagIdIt->second;
-                    e.relation = "has_tag";
-                    edges.push_back(std::move(e));
+                    addDeferredEdge(docKey, "tag:" + t, "has_tag");
                 }
             }
         }
 
-        auto edgesRes = batch->addEdgesUnique(edges);
-        if (!edgesRes) {
-            ++stats.errors;
-            stats.issues.push_back("addEdgesUnique failed: " + edgesRes.error().message);
-            break;
-        }
         stats.edgesCreated += static_cast<uint64_t>(edges.size()); // attempted unique inserts
         emit(processed);
 
         if (!dryRun) {
-            auto commitRes = batch->commit();
-            if (!commitRes) {
-                ++stats.errors;
-                stats.issues.push_back("commit failed: " + commitRes.error().message);
-                break;
+            auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+            if (coord) {
+                auto wb = std::make_unique<WriteBatch>();
+                wb->source = "GraphComponent::repairGraph";
+                if (!nodes.empty()) {
+                    wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
+                }
+                if (!edges.empty()) {
+                    wb->ops.emplace_back(AddDeferredEdgesOp{std::move(edges)});
+                }
+                coord->enqueue(std::move(wb));
+                auto flushRes = coord->flush();
+                if (!flushRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("WriteCoordinator flush failed: " +
+                                           flushRes.error().message);
+                    break;
+                }
+            } else {
+                // Standalone unit-test/components path: production daemon runs through
+                // WriteCoordinator via ServiceManager, but GraphComponent is also constructible
+                // without the manager. Keep that path functional without silently reporting a
+                // successful repair that wrote nothing.
+                auto batchRes = kgStore_->beginWriteBatch();
+                if (!batchRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("beginWriteBatch failed: " + batchRes.error().message);
+                    break;
+                }
+                auto& kgBatch = *batchRes.value();
+
+                std::unordered_map<std::string, std::int64_t> nodeKeyToId;
+                nodeKeyToId.reserve(nodes.size());
+                if (!nodes.empty()) {
+                    std::vector<std::string> keys;
+                    keys.reserve(nodes.size());
+                    for (const auto& node : nodes) {
+                        keys.push_back(node.nodeKey);
+                    }
+                    auto idsRes = kgBatch.upsertNodes(nodes);
+                    if (!idsRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("upsertNodes failed: " + idsRes.error().message);
+                        break;
+                    }
+                    for (std::size_t i = 0; i < keys.size() && i < idsRes.value().size(); ++i) {
+                        nodeKeyToId.emplace(std::move(keys[i]), idsRes.value()[i]);
+                    }
+                }
+
+                std::vector<metadata::KGEdge> resolvedEdges;
+                resolvedEdges.reserve(edges.size());
+                auto resolveKey = [&](const std::string& key) -> std::optional<std::int64_t> {
+                    auto it = nodeKeyToId.find(key);
+                    if (it != nodeKeyToId.end()) {
+                        return it->second;
+                    }
+                    auto nodeRes = kgStore_->getNodeByKey(key);
+                    if (nodeRes && nodeRes.value().has_value()) {
+                        return nodeRes.value()->id;
+                    }
+                    return std::nullopt;
+                };
+                for (const auto& edge : edges) {
+                    auto src = resolveKey(edge.srcNodeKey);
+                    auto dst = resolveKey(edge.dstNodeKey);
+                    if (!src || !dst) {
+                        continue;
+                    }
+                    metadata::KGEdge kgEdge;
+                    kgEdge.srcNodeId = *src;
+                    kgEdge.dstNodeId = *dst;
+                    kgEdge.relation = edge.relation;
+                    kgEdge.weight = edge.weight;
+                    kgEdge.properties = edge.properties;
+                    resolvedEdges.push_back(std::move(kgEdge));
+                }
+                if (!resolvedEdges.empty()) {
+                    auto edgeRes = kgBatch.addEdgesUnique(resolvedEdges);
+                    if (!edgeRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("addEdgesUnique failed: " + edgeRes.error().message);
+                        break;
+                    }
+                }
+                auto commitRes = kgBatch.commit();
+                if (!commitRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("commit failed: " + commitRes.error().message);
+                    break;
+                }
             }
         }
 
@@ -1085,6 +1078,166 @@ GraphComponent::maintainSemanticTopology(bool dryRun) {
             static_cast<uint64_t>(updatedTopology->reciprocalCommunityCount);
         stats.largestReciprocalCommunity =
             static_cast<uint64_t>(updatedTopology->largestReciprocalCommunitySize);
+    }
+
+    return stats;
+}
+
+Result<GraphComponent::SemanticTopologyMaintenanceStats>
+GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
+                                                     bool dryRun) {
+    if (!initialized_ || !kgStore_) {
+        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
+    }
+
+    SemanticTopologyMaintenanceStats stats;
+    if (documentHashes.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology scoped maintenance skipped: no dirty documents");
+        return stats;
+    }
+
+    bool expected = false;
+    if (!semanticTopologyMaintenanceRunning_.compare_exchange_strong(expected, true,
+                                                                     std::memory_order_acq_rel)) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology maintenance already in progress");
+        return stats;
+    }
+
+    struct Guard {
+        std::atomic<bool>& flag;
+        ~Guard() { flag.store(false, std::memory_order_release); }
+    } guard{semanticTopologyMaintenanceRunning_};
+
+    std::vector<std::string> nodeKeys;
+    nodeKeys.reserve(documentHashes.size());
+    std::unordered_set<std::string> seenHashes;
+    seenHashes.reserve(documentHashes.size());
+    for (const auto& hash : documentHashes) {
+        if (hash.empty() || !seenHashes.insert(hash).second) {
+            continue;
+        }
+        nodeKeys.push_back("doc:" + hash);
+    }
+    if (nodeKeys.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no valid dirty documents");
+        return stats;
+    }
+
+    auto nodesResult = kgStore_->getNodesByKeys(nodeKeys);
+    if (!nodesResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to resolve scoped semantic topology nodes: " +
+                         nodesResult.error().message};
+    }
+
+    std::vector<std::int64_t> nodeIds;
+    nodeIds.reserve(nodesResult.value().size());
+    for (const auto& node : nodesResult.value()) {
+        if (node.id > 0) {
+            nodeIds.push_back(node.id);
+        }
+    }
+    if (nodeIds.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no graph nodes for dirty documents");
+        return stats;
+    }
+
+    constexpr std::size_t kIncidentEdgeLimitPerNode = 4096;
+    auto outgoingResult = kgStore_->getEdgesFromBatch(
+        nodeIds, std::string_view("semantic_neighbor"), kIncidentEdgeLimitPerNode);
+    if (!outgoingResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to load scoped outgoing semantic_neighbor edges: " +
+                         outgoingResult.error().message};
+    }
+    auto incomingResult = kgStore_->getEdgesToBatch(nodeIds, std::string_view("semantic_neighbor"),
+                                                    kIncidentEdgeLimitPerNode);
+    if (!incomingResult) {
+        return Error{ErrorCode::InternalError,
+                     "failed to load scoped incoming semantic_neighbor edges: " +
+                         incomingResult.error().message};
+    }
+
+    std::unordered_map<DirectedNodePair, std::int64_t, DirectedNodePairHash> edgeIdsByPair;
+    std::size_t incidentEdges = 0;
+    auto rememberEdge = [&](const metadata::KGEdge& edge) {
+        if (edge.srcNodeId <= 0 || edge.dstNodeId <= 0) {
+            return;
+        }
+        ++incidentEdges;
+        edgeIdsByPair.emplace(DirectedNodePair{edge.srcNodeId, edge.dstNodeId}, edge.id);
+    };
+    for (const auto& [_, edges] : outgoingResult.value()) {
+        for (const auto& edge : edges) {
+            rememberEdge(edge);
+        }
+    }
+    for (const auto& [_, edges] : incomingResult.value()) {
+        for (const auto& edge : edges) {
+            rememberEdge(edge);
+        }
+    }
+
+    if (edgeIdsByPair.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no incident semantic edges");
+        return stats;
+    }
+
+    std::vector<std::int64_t> edgesToRemove;
+    edgesToRemove.reserve(edgeIdsByPair.size());
+    std::size_t reciprocalPairs = 0;
+    for (const auto& [pair, edgeId] : edgeIdsByPair) {
+        if (pair.first == pair.second) {
+            edgesToRemove.push_back(edgeId);
+            continue;
+        }
+        if (edgeIdsByPair.contains(DirectedNodePair{pair.second, pair.first})) {
+            ++reciprocalPairs;
+            continue;
+        }
+        edgesToRemove.push_back(edgeId);
+    }
+
+    stats.reciprocalCommunities = reciprocalPairs / 2;
+    stats.largestReciprocalCommunity = stats.reciprocalCommunities > 0 ? 2 : 0;
+
+    if (edgesToRemove.empty()) {
+        stats.skipped = true;
+        stats.issues.push_back("semantic topology scoped maintenance skipped: incident region "
+                               "reciprocity healthy enough");
+        return stats;
+    }
+
+    if (dryRun) {
+        stats.issues.push_back("dry-run: would prune " + std::to_string(edgesToRemove.size()) +
+                               " one-way semantic_neighbor edges from scoped region");
+        return stats;
+    }
+
+    for (const auto edgeId : edgesToRemove) {
+        auto removeResult = kgStore_->removeEdgeById(edgeId);
+        if (!removeResult) {
+            return Error{ErrorCode::InternalError,
+                         "failed to prune scoped semantic_neighbor edge " + std::to_string(edgeId) +
+                             ": " + removeResult.error().message};
+        }
+        ++stats.semanticEdgesPruned;
+    }
+
+    stats.issues.push_back("scoped semantic topology maintenance checked " +
+                           std::to_string(nodeIds.size()) + " dirty docs and " +
+                           std::to_string(incidentEdges) + " incident edges");
+    if (stats.semanticEdgesPruned > 0) {
+        stats.issues.push_back("pruned " + std::to_string(stats.semanticEdgesPruned) +
+                               " one-way semantic_neighbor edges from scoped region");
     }
 
     return stats;

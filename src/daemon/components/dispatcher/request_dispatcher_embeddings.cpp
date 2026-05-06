@@ -5,6 +5,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/batch_metrics.h>
@@ -188,6 +189,7 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 ErrorCode::InvalidState, "Embedding generation disabled: provider degraded");
         }
     } catch (...) {
+        // Provider FSM snapshot is advisory; continue to provider availability checks below.
     }
     auto signal = getWorkerJobSignal();
     if (signal) {
@@ -209,12 +211,14 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
             try {
                 modelName = serviceManager_->resolvePreferredModel();
             } catch (...) {
+                // Preferred model resolution is best-effort; try runtime model name next.
             }
         }
         if (modelName.empty()) {
             try {
                 modelName = serviceManager_->getEmbeddingModelName();
             } catch (...) {
+                // Runtime model name is best-effort; report no configured model below.
             }
         }
         if (modelName.empty()) {
@@ -248,10 +252,12 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 try {
                     repairConfig.dataPath = serviceManager_->getResolvedDataDir();
                 } catch (...) {
+                    // Optional repair path hint; repair utility can proceed without it.
                 }
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, nullptr, contentExtractors);
+                    req.documentHashes, nullptr, contentExtractors,
+                    serviceManager_->getVectorIndexCoordinator().get());
                 result = std::move(stats);
             }
         }

@@ -4,6 +4,7 @@ build/
 _deps/
 _build/
 cmake-build-*/
+builddir*
 
 # Build outputs
 *.a

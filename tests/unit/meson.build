@@ -126,7 +126,6 @@ unit_daemon_base = files(
   # 'daemon/components/vector_system_manager_test.cpp',
   # 'daemon/components/plugin_manager_test.cpp',
   # 'daemon/components/database_manager_test.cpp',
-  # 'daemon/components/request_queue_test.cpp',
   # 'daemon/components/checkpoint_manager_test.cpp',
 
   # Legacy GTest tests (to be migrated)

@@ -127,8 +127,6 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     SqliteVecBackend::Config backend_cfg;
     backend_cfg.embedding_dim = cfg.dim;
     backend_cfg.search_engine = engine;
-    backend_cfg.quantized_hnsw_mode = QuantizedHnswMode::LVQ8;
-    backend_cfg.quantized_hnsw_rerank_factor = 2;
 
     SqliteVecBackend backend(backend_cfg);
     auto init = backend.initialize(":memory:");
@@ -156,16 +154,9 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     }
 
     const auto build_start = std::chrono::steady_clock::now();
-    if (engine == VectorSearchEngine::HnswCosine) {
-        auto build = backend.buildIndex();
-        if (!build) {
-            throw std::runtime_error(build.error().message);
-        }
-    } else {
-        auto prep = backend.prepareSearchIndex();
-        if (!prep) {
-            throw std::runtime_error(prep.error().message);
-        }
+    auto build = backend.buildIndex();
+    if (!build) {
+        throw std::runtime_error(build.error().message);
     }
     const auto build_end = std::chrono::steady_clock::now();
 
@@ -195,11 +186,8 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     const double total_us = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0);
     EngineResult out;
     switch (engine) {
-        case VectorSearchEngine::HnswCosine:
-            out.name = "hnsw-cosine";
-            break;
-        case VectorSearchEngine::HnswQuantizedL2:
-            out.name = "hnsw-q-l2";
+        case VectorSearchEngine::SimeonPqAdc:
+            out.name = "simeon-pq";
             break;
         case VectorSearchEngine::Vec0L2:
             out.name = "vec0-l2";
@@ -246,14 +234,11 @@ int main(int argc, char* argv[]) {
         std::printf("note: corpus/query vectors are normalized, so cosine and L2 rankings are "
                     "comparable\n\n");
 
-        const auto hnsw =
-            runEngine(VectorSearchEngine::HnswCosine, cfg, corpus, queries, ground_truth);
-        const auto qhnsw =
-            runEngine(VectorSearchEngine::HnswQuantizedL2, cfg, corpus, queries, ground_truth);
+        const auto spq =
+            runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);
         const auto vec0 = runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
 
-        printResult(hnsw, cfg.k);
-        printResult(qhnsw, cfg.k);
+        printResult(spq, cfg.k);
         printResult(vec0, cfg.k);
         return 0;
     } catch (const std::exception& e) {

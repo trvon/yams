@@ -78,6 +78,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                 return value;
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
         return 0;
     };

@@ -61,9 +61,11 @@ node_modules/
 .act/
 .crush/
 
+# VCS metadata
+.git/
+
 # Unused local mirrors/submodules for image builds
 external/
-homebrew-yams/
 
 # Fuzzing runtime outputs (often root-owned from containers)
 data/fuzz/

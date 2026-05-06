@@ -72,13 +72,13 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     TunedParams params;
     params.zoomLevel = config.zoomLevel;
     params.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params.weights.setAll(config.textWeight, config.vectorWeight, config.entityVectorWeight,
-                          config.pathTreeWeight, config.kgWeight, config.tagWeight,
-                          config.metadataWeight, TuningLayer::Default);
+    params.weights.setAll(config.textWeight, config.simeonTextWeight, config.vectorWeight,
+                          config.entityVectorWeight, config.pathTreeWeight, config.kgWeight,
+                          config.tagWeight, config.metadataWeight, TuningLayer::Default);
     params.similarityThreshold =
         TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
     params.vectorBoostFactor = config.vectorBoostFactor;
-    params.fusionStrategy = config.fusionStrategy;
+    params.fusionStrategy.value = config.fusionStrategy;
     params.vectorOnlyThreshold = config.vectorOnlyThreshold;
     params.vectorOnlyPenalty = config.vectorOnlyPenalty;
     params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
@@ -94,11 +94,8 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
     params.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
     params.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params.enableAdaptiveVectorFallback = config.enableAdaptiveVectorFallback;
-    params.adaptiveVectorSkipMinTier1Hits = config.adaptiveVectorSkipMinTier1Hits;
-    params.adaptiveVectorSkipRequireTextSignal = config.adaptiveVectorSkipRequireTextSignal;
-    params.adaptiveVectorSkipMinTextHits = config.adaptiveVectorSkipMinTextHits;
-    params.adaptiveVectorSkipMinTopTextScore = config.adaptiveVectorSkipMinTopTextScore;
+    params.weakQueryMinTextHits = config.weakQueryMinTextHits;
+    params.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
     params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
     params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
     params.rerankTopK = config.rerankTopK;
@@ -198,6 +195,7 @@ void applyZoomLayer(SearchEngineConfig::NavigationZoomLevel zoom,
 
         case SearchEngineConfig::NavigationZoomLevel::Street:
             params.weights.text.scaleBy(1.10f, TuningLayer::Zoom);
+            params.weights.simeonText.scaleBy(1.10f, TuningLayer::Zoom);
             params.weights.pathTree.scaleBy(1.15f, TuningLayer::Zoom);
             params.weights.entityVector.scaleBy(1.10f, TuningLayer::Zoom);
             params.weights.vector.scaleBy(0.85f, TuningLayer::Zoom);
@@ -226,17 +224,14 @@ void applyZoomConfigExtras(SearchEngineConfig::NavigationZoomLevel zoom,
             config.graphVectorWeight = std::clamp(config.graphVectorWeight * 1.15f, 0.0f, 1.0f);
             config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{10});
             config.graphExpansionMaxSeeds = std::max(config.graphExpansionMaxSeeds, size_t{8});
-            config.rerankSnippetMaxChars = std::min(config.rerankSnippetMaxChars, size_t{192});
             break;
         case SearchEngineConfig::NavigationZoomLevel::Neighborhood:
             config.graphTextWeight = std::clamp(config.graphTextWeight * 1.05f, 0.0f, 1.0f);
             config.graphExpansionMaxTerms = std::max(config.graphExpansionMaxTerms, size_t{8});
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{256});
             break;
         case SearchEngineConfig::NavigationZoomLevel::Street:
             config.graphVectorWeight = std::clamp(config.graphVectorWeight * 0.85f, 0.0f, 1.0f);
             config.graphTextWeight = std::clamp(config.graphTextWeight * 0.95f, 0.0f, 1.0f);
-            config.rerankSnippetMaxChars = std::max(config.rerankSnippetMaxChars, size_t{384});
             if (config.graphExpansionMaxTerms > 0) {
                 config.graphExpansionMaxTerms = std::min(config.graphExpansionMaxTerms, size_t{6});
             }
@@ -256,6 +251,7 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
         case QueryIntent::Path:
             params.weights.pathTree.scaleBy(1.8f, TuningLayer::Intent);
             params.weights.text.scaleBy(0.8f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.7f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.kg.scaleBy(0.8f, TuningLayer::Intent);
@@ -265,11 +261,13 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
             params.weights.pathTree.scaleBy(1.5f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(1.5f, TuningLayer::Intent);
             params.weights.text.scaleBy(0.8f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(0.8f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.7f, TuningLayer::Intent);
             params.weights.kg.scaleBy(0.9f, TuningLayer::Intent);
             break;
         case QueryIntent::Prose:
             params.weights.text.scaleBy(1.25f, TuningLayer::Intent);
+            params.weights.simeonText.scaleBy(1.25f, TuningLayer::Intent);
             params.weights.vector.scaleBy(0.9f, TuningLayer::Intent);
             params.weights.pathTree.scaleBy(0.6f, TuningLayer::Intent);
             params.weights.entityVector.scaleBy(0.6f, TuningLayer::Intent);
@@ -295,6 +293,8 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 
     // Slotted fields: 60% toward target, pinned slots unmodified (set() is a no-op when pinned)
     blendSlot(params.weights.text, target.weights.text.value, kBlend, TuningLayer::Community);
+    blendSlot(params.weights.simeonText, target.weights.simeonText.value, kBlend,
+              TuningLayer::Community);
     blendSlot(params.weights.vector, target.weights.vector.value, kBlend, TuningLayer::Community);
     blendSlot(params.weights.entityVector, target.weights.entityVector.value, kBlend,
               TuningLayer::Community);
@@ -343,8 +343,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     params.enableSubPhraseRescoring =
         params.enableSubPhraseRescoring || target.enableSubPhraseRescoring;
     params.enableLexicalTieBreak = params.enableLexicalTieBreak || target.enableLexicalTieBreak;
-    params.enableAdaptiveVectorFallback =
-        params.enableAdaptiveVectorFallback || target.enableAdaptiveVectorFallback;
 
     // Enums/strategy: adopt target profile's strategy
     params.rrfK = target.rrfK;
@@ -358,10 +356,13 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 // ---------------------------------------------------------------------------
 
 void applySemanticOnlyLayer(TunedParams& params) {
-    params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
-    params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.30f),
+    params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_SUM,
+                                   TuningLayer::Mode);
+    params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);
+    params.weights.simeonText.forceSet(std::min(params.weights.simeonText.value, 0.05f),
+                                       TuningLayer::Mode);
     params.weights.kg.forceSet(0.0f, TuningLayer::Mode);
     params.weights.vector.forceSet(std::max(params.weights.vector.value, 0.45f), TuningLayer::Mode);
     params.weights.entityVector.forceSet(std::max(params.weights.entityVector.value, 0.15f),

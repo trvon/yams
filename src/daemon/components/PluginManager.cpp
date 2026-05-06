@@ -30,6 +30,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <type_traits>
@@ -226,7 +227,10 @@ void PluginManager::shutdown() {
         for (const auto& d : getActivePluginHost()->listLoaded()) {
             try {
                 getActivePluginHost()->unload(d.name);
+            } catch (const std::exception& e) {
+                spdlog::debug("[PluginManager] unload failed for '{}': {}", d.name, e.what());
             } catch (...) {
+                spdlog::debug("[PluginManager] unload failed for '{}': unknown exception", d.name);
             }
         }
     }
@@ -332,6 +336,22 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
             spdlog::info("[PluginManager] autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
+        }
+
+        bool skipAbiModelProviders = false;
+        std::string inProcessBackend;
+        {
+            auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
+            if (backend != "auto" && backend != "daemon" && backend != "onnxruntime") {
+                const auto known = getRegisteredProviders();
+                if (std::find(known.begin(), known.end(), backend) != known.end()) {
+                    skipAbiModelProviders = true;
+                    inProcessBackend = std::move(backend);
+                    spdlog::info("[PluginManager] model_provider plugins will be filtered: "
+                                 "backend='{}' is satisfied in-process",
+                                 inProcessBackend);
+                }
+            }
         }
 
         // Build list of plugin directories to scan
@@ -494,6 +514,12 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                 const bool isModelProvider =
                     std::find(desc.interfaces.begin(), desc.interfaces.end(),
                               "model_provider_v1") != desc.interfaces.end();
+                if (isModelProvider && skipAbiModelProviders) {
+                    spdlog::info("[PluginManager] skipping model_provider plugin '{}' "
+                                 "(path='{}'): backend='{}' is satisfied in-process",
+                                 pluginName, path.string(), inProcessBackend);
+                    continue;
+                }
                 const bool isOnnxPlugin = (pluginName.find("onnx") != std::string::npos);
                 if (isModelProvider && isOnnxPlugin) {
                     std::size_t defaultMax =
@@ -645,6 +671,18 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
     }
 
     try {
+        if (modelProvider_ && modelProvider_->isAvailable()) {
+            const bool preferredMatches = preferredName.empty() ||
+                                          preferredName == adoptedProviderPluginName_ ||
+                                          preferredName == modelProvider_->getProviderName();
+            if (preferredMatches) {
+                spdlog::info("[PluginManager] Reusing adopted model provider: {}",
+                             adoptedProviderPluginName_);
+                refreshStatusSnapshot();
+                return Result<bool>(true);
+            }
+        }
+
         auto loaded = getActivePluginHost()->listLoaded();
 
         auto pathFor = [&](const std::string& name) -> std::string {
@@ -656,6 +694,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     if (stem == name)
                         return d.path.string();
                 } catch (...) {
+                    // Path stem fallback is best-effort; continue scanning descriptors.
                 }
             }
             return {};
@@ -745,9 +784,99 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             return true;
         };
 
+        auto tryAdoptInProcess = [&](const std::string& backend) -> bool {
+            auto provider = createModelProvider(ModelPoolConfig{}, backend);
+            if (!provider || !provider->isAvailable()) {
+                spdlog::warn("[PluginManager] In-process provider '{}' registered but factory "
+                             "returned unavailable instance",
+                             backend);
+                return false;
+            }
+            modelProvider_ = std::move(provider);
+            adoptedProviderPluginName_ = backend;
+            if (deps_.state) {
+                deps_.state->readiness.modelProviderReady = true;
+            }
+            const auto providerName = modelProvider_->getProviderName();
+            const auto trainingFree = modelProvider_->isTrainingFree();
+            embeddingModelName_ = trainingFree ? providerName : (backend + "-default");
+            const size_t dim = modelProvider_->getEmbeddingDim(embeddingModelName_);
+            spdlog::info("[PluginManager] Adopted in-process model provider: {} "
+                         "(training_free={}, dim={})",
+                         providerName, trainingFree, dim);
+            embeddingFsm_.dispatch(ProviderAdoptedEvent{backend});
+            if (dim > 0) {
+                embeddingFsm_.dispatch(ModelLoadedEvent{embeddingModelName_, dim});
+            }
+            if (deps_.lifecycleFsm) {
+                deps_.lifecycleFsm->setSubsystemDegraded("embeddings", false);
+            }
+            try {
+                auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
+                cachedModelCount_.store(count, std::memory_order_relaxed);
+            } catch (...) {
+                cachedModelCount_.store(0, std::memory_order_relaxed);
+            }
+            refreshStatusSnapshot();
+            return true;
+        };
+
+        const auto configuredBackend = ConfigResolver::resolveEmbeddingBackend("auto");
+        const bool onnxRuntimeBackendSelected = configuredBackend == "onnxruntime";
+        const bool inProcessBackendSelected =
+            configuredBackend != "auto" && configuredBackend != "daemon" &&
+            !onnxRuntimeBackendSelected && [&]() {
+                const auto known = getRegisteredProviders();
+                return std::find(known.begin(), known.end(), configuredBackend) != known.end();
+            }();
+
         // Try preferred name first
         if (!preferredName.empty() && tryAdopt(preferredName)) {
             return Result<bool>(true);
+        }
+
+        auto tryAdoptOnnxRuntime = [&]() -> bool {
+            spdlog::info("[PluginManager] adoptModelProvider: preferring ONNX Runtime plugin "
+                         "because embeddings.backend='onnxruntime'");
+            for (const auto& d : loaded) {
+                std::string name = d.name;
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (name.find("onnx") != std::string::npos && tryAdopt(d.name)) {
+                    return true;
+                }
+                try {
+                    auto stem = std::filesystem::path(d.path).stem().string();
+                    std::string lowerStem = stem;
+                    std::transform(
+                        lowerStem.begin(), lowerStem.end(), lowerStem.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (!stem.empty() && stem != d.name &&
+                        lowerStem.find("onnx") != std::string::npos && tryAdopt(stem)) {
+                        return true;
+                    }
+                } catch (...) {
+                    // Alternate path-stem adoption is best-effort.
+                }
+            }
+            spdlog::warn("[PluginManager] ONNX Runtime embeddings requested, but no usable ONNX "
+                         "model_provider plugin was loaded");
+            return false;
+        };
+
+        if (preferredName.empty() && onnxRuntimeBackendSelected) {
+            return Result<bool>(tryAdoptOnnxRuntime());
+        }
+
+        // When the user has selected a specific in-process backend and did not name a
+        // specific plugin, honor that selection before iterating ABI plugins.
+        if (preferredName.empty() && inProcessBackendSelected) {
+            spdlog::info("[PluginManager] adoptModelProvider: preferring in-process backend '{}' "
+                         "over ABI plugins",
+                         configuredBackend);
+            if (tryAdoptInProcess(configuredBackend)) {
+                return Result<bool>(true);
+            }
         }
 
         // Try all loaded plugins
@@ -767,7 +896,13 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                         return Result<bool>(true);
                 }
             } catch (...) {
+                // Alternate path-stem adoption is best-effort.
             }
+        }
+
+        // No ABI plugin adopted; try in-process registry if a specific backend is selected.
+        if (inProcessBackendSelected && tryAdoptInProcess(configuredBackend)) {
+            return Result<bool>(true);
         }
 
         // No provider found
@@ -1055,11 +1190,13 @@ void PluginManager::refreshStatusSnapshot() {
     try {
         snap.hostState = pluginHostFsm_.snapshot();
     } catch (...) {
+        // Status snapshots are best-effort; retain default host state.
     }
 
     try {
         snap.providerState = embeddingFsm_.snapshot();
     } catch (...) {
+        // Status snapshots are best-effort; retain default provider state.
     }
 
     // Helper lambda to add plugin records

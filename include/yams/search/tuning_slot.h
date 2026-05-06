@@ -139,13 +139,14 @@ template <typename T> void blendSlot(TuningSlot<T>& slot, T targetVal, float t, 
     slot.set(lerpValue(slot.value, targetVal, t), layer);
 }
 
-/// The seven component weights for search fusion, with provenance tracking.
+/// The component weights for search fusion, with provenance tracking.
 ///
 /// `normalize()` enforces the sum-to-1.0 invariant while respecting pinned
 /// values: pinned weights are treated as fixed budget allocations and the
 /// remaining budget is distributed proportionally among non-pinned weights.
 struct WeightSlots {
     TuningSlot<float> text;
+    TuningSlot<float> simeonText;
     TuningSlot<float> vector;
     TuningSlot<float> entityVector;
     TuningSlot<float> pathTree;
@@ -202,14 +203,21 @@ struct WeightSlots {
 
     /// Sum of all weight values.
     [[nodiscard]] float sum() const {
-        return text.value + vector.value + entityVector.value + pathTree.value + kg.value +
-               tag.value + metadata.value;
+        return text.value + simeonText.value + vector.value + entityVector.value + pathTree.value +
+               kg.value + tag.value + metadata.value;
     }
 
     /// Initialize all slots from plain values with a given source.
     void setAll(float textVal, float vectorVal, float entityVectorVal, float pathTreeVal,
                 float kgVal, float tagVal, float metadataVal, TuningLayer src) {
+        setAll(textVal, 0.0f, vectorVal, entityVectorVal, pathTreeVal, kgVal, tagVal, metadataVal,
+               src);
+    }
+
+    void setAll(float textVal, float simeonTextVal, float vectorVal, float entityVectorVal,
+                float pathTreeVal, float kgVal, float tagVal, float metadataVal, TuningLayer src) {
         text = TuningSlot<float>(textVal, src);
+        simeonText = TuningSlot<float>(simeonTextVal, src);
         vector = TuningSlot<float>(vectorVal, src);
         entityVector = TuningSlot<float>(entityVectorVal, src);
         pathTree = TuningSlot<float>(pathTreeVal, src);
@@ -219,8 +227,8 @@ struct WeightSlots {
     }
 
 private:
-    std::array<TuningSlot<float>*, 7> allSlots() {
-        return {&text, &vector, &entityVector, &pathTree, &kg, &tag, &metadata};
+    std::array<TuningSlot<float>*, 8> allSlots() {
+        return {&text, &simeonText, &vector, &entityVector, &pathTree, &kg, &tag, &metadata};
     }
 };
 

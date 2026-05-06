@@ -54,7 +54,7 @@ daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool
         out.response = std::move(r.value());
         // Fuzzy retry when 0 results and fuzzy not requested
         bool noResults = out.response.results.empty() || out.response.totalCount == 0;
-        if (noResults && !opts.fuzzy) {
+        if (noResults && opts.allowFuzzyRetry && !opts.fuzzy) {
             auto retry = req;
             retry.fuzzy = true;
             out.attempts++;
@@ -69,7 +69,7 @@ daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool
 
     // Literal-text retry for parse-like failures
     const auto& err = r.error();
-    if (!opts.literalText && is_parse_like_error(err)) {
+    if (opts.allowLiteralTextRetry && !opts.literalText && is_parse_like_error(err)) {
         auto retry = req;
         retry.literalText = true;
         out.attempts++;

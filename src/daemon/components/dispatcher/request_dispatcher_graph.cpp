@@ -442,151 +442,126 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
 
     KgIngestResponse resp;
 
-    // Phase 1: Ingest nodes
-    // Build a map of nodeKey -> nodeId for edge resolution
-    std::unordered_map<std::string, int64_t> nodeKeyToId;
+    auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+    if (coord) {
+        auto wb = std::make_unique<WriteBatch>();
+        wb->source = "RPC::ingestGraph";
 
-    if (!req.nodes.empty()) {
-        std::vector<KGNode> kgNodes;
-        kgNodes.reserve(req.nodes.size());
-
-        for (const auto& ingestNode : req.nodes) {
-            KGNode node;
-            node.nodeKey = ingestNode.nodeKey;
-            node.label =
-                ingestNode.label.empty() ? std::nullopt : std::make_optional(ingestNode.label);
-            node.type =
-                ingestNode.type.empty() ? std::nullopt : std::make_optional(ingestNode.type);
-            node.properties = ingestNode.properties.empty()
-                                  ? std::nullopt
-                                  : std::make_optional(ingestNode.properties);
-            kgNodes.push_back(std::move(node));
-        }
-
-        auto upsertResult = kgStore->upsertNodes(kgNodes);
-        if (!upsertResult) {
-            resp.errors.push_back("Node upsert failed: " + upsertResult.error().message);
-            resp.success = false;
-        } else {
-            const auto& nodeIds = upsertResult.value();
-            for (size_t i = 0; i < nodeIds.size() && i < req.nodes.size(); ++i) {
-                nodeKeyToId[req.nodes[i].nodeKey] = nodeIds[i];
-                if (nodeIds[i] > 0) {
-                    resp.nodesInserted++;
-                } else {
-                    resp.nodesSkipped++;
-                }
+        std::unordered_set<std::string> knownNodeKeys;
+        knownNodeKeys.reserve(req.nodes.size() + req.edges.size() * 2 + req.aliases.size());
+        for (const auto& n : req.nodes) {
+            if (!n.nodeKey.empty()) {
+                knownNodeKeys.insert(n.nodeKey);
             }
         }
-    }
-
-    // Also populate nodeKeyToId for any existing nodes referenced in edges
-    // that weren't in the nodes list
-    for (const auto& edge : req.edges) {
-        if (nodeKeyToId.find(edge.srcNodeKey) == nodeKeyToId.end()) {
-            auto nodeRes = kgStore->getNodeByKey(edge.srcNodeKey);
-            if (nodeRes && nodeRes.value()) {
-                nodeKeyToId[edge.srcNodeKey] = nodeRes.value()->id;
+        auto nodeExists = [&](const std::string& nodeKey) -> bool {
+            if (nodeKey.empty()) {
+                return false;
             }
-        }
-        if (nodeKeyToId.find(edge.dstNodeKey) == nodeKeyToId.end()) {
-            auto nodeRes = kgStore->getNodeByKey(edge.dstNodeKey);
-            if (nodeRes && nodeRes.value()) {
-                nodeKeyToId[edge.dstNodeKey] = nodeRes.value()->id;
+            if (knownNodeKeys.contains(nodeKey)) {
+                return true;
             }
-        }
-    }
-
-    // Phase 2: Ingest edges
-    if (!req.edges.empty()) {
-        std::vector<KGEdge> kgEdges;
-        kgEdges.reserve(req.edges.size());
-
-        for (const auto& ingestEdge : req.edges) {
-            // Resolve node keys to IDs
-            auto srcIt = nodeKeyToId.find(ingestEdge.srcNodeKey);
-            auto dstIt = nodeKeyToId.find(ingestEdge.dstNodeKey);
-
-            if (srcIt == nodeKeyToId.end()) {
-                resp.errors.push_back("Edge source node not found: " + ingestEdge.srcNodeKey);
-                resp.edgesSkipped++;
-                continue;
+            auto nodeRes = kgStore->getNodeByKey(nodeKey);
+            if (nodeRes && nodeRes.value().has_value()) {
+                knownNodeKeys.insert(nodeKey);
+                return true;
             }
-            if (dstIt == nodeKeyToId.end()) {
-                resp.errors.push_back("Edge destination node not found: " + ingestEdge.dstNodeKey);
-                resp.edgesSkipped++;
-                continue;
-            }
+            return false;
+        };
 
-            KGEdge edge;
-            edge.srcNodeId = srcIt->second;
-            edge.dstNodeId = dstIt->second;
-            edge.relation = ingestEdge.relation;
-            edge.weight = ingestEdge.weight;
-            edge.properties = ingestEdge.properties.empty()
-                                  ? std::nullopt
-                                  : std::make_optional(ingestEdge.properties);
-            kgEdges.push_back(std::move(edge));
+        if (!req.nodes.empty()) {
+            std::vector<KGNode> nodes;
+            nodes.reserve(req.nodes.size());
+            for (const auto& n : req.nodes) {
+                KGNode node;
+                node.nodeKey = n.nodeKey;
+                node.label = n.label.empty() ? std::nullopt : std::make_optional(n.label);
+                node.type = n.type.empty() ? std::nullopt : std::make_optional(n.type);
+                node.properties =
+                    n.properties.empty() ? std::nullopt : std::make_optional(n.properties);
+                nodes.push_back(std::move(node));
+            }
+            wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
         }
 
-        if (!kgEdges.empty()) {
-            // Use addEdgesUnique for de-duplication
-            auto addResult = req.skipExistingEdges ? kgStore->addEdgesUnique(kgEdges)
-                                                   : kgStore->addEdges(kgEdges);
-            if (!addResult) {
-                resp.errors.push_back("Edge insert failed: " + addResult.error().message);
-                resp.success = false;
-            } else {
-                resp.edgesInserted += kgEdges.size();
-            }
-        }
-    }
-
-    // Phase 3: Ingest aliases
-    if (!req.aliases.empty()) {
-        std::vector<KGAlias> kgAliases;
-        kgAliases.reserve(req.aliases.size());
-
-        for (const auto& ingestAlias : req.aliases) {
-            auto nodeIt = nodeKeyToId.find(ingestAlias.nodeKey);
-            if (nodeIt == nodeKeyToId.end()) {
-                // Try to look up the node
-                auto nodeRes = kgStore->getNodeByKey(ingestAlias.nodeKey);
-                if (nodeRes && nodeRes.value()) {
-                    nodeKeyToId[ingestAlias.nodeKey] = nodeRes.value()->id;
-                    nodeIt = nodeKeyToId.find(ingestAlias.nodeKey);
-                } else {
-                    resp.errors.push_back("Alias node not found: " + ingestAlias.nodeKey);
-                    resp.aliasesSkipped++;
+        if (!req.edges.empty()) {
+            std::vector<DeferredEdgeOp> deferred;
+            deferred.reserve(req.edges.size());
+            for (const auto& edge : req.edges) {
+                const bool srcOk = nodeExists(edge.srcNodeKey);
+                const bool dstOk = nodeExists(edge.dstNodeKey);
+                if (!srcOk || !dstOk) {
+                    ++resp.edgesSkipped;
+                    if (!srcOk) {
+                        resp.errors.push_back("Edge source node not found: " + edge.srcNodeKey);
+                    }
+                    if (!dstOk) {
+                        resp.errors.push_back("Edge destination node not found: " +
+                                              edge.dstNodeKey);
+                    }
                     continue;
                 }
+                DeferredEdgeOp op;
+                op.srcNodeKey = edge.srcNodeKey;
+                op.dstNodeKey = edge.dstNodeKey;
+                op.relation = edge.relation;
+                op.weight = edge.weight;
+                op.properties =
+                    edge.properties.empty() ? std::nullopt : std::make_optional(edge.properties);
+                deferred.push_back(std::move(op));
             }
-
-            KGAlias alias;
-            alias.nodeId = nodeIt->second;
-            alias.alias = ingestAlias.alias;
-            alias.source =
-                ingestAlias.source.empty() ? std::nullopt : std::make_optional(ingestAlias.source);
-            alias.confidence = ingestAlias.confidence;
-            kgAliases.push_back(std::move(alias));
+            wb->ops.emplace_back(AddDeferredEdgesOp{std::move(deferred)});
         }
 
-        if (!kgAliases.empty()) {
-            auto addResult = kgStore->addAliases(kgAliases);
-            if (!addResult) {
-                resp.errors.push_back("Alias insert failed: " + addResult.error().message);
-                // Don't mark as full failure for aliases
+        if (!req.aliases.empty()) {
+            std::vector<KGAlias> aliases;
+            aliases.reserve(req.aliases.size());
+            for (const auto& a : req.aliases) {
+                if (!nodeExists(a.nodeKey)) {
+                    ++resp.aliasesSkipped;
+                    resp.errors.push_back("Alias node not found: " + a.nodeKey);
+                    continue;
+                }
+                KGAlias alias;
+                alias.nodeId = 0;
+                alias.alias = a.alias;
+                std::string realSource = a.source.empty() ? std::string{} : a.source;
+                alias.source = realSource + "|" + a.nodeKey;
+                alias.confidence = a.confidence;
+                aliases.push_back(std::move(alias));
+            }
+            wb->ops.emplace_back(AddAliasesOp{std::move(aliases)});
+        }
+
+        coord->enqueue(std::move(wb));
+        auto fr = coord->flush();
+        if (!fr) {
+            resp.success = false;
+            const auto validEdges = req.edges.size() - resp.edgesSkipped;
+            const auto validAliases = req.aliases.size() - resp.aliasesSkipped;
+            if (!req.nodes.empty()) {
+                resp.errors.push_back("Node upsert failed: " + fr.error().message);
+            } else if (validEdges > 0) {
+                resp.errors.push_back("Edge insert failed: " + fr.error().message);
+            } else if (validAliases > 0) {
+                resp.success = true;
+                resp.errors.push_back("Alias insert failed: " + fr.error().message);
             } else {
-                resp.aliasesInserted += kgAliases.size();
+                resp.errors.push_back("Flush failed: " + fr.error().message);
             }
+        } else {
+            resp.success = true;
+            resp.nodesInserted = static_cast<uint32_t>(req.nodes.size());
+            resp.edgesInserted = static_cast<uint32_t>(req.edges.size() - resp.edgesSkipped);
+            resp.aliasesInserted = static_cast<uint32_t>(req.aliases.size() - resp.aliasesSkipped);
         }
+        spdlog::info("KgIngest (via WriteCoordinator) completed: {} nodes, {} edges, {} aliases",
+                     resp.nodesInserted, resp.edgesInserted, resp.aliasesInserted);
+        co_return resp;
     }
 
-    spdlog::info("KgIngest completed: {} nodes inserted, {} skipped; {} edges inserted, {} "
-                 "skipped; {} aliases inserted, {} skipped; {} errors",
-                 resp.nodesInserted, resp.nodesSkipped, resp.edgesInserted, resp.edgesSkipped,
-                 resp.aliasesInserted, resp.aliasesSkipped, resp.errors.size());
-
+    resp.success = false;
+    resp.errors.push_back("WriteCoordinator unavailable");
     co_return resp;
 }
 

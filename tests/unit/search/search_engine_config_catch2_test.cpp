@@ -1,7 +1,7 @@
 /**
  * @file search_engine_config_catch2_test.cpp
  * @brief Tests for SearchEngineConfig, CorpusProfile, ComponentResult helpers,
- *        and accumulateComponentScore (search_engine.h)
+ *        and accumulateComponentScore (search_result_fusion.h)
  *
  * These are header-only or inline functions at 0% coverage. Tests here
  * exercise forProfile(), detectProfile(), fusionStrategyToString(),
@@ -12,7 +12,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/search/search_engine.h>
+#include <yams/search/search_result_fusion.h>
 
 #include <string>
 #include <unordered_map>
@@ -102,14 +102,6 @@ TEST_CASE("forProfile CUSTOM also uses defaults", "[search][config][catch2]") {
     CHECK(cfg.corpusProfile == CP::CUSTOM);
 }
 
-TEST_CASE("topology weak query routing defaults stay opt-in", "[search][config][catch2]") {
-    SearchEngineConfig cfg;
-
-    CHECK_FALSE(cfg.enableTopologyWeakQueryRouting);
-    CHECK(cfg.topologyWeakQueryMaxClusters == 2);
-    CHECK(cfg.topologyWeakQueryMaxDocs == 64);
-}
-
 // ────────────────────────────────────────────────────────────────────────────────
 // detectProfile
 // ────────────────────────────────────────────────────────────────────────────────
@@ -166,6 +158,8 @@ TEST_CASE("detectProfile case-insensitive extension matching", "[search][config]
 TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2]") {
     using S = ComponentResult::Source;
     CHECK(std::string(componentSourceToString(S::Text)) == "text");
+    CHECK(std::string(componentSourceToString(S::SimeonText)) == "simeon_text");
+    CHECK(std::string(componentSourceToString(S::GraphText)) == "graph_text");
     CHECK(std::string(componentSourceToString(S::PathTree)) == "path_tree");
     CHECK(std::string(componentSourceToString(S::KnowledgeGraph)) == "kg");
     CHECK(std::string(componentSourceToString(S::Vector)) == "vector");
@@ -179,6 +173,7 @@ TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2
 TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch2]") {
     SearchEngineConfig cfg;
     cfg.textWeight = 0.41f;
+    cfg.simeonTextWeight = 0.11f;
     cfg.graphTextWeight = 0.12f;
     cfg.pathTreeWeight = 0.09f;
     cfg.kgWeight = 0.07f;
@@ -189,6 +184,8 @@ TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch
     cfg.metadataWeight = 0.03f;
 
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Text) == Approx(0.41f));
+    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::SimeonText) ==
+          Approx(0.11f));
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::GraphText) ==
           Approx(0.12f));
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::PathTree) ==
@@ -229,6 +226,8 @@ TEST_CASE("isVectorComponent is true for Vector and EntityVector", "[search][con
 TEST_CASE("isTextAnchoringComponent identifies non-vector components", "[search][config][catch2]") {
     using S = ComponentResult::Source;
     CHECK(isTextAnchoringComponent(S::Text) == true);
+    CHECK(isTextAnchoringComponent(S::SimeonText) == true);
+    CHECK(isTextAnchoringComponent(S::GraphText) == true);
     CHECK(isTextAnchoringComponent(S::PathTree) == true);
     CHECK(isTextAnchoringComponent(S::KnowledgeGraph) == true);
     CHECK(isTextAnchoringComponent(S::Tag) == true);
@@ -330,17 +329,16 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.corpusProfile == SearchEngineConfig::CorpusProfile::MIXED);
     CHECK(cfg.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
     CHECK(cfg.maxResults == 100);
-    CHECK(cfg.similarityThreshold == Approx(0.75f));
+    CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
     CHECK(cfg.enableTieredExecution == true);
-    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::COMB_MNZ);
+    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
     CHECK(cfg.symbolRank == true);
     CHECK(cfg.enableReranking == true);
     CHECK(cfg.rerankTopK == 5);
-    CHECK(cfg.enableModelReranking == false);
-    CHECK(cfg.useScoreBasedReranking == true);
+    CHECK(cfg.rerankReplaceScores == true);
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

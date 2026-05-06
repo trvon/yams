@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -15,6 +16,7 @@
 #include <boost/asio/strand.hpp>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/metadata/document_metadata.h>
 
 namespace yams {
 namespace api {
@@ -27,6 +29,9 @@ class KnowledgeGraphStore;
 namespace vector {
 class VectorDatabase;
 }
+namespace daemon {
+class WriteCoordinator;
+} // namespace daemon
 namespace daemon {
 
 class IModelProvider;
@@ -41,6 +46,12 @@ struct ModelLoadEvent;
  */
 class EmbeddingService : public IComponent {
 public:
+    struct PhaseTiming {
+        uint64_t calls{0};
+        uint64_t totalMs{0};
+        uint64_t maxMs{0};
+    };
+
     EmbeddingService(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<metadata::MetadataRepository> meta,
                      WorkCoordinator* coordinator);
@@ -57,6 +68,10 @@ public:
                       std::function<Result<std::string>(const std::string&,
                                                         std::function<void(const ModelLoadEvent&)>)>
                           ensureModelReady = {});
+
+    void setWriteCoordinatorGetter(std::function<WriteCoordinator*()> getter) {
+        getWriteCoordinator_ = std::move(getter);
+    }
 
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
@@ -78,15 +93,22 @@ public:
     uint64_t semanticUpdateErrors() const {
         return semanticUpdateErrors_.load(std::memory_order_relaxed);
     }
+    std::unordered_map<std::string, PhaseTiming> phaseTimingsSnapshot() const;
+    void resetPhaseTimings();
 
-    /**
-     * @brief Set a callback invoked after each successful vector batch insert.
-     *
-     * Used to invalidate downstream indexes (e.g. CompressedANNIndex in SearchEngine)
-     * that depend on the VectorDatabase contents.
-     */
-    void setCompressedAnnInvalidator(std::function<void()> cb);
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
+
+    // Wipes semantic_neighbor edges and rebuilds against every vdb doc in one
+    // pass. Per-job rebuilds make each doc's top-K depend on job-completion
+    // order; a corpus-wide pass is deterministic.
+    Result<std::size_t> rebuildSemanticNeighborGraphForCorpus(const std::string& modelName);
+
+    // Bounded backfill: finds up to `batchLimit` document nodes that have no
+    // outbound semantic_neighbor edges and runs the per-doc edge-construction
+    // path for them. Does NOT wipe existing edges. Returns the number of
+    // source docs processed (i.e. how big the next batch should be smaller).
+    Result<std::size_t> backfillSemanticNeighborGraph(const std::string& modelName,
+                                                      std::size_t batchLimit);
 
     void start();
 
@@ -99,9 +121,13 @@ private:
     void updateSemanticNeighborGraph(
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
-        const std::vector<InternalEventBus::EmbedPreparedDoc>& preparedDocs,
-        const std::vector<std::tuple<std::string, std::string, std::vector<float>>>&
-            documentEmbeddings);
+        const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
+        bool sourceAllCorpus = false);
+    void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
+    void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
+                                   std::string source);
+    void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
+                                      std::string modelName, std::string source);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -112,10 +138,10 @@ private:
     std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
+    std::function<WriteCoordinator*()> getWriteCoordinator_;
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
-    std::function<void()> compressedAnnInvalidator_; // called after batch insert
     std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
 
     std::atomic<bool> stop_{false};
@@ -139,9 +165,31 @@ private:
     std::atomic<uint64_t> semanticEdgesCreated_{0};
     std::atomic<uint64_t> semanticDocsProcessed_{0};
     std::atomic<uint64_t> semanticUpdateErrors_{0};
+
+    // Idle-tick semantic_neighbor backfill: counts consecutive idle ticks since
+    // the last drain attempt. Bounded — not actually unbounded growth, just used
+    // to throttle the call frequency.
+    std::size_t semanticBackfillIdleTicks_{0};
+    static constexpr std::size_t kSemanticBackfillIdleTickThreshold{4};
+    static constexpr std::size_t kSemanticBackfillBatchLimit{64};
     std::atomic<uint64_t> inferTokenCounter_{0};
+    mutable std::mutex phaseTimingsMutex_;
+    std::unordered_map<std::string, PhaseTiming> phaseTimings_;
     mutable std::mutex inferTrackerMutex_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
+    struct SemanticCorpusEntry {
+        std::string hash;
+        std::string filePath;
+        std::vector<float> embedding;
+        float invNorm{0.0f};
+    };
+    mutable std::mutex semanticCorpusMutex_;
+    std::unordered_map<std::string, SemanticCorpusEntry> semanticCorpusCache_;
+    mutable std::mutex semanticNodeIdCacheMutex_;
+    std::unordered_map<std::string, std::optional<std::int64_t>> semanticNodeIdCache_;
+    mutable std::mutex semanticGraphPendingMutex_;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
+        semanticGraphPendingByModel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
     std::vector<InternalEventBus::EmbedJob> pendingJobs_;
 };

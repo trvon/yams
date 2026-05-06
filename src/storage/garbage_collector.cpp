@@ -118,6 +118,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                 }
 
                 if (!options.dryRun) {
+                    const auto blockSizeResult = pImpl->storageEngine.getBlockSize(blockHash);
                     // Delete from storage
                     auto deleteResult = pImpl->storageEngine.remove(blockHash);
                     if (!deleteResult) {
@@ -127,18 +128,21 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                         continue;
                     }
 
-                    // Get block size for statistics
-                    // Note: In a real implementation, we'd get this from the reference DB
-                    stats.bytesReclaimed += 4096; // Placeholder size
+                    if (blockSizeResult) {
+                        stats.bytesReclaimed += blockSizeResult.value();
+                    }
 
                     // Remove from reference database
                     // This would be done through a specific method in ReferenceCounter
                     // For now, we'll just count it
                     stats.blocksDeleted++;
                 } else {
+                    const auto blockSizeResult = pImpl->storageEngine.getBlockSize(blockHash);
                     // Dry run - just count
                     stats.blocksDeleted++;
-                    stats.bytesReclaimed += 4096; // Placeholder size
+                    if (blockSizeResult) {
+                        stats.bytesReclaimed += blockSizeResult.value();
+                    }
                 }
 
                 // Progress callback

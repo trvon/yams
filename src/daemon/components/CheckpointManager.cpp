@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/daemon/components/CheckpointManager.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -15,6 +16,8 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <spdlog/spdlog.h>
+
+#include <filesystem>
 
 namespace yams::daemon {
 
@@ -48,6 +51,24 @@ void CheckpointManager::stop() {
     }
 
     spdlog::info("[CheckpointManager] Stopping checkpoint task");
+    cv_.notify_all();
+    if (checkpointThread_.joinable()) {
+        checkpointThread_.join();
+    }
+
+    if (deps_.metadataRepository) {
+        try {
+            auto result = deps_.metadataRepository->checkpointWalTruncate();
+            if (result) {
+                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint (TRUNCATE) completed");
+            } else {
+                spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE failed: {}",
+                             result.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE threw: {}", e.what());
+        }
+    }
 }
 
 bool CheckpointManager::checkpointNow() {
@@ -73,50 +94,51 @@ bool CheckpointManager::checkpointNow() {
 }
 
 void CheckpointManager::launchCheckpointLoop() {
-    auto exec = deps_.executor;
+    // Path 1b fix: previously the loop ran via boost::asio::co_spawn on
+    // deps_.executor (the ingest WorkCoordinator). Under bulk ingest that
+    // executor's worker threads stay saturated with embedding + topology
+    // work, so the timer completion for the checkpoint coroutine never gets
+    // picked up. Bench logs at 65k-doc ingest showed exactly one
+    // "Starting checkpoint task" line followed by zero actual checkpoints
+    // over 60+ minutes — the WAL grew to 40+ GB unimpeded.
+    //
+    // Move the loop onto a dedicated std::thread with condition_variable-
+    // based wait so shutdown still interrupts promptly (no 5-min sleeps
+    // blocking stop()), but the loop itself is immune to executor pressure.
     auto stopFlag = deps_.stopRequested;
-    auto* self = this;
+    checkpointThread_ = std::thread([this, stopFlag]() {
+        using namespace std::chrono_literals;
+        std::unique_lock lock(cvMutex_);
+        // Initial 30s warmup (matches the prior asio-based timing).
+        cv_.wait_for(lock, 30s, [this, &stopFlag]() {
+            return (stopFlag && stopFlag->load(std::memory_order_acquire)) ||
+                   !running_.load(std::memory_order_acquire);
+        });
 
-    boost::asio::co_spawn(
-        exec,
-        [self, stopFlag]() -> boost::asio::awaitable<void> {
-            using namespace std::chrono_literals;
-
-            auto executor = co_await boost::asio::this_coro::executor;
-            boost::asio::steady_timer timer(executor);
-
-            timer.expires_after(30s);
+        while (running_.load(std::memory_order_acquire) &&
+               (!stopFlag || !stopFlag->load(std::memory_order_acquire))) {
+            cv_.wait_for(lock, config_.checkpoint_interval, [this, &stopFlag]() {
+                return (stopFlag && stopFlag->load(std::memory_order_acquire)) ||
+                       !running_.load(std::memory_order_acquire);
+            });
+            if (!running_.load(std::memory_order_acquire) ||
+                (stopFlag && stopFlag->load(std::memory_order_acquire))) {
+                break;
+            }
+            // Release the lock while performing the (potentially long-running)
+            // checkpoint so stop() can wake us via notify without contending.
+            lock.unlock();
             try {
-                co_await timer.async_wait(boost::asio::use_awaitable);
-            } catch (const boost::system::system_error& e) {
-                if (e.code() == boost::asio::error::operation_aborted) {
-                    co_return;
-                }
-                throw;
+                checkpointNow();
+            } catch (const std::exception& e) {
+                spdlog::warn("[CheckpointManager] checkpoint thread exception: {}", e.what());
+                stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
             }
+            lock.lock();
+        }
 
-            while (!stopFlag->load(std::memory_order_acquire) &&
-                   self->running_.load(std::memory_order_acquire)) {
-                // VectorIndexManager removed - checkpoints are no longer needed for vector index
-                // VectorDatabase uses SQLite which has its own transaction/WAL mechanism
-
-                timer.expires_after(self->config_.checkpoint_interval);
-                try {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                } catch (const boost::system::system_error& e) {
-                    if (e.code() == boost::asio::error::operation_aborted) {
-                        break;
-                    }
-                    throw;
-                }
-
-                self->checkpointNow();
-            }
-
-            spdlog::debug("[CheckpointManager] Checkpoint loop stopped");
-            co_return;
-        },
-        boost::asio::detached);
+        spdlog::debug("[CheckpointManager] Checkpoint loop stopped");
+    });
 }
 
 bool CheckpointManager::checkpointVectorIndex() {
@@ -124,13 +146,35 @@ bool CheckpointManager::checkpointVectorIndex() {
         return true;
     }
 
+    if (deps_.state) {
+        const bool repairInProgress =
+            deps_.state->stats.repairInProgress.load(std::memory_order_relaxed);
+        const auto repairQueueDepth =
+            deps_.state->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        if (repairInProgress || repairQueueDepth > 0) {
+            spdlog::debug("[CheckpointManager] Skipping vector index persistence during repair "
+                          "(in_progress={} queue_depth={})",
+                          repairInProgress ? 1 : 0, repairQueueDepth);
+            return true;
+        }
+    }
+
     auto vectorDb = deps_.vectorSystemManager->getVectorDatabase();
     if (!vectorDb || !vectorDb->isInitialized()) {
         return true;
     }
 
+    // Route through the coordinator when available so the persist runs serialised
+    // on the same strand that owns rebuild/finalize. Falling back to direct
+    // persistIndex() is only safe when the coordinator isn't wired yet (boot).
     try {
-        if (vectorDb->optimizeIndex()) {
+        bool ok = false;
+        if (deps_.vectorIndexCoordinator) {
+            ok = deps_.vectorIndexCoordinator->requestCheckpoint();
+        } else {
+            ok = vectorDb->persistIndex();
+        }
+        if (ok) {
             auto now = std::chrono::system_clock::now();
             auto epoch =
                 std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -180,11 +224,41 @@ bool CheckpointManager::checkpointWal() {
         return true;
     }
 
+    // Path 1b: watermark-triggered TRUNCATE. When yams.db-wal grows beyond
+    // kTruncateWatermarkBytes, switch from PASSIVE to TRUNCATE so the WAL
+    // returns to zero bytes on next checkpoint. Without this, large-corpus
+    // ingest (e.g. 65k+ docs in a single session) can grow the WAL into
+    // tens of GB — query latency collapses because every FTS5 match
+    // traverses the unflushed WAL. PASSIVE can't reclaim pages held by
+    // writers, so at that point TRUNCATE's brief exclusive lock is the
+    // lesser evil.
+    constexpr std::uint64_t kTruncateWatermarkBytes = 256ULL * 1024ULL * 1024ULL; // 256 MiB
+    bool wantsTruncate = false;
+    if (!config_.data_dir.empty()) {
+        std::error_code ec;
+        const auto walPath = config_.data_dir / "yams.db-wal";
+        const auto walSize = std::filesystem::file_size(walPath, ec);
+        if (!ec && walSize >= kTruncateWatermarkBytes) {
+            wantsTruncate = true;
+            spdlog::info("[CheckpointManager] yams.db-wal is {} MB (>= 1 GiB watermark), "
+                         "escalating to TRUNCATE checkpoint",
+                         walSize / (1024ULL * 1024ULL));
+        }
+    }
+
     try {
-        auto result = deps_.metadataRepository->checkpointWal();
+        auto result = wantsTruncate ? deps_.metadataRepository->checkpointWalTruncate()
+                                    : deps_.metadataRepository->checkpointWal();
         if (result) {
             stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
-            spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            // Info level for TRUNCATE so the watermark-trigger path is
+            // visible in bench logs; debug for routine PASSIVE to keep
+            // normal-operation logs quiet.
+            if (wantsTruncate) {
+                spdlog::info("[CheckpointManager] WAL checkpoint (TRUNCATE) completed");
+            } else {
+                spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            }
             return true;
         }
         spdlog::warn("[CheckpointManager] WAL checkpoint failed: {}", result.error().message);

@@ -51,6 +51,7 @@
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
 
+#include "tests/benchmarks/beir_loader.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
@@ -294,7 +295,7 @@ static bool forceMockEmbeddingsForBench() {
 }
 
 static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool vectorsDisabled,
-                                           bool forceMockEmbeddings) {
+                                           bool forceMockEmbeddings, bool embedBackendSimeon) {
     if (!harness || !harness->daemon() || vectorsDisabled) {
         return;
     }
@@ -313,6 +314,16 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
         serviceManager->__test_setModelProvider(sharedProvider);
     }
 
+    if (embedBackendSimeon) {
+        auto ready = serviceManager->ensureEmbeddingModelReadySync("simeon-default", {}, 10000,
+                                                                   false, false);
+        if (!ready) {
+            spdlog::warn("[Bench] Simeon provider not ready for retrieval bench: {}",
+                         ready.error().message);
+        }
+        return;
+    }
+
     auto ready =
         serviceManager->ensureEmbeddingModelReadySync("all-MiniLM-L6-v2", {}, 10000, false, false);
     if (!ready) {
@@ -321,24 +332,9 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
     }
 }
 
-struct BEIRDocument {
-    std::string id;
-    std::string title;
-    std::string text;
-};
-
-struct BEIRQuery {
-    std::string id;
-    std::string text;
-};
-
-struct BEIRDataset {
-    std::string name;
-    std::map<std::string, BEIRDocument> documents;
-    std::map<std::string, BEIRQuery> queries;
-    std::multimap<std::string, std::pair<std::string, int>> qrels;
-    fs::path basePath;
-};
+using yams::bench::BEIRDataset;
+using yams::bench::BEIRDocument;
+using yams::bench::BEIRQuery;
 
 static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     const char* home = std::getenv("HOME");
@@ -437,131 +433,10 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     return dataset;
 }
 
-// Generic BEIR dataset loader - works with any dataset from:
-// https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
-// Supported datasets: cqadupstack, nfcorpus, arguana, scidocs, fiqa, quora, hotpotqa,
-//                     fever, climate-fever, dbpedia-entity, trec-covid, touche-2020
+// Generic BEIR dataset loader — delegates to yams::bench::loadBEIRDataset.
 static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
                                            const fs::path& cacheDir) {
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        return Error{ErrorCode::InvalidArgument, "HOME environment variable not set"};
-    }
-
-    // Map dataset names to their zip file names (some differ)
-    static const std::map<std::string, std::string> DATASET_ZIP_NAMES = {
-        {"touche-2020", "webis-touche2020"},
-        {"dbpedia-entity", "dbpedia-entity"},
-    };
-
-    std::string zipName = datasetName;
-    auto zipIt = DATASET_ZIP_NAMES.find(datasetName);
-    if (zipIt != DATASET_ZIP_NAMES.end()) {
-        zipName = zipIt->second;
-    }
-
-    fs::path datasetDir = cacheDir.empty()
-                              ? fs::path(home) / ".cache" / "yams" / "benchmarks" / datasetName
-                              : cacheDir;
-
-    BEIRDataset dataset;
-    dataset.name = datasetName;
-    dataset.basePath = datasetDir;
-
-    fs::path corpusFile = datasetDir / "corpus.jsonl";
-    fs::path queriesFile = datasetDir / "queries.jsonl";
-    fs::path qrelsFile = datasetDir / "qrels" / "test.tsv";
-
-    if (!fs::exists(corpusFile) || !fs::exists(queriesFile) || !fs::exists(qrelsFile)) {
-        if (datasetName == "longmemeval_s") {
-            return Error{ErrorCode::NotFound,
-                         "LongMemEval_S dataset not found. Convert from HuggingFace:\n"
-                         "  uv pip install datasets\n"
-                         "  python scripts/prepare_longmemeval_s.py\n"
-                         "Expected location: ~/.cache/yams/benchmarks/longmemeval_s/"};
-        }
-        std::ostringstream oss;
-        oss << datasetName << " dataset not found. Please download manually:\n"
-            << "  mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks\n"
-            << "  curl -L -o " << zipName << ".zip "
-            << "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/" << zipName
-            << ".zip\n"
-            << "  unzip " << zipName << ".zip";
-        if (datasetName != zipName) {
-            oss << " && mv " << zipName << " " << datasetName;
-        }
-        return Error{ErrorCode::NotFound, oss.str()};
-    }
-
-    // Load corpus
-    std::ifstream corpusIn(corpusFile);
-    std::string line;
-    while (std::getline(corpusIn, line)) {
-        if (line.empty())
-            continue;
-        try {
-            auto j = json::parse(line);
-            BEIRDocument doc;
-            doc.id = j.value("_id", "");
-            if (doc.id.empty())
-                doc.id = j.value("id", "");
-            doc.title = j.value("title", "");
-            doc.text = j.value("text", "");
-            if (!doc.id.empty() && !doc.text.empty()) {
-                dataset.documents[doc.id] = doc;
-            }
-        } catch (const json::exception& e) {
-            spdlog::warn("Failed to parse corpus line: {}", e.what());
-        }
-    }
-    corpusIn.close();
-
-    // Load queries
-    std::ifstream queriesIn(queriesFile);
-    while (std::getline(queriesIn, line)) {
-        if (line.empty())
-            continue;
-        try {
-            auto j = json::parse(line);
-            BEIRQuery q;
-            q.id = j.value("_id", "");
-            if (q.id.empty())
-                q.id = j.value("id", "");
-            q.text = j.value("text", "");
-            if (!q.id.empty() && !q.text.empty()) {
-                dataset.queries[q.id] = q;
-            }
-        } catch (const json::exception& e) {
-            spdlog::warn("Failed to parse query line: {}", e.what());
-        }
-    }
-    queriesIn.close();
-
-    // Load qrels
-    std::ifstream qrelsIn(qrelsFile);
-    bool firstLine = true;
-    while (std::getline(qrelsIn, line)) {
-        if (line.empty() || line[0] == '#')
-            continue;
-        if (firstLine) {
-            firstLine = false;
-            if (line.find("query-id") != std::string::npos)
-                continue;
-        }
-        std::istringstream iss(line);
-        std::string queryId, docId, scoreStr;
-        if (std::getline(iss, queryId, '\t') && std::getline(iss, docId, '\t') &&
-            std::getline(iss, scoreStr, '\t')) {
-            int score = std::stoi(scoreStr);
-            dataset.qrels.emplace(queryId, std::make_pair(docId, score));
-        }
-    }
-    qrelsIn.close();
-
-    spdlog::info("Loaded BEIR {} dataset: {} documents, {} queries, {} qrels", datasetName,
-                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size());
-
-    return dataset;
+    return yams::bench::loadBEIRDataset(datasetName, cacheDir);
 }
 
 static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& datasetName,
@@ -844,11 +719,21 @@ struct QueryDiagnosticsSummary {
     std::vector<double> turboQuantCandidateSamples;
     std::vector<double> turboQuantPackedCandidatesScoredSamples;
     std::unordered_map<std::string, std::uint64_t> turboQuantSkipReasonCounts;
+    std::vector<double> fusionPreFusionUniqueCountSamples;
+    std::vector<double> fusionPostFusionCountSamples;
     std::vector<double> fusionDroppedCountSamples;
+    std::vector<double> fusionDroppedRateSamples;
+    std::vector<double> anchoredPreFusionCountSamples;
+    std::vector<double> anchoredFusionDroppedCountSamples;
+    std::vector<double> anchoredFusionDroppedRateSamples;
+    std::vector<double> topTextPreFusionCountSamples;
+    std::vector<double> topTextFusionDroppedCountSamples;
+    std::vector<double> topTextFusionDroppedRateSamples;
     std::vector<double> vectorOnlyDocsSamples;
     std::vector<double> vectorOnlyBelowThresholdSamples;
     std::vector<double> vectorOnlyAboveThresholdSamples;
     std::vector<double> vectorOnlyNearMissEligibleSamples;
+    std::uint64_t adaptiveFusionEnabledQueryCount = 0;
     std::vector<double> strongVectorOnlyDocsSamples;
     std::vector<double> strongVectorOnlyScoreEligibleDocsSamples;
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
@@ -1452,8 +1337,53 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (auto v = parseDoubleStat(searchStats, "semantic_rescue_target")) {
         summary.semanticRescueTargetSamples.push_back(*v);
     }
-    if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
+    if (auto v = parseDoubleStat(searchStats, "fusion_pre_fusion_unique_count")) {
+        summary.fusionPreFusionUniqueCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_post_fusion_count")) {
+        summary.fusionPostFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_dropped_count")) {
         summary.fusionDroppedCountSamples.push_back(*v);
+    } else if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
+        summary.fusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "fusion_dropped_rate")) {
+        summary.fusionDroppedRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_pre_fusion_count")) {
+        summary.anchoredPreFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_fusion_dropped_count")) {
+        summary.anchoredFusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "anchored_fusion_dropped_rate")) {
+        summary.anchoredFusionDroppedRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_pre_fusion_count")) {
+        summary.topTextPreFusionCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_fusion_dropped_count")) {
+        summary.topTextFusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "top_text_fusion_dropped_rate")) {
+        summary.topTextFusionDroppedRateSamples.push_back(*v);
+    }
+    const bool hasDirectPreFusionStats = searchStats.find("vector_only_docs") != searchStats.end();
+    if (auto v = parseDoubleStat(searchStats, "vector_only_docs")) {
+        summary.vectorOnlyDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_below_threshold")) {
+        summary.vectorOnlyBelowThresholdSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_above_threshold")) {
+        summary.vectorOnlyAboveThresholdSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "vector_only_near_miss_eligible")) {
+        summary.vectorOnlyNearMissEligibleSamples.push_back(*v);
+    }
+    if (parseBoolStat(searchStats, "adaptive_fusion_enabled").value_or(false)) {
+        summary.adaptiveFusionEnabledQueryCount++;
     }
     if (auto v = parseDoubleStat(searchStats, "multi_vector_generated_phrases")) {
         summary.multiVectorGeneratedPhraseSamples.push_back(*v);
@@ -1501,24 +1431,27 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         try {
             auto parsed = json::parse(prefusion->second);
             if (parsed.is_object()) {
-                if (auto it = parsed.find("vector_only_docs"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyDocsSamples.push_back(it->get<double>());
+                if (!hasDirectPreFusionStats) {
+                    if (auto it = parsed.find("vector_only_docs"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyDocsSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_below_threshold"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyBelowThresholdSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_below_threshold"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyBelowThresholdSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_above_threshold"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyAboveThresholdSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_above_threshold"); it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyAboveThresholdSamples.push_back(it->get<double>());
+                        }
                     }
-                }
-                if (auto it = parsed.find("vector_only_near_miss_eligible"); it != parsed.end()) {
-                    if (it->is_number()) {
-                        summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
+                    if (auto it = parsed.find("vector_only_near_miss_eligible");
+                        it != parsed.end()) {
+                        if (it->is_number()) {
+                            summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
+                        }
                     }
                 }
                 if (auto it = parsed.find("strong_vector_only_docs"); it != parsed.end()) {
@@ -1678,8 +1611,33 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                     "ewma_graph_rerank_latency_ms",
                     "ewma_graph_rerank_skip_rate",
                     "ewma_graph_rerank_contribution_rate",
+                    "ewma_fusion_dropped_rate",
+                    "ewma_anchored_fusion_dropped_rate",
+                    "ewma_top_text_fusion_dropped_rate",
+                    "ewma_vector_only_share",
+                    "ewma_semantic_rescue_rate",
                 };
                 for (const auto& key : kKeys) {
+                    if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
+                        summary.tunerSignalSamples[key].push_back(it->get<double>());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    if (auto runtimeConfig = searchStats.find("tuner_runtime_config_json");
+        runtimeConfig != searchStats.end()) {
+        try {
+            auto parsed = json::parse(runtimeConfig->second);
+            if (parsed.is_object()) {
+                static const std::vector<std::string> kWeightKeys = {
+                    "text_weight",          "simeon_text_weight", "vector_weight",
+                    "entity_vector_weight", "path_tree_weight",   "kg_weight",
+                    "tag_weight",           "metadata_weight",
+                };
+                for (const auto& key : kWeightKeys) {
                     if (auto it = parsed.find(key); it != parsed.end() && it->is_number()) {
                         summary.tunerSignalSamples[key].push_back(it->get<double>());
                     }
@@ -1750,6 +1708,9 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.turboQuantEnabledQueryCount) / queryCount},
         {"turboquant_apply_rate",
          static_cast<double>(summary.turboQuantAppliedQueryCount) / queryCount},
+        {"adaptive_fusion_enabled_query_count", summary.adaptiveFusionEnabledQueryCount},
+        {"adaptive_fusion_enabled_rate",
+         static_cast<double>(summary.adaptiveFusionEnabledQueryCount) / queryCount},
         {"semantic_rescue_nonzero_rate",
          static_cast<double>(summary.semanticRescueNonZeroQueryCount) / queryCount},
         {"miss_missing_pre_fusion_rate",
@@ -1769,7 +1730,20 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
+        {"fusion_pre_fusion_unique_count",
+         summarizeSamples(summary.fusionPreFusionUniqueCountSamples)},
+        {"fusion_post_fusion_count", summarizeSamples(summary.fusionPostFusionCountSamples)},
         {"fusion_dropped_count", summarizeSamples(summary.fusionDroppedCountSamples)},
+        {"fusion_dropped_rate", summarizeSamples(summary.fusionDroppedRateSamples)},
+        {"anchored_pre_fusion_count", summarizeSamples(summary.anchoredPreFusionCountSamples)},
+        {"anchored_fusion_dropped_count",
+         summarizeSamples(summary.anchoredFusionDroppedCountSamples)},
+        {"anchored_fusion_dropped_rate",
+         summarizeSamples(summary.anchoredFusionDroppedRateSamples)},
+        {"top_text_pre_fusion_count", summarizeSamples(summary.topTextPreFusionCountSamples)},
+        {"top_text_fusion_dropped_count",
+         summarizeSamples(summary.topTextFusionDroppedCountSamples)},
+        {"top_text_fusion_dropped_rate", summarizeSamples(summary.topTextFusionDroppedRateSamples)},
         {"vector_only_docs", summarizeSamples(summary.vectorOnlyDocsSamples)},
         {"vector_only_below_threshold", summarizeSamples(summary.vectorOnlyBelowThresholdSamples)},
         {"vector_only_above_threshold", summarizeSamples(summary.vectorOnlyAboveThresholdSamples)},
@@ -1913,6 +1887,12 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
     j["search_stats"] = e.searchStats;
     j["diag"] = e.diagnostics;
 
+    if (const char* embBackend = std::getenv("YAMS_EMBED_BACKEND"); embBackend && *embBackend) {
+        j["embedding_backend"] = embBackend;
+    } else {
+        j["embedding_backend"] = "daemon";
+    }
+
     if (g_debugRunContext.has_value()) {
         j["run_id"] = g_debugRunContext->runId;
         j["candidate"] = g_debugRunContext->candidate;
@@ -2014,16 +1994,15 @@ struct OptimizationRunResult {
     double hybridEvalMs = 0.0;
     double keywordEvalMs = 0.0;
     std::string searchEngine =
-        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
-    std::string quantizedHnswMode =
-        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
-    std::size_t quantizedHnswRerankFactor = 2;
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
     std::uintmax_t vectorsDbBytes = 0;
     std::uintmax_t vectorsWalBytes = 0;
     std::uintmax_t persistedHnswNodes = 0;
     std::uintmax_t persistedHnswMetaRows = 0;
     std::uintmax_t persistedVec0Tables = 0;
     std::uintmax_t persistedVec0Rows = 0;
+    std::uintmax_t persistedPqCodes = 0;
+    std::uintmax_t persistedPqMeta = 0;
     bool success = false;
     std::string errorMessage;
 };
@@ -2039,10 +2018,7 @@ struct BenchCacheMetadata {
     bool requireKgReady = false;
     bool graphRerankRequested = false;
     std::string searchEngine =
-        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
-    std::string quantizedHnswMode =
-        yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8);
-    std::size_t quantizedHnswRerankFactor = 2;
+        yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
     int expectedDocs = 0;
     int expectedQueries = 0;
     std::uintmax_t corpusFingerprint = 0;
@@ -2056,6 +2032,8 @@ struct BenchCacheMetadata {
     std::uintmax_t persistedHnswMetaRows = 0;
     std::uintmax_t persistedVec0Tables = 0;
     std::uintmax_t persistedVec0Rows = 0;
+    std::uintmax_t persistedPqCodes = 0;
+    std::uintmax_t persistedPqMeta = 0;
 };
 
 struct PersistedHnswState {
@@ -2066,20 +2044,22 @@ struct PersistedHnswState {
     std::uintmax_t metaRows = 0;
     std::uintmax_t vec0Tables = 0;
     std::uintmax_t vec0Rows = 0;
+    std::uintmax_t pqCodeRows = 0;
+    std::uintmax_t pqMetaRows = 0;
 
     bool reusable(yams::vector::VectorSearchEngine engine) const {
         if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
             return vec0Tables > 0 && vec0Rows > 0;
         }
-        if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
-            return false;
+        if (engine == yams::vector::VectorSearchEngine::SimeonPqAdc) {
+            return pqCodeRows > 0 && pqMetaRows > 0;
         }
         return nodeRows > 0 && metaRows > 0;
     }
 };
 
 static std::string g_benchmark_search_engine =
-    yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine);
+    yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
 static PersistedHnswState g_final_vector_index_state;
 
 static bool envTruthy(const char* value) {
@@ -2104,44 +2084,14 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
         }
         spdlog::warn(
             "[Bench] Invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}", raw,
-            yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::HnswCosine));
+            yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc));
     }
-    return yams::vector::VectorSearchEngine::HnswCosine;
-}
-
-static yams::vector::QuantizedHnswMode benchmarkQuantizedHnswMode() {
-    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_MODE"); raw && *raw) {
-        std::string normalized(raw);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        if (auto parsed = yams::vector::parseQuantizedHnswMode(normalized)) {
-            return *parsed;
-        }
-        spdlog::warn("[Bench] Invalid YAMS_VECTOR_QUANTIZED_MODE='{}'; using default {}", raw,
-                     yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8));
-    }
-    return yams::vector::QuantizedHnswMode::LVQ8;
-}
-
-static std::size_t benchmarkQuantizedHnswRerankFactor() {
-    if (const char* raw = std::getenv("YAMS_VECTOR_QUANTIZED_RERANK_FACTOR"); raw && *raw) {
-        try {
-            return std::max<std::size_t>(1, static_cast<std::size_t>(std::stoull(raw)));
-        } catch (...) {
-        }
-    }
-    return 2;
+    return yams::vector::VectorSearchEngine::SimeonPqAdc;
 }
 
 static std::string benchmarkEngineCacheLabel() {
     const auto engine = benchmarkVectorSearchEngine();
     std::string label = yams::vector::vectorSearchEngineName(engine);
-    if (engine == yams::vector::VectorSearchEngine::HnswQuantizedL2) {
-        label += std::string("_") +
-                 yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()) + "_r" +
-                 std::to_string(benchmarkQuantizedHnswRerankFactor());
-    }
     return label;
 }
 
@@ -2270,7 +2220,9 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
         "SELECT name FROM sqlite_master WHERE type='table' AND "
         "(name='vectors_hnsw_meta' OR name='vectors_hnsw_nodes' OR "
         " name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-        " name LIKE 'vectors_%_vec0')";
+        " name LIKE 'vectors_%_vec0' OR "
+        " name='simeon_pq_codes' OR name='simeon_pq_meta' OR "
+        " name LIKE 'vectors_%_simeon_pq_codes' OR name LIKE 'vectors_%_simeon_pq_meta')";
     if (sqlite3_prepare_v2(db, tableSql, -1, &stmt, nullptr) != SQLITE_OK) {
         spdlog::warn("[Bench] Failed to inspect persisted HNSW tables in {}: {}",
                      vectorsDbPath.string(), sqlite3_errmsg(db));
@@ -2309,6 +2261,10 @@ static PersistedHnswState inspectPersistedHnswState(const fs::path& dataDir) {
             } else if (table.find("_vec0") != std::string::npos) {
                 state.vec0Tables += 1;
                 state.vec0Rows += count;
+            } else if (table.find("simeon_pq_codes") != std::string::npos) {
+                state.pqCodeRows += count;
+            } else if (table.find("simeon_pq_meta") != std::string::npos) {
+                state.pqMetaRows += count;
             }
         }
         sqlite3_finalize(stmt);
@@ -2331,8 +2287,6 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"require_kg_ready", metadata.requireKgReady},
         {"graph_rerank_requested", metadata.graphRerankRequested},
         {"search_engine", metadata.searchEngine},
-        {"quantized_hnsw_mode", metadata.quantizedHnswMode},
-        {"quantized_hnsw_rerank_factor", std::to_string(metadata.quantizedHnswRerankFactor)},
         {"expected_docs", metadata.expectedDocs},
         {"expected_queries", metadata.expectedQueries},
         {"corpus_fingerprint", std::to_string(metadata.corpusFingerprint)},
@@ -2346,6 +2300,8 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"persisted_hnsw_meta_rows", std::to_string(metadata.persistedHnswMetaRows)},
         {"persisted_vec0_tables", std::to_string(metadata.persistedVec0Tables)},
         {"persisted_vec0_rows", std::to_string(metadata.persistedVec0Rows)},
+        {"persisted_pq_codes", std::to_string(metadata.persistedPqCodes)},
+        {"persisted_pq_meta", std::to_string(metadata.persistedPqMeta)},
     };
 }
 
@@ -2366,248 +2322,28 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     metadata.graphRerankRequested = j.value("graph_rerank_requested", false);
     metadata.searchEngine =
         j.value("search_engine", std::string(yams::vector::vectorSearchEngineName(
-                                     yams::vector::VectorSearchEngine::HnswCosine)));
-    metadata.quantizedHnswMode = j.value(
-        "quantized_hnsw_mode",
-        std::string(yams::vector::quantizedHnswModeName(yams::vector::QuantizedHnswMode::LVQ8)));
-    if (j.contains("quantized_hnsw_rerank_factor")) {
-        try {
-            if (j["quantized_hnsw_rerank_factor"].is_number_unsigned() ||
-                j["quantized_hnsw_rerank_factor"].is_number_integer()) {
-                metadata.quantizedHnswRerankFactor =
-                    static_cast<std::size_t>(j["quantized_hnsw_rerank_factor"].get<int>());
-            } else if (j["quantized_hnsw_rerank_factor"].is_string()) {
-                metadata.quantizedHnswRerankFactor = static_cast<std::size_t>(
-                    std::stoull(j["quantized_hnsw_rerank_factor"].get<std::string>()));
-            }
-        } catch (...) {
-            metadata.quantizedHnswRerankFactor = 2;
-        }
-    }
+                                     yams::vector::VectorSearchEngine::SimeonPqAdc)));
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
+    metadata.corpusFingerprint = j.value("corpus_fingerprint", std::uintmax_t{0});
     metadata.status = j.value("status", std::string("priming"));
     metadata.embeddedDocs = j.value("embedded_docs", 0);
+    metadata.vectorCount = j.value("vector_count", std::uintmax_t{0});
     metadata.vectorIndexReady = j.value("vector_index_ready", false);
-
-    const auto fingerprintString = j.value("corpus_fingerprint", std::string("0"));
-    try {
-        metadata.corpusFingerprint = static_cast<std::uintmax_t>(std::stoull(fingerprintString));
-    } catch (...) {
-        metadata.corpusFingerprint = 0;
-    }
-
-    const auto vectorCountString = j.value("vector_count", std::string("0"));
-    try {
-        metadata.vectorCount = static_cast<std::uintmax_t>(std::stoull(vectorCountString));
-    } catch (...) {
-        metadata.vectorCount = 0;
-    }
-
-    const auto persistedNodesString = j.value("persisted_hnsw_nodes", std::string("0"));
-    try {
-        metadata.persistedHnswNodes =
-            static_cast<std::uintmax_t>(std::stoull(persistedNodesString));
-    } catch (...) {
-        metadata.persistedHnswNodes = 0;
-    }
-
-    const auto persistedMetaString = j.value("persisted_hnsw_meta_rows", std::string("0"));
-    try {
-        metadata.persistedHnswMetaRows =
-            static_cast<std::uintmax_t>(std::stoull(persistedMetaString));
-    } catch (...) {
-        metadata.persistedHnswMetaRows = 0;
-    }
-
-    const auto vec0TablesString = j.value("persisted_vec0_tables", std::string("0"));
-    try {
-        metadata.persistedVec0Tables = static_cast<std::uintmax_t>(std::stoull(vec0TablesString));
-    } catch (...) {
-        metadata.persistedVec0Tables = 0;
-    }
-
-    const auto vec0RowsString = j.value("persisted_vec0_rows", std::string("0"));
-    try {
-        metadata.persistedVec0Rows = static_cast<std::uintmax_t>(std::stoull(vec0RowsString));
-    } catch (...) {
-        metadata.persistedVec0Rows = 0;
-    }
-
-    const auto dbBytesString = j.value("vectors_db_bytes", std::string("0"));
-    try {
-        metadata.vectorsDbBytes = static_cast<std::uintmax_t>(std::stoull(dbBytesString));
-    } catch (...) {
-        metadata.vectorsDbBytes = 0;
-    }
-
-    const auto walBytesString = j.value("vectors_wal_bytes", std::string("0"));
-    try {
-        metadata.vectorsWalBytes = static_cast<std::uintmax_t>(std::stoull(walBytesString));
-    } catch (...) {
-        metadata.vectorsWalBytes = 0;
-    }
-
+    metadata.vectorsDbBytes = j.value("vectors_db_bytes", std::uintmax_t{0});
+    metadata.vectorsWalBytes = j.value("vectors_wal_bytes", std::uintmax_t{0});
+    metadata.persistedHnswNodes = j.value("persisted_hnsw_nodes", std::uintmax_t{0});
+    metadata.persistedHnswMetaRows = j.value("persisted_hnsw_meta_rows", std::uintmax_t{0});
+    metadata.persistedVec0Tables = j.value("persisted_vec0_tables", std::uintmax_t{0});
+    metadata.persistedVec0Rows = j.value("persisted_vec0_rows", std::uintmax_t{0});
+    metadata.persistedPqCodes = j.value("persisted_pq_codes", std::uintmax_t{0});
+    metadata.persistedPqMeta = j.value("persisted_pq_meta", std::uintmax_t{0});
     return metadata;
-}
-
-static Result<void> writeBenchCacheMetadata(const fs::path& warmDataDir,
-                                            const BenchCacheMetadata& metadata) {
-    std::error_code ec;
-    yams::common::ensureDirectories(warmDataDir);
-    if (ec) {
-        return Error{ErrorCode::IOError, "Failed to create warm data dir '" + warmDataDir.string() +
-                                             "': " + ec.message()};
-    }
-
-    const fs::path metadataPath = warmDataDir / "retrieval_bench_cache.json";
-    std::ofstream out(metadataPath, std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        return Error{ErrorCode::IOError,
-                     "Failed to write warm cache metadata: " + metadataPath.string()};
-    }
-    out << benchCacheMetadataToJson(metadata).dump(2) << "\n";
-    return {};
-}
-
-static Result<BenchCacheMetadata> readBenchCacheMetadata(const fs::path& warmDataDir) {
-    const fs::path metadataPath = warmDataDir / "retrieval_bench_cache.json";
-    if (!fs::exists(metadataPath)) {
-        return Error{ErrorCode::NotFound, "Warm cache metadata missing: " + metadataPath.string()};
-    }
-
-    std::ifstream in(metadataPath);
-    if (!in.is_open()) {
-        return Error{ErrorCode::IOError,
-                     "Failed to read warm cache metadata: " + metadataPath.string()};
-    }
-
-    try {
-        json j;
-        in >> j;
-        auto parsed = parseBenchCacheMetadata(j);
-        if (!parsed.has_value()) {
-            return Error{ErrorCode::InvalidData,
-                         "Warm cache metadata is not a valid object: " + metadataPath.string()};
-        }
-        return *parsed;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InvalidData, "Failed to parse warm cache metadata '" +
-                                                 metadataPath.string() + "': " + e.what()};
-    }
-}
-
-static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCacheMetadata& actual,
-                              std::string* mismatchReason) {
-    auto mismatch = [&](const std::string& reason) {
-        if (mismatchReason) {
-            *mismatchReason = reason;
-        }
-        return false;
-    };
-
-    const auto datasetPathMatches = [&]() {
-        if (expected.datasetPath.empty() || actual.datasetPath.empty()) {
-            return true;
-        }
-        return expected.datasetPath == actual.datasetPath;
-    };
-
-    if (expected.dataset != actual.dataset) {
-        return mismatch("dataset mismatch");
-    }
-    if (!datasetPathMatches()) {
-        return mismatch("dataset_path mismatch");
-    }
-    if (expected.corpusSize != actual.corpusSize) {
-        return mismatch("corpus_size mismatch");
-    }
-    if (expected.useBEIR != actual.useBEIR) {
-        return mismatch("use_beir mismatch");
-    }
-    if (expected.vectorsDisabled != actual.vectorsDisabled) {
-        return mismatch("vectors_disabled mismatch");
-    }
-    if (expected.searchEngine != actual.searchEngine) {
-        return mismatch("search_engine mismatch");
-    }
-    if (expected.quantizedHnswMode != actual.quantizedHnswMode) {
-        return mismatch("quantized_hnsw_mode mismatch");
-    }
-    if (expected.quantizedHnswRerankFactor != actual.quantizedHnswRerankFactor) {
-        return mismatch("quantized_hnsw_rerank_factor mismatch");
-    }
-    if (expected.expectedDocs != actual.expectedDocs) {
-        return mismatch("expected_docs mismatch");
-    }
-    if (expected.corpusFingerprint != 0 && actual.corpusFingerprint != 0 &&
-        expected.corpusFingerprint != actual.corpusFingerprint) {
-        return mismatch("corpus_fingerprint mismatch");
-    }
-
-    if (!(actual.status == "primed" || actual.status == "partial")) {
-        return mismatch("cache status not reusable");
-    }
-
-    const auto expectedEngine = yams::vector::parseVectorSearchEngine(expected.searchEngine)
-                                    .value_or(yams::vector::VectorSearchEngine::HnswCosine);
-    const bool reusableIndex = expectedEngine == yams::vector::VectorSearchEngine::Vec0L2
-                                   ? (actual.vectorIndexReady && actual.persistedVec0Tables > 0 &&
-                                      actual.persistedVec0Rows > 0)
-                               : expectedEngine == yams::vector::VectorSearchEngine::HnswQuantizedL2
-                                   ? true
-                                   : (actual.vectorIndexReady && actual.persistedHnswNodes > 0 &&
-                                      actual.persistedHnswMetaRows > 0);
-    if (!expected.vectorsDisabled && actual.status == "primed" && !reusableIndex) {
-        return mismatch("vector index not reusable");
-    }
-
-    return true;
-}
-
-static int benchCacheStatusRank(std::string_view status) {
-    if (status == "primed") {
-        return 2;
-    }
-    if (status == "partial") {
-        return 1;
-    }
-    return 0;
-}
-
-static BenchCacheMetadata
-preferStrongerBenchCacheMetadata(const BenchCacheMetadata& candidate,
-                                 const std::optional<BenchCacheMetadata>& prior) {
-    if (!prior.has_value()) {
-        return candidate;
-    }
-
-    std::string mismatchReason;
-    if (!benchCacheMatches(candidate, *prior, &mismatchReason)) {
-        return candidate;
-    }
-
-    const int candidateRank = benchCacheStatusRank(candidate.status);
-    const int priorRank = benchCacheStatusRank(prior->status);
-    if (priorRank > candidateRank) {
-        return *prior;
-    }
-    if (priorRank == candidateRank) {
-        if (prior->embeddedDocs > candidate.embeddedDocs) {
-            return *prior;
-        }
-        if (prior->embeddedDocs == candidate.embeddedDocs &&
-            prior->vectorCount > candidate.vectorCount) {
-            return *prior;
-        }
-    }
-
-    return candidate;
 }
 
 static std::string canonicalPathOrEmpty(const fs::path& path) {
     if (path.empty()) {
-        return "";
+        return {};
     }
     std::error_code ec;
     const auto canonical = fs::weakly_canonical(path, ec);
@@ -2617,25 +2353,134 @@ static std::string canonicalPathOrEmpty(const fs::path& path) {
     return path.lexically_normal().string();
 }
 
-static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& base,
+static fs::path benchCacheMetadataPath(const fs::path& cacheDir) {
+    return cacheDir / "retrieval_bench_cache.json";
+}
+
+static Result<BenchCacheMetadata> readBenchCacheMetadata(const fs::path& cacheDir) {
+    const auto metadataPath = benchCacheMetadataPath(cacheDir);
+    std::error_code ec;
+    if (!fs::exists(metadataPath, ec)) {
+        return Error{ErrorCode::NotFound, "Cache metadata not found: " + metadataPath.string()};
+    }
+    std::ifstream in(metadataPath);
+    if (!in) {
+        return Error{ErrorCode::IOError, "Failed to open cache metadata: " + metadataPath.string()};
+    }
+    json j;
+    try {
+        in >> j;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Failed to parse cache metadata: " + std::string(e.what())};
+    }
+    auto parsed = parseBenchCacheMetadata(j);
+    if (!parsed) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Cache metadata schema invalid: " + metadataPath.string()};
+    }
+    return *parsed;
+}
+
+static Result<void> writeBenchCacheMetadata(const fs::path& cacheDir,
+                                            const BenchCacheMetadata& metadata) {
+    std::error_code ec;
+    fs::create_directories(cacheDir, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError,
+                     "Failed to create cache dir: " + cacheDir.string() + ": " + ec.message()};
+    }
+    const auto metadataPath = benchCacheMetadataPath(cacheDir);
+    std::ofstream out(metadataPath);
+    if (!out) {
+        return Error{ErrorCode::IOError,
+                     "Failed to write cache metadata: " + metadataPath.string()};
+    }
+    out << benchCacheMetadataToJson(metadata).dump(2) << "\n";
+    return Result<void>{};
+}
+
+static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCacheMetadata& actual,
+                              std::string* mismatchReason = nullptr) {
+    auto mismatch = [&](std::string reason) {
+        if (mismatchReason) {
+            *mismatchReason = std::move(reason);
+        }
+        return false;
+    };
+    if (expected.dataset != actual.dataset)
+        return mismatch("dataset mismatch");
+    if (expected.datasetPath != actual.datasetPath)
+        return mismatch("dataset path mismatch");
+    if (expected.corpusSize != actual.corpusSize)
+        return mismatch("corpus size mismatch");
+    if (expected.numQueries != actual.numQueries)
+        return mismatch("query count mismatch");
+    if (expected.topK != actual.topK)
+        return mismatch("top-k mismatch");
+    if (expected.useBEIR != actual.useBEIR)
+        return mismatch("beir flag mismatch");
+    if (expected.vectorsDisabled != actual.vectorsDisabled)
+        return mismatch("vectors disabled mismatch");
+    if (expected.requireKgReady != actual.requireKgReady)
+        return mismatch("kg requirement mismatch");
+    if (expected.graphRerankRequested != actual.graphRerankRequested)
+        return mismatch("graph rerank mismatch");
+    if (expected.searchEngine != actual.searchEngine)
+        return mismatch("search engine mismatch");
+    if (expected.expectedDocs != actual.expectedDocs)
+        return mismatch("expected docs mismatch");
+    if (expected.expectedQueries != actual.expectedQueries)
+        return mismatch("expected queries mismatch");
+    if (expected.corpusFingerprint != 0 && actual.corpusFingerprint != 0 &&
+        expected.corpusFingerprint != actual.corpusFingerprint) {
+        return mismatch("corpus fingerprint mismatch");
+    }
+    if (actual.status != "primed") {
+        return mismatch("cache status not reusable");
+    }
+    return true;
+}
+
+static BenchCacheMetadata
+preferStrongerBenchCacheMetadata(BenchCacheMetadata preferred,
+                                 const std::optional<BenchCacheMetadata>& candidate) {
+    if (!candidate) {
+        return preferred;
+    }
+    const auto& c = *candidate;
+    if (preferred.datasetPath.empty())
+        preferred.datasetPath = c.datasetPath;
+    preferred.corpusFingerprint = std::max(preferred.corpusFingerprint, c.corpusFingerprint);
+    preferred.expectedDocs = std::max(preferred.expectedDocs, c.expectedDocs);
+    preferred.expectedQueries = std::max(preferred.expectedQueries, c.expectedQueries);
+    preferred.embeddedDocs = std::max(preferred.embeddedDocs, c.embeddedDocs);
+    preferred.vectorCount = std::max(preferred.vectorCount, c.vectorCount);
+    preferred.vectorIndexReady = preferred.vectorIndexReady || c.vectorIndexReady;
+    preferred.vectorsDbBytes = std::max(preferred.vectorsDbBytes, c.vectorsDbBytes);
+    preferred.vectorsWalBytes = std::max(preferred.vectorsWalBytes, c.vectorsWalBytes);
+    preferred.persistedHnswNodes = std::max(preferred.persistedHnswNodes, c.persistedHnswNodes);
+    preferred.persistedHnswMetaRows =
+        std::max(preferred.persistedHnswMetaRows, c.persistedHnswMetaRows);
+    preferred.persistedVec0Tables = std::max(preferred.persistedVec0Tables, c.persistedVec0Tables);
+    preferred.persistedVec0Rows = std::max(preferred.persistedVec0Rows, c.persistedVec0Rows);
+    preferred.persistedPqCodes = std::max(preferred.persistedPqCodes, c.persistedPqCodes);
+    preferred.persistedPqMeta = std::max(preferred.persistedPqMeta, c.persistedPqMeta);
+    if (preferred.status != "primed" && c.status == "primed") {
+        preferred.status = c.status;
+    }
+    return preferred;
+}
+
+static BenchCacheMetadata currentBenchCacheMetadata(BenchCacheMetadata metadata,
                                                     const yams::daemon::StatusResponse& status,
                                                     const fs::path& dataDir) {
-    BenchCacheMetadata metadata = base;
-    const auto getCount = [&status](const std::string& key) -> uint64_t {
-        auto it = status.requestCounts.find(key);
-        return (it == status.requestCounts.end()) ? 0ULL : it->second;
+    metadata.datasetPath =
+        metadata.datasetPath.empty() ? canonicalPathOrEmpty(dataDir) : metadata.datasetPath;
+    auto getCount = [&](std::string_view key) -> std::uintmax_t {
+        auto it = status.requestCounts.find(std::string(key));
+        return it == status.requestCounts.end() ? 0 : it->second;
     };
-
-    metadata.embeddedDocs =
-        std::max(metadata.embeddedDocs, static_cast<int>(getCount("documents_embedded")));
-    metadata.vectorCount =
-        std::max(metadata.vectorCount, static_cast<std::uintmax_t>(getCount("vector_count")));
-    metadata.searchEngine =
-        std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
-    metadata.quantizedHnswMode =
-        std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
-    metadata.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
-
     const auto persistedHnsw = inspectPersistedHnswState(dataDir);
     metadata.vectorIndexReady = persistedHnsw.reusable(benchmarkVectorSearchEngine());
     metadata.vectorsDbBytes = persistedHnsw.vectorsDbBytes;
@@ -2644,7 +2489,10 @@ static BenchCacheMetadata currentBenchCacheMetadata(const BenchCacheMetadata& ba
     metadata.persistedHnswMetaRows = persistedHnsw.metaRows;
     metadata.persistedVec0Tables = persistedHnsw.vec0Tables;
     metadata.persistedVec0Rows = persistedHnsw.vec0Rows;
-
+    metadata.persistedPqCodes = persistedHnsw.pqCodeRows;
+    metadata.persistedPqMeta = persistedHnsw.pqMetaRows;
+    metadata.embeddedDocs = static_cast<int>(getCount("documents_embedded"));
+    metadata.vectorCount = getCount("vector_count");
     const bool queueDrained = getCount("embed_svc_queued") == 0 && getCount("embed_in_flight") == 0;
     const bool fullCoverage =
         metadata.embeddedDocs >= metadata.expectedDocs && metadata.expectedDocs > 0;
@@ -4132,14 +3980,19 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["hybrid_eval_ms"] = result.hybridEvalMs;
     j["keyword_eval_ms"] = result.keywordEvalMs;
     j["search_engine"] = result.searchEngine;
-    j["quantized_hnsw_mode"] = result.quantizedHnswMode;
-    j["quantized_hnsw_rerank_factor"] = result.quantizedHnswRerankFactor;
+    if (const char* embBackend = std::getenv("YAMS_EMBED_BACKEND"); embBackend && *embBackend) {
+        j["embedding_backend"] = embBackend;
+    } else {
+        j["embedding_backend"] = "daemon";
+    }
     j["vectors_db_bytes"] = result.vectorsDbBytes;
     j["vectors_wal_bytes"] = result.vectorsWalBytes;
     j["persisted_hnsw_nodes"] = result.persistedHnswNodes;
     j["persisted_hnsw_meta_rows"] = result.persistedHnswMetaRows;
     j["persisted_vec0_tables"] = result.persistedVec0Tables;
     j["persisted_vec0_rows"] = result.persistedVec0Rows;
+    j["persisted_pq_codes"] = result.persistedPqCodes;
+    j["persisted_pq_meta"] = result.persistedPqMeta;
     j["tuning_state"] = result.tuningState;
     j["tuning_reason"] = result.tuningReason;
     j["error"] = result.errorMessage;
@@ -4180,6 +4033,46 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
         {"duplicate_rate_at_k", result.keywordMetrics.duplicateRateAtK},
         {"num_queries", result.keywordMetrics.numQueries},
     };
+
+    {
+        auto sampleMean = [](const std::vector<double>& v) -> double {
+            if (v.empty())
+                return 0.0;
+            double sum = 0.0;
+            for (double x : v)
+                sum += x;
+            return sum / static_cast<double>(v.size());
+        };
+        auto meanSignal = [&](const std::string& key) -> double {
+            auto it = result.hybridDiagnostics.tunerSignalSamples.find(key);
+            return it == result.hybridDiagnostics.tunerSignalSamples.end() ? 0.0
+                                                                           : sampleMean(it->second);
+        };
+        auto meanScoreMass = [&](const std::string& src) -> double {
+            auto it = result.hybridDiagnostics.fusionSourceScoreMassSamples.find(src);
+            return it == result.hybridDiagnostics.fusionSourceScoreMassSamples.end()
+                       ? 0.0
+                       : sampleMean(it->second);
+        };
+        const double denseMass = meanScoreMass("vector") + meanScoreMass("compressed_ann") +
+                                 meanScoreMass("graph_vector") + meanScoreMass("entity_vector");
+        const double lexicalMass =
+            meanScoreMass("text") + meanScoreMass("graph_text") + meanScoreMass("path_tree");
+        const double otherMass = meanScoreMass("kg") + meanScoreMass("tag") +
+                                 meanScoreMass("metadata") + meanScoreMass("symbol");
+        const double totalMass = denseMass + lexicalMass + otherMass;
+        const double denseContrib = totalMass > 0.0 ? denseMass / totalMass : 0.0;
+        const double bm25Contrib = totalMass > 0.0 ? lexicalMass / totalMass : 0.0;
+
+        j["fusion_alpha"] = meanSignal("vector_weight");
+        j["text_weight"] = meanSignal("text_weight");
+        j["dense_contrib"] = denseContrib;
+        j["bm25_contrib"] = bm25Contrib;
+        j["other_contrib"] = totalMass > 0.0 ? otherMass / totalMass : 0.0;
+
+        j["ngram_range_used"] = "3-5";
+        j["idf_weighted"] = false;
+    }
 
     j["hybrid_debug_summary"] = queryDiagnosticsToJson(result.hybridDiagnostics);
     j["keyword_debug_summary"] = queryDiagnosticsToJson(result.keywordDiagnostics);
@@ -4248,6 +4141,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         }
         opts.timeout = queryTimeout;
         opts.symbolRank = true;
+        opts.allowFuzzyRetry = false;
+        opts.allowLiteralTextRetry = false;
         const bool benchDiagEnabled = []() -> bool {
             if (const char* env = std::getenv("YAMS_BENCH_DIAG"); env && std::string(env) == "1") {
                 return true;
@@ -4487,6 +4382,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadow.limit = opts.limit;
                 shadow.timeout = opts.timeout;
                 shadow.symbolRank = opts.symbolRank;
+                shadow.allowFuzzyRetry = false;
+                shadow.allowLiteralTextRetry = false;
 
                 DebugLogEntry shadowEntry;
                 shadowEntry.query = "__diag_shadow_query__";
@@ -5163,6 +5060,7 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+        addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
 
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
@@ -5264,13 +5162,24 @@ struct BenchFixture {
             std::getenv("YAMS_POST_KG_CONCURRENT") ? std::getenv("YAMS_POST_KG_CONCURRENT")
                                                    : "<unset>");
 
+        const bool embedBackendSimeon = [] {
+            const char* v = std::getenv("YAMS_EMBED_BACKEND");
+            return v && std::string{v} == "simeon";
+        }();
+
         DaemonHarness::Options harnessOptions;
         harnessOptions.isolateState = true;
         harnessOptions.useMockModelProvider = vectorsDisabled || forceMockEmbeddings;
-        harnessOptions.autoLoadPlugins = !vectorsDisabled && !forceMockEmbeddings;
+        harnessOptions.autoLoadPlugins =
+            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
         harnessOptions.configureModelPool = !vectorsDisabled && !forceMockEmbeddings;
         harnessOptions.modelPoolLazyLoading = false;
-        harnessOptions.pluginDirStrict = !vectorsDisabled && !forceMockEmbeddings;
+        harnessOptions.pluginDirStrict =
+            !vectorsDisabled && !forceMockEmbeddings && !embedBackendSimeon;
+        if (embedBackendSimeon) {
+            harnessOptions.enableModelProvider = true;
+            harnessOptions.useMockModelProvider = false;
+        }
 
         // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
         // corpus ingestion + embedding wait on repeated benchmark runs.
@@ -5284,22 +5193,20 @@ struct BenchFixture {
             if (fs::exists(cacheDir)) {
                 auto metadataResult = readBenchCacheMetadata(cacheDir);
                 if (metadataResult) {
+                    const auto& cachedMetadata = metadataResult.value();
                     std::string mismatchReason;
-                    if (benchCacheMatches(expectedCacheMetadata, metadataResult.value(),
-                                          &mismatchReason)) {
+                    if (benchCacheMatches(expectedCacheMetadata, cachedMetadata, &mismatchReason)) {
                         harnessOptions.dataDir = cacheDir;
                         warmDataDir = true;
-                        warmCacheMetadata = metadataResult.value();
+                        warmCacheMetadata = cachedMetadata;
                         spdlog::info(
                             "[Bench] Reusing warm cache dir: {} (status={}, embedded_docs={}, "
                             "vectors={})",
-                            cacheDir.string(), metadataResult.value().status,
-                            metadataResult.value().embeddedDocs,
-                            metadataResult.value().vectorCount);
+                            cacheDir.string(), cachedMetadata.status, cachedMetadata.embeddedDocs,
+                            cachedMetadata.vectorCount);
                     } else {
                         std::error_code removeEc;
-                        const bool canResumePartial = metadataResult &&
-                                                      metadataResult.value().status == "partial" &&
+                        const bool canResumePartial = cachedMetadata.status == "partial" &&
                                                       mismatchReason == "cache status not reusable";
                         if (!canResumePartial) {
                             fs::remove_all(cacheDir, removeEc);
@@ -5389,8 +5296,8 @@ struct BenchFixture {
                     };
                     const std::array<Candidate, 3> candidates = {
                         {{localPluginDir, localOnnxPlugin, localGlintPlugin},
-                         {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin},
-                         {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin}}};
+                         {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin},
+                         {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin}}};
                     for (const auto& candidate : candidates) {
                         if (!fs::exists(candidate.onnxPlugin)) {
                             continue;
@@ -5497,6 +5404,8 @@ struct BenchFixture {
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             if (!glinerModelPath.empty()) {
+                harnessOptions.autoLoadPlugins = true;
+                harnessOptions.pluginDirStrict = false;
                 json glintConfig;
                 glintConfig["model_path"] = glinerModelPath;
                 glintConfig["threshold"] = 0.5; // Default confidence threshold
@@ -5543,10 +5452,17 @@ struct BenchFixture {
                                   << "\"\n\n";
                     }
                     configOut << "[embeddings]\n";
-                    configOut << "preferred_model = \"embeddinggemma-300m\"\n";
-                    configOut << "embedding_dim = 768\n\n";
-                    configOut << "[daemon.models]\n";
-                    configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    if (embedBackendSimeon) {
+                        configOut << "preferred_model = \"simeon-default\"\n";
+                        configOut << "embedding_dim = 384\n\n";
+                        configOut << "[daemon.models]\n";
+                        configOut << "preload_models = []\n";
+                    } else {
+                        configOut << "preferred_model = \"embeddinggemma-300m\"\n";
+                        configOut << "embedding_dim = 768\n\n";
+                        configOut << "[daemon.models]\n";
+                        configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    }
                     configOut.close();
                     harnessOptions.configPath = configPath;
                     spdlog::info("Using isolated benchmark config: {}", configPath.string());
@@ -5565,7 +5481,8 @@ struct BenchFixture {
         if (!harness->start(daemonReadyTimeout))
             throw std::runtime_error("Failed to start daemon");
 
-        ensureBenchmarkEmbeddingsReady(harness.get(), vectorsDisabled, forceMockEmbeddings);
+        ensureBenchmarkEmbeddingsReady(harness.get(), vectorsDisabled, forceMockEmbeddings,
+                                       embedBackendSimeon);
 
         if (useBEIR) {
             const BEIRDataset& dataset = preparedBeirDataset.value();
@@ -6022,9 +5939,6 @@ struct BenchFixture {
                         // target)
                         bool allStagesDrained =
                             (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
-                        bool indexedReady =
-                            indexedPresent ? (indexedCount >= static_cast<uint64_t>(corpusSize))
-                                           : (docCount >= static_cast<uint64_t>(corpusSize));
                         bool extractedReady =
                             extractedPresent
                                 ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
@@ -6033,6 +5947,17 @@ struct BenchFixture {
                             postProcessedPresent
                                 ? (postProcessed >= static_cast<uint64_t>(corpusSize))
                                 : true;
+                        // `documents_indexed` is a search/FTS visibility counter and can lag or
+                        // remain stale under sanitizer/slow asynchronous rebuild runs even after
+                        // the directory ingest and post-ingest pipeline have accepted and processed
+                        // the whole corpus. For benchmark setup, do not block forever on that
+                        // secondary visibility counter once the canonical document total reached
+                        // the requested corpus and extraction/post-processing has completed.
+                        const bool corpusStored = docCount >= static_cast<uint64_t>(corpusSize);
+                        bool indexedReady =
+                            indexedPresent ? (indexedCount >= static_cast<uint64_t>(corpusSize) ||
+                                              (corpusStored && (extractedReady || processedReady)))
+                                           : corpusStored;
                         bool stableAfterDrain = (stableChecks >= 6);
                         if (allStagesDrained && indexedReady &&
                             (extractedReady || processedReady || stableAfterDrain)) {
@@ -6601,7 +6526,9 @@ struct BenchFixture {
                 return false;
             }
 
-            if (!persisted.reusable(benchmarkVectorSearchEngine())) {
+            const auto benchmarkEngine = benchmarkVectorSearchEngine();
+            bool preparedThisRun = false;
+            if (!persisted.reusable(benchmarkEngine)) {
                 const char* modeLabel = warmDataDirPath.empty() ? "cold-run" : "warm-cache";
                 spdlog::info("[Bench] Finalizing {} vector index (vectors={} persisted_nodes={} "
                              "persisted_meta={})",
@@ -6617,14 +6544,19 @@ struct BenchFixture {
                                  vectorDb->getLastError());
                     return false;
                 }
+                preparedThisRun = true;
 
                 persisted = vectorIndexDataDir.empty()
                                 ? PersistedHnswState{}
                                 : inspectPersistedHnswState(vectorIndexDataDir);
-                if (persisted.reusable(benchmarkVectorSearchEngine())) {
+                if (persisted.reusable(benchmarkEngine)) {
                     spdlog::info("[Bench] Vector index finalized in {} ms "
                                  "(persisted_nodes={} persisted_meta={})",
                                  elapsedMs, persisted.nodeRows, persisted.metaRows);
+                } else if (benchmarkEngine == yams::vector::VectorSearchEngine::SimeonPqAdc) {
+                    spdlog::info("[Bench] Vector index finalized in {} ms for {} "
+                                 "(persisted PQ rows not required for this cold-run process)",
+                                 elapsedMs, yams::vector::vectorSearchEngineName(benchmarkEngine));
                 } else {
                     spdlog::warn("[Bench] Vector index finalize completed in {} ms but persisted "
                                  "HNSW is still unusable (persisted_nodes={} persisted_meta={})",
@@ -6632,8 +6564,10 @@ struct BenchFixture {
                 }
             }
 
-            bool ready = persisted.reusable(benchmarkVectorSearchEngine()) ||
-                         vectorDb->hasReusablePersistedSearchIndex();
+            bool ready = persisted.reusable(benchmarkEngine) ||
+                         vectorDb->hasReusablePersistedSearchIndex() ||
+                         (preparedThisRun &&
+                          benchmarkEngine == yams::vector::VectorSearchEngine::SimeonPqAdc);
             updateVectorIndexReadiness(ready);
 
             int readyTimeoutSec = 60;
@@ -7212,6 +7146,8 @@ struct BenchFixture {
                 }
                 opts.timeout = queryTimeout;
                 opts.symbolRank = symbolRank;
+                opts.allowFuzzyRetry = false;
+                opts.allowLiteralTextRetry = false;
 
                 DebugLogEntry sanityEntry;
                 sanityEntry.query = std::move(label);
@@ -7368,9 +7304,6 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
         }
         result.searchEngine =
             std::string(yams::vector::vectorSearchEngineName(benchmarkVectorSearchEngine()));
-        result.quantizedHnswMode =
-            std::string(yams::vector::quantizedHnswModeName(benchmarkQuantizedHnswMode()));
-        result.quantizedHnswRerankFactor = benchmarkQuantizedHnswRerankFactor();
         if (g_fixture && g_fixture->harness) {
             const auto persisted = inspectPersistedHnswState(g_fixture->harness->dataDir());
             result.vectorsDbBytes = persisted.vectorsDbBytes;
@@ -7379,6 +7312,8 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.persistedHnswMetaRows = persisted.metaRows;
             result.persistedVec0Tables = persisted.vec0Tables;
             result.persistedVec0Rows = persisted.vec0Rows;
+            result.persistedPqCodes = persisted.pqCodeRows;
+            result.persistedPqMeta = persisted.pqMetaRows;
         }
 
         g_debugRunContext->dataset =
@@ -7752,6 +7687,10 @@ int main(int argc, char** argv) {
               << g_final_vector_index_state.vec0Tables << "\n";
     std::cout << "  persisted_vec0_rows:             " << std::setw(10)
               << g_final_vector_index_state.vec0Rows << "\n";
+    std::cout << "  persisted_simeon_pq_codes:       " << std::setw(10)
+              << g_final_vector_index_state.pqCodeRows << "\n";
+    std::cout << "  persisted_simeon_pq_meta:        " << std::setw(10)
+              << g_final_vector_index_state.pqMetaRows << "\n";
 
     // Keyword-only search results (FTS5 isolation)
     std::cout << "\n  --- KEYWORD SEARCH (FTS5 only) ---\n";

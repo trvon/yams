@@ -95,7 +95,8 @@ struct GrepPathTreeIntegrationTest {
 // Once grep_command.cpp is wired to call RetrievalService with PathTreeOptions,
 // these tests will exercise the full CLI → Service → Repository flow
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepWithPathTreeFlagParsesCorrectly", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepWithPathTreeFlagParsesCorrectly",
+                 "[integration][greppathtreeintegrationtest]") {
     // This test verifies that the --path-tree flag is parsed without error
     // Expected behavior: CLI should accept the flag and pass it to the service layer
 
@@ -105,7 +106,8 @@ TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepWithPathTreeFlagParsesCorrect
     SKIP("CLI wiring pending - Phase 3, Step 3");
 }
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeReturnsChildNodes", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeReturnsChildNodes",
+                 "[integration][greppathtreeintegrationtest]") {
     // Test: yams grep --path-tree --paths "/project/src" should return child nodes
     // Expected: main.cpp and utils.cpp (2 docs under /project/src)
 
@@ -114,28 +116,32 @@ TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeReturnsChildNodes", "
     SKIP("Service implementation pending");
 }
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeShowsDocCounts", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeShowsDocCounts",
+                 "[integration][greppathtreeintegrationtest]") {
     // Test: Path-tree results should include doc counts in output
     // Expected: Each child node shows its doc_count
 
     SKIP("Service implementation pending");
 }
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeFallbackModeWorks", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeFallbackModeWorks",
+                 "[integration][greppathtreeintegrationtest]") {
     // Test: --path-tree mode=fallback should try path-tree first, fallback to normal grep
     // Expected: If path-tree query returns empty, normal grep runs
 
     SKIP("Service implementation pending");
 }
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreePreferredModeSkipsFallback", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreePreferredModeSkipsFallback",
+                 "[integration][greppathtreeintegrationtest]") {
     // Test: --path-tree mode=preferred should only use path-tree, no fallback
     // Expected: If path-tree returns empty, command returns empty (no normal grep)
 
     SKIP("Service implementation pending");
 }
 
-TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeLimitsChildren", "[integration][greppathtreeintegrationtest]") {
+TEST_CASE_METHOD(GrepPathTreeIntegrationTest, "GrepPathTreeLimitsChildren",
+                 "[integration][greppathtreeintegrationtest]") {
     // Test: childLimit parameter should cap number of children returned
     // Expected: Only top N children by doc_count
 

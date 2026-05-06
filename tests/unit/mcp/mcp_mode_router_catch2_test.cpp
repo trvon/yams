@@ -241,3 +241,68 @@ TEST_CASE("ModeRouter query projection returns steps/totalSteps/completedSteps",
     REQUIRE(data["completedSteps"].get<int>() == 1);
     REQUIRE_FALSE(data["steps"][0]["isError"].get<bool>());
 }
+
+TEST_CASE("ModeRouter query projection preserves partial results on dispatch failure",
+          "[mcp][mode_router]") {
+    ModeRouterConfig cfg;
+    cfg.kind = "read";
+    cfg.stepsKey = "steps";
+    cfg.summaryPrefix = "Pipeline";
+    cfg.opTable = {{"grep", "grep"}, {"search", "search"}};
+    cfg.dispatchErrorsAreFatal = false;
+    cfg.dispatch = [](std::string op, std::string, json,
+                      std::size_t i) -> boost::asio::awaitable<ModeRouterStepResult> {
+        if (op == "grep") {
+            co_return makeOk(op, i, json{{"match_count", 0}});
+        }
+        co_return makeErr(op, i, "[ipc:timeout] Read timeout");
+    };
+    cfg.stepProjector = yams::mcp::projections::queryStepProjection;
+    cfg.finalResultBuilder = yams::mcp::projections::queryFinalResult;
+
+    ModeRouter router(std::move(cfg));
+
+    json args = {{"steps", json::array({{{"op", "grep"}, {"params", json::object()}},
+                                        {{"op", "search"}, {"params", json::object()}}})}};
+    auto result = runRouter(router, args);
+    REQUIRE_FALSE(result.value("isError", false));
+
+    const auto& text = result["content"][0]["text"].get_ref<const std::string&>();
+    REQUIRE_THAT(text, ContainsSubstring("1 succeeded, 1 failed"));
+    REQUIRE_THAT(text, ContainsSubstring("[ipc:timeout] Read timeout"));
+
+    const auto& data = result["structuredContent"]["data"];
+    REQUIRE(data["totalSteps"].get<int>() == 2);
+    REQUIRE(data["completedSteps"].get<int>() == 2);
+    REQUIRE_FALSE(data["steps"][0]["isError"].get<bool>());
+    REQUIRE(data["steps"][1]["isError"].get<bool>());
+    REQUIRE(data["steps"][1]["result"]["error"].get<std::string>() == "[ipc:timeout] Read timeout");
+}
+
+TEST_CASE("ModeRouter query validation failures remain fatal", "[mcp][mode_router]") {
+    ModeRouterConfig cfg;
+    cfg.kind = "read";
+    cfg.stepsKey = "steps";
+    cfg.summaryPrefix = "Pipeline";
+    cfg.opTable = {{"search", "search"}};
+    cfg.dispatchErrorsAreFatal = false;
+    cfg.dispatch = [](std::string op, std::string, json,
+                      std::size_t i) -> boost::asio::awaitable<ModeRouterStepResult> {
+        co_return makeOk(op, i, json{{"hits", 0}});
+    };
+    cfg.stepProjector = yams::mcp::projections::queryStepProjection;
+    cfg.finalResultBuilder = yams::mcp::projections::queryFinalResult;
+
+    ModeRouter router(std::move(cfg));
+
+    auto result =
+        runRouter(router, json{{"steps", json::array({json{{"params", json::object()}}})}});
+    REQUIRE(result.value("isError", false));
+
+    const auto& text = result["content"][0]["text"].get_ref<const std::string&>();
+    REQUIRE_THAT(text, ContainsSubstring("missing 'op' field"));
+
+    const auto& data = result["structuredContent"]["data"];
+    REQUIRE(data["completedSteps"].get<int>() == 1);
+    REQUIRE(data["steps"][0]["isError"].get<bool>());
+}

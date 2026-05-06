@@ -1,10 +1,12 @@
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/search/simeon_lexical_backend.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
-#include <yams/vector/vector_index_manager.h>
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/as_tuple.hpp>
@@ -162,7 +164,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                                  std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                                  const std::string& reason, int timeoutMs,
-                                 const boost::asio::any_io_executor& workerExecutor) {
+                                 const boost::asio::any_io_executor& workerExecutor,
+                                 bool enableSimeonLexicalBuild) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     // Enable vector search only when vector database is provided
@@ -202,13 +205,95 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     if (!tunerStatePath_.empty()) {
         opts.tunerStatePath = tunerStatePath_;
     }
-    // Default daemon policy: lexical-first with adaptive semantic fallback.
-    // Keep weak-query vector fanout disabled here so hybrid search stays precision-biased
-    // instead of broadening semantic candidates whenever lexical evidence is sparse.
-    // SearchEngine::Impl computes auto-threshold as max(maxResults*2, 50) when this is 0.
-    opts.config.enableAdaptiveVectorFallback = true;
+    // Default daemon policy: vector is a peer retriever (always runs when the embedding
+    // leg is available). Keep weak-query vector fanout disabled here so hybrid search
+    // stays precision-biased instead of broadening semantic candidates whenever lexical
+    // evidence is sparse.
     opts.config.enableWeakQueryFanoutBoost = false;
-    opts.config.adaptiveVectorSkipMinTier1Hits = 0;
+    {
+        const auto backend = ConfigResolver::resolveEmbeddingBackend();
+        const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();
+        if (!enableSimeonLexicalBuild) {
+            spdlog::warn("[simeon-lexical] async BM25 build suppressed by memory "
+                         "instrumentation profile");
+        } else if (backend == "simeon" && bm25Policy.enabled.value_or(true)) {
+            yams::search::SimeonLexicalBackend::Config lexicalCfg;
+            // Default the corpus byte cap from ResourceGovernor so it scales
+            // with memoryBudgetBytes / pressure level. Explicit config still
+            // wins below.
+            if (auto governorCap = ResourceGovernor::instance().recommendLexicalCorpusBytes();
+                governorCap > 0) {
+                lexicalCfg.max_corpus_bytes = static_cast<std::size_t>(governorCap);
+                constexpr std::size_t kAvgDocBytes = 4096;
+                const std::size_t docsFromBudget = std::max<std::size_t>(
+                    1024, static_cast<std::size_t>(governorCap) / kAvgDocBytes);
+                lexicalCfg.max_corpus_docs = std::min(lexicalCfg.max_corpus_docs, docsFromBudget);
+            }
+            if (bm25Policy.variant && *bm25Policy.variant == "atire") {
+                lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
+            }
+            if (bm25Policy.subwordGamma) {
+                lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
+            }
+            if (bm25Policy.maxCorpusDocs) {
+                lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
+            }
+            if (bm25Policy.maxCorpusBytes) {
+                lexicalCfg.max_corpus_bytes = *bm25Policy.maxCorpusBytes;
+            }
+            if (bm25Policy.buildDocChunkBytes) {
+                lexicalCfg.build_doc_chunk_bytes = *bm25Policy.buildDocChunkBytes;
+            }
+            if (bm25Policy.buildDocMaxChunks) {
+                lexicalCfg.build_doc_max_chunks = *bm25Policy.buildDocMaxChunks;
+            }
+            if (bm25Policy.fragmentGeometryEnabled) {
+                lexicalCfg.fragment_geometry_enabled = *bm25Policy.fragmentGeometryEnabled;
+            }
+            if (bm25Policy.fragmentGeometryMaxDocs) {
+                lexicalCfg.fragment_geometry_max_docs = *bm25Policy.fragmentGeometryMaxDocs;
+            }
+            if (bm25Policy.fragmentGeometryMaxCorpusBytes) {
+                lexicalCfg.fragment_geometry_max_corpus_bytes =
+                    *bm25Policy.fragmentGeometryMaxCorpusBytes;
+            }
+            if (bm25Policy.fragmentGeometryPmiSampleDocs) {
+                lexicalCfg.fragment_geometry_pmi_sample_docs =
+                    *bm25Policy.fragmentGeometryPmiSampleDocs;
+            }
+            if (bm25Policy.fragmentGeometryPmiSampleBytes) {
+                lexicalCfg.fragment_geometry_pmi_sample_bytes =
+                    *bm25Policy.fragmentGeometryPmiSampleBytes;
+            }
+            // Router: default DISABLED. Simeon's own three-corpus BEIR
+            // eval (docs/research/benchmarks.md) shows SAB-smooth alone is
+            // within ≤1.8 nDCG@10 points of the dual-build router while
+            // using ~half the steady-state BM25 memory. Explicit
+            // routerEnabled=true still opts in; the only preset understood
+            // is "passE_scq0_clar3" (header's default RouterPreset) and
+            // "off" remains a hard disable.
+            const bool presetOff = bm25Policy.routerPreset && *bm25Policy.routerPreset == "off";
+            lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(false) && !presetOff;
+
+            // RM3 SAB-smooth — test env: YAMS_SIMEON_RM3=1
+            if (const char* rm3Env = std::getenv("YAMS_SIMEON_RM3")) {
+                lexicalCfg.rm3_enabled = std::string(rm3Env) == "1";
+            }
+
+            opts.simeonLexicalConfig = lexicalCfg;
+        }
+    }
+
+    // Topology routing policy was removed in the search-engine debloat;
+    // rrfK can still be tuned via the topology-routing config block.
+    {
+        auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
+        if (tp.rrfK) {
+            opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
+            spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
+        }
+    }
+
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
         opts.config.vectorMaxResults = 0;
@@ -243,6 +328,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         ev.error = "build_timeout";
                         fsm_.dispatch(ev);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
                         std::move(h)(std::exception_ptr{},
@@ -289,6 +375,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             fsm_.dispatch(ev);
                             refreshSnapshot();
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                         spdlog::info("[SearchEngineManager] Build completed: vector={}",
                                      vectorEnabled);
@@ -298,6 +385,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             ev.error = result.error().message;
                             fsm_.dispatch(ev);
                         } catch (...) {
+                            // Intentional best-effort path; keep the primary operation unaffected.
                         }
                         spdlog::error("[SearchEngineManager] Build failed: {}",
                                       result.error().message);

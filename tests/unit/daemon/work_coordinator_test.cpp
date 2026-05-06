@@ -413,18 +413,21 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
 
         std::set<std::thread::id> thread_ids;
         std::mutex ids_mutex;
+        std::atomic<int> completed_count{0};
 
         for (int i = 0; i < 100; ++i) {
             boost::asio::post(coordinator.getExecutor(), [&]() {
+                std::this_thread::sleep_for(2ms);
                 std::lock_guard<std::mutex> lk(ids_mutex);
                 thread_ids.insert(std::this_thread::get_id());
+                completed_count.fetch_add(1, std::memory_order_relaxed);
             });
         }
 
         // Wait for work to be distributed across threads with timeout
         bool completed = wait_for_condition(2000ms, 20ms, [&]() {
             std::lock_guard<std::mutex> lk(ids_mutex);
-            return thread_ids.size() >= 2;
+            return thread_ids.size() >= 2 && completed_count.load(std::memory_order_relaxed) == 100;
         });
 
         REQUIRE(completed);

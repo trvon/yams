@@ -23,12 +23,14 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
+#include <yams/daemon/components/storage_preflight.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/connection_fsm.h>
+#include <yams/daemon/ipc/socket_utils.h>
 #if defined(TRACY_ENABLE)
 #include <tracy/Tracy.hpp>
 #endif
@@ -102,8 +104,6 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
     inactiveSince = {};
 }
 } // namespace
-// IPC server implementation removed in PBI-007; client uses Boost.Asio path.
-
 namespace yams::daemon {
 
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
@@ -171,6 +171,24 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 #else
     _putenv_s("YAMS_IN_DAEMON", "1");
 #endif
+
+    if (!config_.dataDir.empty()) {
+#ifndef _WIN32
+        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1);
+#else
+        _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
+#endif
+        spdlog::debug("Seeded YAMS_STORAGE='{}'", config_.dataDir.string());
+    }
+
+    if (!config_.configFilePath.empty()) {
+#ifndef _WIN32
+        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1);
+#else
+        _putenv_s("YAMS_CONFIG", config_.configFilePath.string().c_str());
+#endif
+        spdlog::debug("Seeded YAMS_CONFIG='{}'", config_.configFilePath.string());
+    }
 
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
@@ -337,6 +355,27 @@ Result<void> YamsDaemon::start() {
         return preflight.error();
     }
 
+    if (!config_.dataDir.empty()) {
+        spdlog::info("[Startup] Phase: Storage Preflight");
+        auto storage = probeStorage(config_.dataDir);
+        if (!storage) {
+            spdlog::error("[Startup] Storage preflight failed for '{}': {}. Hint: check that the "
+                          "mount is reachable (ls/stat the path); on a hung NFS/SMB/external mount "
+                          "use 'umount -f' or move the data dir to local storage.",
+                          config_.dataDir.string(), storage.error().message);
+            running_ = false;
+            return storage.error();
+        }
+        if (storage.value().slow) {
+            spdlog::warn("[Startup] {}", storage.value().detail);
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.storageWarning = storage.value().detail;
+        } else {
+            spdlog::info("[Startup] Storage preflight OK ({}ms)",
+                         storage.value().probeDuration.count());
+        }
+    }
+
     spdlog::info("[Startup] Phase: LifecycleManager Init");
     if (auto result = lifecycleManager_->initialize(); !result) {
         running_ = false;
@@ -426,15 +465,8 @@ Result<void> YamsDaemon::start() {
     }
 
     // Derive proxy socket path from daemon socket to avoid global /tmp/proxy.sock collisions.
-    {
-        const auto& daemonSocket = socketConfig.socketPath;
-        auto base = daemonSocket.stem().string();
-        if (base.empty())
-            base = daemonSocket.filename().string();
-        if (base.empty())
-            base = "yams-daemon";
-        socketConfig.proxySocketPath = daemonSocket.parent_path() / (base + ".proxy.sock");
-    }
+    socketConfig.proxySocketPath =
+        yams::daemon::socket_utils::derive_proxy_socket_path(socketConfig.socketPath);
 
     socketServer_ = std::make_unique<SocketServer>(socketConfig, ioCoordinator_.get(),
                                                    serviceManager_->getWorkCoordinator(),
@@ -1153,8 +1185,6 @@ bool YamsDaemon::waitForStopCompletion(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(stop_mutex_);
     return stop_cv_.wait_for(lock, timeout, [&] { return stopCompleted_; });
 }
-
-// run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
     if (auto rs = serviceManager_->getRepairServiceShared()) {

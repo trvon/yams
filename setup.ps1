@@ -12,9 +12,39 @@ Param(
 )
 
 $ErrorActionPreference = 'Stop'
-$forceVs2022Toolset = $false
 $initialMeson = Get-Command meson -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 $initialNinja = Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+
+function Import-BatchEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BatchFile,
+
+        [string[]]$Arguments = @()
+    )
+
+    if (-not (Test-Path $BatchFile)) {
+        return $false
+    }
+
+    $commandParts = @("`"$BatchFile`"")
+    foreach ($arg in $Arguments) {
+        if ($null -ne $arg -and $arg -ne '') {
+            $commandParts += $arg
+        }
+    }
+
+    $varsLoaded = $false
+    & $env:COMSPEC /s /c (($commandParts -join ' ') + ' && set') | ForEach-Object {
+        $name, $value = $_ -split '=', 2
+        if ($name -and $value) {
+            Set-Item -Force -Path "ENV:\$name" -Value $value
+            $varsLoaded = $true
+        }
+    }
+
+    return $varsLoaded
+}
 
 if (-not $Offline -and $env:YAMS_OFFLINE -match '^(1|true|yes|on)$') {
     $Offline = $true
@@ -35,12 +65,11 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
     }
     
     if (Test-Path $vswhere) {
-        # Prefer VS 2022 (version 17) if available, as it's the stable target for this project
-        $vsPath = & $vswhere -version "[17.0,18.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        
+        # Prefer the newest installed MSVC toolchain by default.
+        $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+
         if (-not $vsPath) {
-            # Fallback to latest (likely VS 2025)
-            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            $vsPath = & $vswhere -version "[17.0,18.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
         }
 
         if ($vsPath) {
@@ -49,13 +78,8 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
                 Write-Host "Found Visual Studio at: $vsPath"
                 
                 $toolsetArg = ""
-                $forceVs2022Toolset = $false
-                
-                # Check for VS 2025 (v18.x) and (optionally) select an older toolset for Boost compatibility.
-                # NOTE: vswhere's "-path" flag takes *no argument* (it means "current path"), so we avoid
-                # using it with $vsPath. Instead, we:
-                #   1) resolve installationVersion via JSON and matching installationPath
-                #   2) detect v143/v144 by checking the installed VC\Tools\MSVC directories
+
+                # Resolve installationVersion via JSON and matching installationPath.
                 $vsInstallVersion = $null
                 try {
                     $instancesJson = & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json
@@ -68,8 +92,6 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
                     # Best-effort; continue without installationVersion string.
                     $vsInstallVersion = $null
                 }
-
-                $compatMsvcVersion = '193' # Default to 193 if forcing compatibility
 
                 $vcToolsPath = Join-Path $vsPath "VC\Tools\MSVC"
                 $v143Dir = $null
@@ -86,42 +108,28 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
                         Write-Host "VS 2025 detected"
                     }
 
-                    if ($v143Dir) {
-                        Write-Host "Found v143 toolset: $($v143Dir.Name)"
-                        $toolsetArg = "-vcvars_ver=$($v143Dir.Name)"
-                        $forceVs2022Toolset = $true
-                        $compatMsvcVersion = '193'
-                    } elseif ($v144Dir) {
-                        Write-Host "Found v144 toolset: $($v144Dir.Name)"
-                        Write-Host "Using v144 (VS 2022 17.10+) as fallback for VS 2025 compatibility."
-                        $toolsetArg = "-vcvars_ver=$($v144Dir.Name)"
-                        $forceVs2022Toolset = $true
-                        $compatMsvcVersion = '194'
-                    } else {
-                        Write-Warning "VS 2025 detected but 'MSVC v143/v144' toolsets not found in '$vcToolsPath'."
-                        Write-Warning "Building with the default VS 2025 toolset (v145). This may fail with Boost 1.85/1.86."
-                        Write-Warning "Fix: install the 'MSVC v143' (or v144) toolset in Visual Studio Installer, or set YAMS_VS_TOOLSET=14.5 to silence toolset selection."
-                        $toolsetArg = ""
-                        $forceVs2022Toolset = $false
+                    if ($v143Dir -or $v144Dir) {
+                        $legacyToolsets = @()
+                        if ($v143Dir) { $legacyToolsets += $v143Dir.Name }
+                        if ($v144Dir) { $legacyToolsets += $v144Dir.Name }
+                        Write-Host "Optional legacy MSVC toolsets detected: $($legacyToolsets -join ', ')"
                     }
+                    Write-Host "Using the default VS 2025 toolset unless YAMS_VS_TOOLSET is explicitly set."
                 }
 
                 # Allow manual override
                 if ($env:YAMS_VS_TOOLSET) {
                     Write-Host "Forcing Toolset Version (Override): $($env:YAMS_VS_TOOLSET)"
                     $toolsetArg = "-vcvars_ver=$($env:YAMS_VS_TOOLSET)"
-                    $forceVs2022Toolset = $env:YAMS_VS_TOOLSET -like '14.3*'
                 }
 
-                # Import VS environment variables into current PowerShell session for x64 architecture
-                $varsLoaded = $false
-                & "${env:COMSPEC}" /s /c "`"$vsDevCmd`" -arch=amd64 -host_arch=amd64 $toolsetArg -no_logo && set" | ForEach-Object {
-                    $name, $value = $_ -split '=', 2
-                    if ($name -and $value) {
-                        Set-Item -Force -Path "ENV:\$name" -Value $value
-                        $varsLoaded = $true
-                    }
+                # Import VS environment variables into current PowerShell session for x64 architecture.
+                $vsDevCmdArgs = @('-arch=amd64', '-host_arch=amd64')
+                if ($toolsetArg) {
+                    $vsDevCmdArgs += $toolsetArg
                 }
+                $vsDevCmdArgs += '-no_logo'
+                $varsLoaded = Import-BatchEnvironment -BatchFile $vsDevCmd -Arguments $vsDevCmdArgs
                 
                 if (-not $varsLoaded) {
                     throw "Failed to initialize Visual Studio environment. The toolset ($($toolsetArg -replace '-vcvars_ver=','')) might be missing or broken."
@@ -143,9 +151,9 @@ Detected Visual Studio instance:
 Common fixes:
 1. Install the 'Desktop development with C++' workload for your Visual Studio installation.
 2. Ensure the Windows 10/11 SDK is installed.
-3. If using VS 2025 and you see messages about forcing v143/v144:
-     - Install the 'MSVC v143' (VS 2022) toolset as an individual component inside VS 2025, OR
-     - Override toolset selection via:  `$env:YAMS_VS_TOOLSET = '14.5'`
+3. If using VS 2025 and you need a specific MSVC toolset:
+    - Install the matching optional MSVC toolset in Visual Studio Installer, OR
+    - Override toolset selection via:  `$env:YAMS_VS_TOOLSET = '14.5'`
 4. Ensure vswhere.exe exists at: ${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe
 
 For installation: https://visualstudio.microsoft.com/downloads/
@@ -213,18 +221,6 @@ if ($vsInstallVersion -and $vsInstallVersion -match '^(\d+)\.') {
     } else {
         $vsVersion = '18'
     }
-}
-
-# Force VS 2022 toolset (v143/v144) if we are on VS 2025 to fix Boost build
-# This overrides the detection above because Boost 1.85/1.86 b2 build system
-# does not support the v145 toolset (VS 2025) correctly yet.
-if ($msvcVersion -ge 195 -and $forceVs2022Toolset) {
-    Write-Host "VS 2025 detected. Forcing Conan to use VS 2022 (v17) settings for compatibility."
-    # We must keep vsVersion='18' (VS 2025) because that's what is actually installed on disk.
-    # Conan checks the registry/vswhere for this version.
-    # However, we lie about the compiler version to trick recipes into using v143/v144 logic.
-    $vsVersion = '18' 
-    $msvcVersion = $compatMsvcVersion
 }
 
 # Basic config (match setup.sh semantics as closely as practical)
@@ -389,15 +385,23 @@ if ($cmakeGenerator) {
 
 # Configure VS version for bzip2 and other packages that need MSBuild detection
 # VS 2025/2024 is version 18, MSVC compiler version 195
-$conanArgs += @('-c', "tools.microsoft.msbuild:vs_version=$vsVersion")
+if (-not $env:YAMS_CONAN_COMPILER_VERSION) {
+    $env:YAMS_CONAN_COMPILER_VERSION = $msvcVersion
+    Write-Host "Using detected Conan compiler.version: $($env:YAMS_CONAN_COMPILER_VERSION)"
+} else {
+    Write-Host "Using pinned Conan compiler.version from YAMS_CONAN_COMPILER_VERSION: $($env:YAMS_CONAN_COMPILER_VERSION)"
+}
 
-# Generate PowerShell build environment files for Conan-managed builds
-$conanArgs += @('-c', 'tools.env.virtualenv:powershell=True')
+if (-not $env:YAMS_MSBUILD_VS_VERSION) {
+    $env:YAMS_MSBUILD_VS_VERSION = $vsVersion
+    Write-Host "Using detected MSBuild Visual Studio version: $($env:YAMS_MSBUILD_VS_VERSION)"
+} else {
+    Write-Host "Using pinned MSBuild Visual Studio version from YAMS_MSBUILD_VS_VERSION: $($env:YAMS_MSBUILD_VS_VERSION)"
+}
 
 if (-not $SystemDeps) {
     # Export custom Conan recipes before install (must happen before conan install)
     Write-Host '--- Exporting custom Conan recipes... ---'
-    # qpdf export removed - PDF plugin will be updated in separate PBI
 
     if (Test-Path 'conan/onnxruntime/conanfile.py') {
         Write-Host 'Exporting onnxruntime/1.23.0 from conan/onnxruntime/'
@@ -409,14 +413,22 @@ if (-not $SystemDeps) {
     }
 }
 
-if ($env:YAMS_CONAN_HOST_PROFILE) {
-    Write-Host "Using explicit Conan host profile: $($env:YAMS_CONAN_HOST_PROFILE)"
-    $conanArgs += @('-pr:h', $env:YAMS_CONAN_HOST_PROFILE, '-pr:b', 'default')
+$conanHostProfile = $env:YAMS_CONAN_HOST_PROFILE
+if (-not $conanHostProfile) {
+    $conanHostProfile = '.\conan\profiles\host-windows-msvc'
 }
+
+if (-not (Test-Path $conanHostProfile)) {
+    Write-Error "Conan host profile not found: $conanHostProfile"
+    exit 1
+}
+
+Write-Host "Using Conan host profile: $conanHostProfile"
+$conanArgs += @('-pr:h', $conanHostProfile, '-pr:b', 'default')
 
 # Enable tests/benchmarks for Debug/Profiling/Fuzzing builds (parity with setup.sh)
 if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
-    $conanArgs += @('-o', 'build_tests=True', '-o', 'build_benchmarks=True')
+    $conanArgs += @('-o', '&:build_tests=True', '-o', '&:build_benchmarks=True')
 }
 
 # Optional feature flags (match environment knobs from setup.sh)
@@ -518,9 +530,9 @@ if (-not $SystemDeps) {
     } catch {
         Write-Error $_
         Write-Warning "Build failed. Common fixes:"
-        Write-Warning "1. If using VS 2025 (Preview), try installing the VS 2022 (v143) toolset via Visual Studio Installer."
+        Write-Warning "1. Verify setup.ps1 selected the installed MSVC toolset you expect in the decision trace."
         Write-Warning "2. Try cleaning the cache: conan remove boost/* -c"
-        Write-Warning "3. Vcpkg is often more stable on Windows for bleeding-edge compilers, but this project uses Conan for cross-platform consistency."
+        Write-Warning "3. If you need a non-default MSVC toolset, set YAMS_VS_TOOLSET before rerunning setup.ps1."
         exit 1
     }
 }
@@ -623,18 +635,92 @@ if ($env:YAMS_MESON_NATIVE_FILE) {
     }
 }
 
-# Activate Conan build environment to ensure tools like pkg-config are in PATH
+# Activate Conan build environment to ensure tools like pkg-config are in PATH.
+# Conan can generate either PowerShell or batch activation scripts depending on host settings.
 $conanBuildPs1 = Join-Path $buildDir "$conanSubdir/conan/conanbuild.ps1"
-if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
-    Write-Host "Activating Conan build environment: $conanBuildPs1"
-    . $conanBuildPs1
+$conanBuildBat = Join-Path $buildDir "$conanSubdir/conan/conanbuild.bat"
+$conanBuildEnvScript = $null
+if (-not $SystemDeps) {
+    if (Test-Path $conanBuildPs1) {
+        Write-Host "Activating Conan build environment: $conanBuildPs1"
+        . $conanBuildPs1
+        $conanBuildEnvScript = $conanBuildPs1
+    } elseif (Test-Path $conanBuildBat) {
+        Write-Host "Activating Conan build environment: $conanBuildBat"
+        if (-not (Import-BatchEnvironment -BatchFile $conanBuildBat)) {
+            throw "Failed to import Conan batch environment: $conanBuildBat"
+        }
+        $conanBuildEnvScript = $conanBuildBat
+    }
+}
+
+# Export BOOST_ROOT so meson's built-in Boost dep finds the Conan-installed
+# Boost (Windows has no system Boost fallback). Resolve the prefix from Conan's
+# boost.pc. Conan 2.x writes a relocatable form (`prefix=${pcfiledir}/..`)
+# which pkg-config substitutes at query time — a naive Select-String capture
+# yields the literal placeholder, so call pkgconf when available, otherwise
+# expand `${pcfiledir}` manually.
+if ((-not $SystemDeps) -and (-not $env:BOOST_ROOT)) {
+    $conanGenDir = (Join-Path $buildDir "$conanSubdir/conan")
+    $boostPc = Join-Path $conanGenDir 'boost.pc'
+    if (Test-Path $boostPc) {
+        $boostPath = $null
+        # Preferred: ask pkgconf to do the substitution. Conan installs a
+        # pkgconf binary alongside the generators; meson's PkgConfigDeps also
+        # points PKG_CONFIG_PATH at this dir.
+        $pkgconf = Get-Command pkg-config -ErrorAction SilentlyContinue
+        if (-not $pkgconf) { $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue }
+        if ($pkgconf) {
+            $env:PKG_CONFIG_PATH = "$conanGenDir;$($env:PKG_CONFIG_PATH)"
+            try {
+                $resolved = & $pkgconf.Source --variable=prefix boost 2>$null
+                if ($LASTEXITCODE -eq 0 -and $resolved) {
+                    $boostPath = $resolved.Trim()
+                }
+            } catch {}
+        }
+        # Fallback: parse `prefix=` line and expand ${pcfiledir} ourselves.
+        if (-not $boostPath) {
+            $prefixLine = Select-String -Path $boostPc `
+                -Pattern '^\s*prefix\s*=' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($prefixLine) {
+                $raw = ($prefixLine.Line -replace '^\s*prefix\s*=\s*', '').Trim()
+                $raw = $raw -replace '\$\{pcfiledir\}', $conanGenDir
+                try {
+                    $boostPath = [System.IO.Path]::GetFullPath($raw)
+                } catch { $boostPath = $raw }
+            }
+        }
+        if ($boostPath -and (Test-Path (Join-Path $boostPath 'include/boost'))) {
+            $env:BOOST_ROOT = $boostPath
+            $env:BOOST_INCLUDEDIR = (Join-Path $boostPath 'include')
+            $env:BOOST_LIBRARYDIR = (Join-Path $boostPath 'lib')
+            Write-Host "BOOST_ROOT       set to: $boostPath"
+            Write-Host "BOOST_INCLUDEDIR set to: $($env:BOOST_INCLUDEDIR)"
+            Write-Host "BOOST_LIBRARYDIR set to: $($env:BOOST_LIBRARYDIR)"
+            # Persist to GITHUB_ENV so any downstream workflow step (e.g.
+            # 'Run Tests with Meson (Windows)') still sees the same hints.
+            # No-op when not running under GitHub Actions.
+            if ($env:GITHUB_ENV) {
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_ROOT=$boostPath"
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_INCLUDEDIR=$($env:BOOST_INCLUDEDIR)"
+                Add-Content -Path $env:GITHUB_ENV -Value "BOOST_LIBRARYDIR=$($env:BOOST_LIBRARYDIR)"
+                Write-Host "Persisted Boost env hints to GITHUB_ENV"
+            }
+        } elseif ($boostPath) {
+            Write-Warning "boost.pc resolved prefix '$boostPath' has no include/boost subdir; not exporting BOOST_ROOT"
+        } else {
+            Write-Warning "boost.pc found at $boostPc but prefix could not be resolved"
+        }
+    }
 }
 
 $activeMeson = Get-Command meson -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 $activeNinja = Get-Command ninja -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 $conanToolsOverride = ($activeMeson -ne $initialMeson) -or ($activeNinja -ne $initialNinja)
 $mesonWrapperPs1 = $null
-if ((-not $SystemDeps) -and (Test-Path $conanBuildPs1)) {
+if ((-not $SystemDeps) -and $conanBuildEnvScript) {
     $mesonWrapperPs1 = Join-Path $buildDir 'mesonw.ps1'
     $wrapperContent = @"
 Param(
@@ -644,8 +730,36 @@ Param(
 
 `$ErrorActionPreference = 'Stop'
 `$conanBuildPs1 = '$($conanBuildPs1 -replace "'", "''")'
+`$conanBuildBat = '$($conanBuildBat -replace "'", "''")'
+
+function Import-BatchEnvironment {
+    param(
+        [Parameter(Mandatory = `$true)]
+        [string]`$BatchFile
+    )
+
+    if (-not (Test-Path `$BatchFile)) {
+        return `$false
+    }
+
+    `$varsLoaded = `$false
+    & `$env:COMSPEC /s /c "`"`$BatchFile`" && set" | ForEach-Object {
+        `$name, `$value = `$_ -split '=', 2
+        if (`$name -and `$value) {
+            Set-Item -Force -Path "ENV:\`$name" -Value `$value
+            `$varsLoaded = `$true
+        }
+    }
+
+    return `$varsLoaded
+}
+
 if (Test-Path `$conanBuildPs1) {
     . `$conanBuildPs1
+} elseif (Test-Path `$conanBuildBat) {
+    if (-not (Import-BatchEnvironment -BatchFile `$conanBuildBat)) {
+        throw "Failed to import Conan batch environment: `$conanBuildBat"
+    }
 }
 & meson @MesonArgs
 exit `$LASTEXITCODE
@@ -938,8 +1052,9 @@ if ($Package) {
     }
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-    # Install to stage directory (destdir prepends to prefix, build-msi.ps1 handles finding files)
-    meson install -C $buildDir --destdir $stageDir
+    # Install to stage directory (destdir prepends to prefix, build-msi.ps1 handles finding files).
+    # --no-rebuild: skip the implicit recompile; setup.ps1 already built above.
+    meson install -C $buildDir --destdir $stageDir --no-rebuild
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Meson install failed"
         exit 1

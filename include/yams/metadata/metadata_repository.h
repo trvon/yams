@@ -164,8 +164,12 @@ struct DocumentQueryOptions {
     std::optional<int64_t> indexedAfter;
     std::optional<int64_t> indexedBefore;
     std::optional<int64_t> changedSince;
+    /// Cursor pagination helper for long-running maintenance scans.
+    /// When set, only documents with id > value are returned.
+    std::optional<int64_t> idGreaterThan;
     int limit{0};
     int offset{0};
+    bool orderByIdAsc{false};
     bool orderByNameAsc{false};
     bool orderByIndexedDesc{false};
     bool pathsOnly{false};
@@ -452,6 +456,11 @@ public:
                                                            RepairStatus status) = 0;
 
     virtual Result<void> checkpointWal() = 0;
+    // Path 1b: TRUNCATE-mode checkpoint. Takes exclusive access and blocks
+    // readers/writers briefly, but returns the WAL to zero bytes. Use
+    // sparingly — e.g., when WAL growth exceeds a watermark, or at shutdown
+    // when no readers are expected.
+    virtual Result<void> checkpointWalTruncate() = 0;
 
     // Path tree operations (PBI-051 scaffold)
     virtual Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
@@ -772,6 +781,7 @@ public:
                                                    RepairStatus status) override;
 
     Result<void> checkpointWal() override;
+    Result<void> checkpointWalTruncate() override;
 
     /**
      * @brief Refresh all idle connections in the pool (PBI-079)
@@ -865,10 +875,10 @@ private:
 
     // SymSpell fuzzy search (SQLite-backed)
     // Note: SymSpellSearch stores a raw sqlite3* that must remain valid for its lifetime.
-    // We keep a dedicated pooled connection alive for the SymSpell index to avoid
-    // holding a pointer to a pooled handle that can be returned to the pool.
+    // Use a dedicated Database handle instead of leasing from the shared pool; holding a pooled
+    // connection here can starve tests and single-connection daemon configurations.
     mutable std::mutex symspellInitMutex_;
-    mutable std::unique_ptr<PooledConnection> symspellConn_;
+    mutable std::unique_ptr<Database> symspellDb_;
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
     mutable std::atomic<bool> symspellInitialized_{false};
 
@@ -1020,7 +1030,7 @@ private:
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
             const auto attemptStart = std::chrono::steady_clock::now();
             const auto acquireStart = attemptStart;
-            auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority);
+            auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority, opTag);
             const auto acquireEnd = std::chrono::steady_clock::now();
             const auto acquireMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(acquireEnd - acquireStart)
@@ -1038,8 +1048,9 @@ private:
                         route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, totalMs,
                         connResult.error().message);
                 }
-                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' acquire error: {}",
-                              route, connResult.error().message);
+                spdlog::error(
+                    "MetadataRepository::executeQueryOnPool route='{}' op='{}' acquire error: {}",
+                    route, op.empty() ? "(unknown)" : op, connResult.error().message);
                 return Error{connResult.error()};
             }
 
@@ -1163,8 +1174,8 @@ private:
         }
 
         const auto start = std::chrono::steady_clock::now();
-        auto connResult =
-            pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+        auto connResult = pool_.acquire(std::chrono::milliseconds(30000),
+                                        ConnectionPriority::Normal, current_metadata_op());
         if (!connResult) {
             if (metadata_trace_enabled()) {
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(

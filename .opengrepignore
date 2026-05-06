@@ -1,0 +1,28 @@
+# Generated/build outputs
+build/
+build*/
+Testing/
+CMakeFiles/
+compile_commands.json
+
+# Vendored/generated/heavy surfaces
+third_party/
+external/
+plugins/yams-ghidra-plugin/
+.artifacts/
+.wrangler/
+.claude/
+
+# Non-source corpora and generated reports
+docs/research/
+papers/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.sarif

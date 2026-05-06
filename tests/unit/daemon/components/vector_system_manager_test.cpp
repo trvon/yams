@@ -143,6 +143,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
         yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
@@ -174,26 +175,19 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         REQUIRE(result.has_value());
         REQUIRE(warmMgr.getVectorDatabase() != nullptr);
         CHECK(stateComponent->readiness.vectorDbReady.load());
-        CHECK(stateComponent->readiness.vectorIndexReady.load());
-        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 100);
+        // VectorSystemManager now owns DB readiness only. Search-index readiness and any
+        // background load/build work are managed asynchronously by VectorIndexCoordinator.
+        CHECK_FALSE(stateComponent->readiness.vectorIndexReady.load());
+        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 0);
 
-        sqlite3* rawDb = nullptr;
-        REQUIRE(sqlite3_open((tempDir / "vectors.db").string().c_str(), &rawDb) == SQLITE_OK);
-        REQUIRE(tableExists(rawDb, "vectors_64_hnsw_nodes"));
-
-        sqlite3_stmt* stmt = nullptr;
-        REQUIRE(sqlite3_prepare_v2(rawDb, "SELECT COUNT(*) FROM vectors_64_hnsw_nodes", -1, &stmt,
-                                   nullptr) == SQLITE_OK);
-        REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
-        CHECK(sqlite3_column_int64(stmt, 0) > 0);
-        sqlite3_finalize(stmt);
-        sqlite3_close(rawDb);
+        CHECK(warmMgr.getVectorDatabase()->hasReusablePersistedSearchIndex());
     }
 
     SECTION("initializeOnce does not block on rebuilding missing persisted search index") {
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
         yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
         warmDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
@@ -226,13 +220,9 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         REQUIRE(warmMgr.getVectorDatabase() != nullptr);
         CHECK(stateComponent->readiness.vectorDbReady.load());
         CHECK_FALSE(stateComponent->readiness.vectorIndexReady.load());
-        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 50);
+        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 0);
 
-        sqlite3* rawDb = nullptr;
-        REQUIRE(sqlite3_open((tempDir / "vectors.db").string().c_str(), &rawDb) == SQLITE_OK);
-        CHECK_FALSE(tableExists(rawDb, "vectors_64_hnsw_nodes"));
-
-        sqlite3_close(rawDb);
+        CHECK_FALSE(warmMgr.getVectorDatabase()->hasReusablePersistedSearchIndex());
     }
 }
 

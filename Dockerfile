@@ -5,6 +5,7 @@
 FROM ubuntu:24.04 AS deps
 # FROM debian:trixie-slim AS deps
 ARG DEBIAN_FRONTEND=noninteractive
+ARG ZIG_VERSION=0.15.2
 RUN set -eux; \
   for i in 1 2 3; do \
   apt-get update && \
@@ -16,6 +17,7 @@ RUN set -eux; \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \
   liburing-dev ccache \
+  libomp-18-dev \
   cmake && \
   rm -rf /var/lib/apt/lists/* && break || \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
@@ -30,7 +32,8 @@ RUN set -eux; \
   rustup set auto-self-update disable && \
   rustc --version && cargo --version
 
-# Install Zig 0.15.2 stable for zyp PDF plugin
+# Install Zig 0.15.x for zyp PDF plugin.
+# zpdf is not Zig 0.16-compatible yet, so fail fast if this pin is overridden.
 RUN set -eux; \
   ARCH=$(uname -m); \
   case "$ARCH" in \
@@ -38,7 +41,10 @@ RUN set -eux; \
   aarch64) ZIG_ARCH="aarch64" ;; \
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
   esac; \
-  ZIG_VERSION="0.15.2"; \
+  case "${ZIG_VERSION}" in \
+  0.15.*) ;; \
+  *) echo "Unsupported Zig version ${ZIG_VERSION}; zpdf requires Zig 0.15.x"; exit 1 ;; \
+  esac; \
   curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
   tar -xJf /tmp/zig.tar.xz -C /opt && \
   mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \
@@ -128,27 +134,70 @@ RUN --mount=type=cache,target=/root/.conan2 \
   python3 - <<'PY'
 import glob
 import os
+import platform
 import shutil
 import re
 
-dst = '/src/build/release'
-os.makedirs(dst, exist_ok=True)
+destinations = ['/src/build/release', '/opt/yams/usr/local/lib']
+for dst in destinations:
+    os.makedirs(dst, exist_ok=True)
 
 copied = set()
+created_links = set()
+
+elf_machine_codes = {
+    'x86_64': 0x3E,
+    'aarch64': 0xB7,
+    'arm64': 0xB7,
+}
+expected_machine = elf_machine_codes.get(platform.machine().lower())
+
+def elf_machine(path: str):
+    try:
+        with open(path, 'rb') as fh:
+            header = fh.read(20)
+    except OSError:
+        return None
+    if len(header) < 20 or header[:4] != b'\x7fELF':
+        return None
+    endian = header[5]
+    if endian == 1:
+        return int.from_bytes(header[18:20], 'little')
+    if endian == 2:
+        return int.from_bytes(header[18:20], 'big')
+    return None
+
 for pat in [
+    '/src/build/release/**/libtbb*.so*',
+    '/src/build/release/**/libonnxruntime*.so*',
     '/root/.conan2/p/**/p/lib/libtbb*.so*',
     '/root/.conan2/p/**/p/lib/libtbbbind*.so*',
     '/root/.conan2/p/**/p/lib/libonnxruntime*.so*',
+    '/root/.conan2/p/**/lib/libtbb*.so*',
+    '/root/.conan2/p/**/lib/libtbbbind*.so*',
+    '/root/.conan2/p/**/lib/libonnxruntime*.so*',
 ]:
     for p in glob.glob(pat, recursive=True):
+        base = os.path.basename(p)
         rp = os.path.realpath(p)
         if not os.path.isfile(rp):
             continue
-        base = os.path.basename(rp)
-        if base in copied:
+        machine = elf_machine(rp)
+        if expected_machine is not None and machine is not None and machine != expected_machine:
             continue
-        shutil.copy2(rp, os.path.join(dst, base))
-        copied.add(base)
+        real_base = os.path.basename(rp)
+        if real_base not in copied:
+            for dst in destinations:
+                dest_path = os.path.join(dst, real_base)
+                if not (os.path.exists(dest_path) and os.path.samefile(rp, dest_path)):
+                    shutil.copy2(rp, dest_path)
+            copied.add(real_base)
+        if base != real_base:
+            for dst in destinations:
+                link_path = os.path.join(dst, base)
+                if not os.path.lexists(link_path):
+                    os.symlink(real_base, link_path)
+                    created_links.add((dst, base))
 
 def ensure_soname_links(directory: str) -> int:
     created = 0
@@ -161,16 +210,22 @@ def ensure_soname_links(directory: str) -> int:
         target = name
         link_name = m.group('stem')
         link_path = os.path.join(directory, link_name)
-        if os.path.exists(link_path):
+        if os.path.lexists(link_path):
             continue
         os.symlink(target, link_path)
         created += 1
     return created
 
-links = ensure_soname_links(dst)
+links = sum(ensure_soname_links(dst) for dst in destinations)
 
-print(f'Copied {len(copied)} runtime libs into {dst}; created {links} SONAME symlinks')
+print(
+    f'Copied {len(copied)} runtime libs into {", ".join(destinations)}; '
+    f'preserved {len(created_links)} package symlinks; created {links} SONAME symlinks'
+)
 PY
+
+RUN set -eux; \
+  bash scripts/prune-runtime-install.sh /opt/yams/usr/local
 
 # Stage 1.25: smoke tests (optional)
 # Note: kept separate so Linux builder images can be produced even when
@@ -184,7 +239,7 @@ RUN set -eux; \
   exit 0; \
   fi; \
   # Conan runtime_deploy copies shared libs into build dir; add it to loader path.
-  export LD_LIBRARY_PATH="/src/build/release:${LD_LIBRARY_PATH:-}"; \
+  export LD_LIBRARY_PATH="/opt/yams/usr/local/lib:/src/build/release:${LD_LIBRARY_PATH:-}"; \
   meson test -C build/release -j${BUILD_JOBS} --no-rebuild --print-errorlogs mcp_submodule cli_submodule
 
 # Stage 1.3: full test suite (optional)
@@ -196,7 +251,7 @@ RUN set -eux; \
   echo "BUILD_TESTS=false: skipping full test suite"; \
   exit 0; \
   fi; \
-  export LD_LIBRARY_PATH="/src/build/release:${LD_LIBRARY_PATH:-}"; \
+  export LD_LIBRARY_PATH="/opt/yams/usr/local/lib:/src/build/release:${LD_LIBRARY_PATH:-}"; \
   meson test -C build/release -j${BUILD_JOBS} --no-rebuild --print-errorlogs
 
 # Stage 1.5: runtime self-test (fails the build if runtime deps are missing)

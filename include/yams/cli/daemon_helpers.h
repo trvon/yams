@@ -706,6 +706,17 @@ inline bool& cli_pool_initialized() {
     return initialized;
 }
 
+inline void shutdown_cli_daemon_client_pool() {
+    std::shared_ptr<DaemonClientPool> oldPool;
+    {
+        std::lock_guard<std::mutex> lk(cli_pool_mutex());
+        oldPool = std::move(cli_pool_instance());
+        cli_pool_initialized() = false;
+        cli_pool_config() = yams::daemon::ClientConfig{};
+    }
+    oldPool.reset();
+}
+
 enum class CliDaemonAccessPolicy {
     AllowInProcessFallback,
     RequireSocket,
@@ -1080,6 +1091,10 @@ apply_cli_daemon_plan_to_retrieval_options(const CliDaemonClientPlan& plan,
 
 inline bool is_transport_failure(const yams::Error& err) {
     if (err.code == ErrorCode::Timeout) {
+        return true;
+    }
+    if (err.code == ErrorCode::InvalidState &&
+        err.message.find("Daemon not ready yet") != std::string::npos) {
         return true;
     }
     return yams::daemon::parseIpcFailureKind(err.message).has_value();

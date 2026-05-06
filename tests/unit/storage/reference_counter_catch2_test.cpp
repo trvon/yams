@@ -618,7 +618,7 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector basic collection",
     const auto& stats = result.value();
     CHECK(stats.blocksScanned == 3u); // 3 unreferenced blocks
     CHECK(stats.blocksDeleted == 3u);
-    CHECK(stats.bytesReclaimed > 0u);
+    CHECK(stats.bytesReclaimed == 3u * data.size());
     CHECK(stats.errors.empty());
 
     // Verify unreferenced blocks were deleted
@@ -662,6 +662,7 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
     const auto& stats = result.value();
     CHECK(stats.blocksScanned == 3u);
     CHECK(stats.blocksDeleted == 3u); // Counted but not actually deleted
+    CHECK(stats.bytesReclaimed == 3u * data.size());
 
     // Verify blocks still exist (dry run)
     for (int i = 0; i < 3; ++i) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -21,6 +22,8 @@ class VectorDatabase;
 } // namespace yams::vector
 
 namespace yams::daemon {
+
+class TopologyTuner;
 
 class TopologyManager {
 public:
@@ -44,6 +47,23 @@ public:
         std::uint64_t dirtyRegionDocs{0};
         std::uint64_t coalescedDirtySets{0};
         std::uint64_t fallbackFullRebuilds{0};
+        std::uint64_t clusterSizeMax{0};
+        std::uint64_t clusterSizeP50{0};
+        std::uint64_t clusterSizeP90{0};
+        std::uint64_t singletonCount{0};
+        std::uint64_t orphanDocCount{0};
+        double singletonRatio{0.0};
+        double giantClusterRatio{0.0};
+        double clusterSizeGini{0.0};
+        double avgIntraEdgeWeight{0.0};
+        // Phase H-TDA wiring fix: H_0 persistence computed on the cluster
+        // centroids produced by this rebuild (not on raw doc embeddings).
+        // Varies per arm because each clustering produces a different
+        // centroid cloud. 0 means no valid centroids (e.g. one giant cluster
+        // or all singletons → no MST edges between centroids).
+        double clusterCentroidPersistence{0.0};
+        std::size_t clusterCentroidCount{0};
+        std::string cellIdentity;
         std::vector<std::string> issues;
     };
 
@@ -74,9 +94,19 @@ public:
         std::uint64_t lastDirtyRegionDocs{0};
         std::uint64_t lastCoalescedDirtySets{0};
         std::uint64_t lastFallbackFullRebuilds{0};
+        std::uint64_t lastClusterSizeMax{0};
+        std::uint64_t lastClusterSizeP50{0};
+        std::uint64_t lastClusterSizeP90{0};
+        std::uint64_t lastSingletonCount{0};
+        std::uint64_t lastOrphanDocCount{0};
+        double lastSingletonRatio{0.0};
+        double lastGiantClusterRatio{0.0};
+        double lastClusterSizeGini{0.0};
+        double lastAvgIntraEdgeWeight{0.0};
         std::string lastReason;
         std::string lastSnapshotId;
         std::string lastAlgorithm;
+        std::string lastCellIdentity;
     };
 
     struct Dependencies {
@@ -105,8 +135,62 @@ public:
         return publishedEpoch_.load(std::memory_order_acquire);
     }
 
+    void setPublishedEpoch(std::uint64_t epoch) {
+        publishedEpoch_.store(epoch, std::memory_order_release);
+    }
+
     [[nodiscard]] bool tryScheduleRebuild();
+
+    // Audit-fix #1: throttle between rebuild *completions*. Set the minimum
+    // interval (ms) that must elapse between the end of one rebuild and the
+    // start of the next. tryScheduleRebuild() returns false (without
+    // claiming the schedule) if the throttle hasn't elapsed; dirty hashes
+    // remain in the set and will be picked up by the next call that
+    // succeeds. Default 0 = no throttle (current behavior).
+    void setRebuildMinIntervalMs(std::int64_t millis) noexcept {
+        rebuildMinIntervalMs_.store(millis, std::memory_order_release);
+    }
+    [[nodiscard]] std::int64_t getRebuildMinIntervalMs() const noexcept {
+        return rebuildMinIntervalMs_.load(std::memory_order_acquire);
+    }
     void clearScheduled();
+
+    void setAutoRebuildEnabled(bool enabled) {
+        autoRebuildEnabled_.store(enabled, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool autoRebuildEnabled() const {
+        return autoRebuildEnabled_.load(std::memory_order_acquire);
+    }
+
+    void setHdbscanMinPoints(std::size_t n) {
+        hdbscanMinPoints_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t hdbscanMinPoints() const {
+        return hdbscanMinPoints_.load(std::memory_order_acquire);
+    }
+
+    void setHdbscanMinClusterSize(std::size_t n) {
+        hdbscanMinClusterSize_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t hdbscanMinClusterSize() const {
+        return hdbscanMinClusterSize_.load(std::memory_order_acquire);
+    }
+
+    void setFeatureSmoothingHops(std::size_t n) {
+        featureSmoothingHops_.store(n, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t featureSmoothingHops() const {
+        return featureSmoothingHops_.load(std::memory_order_acquire);
+    }
+
+    // Phase G: optional adaptive tuner. When set and enabled, each
+    // rebuildArtifacts() call may pull a new arm (within cooldown) and
+    // overwrite the HDBSCAN parameters + algorithm before clustering runs.
+    void setTopologyTuner(std::shared_ptr<TopologyTuner> tuner);
 
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
 
@@ -132,7 +216,23 @@ private:
 
     std::atomic<bool> rebuildRunning_{false};
     std::atomic<bool> rebuildScheduled_{false};
+    // Audit-fix #1 state:
+    std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
+    std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
+    std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
+    std::atomic<std::size_t> hdbscanMinPoints_{0};
+    std::atomic<std::size_t> hdbscanMinClusterSize_{0};
+    std::atomic<std::size_t> featureSmoothingHops_{0};
+
+    // Tuner state (Phase G). Protected by tunerMutex_ since multiple
+    // fields move together on each pull / observation.
+    mutable std::mutex tunerMutex_;
+    std::shared_ptr<TopologyTuner> tuner_;
+    std::chrono::steady_clock::time_point tunerLastPullTime_{};
+    std::chrono::milliseconds tunerLastDuration_{0};
+    std::size_t tunerLastPullDocCount_{0};
+    std::string tunerCurrentArmId_;
 };
 
 } // namespace yams::daemon

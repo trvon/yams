@@ -14,7 +14,7 @@ deps = [
   dependency('yams_config'),
   dependency('nlohmann_json'),
   dependency('spdlog'),
-  dependency('boost'),
+  boost_dep,
   dependency('threads'),
   cli11_resolved_dep,
 ]

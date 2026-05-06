@@ -78,21 +78,6 @@ grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   install: false,
 )
 
-# TurboQuant benchmark (arXiv:2504.19874) - always built, no external dependencies
-turboquant_bench = executable('turboquant_bench', files('turboquant_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
-    dependency('yams_vector'),
-    dependency('yams_benchmarks'),
-    dependency('nlohmann_json'),
-    dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
-
-alias_target('bench_turboquant', turboquant_bench)
-
 vector_backend_engine_compare = executable('vector_backend_engine_compare',
   files('vector_backend_engine_compare.cpp'),
   include_directories: incs,
@@ -105,21 +90,6 @@ vector_backend_engine_compare = executable('vector_backend_engine_compare',
 )
 
 alias_target('bench_vector_backend_engine_compare', vector_backend_engine_compare)
-
-# Authoritative compressed ANN decision benchmark (real YAMS data, ceiling vs graph vs reranker)
-compressed_ann_decision_bench = executable('compressed_ann_decision_bench',
-  files('compressed_ann_decision_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
-    dependency('yams_vector'),
-    dependency('spdlog'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
-
-alias_target('bench_compressed_ann_decision_bench', compressed_ann_decision_bench)
 
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
@@ -229,7 +199,7 @@ endif
 ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_throughput_bench.cpp'),
   include_directories: incs,
   dependencies: [
-    dependency('boost', modules: ['system']),
+    boost_dep,
     dependency('yams_benchmarks'),
     dependency('yams_api'),
     dependency('yams_app_services'),
@@ -394,6 +364,33 @@ if catch2_with_main_dep.found()
        env: multi_client_bench_env)
 
   alias_target('bench_multi_client', multi_client_ingestion_bench)
+
+  # Topology ablation bench (Catch2-based, component-level)
+  # Sweeps router limit and role-score boosts on a synthetic topology batch.
+  # See docs/benchmarks/topology_ablation_matrix.md.
+  topology_ablation_bench = executable('topology_ablation_bench',
+    files('topology_ablation_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      dependency('yams_topology'),
+      dependency('nlohmann_json'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  test('topology_ablation_bench', topology_ablation_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'topology-ablation'],
+       is_parallel: false,
+       timeout: 300,
+       env: {
+         'YAMS_TESTING': '1',
+         'LD_LIBRARY_PATH': _test_env_ld_library_path,
+       })
+
+  alias_target('bench_topology_ablation', topology_ablation_bench)
 else
   message('Catch2 not found, skipping symbol_extraction_bench, hnsw_entity_search_bench, and multi_client_ingestion_bench')
 endif

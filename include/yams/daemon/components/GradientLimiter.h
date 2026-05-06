@@ -70,6 +70,10 @@ public:
     /// Get current in-flight count
     uint32_t inFlight() const { return inFlight_.load(std::memory_order_relaxed); }
 
+    void setMaxLimit(double newMax);
+
+    double currentMaxLimit() const { return dynamicMaxLimit_.load(std::memory_order_relaxed); }
+
     /// Get metrics snapshot
     Metrics metrics() const;
 
@@ -90,6 +94,7 @@ private:
 
     // Core state (atomic for thread safety)
     std::atomic<double> limit_;
+    std::atomic<double> dynamicMaxLimit_;
     std::atomic<uint32_t> inFlight_{0};
 
     // RTT tracking

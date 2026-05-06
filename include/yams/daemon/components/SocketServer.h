@@ -6,13 +6,14 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/components/AdmissionPolicy.h>
+#include <yams/daemon/ipc/request_handler.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -92,6 +93,11 @@ public:
     // Check slot utilization: activeConnections / slotLimit (0.0 to 1.0+ if overcommitted)
     double getSlotUtilization() const;
 
+    // Test hooks: keep socket admission accounting observable without needing a live daemon.
+    void testing_setConnectionCounts(size_t mainActive, size_t proxyActive);
+    bool testing_mainSocketEmergencyGuardRejects() const;
+    SocketAdmissionVerdict testing_mainSocketAdmissionVerdict(const Request& request) const;
+
 private:
     // Async operations
     boost::asio::awaitable<void> accept_loop(bool isProxy = false);
@@ -101,6 +107,7 @@ private:
         // Use atomic to prevent data races when accessing creation time from multiple threads
         // Store as nanoseconds since steady_clock epoch for thread-safety
         std::atomic<int64_t> created_at_ns{0}; // Connection creation time in nanoseconds
+        std::atomic<int64_t> last_activity_at_ns{0};
 
         // Helper to get creation time as time_point (thread-safe read)
         std::chrono::steady_clock::time_point created_at() const {
@@ -114,7 +121,30 @@ private:
                 std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count(),
                 std::memory_order_release);
         }
+
+        std::chrono::steady_clock::time_point last_activity_at() const {
+            const auto raw = last_activity_at_ns.load(std::memory_order_acquire);
+            if (raw == 0) {
+                return created_at();
+            }
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(raw));
+        }
+
+        void touch_activity() {
+            last_activity_at_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count(),
+                                      std::memory_order_release);
+        }
     };
+
+    struct AcceptLoopState {
+        mutable std::mutex mutex;
+        std::condition_variable cv;
+        bool done{true};
+        std::exception_ptr error;
+    };
+
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                    uint64_t conn_token, bool isProxy = false);
 
@@ -131,11 +161,11 @@ private:
 
     // Boost.ASIO components (use IOCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
-    std::future<void> acceptLoopFuture_;
+    std::shared_ptr<AcceptLoopState> acceptLoopState_;
 
     // Proxy acceptor (second listen socket for multiplexed CLI connections)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> proxyAcceptor_;
-    std::future<void> proxyAcceptLoopFuture_;
+    std::shared_ptr<AcceptLoopState> proxyAcceptLoopState_;
     std::atomic<size_t> proxyActiveConnections_{0};
     std::filesystem::path proxySocketPath_;
 
@@ -176,10 +206,33 @@ private:
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)
     std::atomic<int32_t> shrinkDebt_{0}; // Deficit when shrinking below active connections
 
+    size_t mainActiveConnectionCount() const;
+    size_t connectionSlotsFreeForLimit(size_t limit) const;
+    bool mainSocketEmergencyGuardRejects() const;
+    void closeAcceptedSocket(boost::asio::local::stream_protocol::socket& socket) const;
+    boost::asio::awaitable<void> backoffAfterReject(std::chrono::milliseconds delay) const;
+    boost::asio::awaitable<void>
+    rejectProxyAcceptForNoSlots(boost::asio::local::stream_protocol::socket& socket,
+                                std::string_view loopLabel, bool trace,
+                                uint32_t rejectStreak) const;
+    boost::asio::awaitable<void>
+    rejectMainAcceptForEmergencyGuard(boost::asio::local::stream_protocol::socket& socket,
+                                      std::string_view loopLabel) const;
+    size_t recordAcceptedConnection(bool isProxy);
+    size_t releaseActiveConnection(bool isProxy);
+    void publishConnectionStats(size_t currentActiveConnections,
+                                std::optional<size_t> slotLimitOverride = std::nullopt) const;
+    SocketAdmissionVerdict evaluateRequestAdmission(const Request& request, bool isProxy) const;
+    void ensureWriterBudget();
+    RequestDispatcher* currentDispatcher() const;
+    RequestHandler::Config makeHandlerConfig(bool isProxy, RequestDispatcher* dispatcher) const;
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t
     close_sockets_on_executor(const std::vector<std::shared_ptr<TrackedSocket>>& tracked_sockets);
+    std::shared_ptr<AcceptLoopState> schedule_accept_loop(bool isProxy);
+    bool wait_accept_loop(const std::shared_ptr<AcceptLoopState>& state,
+                          std::chrono::milliseconds timeout, std::string_view label);
 };
 
 } // namespace yams::daemon

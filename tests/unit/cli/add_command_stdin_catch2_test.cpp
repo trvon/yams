@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <chrono>
 
 #include <nlohmann/json.hpp>
 
@@ -87,11 +88,17 @@ TEST_CASE("AddCommand - reads from piped stdin and stores content", "[cli][add][
 
     const std::string payload = "line1\nline2\n\tindent\n";
 
-    fs::path tmp = fs::temp_directory_path() / ("yams_add_stdin_" + std::to_string(::getpid()));
+    const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    fs::path tmp = fs::temp_directory_path() / ("yams_add_stdin_" + unique);
     fs::create_directories(tmp);
 
     // Use RAII to restore environment on exit (including exceptions/early returns)
+    yams::test::ScopedEnvVar configEnv("YAMS_CONFIG", (tmp / "config.toml").string());
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", tmp.string());
+    yams::test::ScopedEnvVar nonInteractiveEnv("YAMS_NON_INTERACTIVE",
+                                               std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableDaemonEnv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART",
+                                              std::optional<std::string>{"1"});
 
     fs::path in = tmp / "stdin.txt";
     {

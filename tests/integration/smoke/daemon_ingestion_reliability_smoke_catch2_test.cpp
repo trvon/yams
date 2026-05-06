@@ -17,6 +17,11 @@
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
 // This smoke test exercises transient IPC unavailability during daemon startup
 // and validates the retriable ingestion path does not surface I/O errors.
 struct DaemonIngestionReliabilitySmoke {
@@ -50,7 +55,8 @@ struct DaemonIngestionReliabilitySmoke {
     }
 };
 
-TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady", "[smoke][daemoningestionreliabilitysmoke]") {
+TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady",
+                 "[smoke][daemoningestionreliabilitysmoke]") {
     // Skip if AF_UNIX bind is forbidden
     auto canBind = []() {
         try {
@@ -77,7 +83,8 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     if (!canBind) {
         SKIP("Skipping smoke: environment forbids AF_UNIX bind (sandbox).");
     }
-    INFO("Fixture manager not initialized"); REQUIRE(fixtures_);
+    INFO("Fixture manager not initialized");
+    REQUIRE(fixtures_);
 
     yams::test::TestDataGenerator generator(4242);
     auto documentFixture = fixtures_->createTextFixture(
@@ -122,14 +129,15 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     cfg.logFile = root_ / "daemon.log";
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();
-    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+    INFO((started ? std::string{} : started.error().message));
+    REQUIRE(started);
 
     // Start runLoop in background thread - REQUIRED for daemon to process requests
     std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
 
     // Wait for daemon to reach Ready state before allowing client requests to complete
     // Without this, the client might connect before services are fully initialized
-    auto deadline = std::chrono::steady_clock::now() + 10s;
+    auto deadline = std::chrono::steady_clock::now() + (10s * kTestTimeoutScale);
     while (std::chrono::steady_clock::now() < deadline) {
         auto lifecycle = daemon.getLifecycle().snapshot();
         if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
@@ -139,13 +147,14 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     }
 
     // Wait for result (bounded)
-    REQUIRE(fut.wait_for(5s) == std::future_status::ready);
+    REQUIRE(fut.wait_for(5s * kTestTimeoutScale) == std::future_status::ready);
     auto addRes = fut.get();
 
     // Join worker before assertions complete
     worker.join();
 
-    INFO((addRes ? "" : addRes.error().message)); REQUIRE(addRes);
+    INFO((addRes ? "" : addRes.error().message));
+    REQUIRE(addRes);
     CHECK_FALSE(addRes.value().hash.empty());
 
     // Shutdown daemon cleanly

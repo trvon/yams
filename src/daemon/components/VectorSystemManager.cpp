@@ -13,9 +13,12 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
+#include <string_view>
 #include <thread>
 
 #ifdef _WIN32
@@ -28,6 +31,49 @@
 #endif
 
 namespace yams::daemon {
+
+namespace {
+
+template <typename T> std::optional<T> parseUnsigned(std::string_view raw) {
+    if (raw.empty() || raw.front() == '-') {
+        return std::nullopt;
+    }
+    T value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<int> parseInt(std::string_view raw) {
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    int value{};
+    const char* begin = raw.data();
+    const char* end = begin + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
+    if (!state) {
+        return;
+    }
+    try {
+        state->readiness.vectorDbInitAttempted = attempted;
+    } catch (...) {
+        // State publication is best-effort during initialization/shutdown races.
+    }
+}
+
+} // namespace
 
 VectorSystemManager::VectorSystemManager(Dependencies deps) : deps_(std::move(deps)) {}
 
@@ -60,12 +106,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     // In-process guard (first-wins)
     if (initAttempted_.exchange(true, std::memory_order_acq_rel)) {
         spdlog::debug("[VectorInit] skipped (already attempted in this process)");
-        if (deps_.state) {
-            try {
-                deps_.state->readiness.vectorDbInitAttempted = true;
-            } catch (...) {
-            }
-        }
+        markVectorInitAttempted(deps_.state, true);
         return Result<bool>(false);
     }
 
@@ -78,6 +119,13 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     namespace fs = std::filesystem;
     vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
+
+    // Resolve vector backend selection via ConfigResolver (TOML + env).
+    auto backendPolicy = ConfigResolver::resolveVectorBackendPolicy();
+    if (backendPolicy.backend && *backendPolicy.backend == "faiss") {
+        cfg.backend_type = vector::VectorBackendType::Faiss;
+        spdlog::info("[VectorInit] backend=faiss via ConfigResolver");
+    }
     bool exists = fs::exists(cfg.database_path);
     cfg.create_if_missing = true;
 
@@ -97,6 +145,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 spdlog::info("[VectorInit] probe: ddl dim={}", *ddlDim);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -110,11 +159,27 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 spdlog::info("[VectorInit] probe: generator dim={}", g);
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
     // 3. Ask provider directly (if weak_ptr is set)
     auto modelProvider = deps_.modelProvider.lock();
+    // Training-free providers (e.g. simeon) don't use named models; ask for the
+    // fixed output dimension directly before falling through to the name-based
+    // resolution paths below.
+    if (!dim && modelProvider && modelProvider->isAvailable() && modelProvider->isTrainingFree()) {
+        try {
+            size_t prov = modelProvider->getEmbeddingDim("");
+            if (prov > 0) {
+                dim = prov;
+                spdlog::info("[VectorInit] using training-free provider dim={} ({})", *dim,
+                             modelProvider->getProviderName());
+            }
+        } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
+        }
+    }
     if (!dim && deps_.resolvePreferredModel) {
         try {
             std::string preferred = deps_.resolvePreferredModel();
@@ -126,6 +191,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -137,18 +203,20 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
                 auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
-                    dim = static_cast<size_t>(std::stoul(it->second));
-                    spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                    if (auto parsed = parseUnsigned<size_t>(it->second)) {
+                        dim = *parsed;
+                        spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                    }
                 }
             } catch (...) {
+                // Config dimension is a fallback probe only; keep trying other sources.
             }
         }
 
         if (!dim) {
             if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                try {
-                    dim = static_cast<size_t>(std::stoul(envd));
-                } catch (...) {
+                if (auto parsed = parseUnsigned<size_t>(envd)) {
+                    dim = *parsed;
                 }
             }
         }
@@ -175,6 +243,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
 
@@ -219,23 +288,24 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     }
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     }
 
     if (!dim) {
         spdlog::info("[VectorInit] deferring initialization (provider dim unresolved)");
-        if (deps_.state) {
-            try {
-                deps_.state->readiness.vectorDbInitAttempted = false;
-            } catch (...) {
-            }
-        }
+        markVectorInitAttempted(deps_.state, false);
         initAttempted_.store(false, std::memory_order_release);
         return Result<bool>(false);
     }
 
     cfg.embedding_dim = *dim;
+    cfg.suppress_search_index_builds = deps_.suppressVectorIndexBuild;
+    if (cfg.suppress_search_index_builds) {
+        spdlog::warn("[VectorInit] search index build/load suppressed by memory instrumentation "
+                     "profile");
+    }
 
     const auto envTruthy = [](const char* value) -> bool {
         if (!value) {
@@ -260,19 +330,17 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                      cfg.quantized_primary_storage);
     }
     if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_BITS")) {
-        try {
-            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(std::stoi(env), 1, 8));
+        if (auto bits = parseInt(env)) {
+            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(*bits, 1, 8));
             spdlog::info("[VectorInit] turboquant bits overridden to {} via env",
                          static_cast<int>(cfg.turboquant_bits));
-        } catch (...) {
         }
     }
     if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_SEED")) {
-        try {
-            cfg.turboquant_seed = static_cast<uint64_t>(std::stoull(env));
+        if (auto seed = parseUnsigned<uint64_t>(env)) {
+            cfg.turboquant_seed = *seed;
             spdlog::info("[VectorInit] turboquant seed overridden to {} via env",
                          cfg.turboquant_seed);
-        } catch (...) {
         }
     }
 
@@ -294,26 +362,22 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                                  cfgPath.string());
                 }
             }
-            if (auto it = kv.find("vector_database.quantized_hnsw_mode");
+            if (auto it = kv.find("vector_database.vec0_phss_enabled");
                 it != kv.end() && !it->second.empty()) {
-                std::string normalized(it->second);
-                std::transform(
-                    normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-                        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    });
-                if (auto parsed = vector::parseQuantizedHnswMode(normalized)) {
-                    cfg.quantized_hnsw_mode = *parsed;
-                    spdlog::info("[VectorInit] quantized HNSW mode configured as {} from {}",
-                                 vector::quantizedHnswModeName(cfg.quantized_hnsw_mode),
-                                 cfgPath.string());
+                cfg.vec0_phss_enabled = envTruthy(it->second.c_str());
+                spdlog::info("[VectorInit] vec0 PHSS configured as {} from {}",
+                             cfg.vec0_phss_enabled ? "enabled" : "disabled", cfgPath.string());
+            }
+            if (auto it = kv.find("vector_database.vec0_phss_candidates");
+                it != kv.end() && !it->second.empty()) {
+                if (auto candidates = parseInt(it->second)) {
+                    cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
+                    spdlog::info("[VectorInit] vec0 PHSS candidates configured as {} from {}",
+                                 cfg.vec0_phss_candidates, cfgPath.string());
                 }
             }
-            if (auto it = kv.find("vector_database.quantized_hnsw_rerank_factor");
-                it != kv.end() && !it->second.empty()) {
-                cfg.quantized_hnsw_rerank_factor =
-                    std::max<size_t>(1, static_cast<size_t>(std::stoull(it->second)));
-            }
         } catch (...) {
+            // Optional vector config overrides are best-effort; defaults remain valid.
         }
     }
 
@@ -331,39 +395,25 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                          env, vector::vectorSearchEngineName(cfg.search_engine));
         }
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_MODE")) {
-        std::string normalized(env);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        if (auto parsed = vector::parseQuantizedHnswMode(normalized)) {
-            cfg.quantized_hnsw_mode = *parsed;
-            spdlog::info("[VectorInit] quantized HNSW mode overridden to {} via env",
-                         vector::quantizedHnswModeName(cfg.quantized_hnsw_mode));
-        } else {
-            spdlog::warn("[VectorInit] invalid YAMS_VECTOR_QUANTIZED_MODE='{}'; using default {}",
-                         env, vector::quantizedHnswModeName(cfg.quantized_hnsw_mode));
-        }
+    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_ENABLED")) {
+        cfg.vec0_phss_enabled = envTruthy(env);
+        spdlog::info("[VectorInit] vec0 PHSS overridden to {} via env",
+                     cfg.vec0_phss_enabled ? "enabled" : "disabled");
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_RERANK_FACTOR")) {
-        try {
-            cfg.quantized_hnsw_rerank_factor =
-                std::max<size_t>(1, static_cast<size_t>(std::stoull(env)));
-            spdlog::info("[VectorInit] quantized HNSW rerank factor overridden to {} via env",
-                         cfg.quantized_hnsw_rerank_factor);
-        } catch (...) {
+    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES")) {
+        if (auto candidates = parseInt(env)) {
+            cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
+            spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
+                         cfg.vec0_phss_candidates);
         }
     }
 
     // Log start
     auto tid = std::this_thread::get_id();
-    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={} "
-                 "qmode={} qrerank={}",
+    spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={}",
                  static_cast<long long>(::getpid()), static_cast<const void*>(&tid),
                  cfg.database_path, exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no",
-                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine),
-                 vector::quantizedHnswModeName(cfg.quantized_hnsw_mode),
-                 cfg.quantized_hnsw_rerank_factor);
+                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine));
 
     // Cross-process advisory lock
 #ifdef _WIN32
@@ -425,39 +475,30 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 try {
                     vdb->initializeCounter();
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
 
                 bool vectorDbReady = false;
-                bool vectorIndexReady = false;
                 try {
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
-                    if (vectorDbReady) {
-                        if (vdb->hasReusablePersistedSearchIndex()) {
-                            vectorIndexReady = vdb->prepareSearchIndex();
-                            if (!vectorIndexReady) {
-                                spdlog::warn("[VectorInit] prepareSearchIndex failed: {}",
-                                             vdb->getLastError());
-                            }
-                        } else {
-                            spdlog::info("[VectorInit] persisted HNSW absent; deferring index "
-                                         "build until checkpoint/query path");
-                        }
+                    if (!vectorDbReady) {
+                        spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
+                                     "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
+                    // Intentional best-effort path; keep the primary operation unaffected.
                 }
 
-                // Update state
+                // Update state (DB readiness only; index readiness is managed by coordinator)
                 if (deps_.state) {
                     try {
                         deps_.state->readiness.vectorDbInitAttempted = true;
                         deps_.state->readiness.vectorDbReady = vectorDbReady;
-                        deps_.state->readiness.vectorIndexReady = vectorIndexReady;
-                        deps_.state->readiness.vectorIndexProgress =
-                            (vectorIndexReady ? 100 : (vectorDbReady ? 50 : 0));
                         deps_.state->readiness.vectorDbDim =
                             static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
 
@@ -466,6 +507,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     try {
                         deps_.serviceFsm->dispatch(VectorsInitializedEvent{cfg.embedding_dim});
                     } catch (...) {
+                        // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
 

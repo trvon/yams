@@ -144,15 +144,13 @@ TEST_CASE_METHOD(DetectorFixture, "Executable MIME specializes from extension hi
     REQUIRE(detector.initialize(config));
 
     auto sharedObject = dir.createBinaryFile(
-        "libsample.so", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45},
-                                                   std::byte{0x4C}, std::byte{0x46},
-                                                   std::byte{0x02}, std::byte{0x01},
-                                                   std::byte{0x01}, std::byte{0x00}});
+        "libsample.so", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45}, std::byte{0x4C},
+                                                 std::byte{0x46}, std::byte{0x02}, std::byte{0x01},
+                                                 std::byte{0x01}, std::byte{0x00}});
     auto objectFile = dir.createBinaryFile(
-        "module.o", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45},
-                                              std::byte{0x4C}, std::byte{0x46},
-                                              std::byte{0x01}, std::byte{0x01},
-                                              std::byte{0x01}, std::byte{0x00}});
+        "module.o", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45}, std::byte{0x4C},
+                                             std::byte{0x46}, std::byte{0x01}, std::byte{0x01},
+                                             std::byte{0x01}, std::byte{0x00}});
 
     auto sharedResult = detector.detectFromFile(sharedObject);
     REQUIRE(sharedResult);
@@ -174,12 +172,11 @@ TEST_CASE_METHOD(DetectorFixture, "Generic binary extensions override weak text 
     REQUIRE(detector.initialize(config));
 
     auto binPath = dir.createBinaryFile(
-        "payload.bin", std::array<std::byte, 16>{std::byte{'B'}, std::byte{'I'}, std::byte{'N'},
-                                                  std::byte{'A'}, std::byte{'R'}, std::byte{'Y'},
-                                                  std::byte{'-'}, std::byte{'D'}, std::byte{'A'},
-                                                  std::byte{'T'}, std::byte{'A'}, std::byte{'-'},
-                                                  std::byte{'0'}, std::byte{'0'}, std::byte{'0'},
-                                                  std::byte{'1'}});
+        "payload.bin",
+        std::array<std::byte, 16>{std::byte{'B'}, std::byte{'I'}, std::byte{'N'}, std::byte{'A'},
+                                  std::byte{'R'}, std::byte{'Y'}, std::byte{'-'}, std::byte{'D'},
+                                  std::byte{'A'}, std::byte{'T'}, std::byte{'A'}, std::byte{'-'},
+                                  std::byte{'0'}, std::byte{'0'}, std::byte{'0'}, std::byte{'1'}});
 
     auto result = detector.detectFromFile(binPath);
     REQUIRE(result);
@@ -189,8 +186,7 @@ TEST_CASE_METHOD(DetectorFixture, "Generic binary extensions override weak text 
     CHECK(result.value().confidence >= 0.55f);
 }
 
-TEST_CASE_METHOD(DetectorFixture,
-                 "Extensionless printable blobs do not fall through to text/plain",
+TEST_CASE_METHOD(DetectorFixture, "Extensionless printable blobs do not fall through to text/plain",
                  "[detection][file]") {
     auto config = configWithCustomPatterns();
     config.useLibMagic = false;
@@ -198,14 +194,12 @@ TEST_CASE_METHOD(DetectorFixture,
 
     auto blobPath = dir.createBinaryFile(
         "88f051b8c01feda0b07cc00112233445",
-        std::array<std::byte, 24>{std::byte{'?'}, std::byte{'<'}, std::byte{'?'},
-                                  std::byte{'?'}, std::byte{'Y'}, std::byte{'?'},
-                                  std::byte{'?'}, std::byte{'<'}, std::byte{'['},
-                                  std::byte{'o'}, std::byte{'+'}, std::byte{'?'},
-                                  std::byte{'g'}, std::byte{'?'}, std::byte{'<'},
-                                  std::byte{'R'}, std::byte{'`'}, std::byte{'g'},
-                                  std::byte{'='}, std::byte{'?'}, std::byte{'#'},
-                                  std::byte{'!'}, std::byte{'='}, std::byte{'{'}});
+        std::array<std::byte, 24>{std::byte{'?'}, std::byte{'<'}, std::byte{'?'}, std::byte{'?'},
+                                  std::byte{'Y'}, std::byte{'?'}, std::byte{'?'}, std::byte{'<'},
+                                  std::byte{'['}, std::byte{'o'}, std::byte{'+'}, std::byte{'?'},
+                                  std::byte{'g'}, std::byte{'?'}, std::byte{'<'}, std::byte{'R'},
+                                  std::byte{'`'}, std::byte{'g'}, std::byte{'='}, std::byte{'?'},
+                                  std::byte{'#'}, std::byte{'!'}, std::byte{'='}, std::byte{'{'}});
 
     auto result = detector.detectFromFile(blobPath);
     REQUIRE(result);

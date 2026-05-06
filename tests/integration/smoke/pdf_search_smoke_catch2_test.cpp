@@ -71,7 +71,8 @@ TEST_CASE_METHOD(PdfSearchSmoke, "PdfKeywordSearchFindsGeneratedToken", "[smoke]
 
     yams::daemon::YamsDaemon daemon(cfg);
     auto started = daemon.start();
-    INFO((started ? std::string{} : started.error().message)); REQUIRE(started);
+    INFO((started ? std::string{} : started.error().message));
+    REQUIRE(started);
 
     // Start runLoop in background thread - REQUIRED for daemon to process requests
     std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
@@ -106,7 +107,8 @@ TEST_CASE_METHOD(PdfSearchSmoke, "PdfKeywordSearchFindsGeneratedToken", "[smoke]
     opts.recursive = false;
     opts.noEmbeddings = true;
     auto add = ing.addViaDaemon(opts);
-    INFO((add ? "" : add.error().message)); REQUIRE(add);
+    INFO((add ? "" : add.error().message));
+    REQUIRE(add);
 
     // Build app/services SearchService bound to this daemon
     auto* sm = daemon.getServiceManager();

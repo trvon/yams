@@ -4,6 +4,12 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -55,7 +61,46 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
     }
     inactiveSince = {};
 }
+
+void releaseFreedSlabsToOs() noexcept {
+#if defined(__APPLE__)
+    vm_address_t* zoneAddrs = nullptr;
+    unsigned zoneCount = 0;
+    if (malloc_get_all_zones(mach_task_self(), nullptr, &zoneAddrs, &zoneCount) == KERN_SUCCESS &&
+        zoneAddrs && zoneCount > 0) {
+        for (unsigned i = 0; i < zoneCount; ++i) {
+            if (auto* z = reinterpret_cast<malloc_zone_t*>(zoneAddrs[i])) {
+                malloc_zone_pressure_relief(z, 0);
+            }
+        }
+    } else if (auto* z = malloc_default_zone()) {
+        malloc_zone_pressure_relief(z, 0);
+    }
+#elif defined(__GLIBC__)
+    (void)malloc_trim(0);
+#endif
+}
 } // namespace
+
+RepairHoldHints computeRepairHoldHints(ResourcePressureLevel level, std::uint64_t repairBacklog,
+                                       uint32_t baseDegradeMs, uint32_t baseReadyMs) noexcept {
+    double degradeMult = 1.0;
+    double readyMult = 1.0;
+    if (level >= ResourcePressureLevel::Critical) {
+        degradeMult = 4.0;
+        readyMult = 0.5;
+    } else if (level >= ResourcePressureLevel::Warning) {
+        degradeMult = 2.0;
+        readyMult = 0.75;
+    }
+    if (repairBacklog > 1000) {
+        degradeMult *= 1.5;
+    } else if (repairBacklog > 100) {
+        degradeMult *= 1.25;
+    }
+    return RepairHoldHints{static_cast<uint32_t>(static_cast<double>(baseDegradeMs) * degradeMult),
+                           static_cast<uint32_t>(static_cast<double>(baseReadyMs) * readyMult)};
+}
 
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
                              WorkCoordinator* coordinator)
@@ -126,11 +171,13 @@ void TuningManager::stop() {
         try {
             wakeDrain->set_value();
         } catch (...) {
+            // Intentional best-effort path; keep the primary operation unaffected.
         }
     });
     try {
         wakeDrainFuture.wait();
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
     try {
@@ -172,23 +219,22 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
 
     while (running_.load()) {
         YAMS_ZONE_SCOPED_N("TuningManager::loop");
-        bool idle = false;
         try {
-            idle = tick_once();
+            (void)tick_once();
         } catch (const std::exception& e) {
             spdlog::debug("TuningManager tick error: {}", e.what());
         } catch (...) {
             logIgnoredTuningException("TuningManager tick error");
         }
 
-        // Choose cadence: active mode uses the fast 5ms tick, idle mode backs off
-        // to a much longer interval (default 1000ms) to reduce CPU wake-ups.
-        const uint32_t ms = idle ? TuneAdvisor::idleTickMs() : TuneAdvisor::statusTickMs();
-        timer.expires_after(std::chrono::milliseconds(ms));
+        // Safety-net timer only. Real responsiveness comes from notifyWakeup()
+        // fired by PostIngestQueue watermarks, RepairService, SocketServer,
+        // EmbeddingService, ResourceGovernor pressure transitions, etc.
+        timer.expires_after(std::chrono::milliseconds(TuneAdvisor::idleTickMs()));
 
         boost::system::error_code ec;
         co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        // operation_aborted means stop() or notifyWakeup() cancelled the idle wait.
+        // operation_aborted means stop() or notifyWakeup() cancelled the wait.
     }
 
     spdlog::debug("TuningManager loop exiting");
@@ -774,6 +820,17 @@ bool TuningManager::tick_once() {
 
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
+                const auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
+                auto refreshLimiterMax = [](GradientLimiter* lim, uint32_t cap) {
+                    if (lim && cap > 0)
+                        lim->setMaxLimit(static_cast<double>(cap));
+                };
+                refreshLimiterMax(pq->extractionLimiter(), budget.extraction);
+                refreshLimiterMax(pq->kgLimiter(), budget.kg);
+                refreshLimiterMax(pq->symbolLimiter(), budget.symbol);
+                refreshLimiterMax(pq->entityLimiter(), budget.entity);
+                refreshLimiterMax(pq->titleLimiter(), budget.title);
+
                 // Propagate governor pressure to limiters before reading
                 const auto pressureLevel = static_cast<uint8_t>(govSnap.level);
                 auto applyPressureToLimiter = [pressureLevel](GradientLimiter* lim) {
@@ -1019,13 +1076,21 @@ bool TuningManager::tick_once() {
             }
             previousPressureLevel_ = currentPressure;
 
+            // Inactive stages: write UINT32_MAX (no cap) so the live mask in
+            // postIngestBudgetedConcurrency is the sole gate; avoids a stale-tick
+            // window where a newly-active stage stays capped at 0 until next tick.
+            const uint32_t maskNow = TuneAdvisor::postIngestStageActiveMask();
+            auto capForStage = [&](uint32_t bit, uint32_t computedTarget) -> uint32_t {
+                return ((maskNow & bit) == 0u) ? UINT32_MAX : computedTarget;
+            };
             TuneAdvisor::beginDynamicCapWrite();
-            TuneAdvisor::setPostExtractionConcurrentDynamicCap(extractionTarget);
-            TuneAdvisor::setPostKgConcurrentDynamicCap(kgTarget);
-            TuneAdvisor::setPostSymbolConcurrentDynamicCap(symbolTarget);
-            TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
-            TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
-            TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
+            TuneAdvisor::setPostExtractionConcurrentDynamicCap(
+                capForStage(1u << 0u, extractionTarget));
+            TuneAdvisor::setPostKgConcurrentDynamicCap(capForStage(1u << 1u, kgTarget));
+            TuneAdvisor::setPostSymbolConcurrentDynamicCap(capForStage(1u << 2u, symbolTarget));
+            TuneAdvisor::setPostEntityConcurrentDynamicCap(capForStage(1u << 3u, entityTarget));
+            TuneAdvisor::setPostTitleConcurrentDynamicCap(capForStage(1u << 4u, titleTarget));
+            TuneAdvisor::setPostEmbedConcurrentDynamicCap(capForStage(1u << 5u, embedTarget));
             TuneAdvisor::endDynamicCapWrite();
 
             // Align EmbeddingGenerator global gate with governor caps
@@ -1319,6 +1384,18 @@ bool TuningManager::tick_once() {
         s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
+
+        s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
+        s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
+        s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
+        s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+        s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+
+        const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        const auto holdHints = computeRepairHoldHints(govSnap.level, repairBacklog);
+        s->repairDegradeHoldMs = holdHints.degradeHoldMs;
+        s->repairReadyHoldMs = holdHints.readyHoldMs;
+
         TuningSnapshotRegistry::instance().set(std::move(s));
     } catch (const std::exception& e) {
         logIgnoredTuningException("Tuning snapshot publish failed", e);
@@ -1445,7 +1522,19 @@ bool TuningManager::tick_once() {
         logIgnoredTuningException("Model maintenance check failed");
     }
 
-    // Return idle hint for tuning loop cadence: true when no real work is pending.
+    if (daemonIdle) {
+        static std::atomic<std::int64_t> sLastReleaseAtMs{0};
+        constexpr std::int64_t kMinReleaseIntervalMs = 30'000;
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+        std::int64_t last = sLastReleaseAtMs.load(std::memory_order_relaxed);
+        if (nowMs - last >= kMinReleaseIntervalMs &&
+            sLastReleaseAtMs.compare_exchange_strong(last, nowMs, std::memory_order_acq_rel)) {
+            releaseFreedSlabsToOs();
+        }
+    }
+
     return daemonIdle;
 }
 

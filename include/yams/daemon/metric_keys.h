@@ -178,6 +178,11 @@ constexpr std::string_view kWorkCoordinatorRunning = "work_coordinator_running";
 constexpr std::string_view kServiceFsmState = "service_fsm_state";
 constexpr std::string_view kEmbeddingState = "embedding_state";
 constexpr std::string_view kPluginHostState = "plugin_host_state";
+constexpr std::string_view kPluginSkippedCount = "plugin_skipped_count";
+constexpr std::string_view kContentExtractorsLoaded = "content_extractors_loaded";
+constexpr std::string_view kSymbolExtractorsLoaded = "symbol_extractors_loaded";
+constexpr std::string_view kEntityExtractorsLoaded = "entity_extractors_loaded";
+constexpr std::string_view kTitleExtractorEnabled = "title_extractor_enabled";
 constexpr std::string_view kPostIngestUseBus = "post_ingest_use_bus";
 
 // Stream metrics
@@ -218,6 +223,8 @@ constexpr std::string_view kRepairIdleTicks = "repair_idle_ticks";
 constexpr std::string_view kRepairBusyTicks = "repair_busy_ticks";
 constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
+constexpr std::string_view kRepairCurrentOperationCode = "repair_current_operation_code";
+constexpr std::string_view kRepairCurrentOperationElapsedMs = "repair_current_operation_elapsed_ms";
 
 // Topology rebuild telemetry
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
@@ -263,6 +270,11 @@ constexpr std::string_view kEmbeddingReady = "embedding_ready";
 constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
 constexpr std::string_view kPluginsReady = "plugins_ready";
 constexpr std::string_view kPluginsDegraded = "plugins_degraded";
+constexpr std::string_view kContentExtractorsReady = "content_extractors_ready";
+constexpr std::string_view kSymbolExtractorsReady = "symbol_extractors_ready";
+constexpr std::string_view kEntityExtractorsReady = "entity_extractors_ready";
+constexpr std::string_view kTitleExtractorReady = "title_extractor_ready";
+constexpr std::string_view kPluginWarningsPresent = "plugin_warnings_present";
 constexpr std::string_view kTopologyArtifactsFresh = "topology_artifacts_fresh";
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
 constexpr std::string_view kVectorEmbeddingsAvailable = "vector_embeddings_available";
@@ -274,5 +286,52 @@ constexpr std::string_view kSearchEngineBuildReasonDegraded = "search_engine_bui
 constexpr std::string_view kSearchEngineLexicalReady = "search_engine_lexical";
 constexpr std::string_view kSearchEngineVectorUsable = "search_engine_vector_usable";
 constexpr std::string_view kSearchEngineHybridUsable = "search_engine_hybrid_usable";
+constexpr std::string_view kSearchEngineLexicalEnhancementConfigured =
+    "search_engine_lexical_enhancement_configured";
+constexpr std::string_view kSearchEngineLexicalEnhancementReady =
+    "search_engine_lexical_enhancement_ready";
+constexpr std::string_view kSearchEngineLexicalEnhancementBuilding =
+    "search_engine_lexical_enhancement_building";
+constexpr std::string_view kSearchEngineFragmentGeometryReady =
+    "search_engine_fragment_geometry_ready";
 
 } // namespace yams::daemon::readiness
+
+namespace yams::daemon::dbphase {
+
+// Database init phase values surfaced via StateComponent.readiness.databasePhase
+// and the StatusResponse.databasePhase IPC field. Pin the strings here so
+// daemon writers and CLI/MCP readers cannot drift.
+constexpr std::string_view kOpening = "opening";
+constexpr std::string_view kRecovering = "recovering";
+constexpr std::string_view kMigrating = "migrating";
+constexpr std::string_view kReady = "ready";
+
+} // namespace yams::daemon::dbphase
+
+namespace yams::daemon::status_keys {
+
+// Keys used to piggyback string/integer status fields in
+// StatusResponse.request_counts (proto IPC) and the bootstrap status JSON
+// written to $XDG_RUNTIME_DIR/yams-daemon.status.json.
+constexpr std::string_view kDatabasePhase = "database_phase";
+constexpr std::string_view kDatabasePhaseElapsedMs = "database_phase_elapsed_ms";
+constexpr std::string_view kDatabaseRecoveredAt = "database_recovered_at";
+constexpr std::string_view kDatabaseRecoveredFrom = "database_recovered_from";
+constexpr std::string_view kStorageWarning = "storage_warning";
+
+} // namespace yams::daemon::status_keys
+
+namespace yams::daemon::ir_metrics {
+constexpr std::string_view kIRSchemaVersion = "topology_ablation_quality_v1";
+constexpr std::string_view kIRTestKey = "test";
+constexpr std::string_view kIRTestName = "topology_ablation_quality";
+constexpr std::string_view kIRAxisKey = "axis";
+constexpr std::string_view kIRAxisIdKey = "axis_id";
+constexpr std::string_view kIRNdcgAtK = "ndcg_at_k";
+constexpr std::string_view kIRMrrAtK = "mrr_at_k";
+constexpr std::string_view kIRMap = "map";
+constexpr std::string_view kIRRecallAtK = "recall_at_k";
+constexpr std::string_view kIRRecallAt100 = "recall_at_100";
+constexpr std::string_view kIRFixtureStatus = "fixture_status";
+} // namespace yams::daemon::ir_metrics

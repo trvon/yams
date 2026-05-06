@@ -38,6 +38,7 @@ jobs:
         shell: bash
         run: |
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp || true
+          git submodule update --init --depth 1 third_party/simeon || true
           git submodule update --init --depth 1 third_party/symspell || true
 
       - name: Install static analysis tools
@@ -59,10 +60,22 @@ jobs:
             BASE="HEAD^"
           fi
 
+          # Push events can report a `before` SHA that is no longer reachable
+          # after a force-push/rewrite. In that case, fall back to the checked
+          # out parent instead of failing before cppcheck runs.
+          if [[ -n "$BASE" ]] && ! git rev-parse --verify "${BASE}^{commit}" >/dev/null 2>&1; then
+            echo "Diff base '$BASE' is not available in this checkout; falling back to HEAD^."
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              BASE="HEAD^"
+            else
+              BASE=""
+            fi
+          fi
+
           if [[ -n "$BASE" ]]; then
-            scripts/check-quality.sh --profile ci --format human --parallel --diff-base "$BASE"
+            scripts/lint.sh cppcheck --diff "$BASE"
           else
-            scripts/check-quality.sh --profile ci --format human --parallel
+            scripts/lint.sh cppcheck
           fi
 
       - name: Run clang-tidy on changed files (PR only)
@@ -174,7 +187,7 @@ jobs:
 
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f13873027a65788a2f0c7ecaca13cb1b26c # v1
         with:
           tool-cache: false      # Keep tools we might need
           android: true          # ~14GB savings
@@ -204,6 +217,7 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Only init submodules required for the build
           retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/simeon
           retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -214,11 +228,11 @@ jobs:
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
           # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils
+          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/bin" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -264,7 +278,7 @@ jobs:
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/bin/python" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/bin" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/bin:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -278,7 +292,7 @@ jobs:
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade pip
-          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade meson 'ninja>=1.10'
+          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/Scripts" >> "$GITHUB_PATH"
           export PATH="$PYTOOLS_DIR/Scripts:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
@@ -314,9 +328,11 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-linux-x86_64-
+            conan2-${{ runner.os }}-
       - name: Conan cache diagnostics
         shell: bash
         run: |
@@ -332,6 +348,8 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
+            ccache-${{ runner.os }}-linux-x86_64-
+            ccache-${{ runner.os }}-
       - name: Install Conan (latest)
         shell: bash
         run: |
@@ -352,7 +370,7 @@ jobs:
           fi
 
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -377,7 +395,8 @@ jobs:
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
 
@@ -488,6 +507,33 @@ jobs:
           YAMS_ENABLE_MOBILE_BINDINGS: "false"
         run: |
           .\setup.ps1 Debug
+
+      # Diagnostic for Windows Boost lookup. Reads BOOST_* env vars set by
+      # setup.ps1 (persisted to GITHUB_ENV) and lists the actual Conan boost
+      # lib filenames so we can pattern-match meson's expected naming if the
+      # build above fails. continue-on-error + always() so it never blocks.
+      - name: (diag) Boost env + Conan lib layout (Windows)
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "BOOST_ROOT=$env:BOOST_ROOT"
+          Write-Host "BOOST_INCLUDEDIR=$env:BOOST_INCLUDEDIR"
+          Write-Host "BOOST_LIBRARYDIR=$env:BOOST_LIBRARYDIR"
+          if ($env:BOOST_LIBRARYDIR -and (Test-Path $env:BOOST_LIBRARYDIR)) {
+              Write-Host "--- $env:BOOST_LIBRARYDIR contents (boost_*) ---"
+              Get-ChildItem $env:BOOST_LIBRARYDIR -Filter 'boost_*' | Select Name | Format-Table -AutoSize | Out-String
+              Write-Host "--- $env:BOOST_LIBRARYDIR contents (libboost_*) ---"
+              Get-ChildItem $env:BOOST_LIBRARYDIR -Filter 'libboost_*' -ErrorAction SilentlyContinue | Select Name | Format-Table -AutoSize | Out-String
+          }
+
+      - name: ccache stats (post-build)
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          set +e
+          ccache -s 2>/dev/null || true
+          du -sh "${CCACHE_DIR:-$HOME/.cache/ccache}" 2>/dev/null || true
 
       # - name: Check mobile ABI surface
       #   shell: bash

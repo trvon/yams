@@ -2,21 +2,31 @@ spdlog_dep = dependency('spdlog', required: true)
 sqlite_dep = dependency('sqlite3', required: true)
 json_dep = dependency('nlohmann_json', required: true)
 fmt_dep = dependency('fmt', required: false)
-boost_dep = dependency('boost', required: true)
+# boost_dep inherited from top-level meson.build (per-library pkg-config probes).
+# Re-invoking dependency('boost', ...) here would bypass the override on the
+# modules: form (meson #14146).
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
 
-onnx_opt = get_option('enable-onnx')
-
-onnx_dep = onnxruntime_resolved_dep
-
-onnx_feature_requested = not onnx_opt.disabled()
-onnx_runtime_link = false
-if onnx_feature_requested and onnx_dep.found()
-  onnx_runtime_link = true
+# FAISS HNSW backend (optional, for online/incremental vector index updates)
+faiss_dep = disabler()
+if get_option('enable-faiss')
+  faiss_dep = dependency('faiss', required: false, method: 'cmake')
+  if not faiss_dep.found()
+    cpp = meson.get_compiler('cpp')
+    faiss_lib = cpp.find_library('faiss', required: false)
+    if faiss_lib.found()
+      faiss_dep = declare_dependency(
+        dependencies: [faiss_lib, cpp.find_library('openblas', required: true),
+                       cpp.find_library('omp', required: true)],
+      )
+    endif
+  endif
 endif
+faiss_config = configuration_data()
+faiss_config.set10('YAMS_HAS_FAISS', faiss_dep.found())
 
 # Optional include dirs for third-party headers
 # Note: HNSW implementation now uses sqlite-vec-cpp, hnswlib no longer needed
@@ -56,19 +66,41 @@ vector_cppargs = [
   '-DSQLITE_ENABLE_LOAD_EXTENSION=1',
 ]
 
+sqlite_vec_feature_cppargs = []
+
+# SIMD codegen flags for sqlite-vec-cpp only. These are applied per-TU to
+# the sqlite_vec_cpp sources so the rest of yams_vector (tokenizer,
+# chunker, etc.) is not locked into requiring AVX2 / dotprod at runtime.
+vec_simd_cppargs = []
+
 # Enable SIMD for sqlite-vec-cpp when supported
 cpp_comp = meson.get_compiler('cpp')
 host_cpu = host_machine.cpu_family()
-if host_cpu == 'x86_64' or host_cpu == 'x86'
+target_is_x86 = cpp_comp.compiles('''
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(_M_IX86) && !defined(_M_X64)
+#error not x86
+#endif
+int main() { return 0; }
+''', name: 'compiler target is x86/x64')
+target_is_arm = cpp_comp.compiles('''
+#if !defined(__arm__) && !defined(__aarch64__) && !defined(_M_ARM) && !defined(_M_ARM64)
+#error not arm
+#endif
+int main() { return 0; }
+''', name: 'compiler target is ARM/ARM64')
+
+if target_is_x86
   if cpp_comp.has_argument('-mavx') and cpp_comp.has_argument('-mfma')
-    vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX', '-mavx', '-mfma']
+    sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
+    vec_simd_cppargs += ['-mavx', '-mfma']
     if cpp_comp.has_argument('-mavx2')
-      vector_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2', '-mavx2']
+      sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2']
+      vec_simd_cppargs += ['-mavx2']
     endif
   endif
-elif host_cpu == 'aarch64' or host_cpu == 'arm'
+elif target_is_arm
   # NEON is baseline on aarch64; on 32-bit arm it may depend on sub-arch
-  vector_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
+  sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
   # DotProd (ARMv8.2+): compile-test vdotq_s32; all Apple Silicon supports this
   dotprod_test = '''
   #include <arm_neon.h>
@@ -81,7 +113,7 @@ elif host_cpu == 'aarch64' or host_cpu == 'arm'
   }
   '''
   if cpp_comp.compiles(dotprod_test, args: ['-march=armv8.2-a+dotprod'], name: 'ARM DotProd (vdotq_s32)')
-    vector_cppargs += ['-march=armv8.2-a+dotprod']
+    vec_simd_cppargs += ['-march=armv8.2-a+dotprod']
     message('ARM DotProd: enabled for sqlite-vec-cpp (int8 cosine/IP ~33x faster)')
   endif
 endif
@@ -97,19 +129,112 @@ srcs = [
   'embedding_service.cpp',
   'batch_metrics.cpp',
   'document_chunker.cpp',
-  'vector_index_manager.cpp',
-  'vector_index_optimizer.cpp',
+  'vector_utils.cpp',
   'model_registry.cpp',
   'model_cache.cpp',
   'model_loader.cpp',
-  'sqlite_vec_backend.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'dim_resolver.cpp',
   'tokenizer.cpp',
   'turboquant.cpp',
-  'compressed_ann.cpp',
-] + sqlite_vec_cpp_src
+]
+
+if faiss_dep.found()
+  srcs += ['faiss_backend.cpp']
+endif
+
+# Isolate SIMD-heavy sqlite-vec-cpp sources into their own static library so
+# -mavx / -mavx2 / -mfma / -march=armv8.2-a+dotprod do not leak into the rest
+# of yams_vector. This keeps generic TUs buildable on older CPUs while still
+# enabling the fast int8 kernels inside sqlite-vec-cpp.
+sqlite_vec_cpp_lib = []
+if sqlite_vec_cpp_src.length() > 0
+  sqlite_vec_cpp_lib = static_library('yams_sqlite_vec_cpp',
+    sqlite_vec_cpp_src,
+    include_directories: [sqlite_vec_cpp_inc, include_directories('../../include'), include_directories('.')],
+    dependencies: [sqlite_dep, spdlog_dep],
+    cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs,
+    install: false,
+  )
+endif
+
+# ------------------------------------------------------------------
+# Vendored simeon (model-free SIMD embedding) — third_party/simeon
+# Built into yams_vector as an opt-in backend; standalone builds also
+# live in third_party/simeon/build for library-level development.
+# ------------------------------------------------------------------
+simeon_dir = join_paths(meson.project_source_root(), 'third_party', 'simeon')
+simeon_inc = include_directories('../../third_party/simeon/include', is_system: true)
+
+simeon_core_srcs = [
+  join_paths(simeon_dir, 'src', 'simeon.cpp'),
+  join_paths(simeon_dir, 'src', 'tokenizer.cpp'),
+  join_paths(simeon_dir, 'src', 'tokenizer_bpe.cpp'),
+  join_paths(simeon_dir, 'src', 'hasher.cpp'),
+  join_paths(simeon_dir, 'src', 'hash_xxh64.cpp'),
+  join_paths(simeon_dir, 'src', 'hash_crc32c.cpp'),
+  join_paths(simeon_dir, 'src', 'hash_tabulation.cpp'),
+  join_paths(simeon_dir, 'src', 'projection.cpp'),
+  join_paths(simeon_dir, 'src', 'pq.cpp'),
+  join_paths(simeon_dir, 'src', 'pmi.cpp'),
+  join_paths(simeon_dir, 'src', 'bm25.cpp'),
+  join_paths(simeon_dir, 'src', 'fusion.cpp'),
+  join_paths(simeon_dir, 'src', 'minhash.cpp'),
+  join_paths(simeon_dir, 'src', 'matryoshka.cpp'),
+  join_paths(simeon_dir, 'src', 'prf.cpp'),
+  join_paths(simeon_dir, 'src', 'concept_mining.cpp'),
+  join_paths(simeon_dir, 'src', 'aho_corasick.cpp'),
+  join_paths(simeon_dir, 'src', 'aho_corasick_da.cpp'),
+  join_paths(simeon_dir, 'src', 'text_rank.cpp'),
+  join_paths(simeon_dir, 'src', 'fragment_geometry.cpp'),
+  join_paths(simeon_dir, 'src', 'persistent_homology.cpp'),
+  join_paths(simeon_dir, 'src', 'query_router.cpp'),
+  join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
+]
+
+# SIMD tier defines — must be visible to every TU that includes
+# <simeon/simd.hpp>, since the dispatcher (l2_normalize / dot / …) is
+# header-inline and guards the NEON/AVX2 call paths with
+# SIMEON_HAS_NEON / SIMEON_HAS_AVX2. Without these, active_simd_tier()
+# always returns Scalar even though arch/neon.cpp or arch/avx2.cpp is
+# compiled in.
+simeon_simd_defines = []
+simeon_extra_libs = []
+if target_is_arm
+  simeon_simd_defines += '-DSIMEON_HAS_NEON=1'
+  simeon_neon_lib = static_library('yams_simeon_neon',
+    [join_paths(simeon_dir, 'src', 'arch', 'neon.cpp')],
+    include_directories: simeon_inc,
+    cpp_args: simeon_simd_defines,
+    install: false,
+  )
+  simeon_extra_libs += simeon_neon_lib
+elif target_is_x86
+  if cpp_comp.has_argument('-mavx2') and cpp_comp.has_argument('-mfma')
+    simeon_simd_defines += '-DSIMEON_HAS_AVX2=1'
+    simeon_avx_args = ['-mavx2', '-mfma']
+    simeon_avx_lib = static_library('yams_simeon_avx2',
+      [join_paths(simeon_dir, 'src', 'arch', 'avx2.cpp')],
+      include_directories: simeon_inc,
+      cpp_args: simeon_avx_args + simeon_simd_defines,
+      install: false,
+    )
+    simeon_extra_libs += simeon_avx_lib
+  endif
+endif
+
+simeon_lib = static_library('yams_simeon',
+  simeon_core_srcs + yams_embedding_simeon_srcs,
+  include_directories: [simeon_inc, include_directories('../../include')],
+  dependencies: [spdlog_dep, tl_expected_dep, yams_core],
+  cpp_args: simeon_simd_defines,
+  link_with: simeon_extra_libs,
+  install: false,
+)
+
+# NOTE: no separate simeon_dep export is declared — yams_vector_dep below
+# already propagates simeon linkage and include paths to consumers.
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec-cpp sources
 if sqlite_vec_cpp_src.length() > 0
@@ -123,16 +248,30 @@ yams_daemon_client = dependency('yams_daemon_client', required: true)
 
 deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep, yams_daemon_client]
 
+if faiss_dep.found()
+  deps_vec += [faiss_dep]
+  vector_cppargs += ['-DYAMS_HAS_FAISS=1']
+endif
+
 vector_platform_deps = []
 if host_machine.system() == 'windows'
   vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
 endif
 
+sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
+  ['sqlite_vec_backend.cpp'],
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
+  dependencies: deps_vec + vector_platform_deps,
+  cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
+  install: false,
+)
+
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc],
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + (faiss_dep.found() ? [include_directories('/opt/homebrew/include', is_system: true), include_directories('/opt/homebrew/opt/libomp/include', is_system: true)] : []),
   dependencies: deps_vec + vector_platform_deps,
-  cpp_args: vector_cppargs,
+  link_with: [simeon_lib, sqlite_vec_backend_lib] + sqlite_vec_cpp_lib,
+  cpp_args: vector_cppargs + simeon_simd_defines,
   install: true,
 )
 
@@ -145,7 +284,8 @@ pkg.generate(yams_vector,
 
 yams_vector_dep = declare_dependency(
   link_with: yams_vector,
-  include_directories: include_directories('../../include'),
+  include_directories: [include_directories('../../include'), simeon_inc],
   dependencies: vector_platform_deps,
+  compile_args: simeon_simd_defines,
 )
 meson.override_dependency('yams_vector', yams_vector_dep)

@@ -212,10 +212,10 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
 
     std::vector<std::vector<float>> result;
     try {
-        result.resize(out_batch);
+        result.reserve(out_batch);
         for (size_t i = 0; i < out_batch; ++i) {
             const float* row = vecs + i * out_dim;
-            result[i].assign(row, row + out_dim);
+            result.emplace_back(row, row + out_dim);
         }
     } catch (...) {
         if (table_->free_embedding_batch)
@@ -289,6 +289,7 @@ std::vector<std::string> AbiModelProviderAdapter::getLoadedModels() const {
                 out.emplace_back(ids[i]);
         }
     } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
     }
     if (table_->free_model_list)
         table_->free_model_list(table_->self, ids, count);
@@ -328,6 +329,7 @@ Result<ModelInfo> AbiModelProviderAdapter::getModelInfo(const std::string& model
                     (void)j["runtime_version"]; // could be surfaced later
                 }
             } catch (...) {
+                // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
         if (json_c)

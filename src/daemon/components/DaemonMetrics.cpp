@@ -1,7 +1,20 @@
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#ifndef _WIN32
+#include <sys/statvfs.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <Windows.h>
+#endif
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -53,11 +66,133 @@
 #ifdef __APPLE__
 #include <unistd.h>
 #include <mach/mach.h>
+#include <malloc/malloc.h>
 #endif
 
 namespace yams::daemon {
 
+std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
+    constexpr std::uint64_t kMinTtlMs = 60'000;
+    constexpr std::uint64_t kMaxTtlMs = 1'800'000;
+    constexpr std::uint64_t kAmplifier = 10;
+    if (lastDurationMs == 0) {
+        return kMinTtlMs;
+    }
+    const std::uint64_t scaled =
+        (lastDurationMs > kMaxTtlMs / kAmplifier) ? kMaxTtlMs : lastDurationMs * kAmplifier;
+    return std::clamp(scaled, kMinTtlMs, kMaxTtlMs);
+}
+
 namespace {
+std::uint64_t queryVolumeUsedBytes(const std::filesystem::path& path) noexcept {
+    if (path.empty())
+        return 0;
+#ifndef _WIN32
+    struct statvfs vfs{};
+    if (::statvfs(path.c_str(), &vfs) != 0)
+        return 0;
+    const std::uint64_t blockSize =
+        vfs.f_frsize != 0 ? vfs.f_frsize : static_cast<std::uint64_t>(vfs.f_bsize);
+    if (blockSize == 0 || vfs.f_blocks == 0)
+        return 0;
+    const std::uint64_t totalBlocks = vfs.f_blocks;
+    const std::uint64_t freeBlocks = vfs.f_bfree;
+    if (freeBlocks > totalBlocks)
+        return 0;
+    return (totalBlocks - freeBlocks) * blockSize;
+#else
+    ULARGE_INTEGER freeAvail{};
+    ULARGE_INTEGER total{};
+    ULARGE_INTEGER totalFree{};
+    const auto wpath = path.wstring();
+    if (!::GetDiskFreeSpaceExW(wpath.c_str(), &freeAvail, &total, &totalFree))
+        return 0;
+    if (totalFree.QuadPart > total.QuadPart)
+        return 0;
+    return static_cast<std::uint64_t>(total.QuadPart - totalFree.QuadPart);
+#endif
+}
+} // namespace
+
+namespace {
+struct MemoryUsageSample {
+    double memoryUsageMb{0.0};
+    std::map<std::string, std::uint64_t> breakdownBytes;
+    std::map<std::string, std::uint64_t> diagnosticCounters;
+};
+
+bool envFlagEnabled(const char* name) {
+    const char* env = std::getenv(name);
+    if (!env || *env == '\0') {
+        return false;
+    }
+    const std::string_view value{env};
+    return value != "0" && value != "false" && value != "FALSE" && value != "off" && value != "OFF";
+}
+
+bool allocatorBreakdownEnabled() {
+#ifdef YAMS_TESTING
+    return envFlagEnabled("YAMS_STATUS_ALLOCATOR_BREAKDOWN");
+#else
+    static const bool enabled = envFlagEnabled("YAMS_STATUS_ALLOCATOR_BREAKDOWN");
+    return enabled;
+#endif
+}
+
+bool mallocStackLoggingEnabled() {
+#ifdef YAMS_TESTING
+    return envFlagEnabled("MallocStackLogging") || envFlagEnabled("MallocStackLoggingNoCompact");
+#else
+    static const bool enabled =
+        envFlagEnabled("MallocStackLogging") || envFlagEnabled("MallocStackLoggingNoCompact");
+    return enabled;
+#endif
+}
+
+bool mallocStackLoggingNoCompactEnabled() {
+#ifdef YAMS_TESTING
+    return envFlagEnabled("MallocStackLoggingNoCompact");
+#else
+    static const bool enabled = envFlagEnabled("MallocStackLoggingNoCompact");
+    return enabled;
+#endif
+}
+
+#if defined(__APPLE__)
+std::pair<std::uint64_t, std::uint64_t> sampleMallocStackLogFootprint() {
+    namespace fs = std::filesystem;
+    std::uint64_t bytes = 0;
+    std::uint64_t files = 0;
+    std::error_code ec;
+    const auto pid = static_cast<long long>(::getpid());
+    const auto prefix = std::string{"stack-logs."} + std::to_string(pid) + ".";
+
+    fs::path dir{"/private/tmp"};
+    if (!fs::exists(dir, ec)) {
+        dir = fs::temp_directory_path(ec);
+    }
+    if (dir.empty() || ec) {
+        return {0, 0};
+    }
+
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        ++files;
+        if (it->is_regular_file(ec)) {
+            bytes += it->file_size(ec);
+            if (ec) {
+                ec.clear();
+            }
+        }
+    }
+    return {bytes, files};
+}
+#endif
+
 // Read Proportional Set Size (PSS) in kB from smaps_rollup when available (Linux), else 0.
 static std::uint64_t readPssKb() {
 #if defined(_WIN32)
@@ -115,6 +250,106 @@ static std::uint64_t readRssKb() {
     }
     return 0;
 #endif
+}
+
+static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
+    MemoryUsageSample sample;
+    const auto sampleStart = std::chrono::steady_clock::now();
+
+    const std::uint64_t pss_kb = readPssKb();
+    const std::uint64_t rss_kb = readRssKb();
+    if (pss_kb > 0) {
+        sample.memoryUsageMb = static_cast<double>(pss_kb) / 1024.0;
+        sample.breakdownBytes["pss_bytes"] = pss_kb * 1024ull;
+    } else if (rss_kb > 0) {
+        sample.memoryUsageMb = static_cast<double>(rss_kb) / 1024.0;
+    }
+    if (rss_kb > 0) {
+        sample.breakdownBytes["rss_bytes"] = rss_kb * 1024ull;
+    }
+
+#if defined(__APPLE__)
+    const bool mslEnabled = mallocStackLoggingEnabled();
+    const bool mslNoCompact = mallocStackLoggingNoCompactEnabled();
+    if (mslEnabled) {
+        sample.diagnosticCounters["msl_enabled"] = 1;
+    }
+    if (mslNoCompact) {
+        sample.diagnosticCounters["msl_no_compact_enabled"] = 1;
+    }
+
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) ==
+        KERN_SUCCESS) {
+        if (info.resident_size > 0) {
+            sample.breakdownBytes["rss_bytes"] = info.resident_size;
+        }
+        if (info.resident_size_peak > 0) {
+            sample.breakdownBytes["rss_peak_bytes"] = info.resident_size_peak;
+        }
+        if (info.phys_footprint > 0) {
+            sample.breakdownBytes["phys_footprint_bytes"] = info.phys_footprint;
+            sample.memoryUsageMb = static_cast<double>(info.phys_footprint) / (1024.0 * 1024.0);
+        }
+        if (info.internal > 0) {
+            sample.breakdownBytes["internal_bytes"] = info.internal;
+        }
+        if (info.external > 0) {
+            sample.breakdownBytes["external_bytes"] = info.external;
+        }
+        if (info.reusable > 0) {
+            sample.breakdownBytes["reusable_bytes"] = info.reusable;
+        }
+        if (info.compressed > 0) {
+            sample.breakdownBytes["compressed_bytes"] = info.compressed;
+        }
+        if (info.compressed_peak > 0) {
+            sample.breakdownBytes["compressed_peak_bytes"] = info.compressed_peak;
+        }
+    }
+
+    if (includeAllocatorBreakdown) {
+        const auto allocatorStart = std::chrono::steady_clock::now();
+        malloc_statistics_t mallocStats{};
+        if (auto* defaultZone = malloc_default_zone(); defaultZone != nullptr) {
+            malloc_zone_statistics(defaultZone, &mallocStats);
+            if (mallocStats.size_allocated > 0) {
+                sample.breakdownBytes["malloc_allocated_bytes"] = mallocStats.size_allocated;
+            }
+            if (mallocStats.size_in_use > 0) {
+                sample.breakdownBytes["malloc_in_use_bytes"] = mallocStats.size_in_use;
+            }
+            if (mallocStats.max_size_in_use > 0) {
+                sample.breakdownBytes["malloc_peak_in_use_bytes"] = mallocStats.max_size_in_use;
+            }
+            if (mallocStats.blocks_in_use > 0) {
+                sample.breakdownBytes["malloc_blocks_in_use"] = mallocStats.blocks_in_use;
+            }
+        }
+        sample.diagnosticCounters["allocator_sample_us"] =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - allocatorStart)
+                                           .count());
+    }
+
+    if (mslEnabled) {
+        const auto mslStart = std::chrono::steady_clock::now();
+        const auto [stackLogBytes, stackLogFiles] = sampleMallocStackLogFootprint();
+        sample.diagnosticCounters["msl_stack_log_bytes"] = stackLogBytes;
+        sample.diagnosticCounters["msl_stack_log_files"] = stackLogFiles;
+        sample.diagnosticCounters["msl_stack_log_sample_us"] =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - mslStart)
+                                           .count());
+    }
+#endif
+
+    sample.diagnosticCounters["memory_sample_us"] =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - sampleStart)
+                                       .count());
+    return sample;
 }
 
 template <typename NumeratorT, typename DenominatorT>
@@ -268,14 +503,188 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 #endif
 }
 
+std::uint64_t age_ms(std::chrono::steady_clock::time_point now,
+                     std::chrono::steady_clock::time_point then) {
+    if (then.time_since_epoch().count() == 0) {
+        return 0;
+    }
+    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - then).count();
+    return age > 0 ? static_cast<std::uint64_t>(age) : 0ULL;
+}
+
 } // namespace
 
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                              const ServiceManager* services, WorkCoordinator* coordinator,
                              const SocketServer* socketServer)
     : lifecycle_(lifecycle), state_(state), services_(services), socketServer_(socketServer),
-      strand_(coordinator->getExecutor()) {
+      strand_(coordinator->getExecutor()), coordinator_(coordinator) {
     cacheMs_ = TuneAdvisor::metricsCacheMs();
+}
+
+void DaemonMetrics::dispatchOffStrand(std::atomic<bool>& guard, const char* name,
+                                      std::function<void()> op) const {
+    if (guard.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (!coordinator_) {
+        guard.store(false, std::memory_order_release);
+        return;
+    }
+    boost::asio::post(coordinator_->getExecutor(), [&guard, name, op = std::move(op)]() mutable {
+        try {
+            op();
+        } catch (const std::exception& e) {
+            spdlog::debug("DaemonMetrics: {} failed: {}", name, e.what());
+        } catch (...) {
+            spdlog::debug("DaemonMetrics: {} failed (unknown)", name);
+        }
+        guard.store(false, std::memory_order_release);
+    });
+}
+
+void DaemonMetrics::dispatchPhysicalWalk() const {
+    dispatchOffStrand(physicalWalkInFlight_, "physical walk", [this]() {
+        const auto walkStart = std::chrono::steady_clock::now();
+        std::uint64_t total = 0;
+        std::uint64_t casObjectsBytes = 0;
+        std::uint64_t refsDbBytes = 0;
+        std::uint64_t dbBytes = 0;
+        std::uint64_t dbWalBytes = 0;
+        std::uint64_t dbShmBytes = 0;
+        std::uint64_t vecDbBytes = 0;
+        std::uint64_t vecIdxBytes = 0;
+        std::uint64_t tmpBytes = 0;
+        std::uint64_t indexBytes = 0;
+        std::error_code ec;
+        namespace fs = std::filesystem;
+        fs::path root;
+        try {
+            root = services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
+        } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
+        }
+        if (!root.empty() && fs::exists(root, ec)) {
+            for (fs::recursive_directory_iterator
+                     it(root, fs::directory_options::skip_permission_denied, ec),
+                 end;
+                 it != end; it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                if (it->is_regular_file(ec)) {
+                    std::uint64_t add = 0;
+                    try {
+#ifdef __unix__
+                        struct stat st;
+                        if (::stat(it->path().c_str(), &st) == 0 && st.st_blocks > 0) {
+                            add = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
+                        } else {
+                            add = static_cast<std::uint64_t>(it->file_size(ec));
+                        }
+#else
+                        add = static_cast<std::uint64_t>(it->file_size(ec));
+#endif
+                    } catch (...) {
+                        add = 0;
+                    }
+                    total += add;
+                    auto p = it->path();
+                    if (p.string().find((root / "objects").string()) == 0) {
+                        casObjectsBytes += add;
+                    } else if (p.filename() == "refs.db") {
+                        refsDbBytes += add;
+                    } else if (p.string().find((root / "temp").string()) == 0) {
+                        tmpBytes += add;
+                    }
+                }
+            }
+        }
+        try {
+            auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
+            if (!dd.empty()) {
+                auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
+                    std::error_code e2;
+                    return fs::exists(p, e2) ? static_cast<std::uint64_t>(fs::file_size(p, e2))
+                                             : 0ULL;
+                };
+                dbBytes = sizeOf(dd / "yams.db");
+                dbWalBytes = sizeOf(dd / "yams.db-wal");
+                dbShmBytes = sizeOf(dd / "yams.db-shm");
+                vecDbBytes = sizeOf(dd / "vectors.db");
+                vecIdxBytes = sizeOf(dd / "vector_index.bin");
+                std::uint64_t extIndex = 0;
+                std::error_code e3;
+                fs::path idxRoot = dd / "search_index";
+                if (fs::exists(idxRoot, e3)) {
+                    for (fs::recursive_directory_iterator it(idxRoot, e3), end; it != end;
+                         it.increment(e3)) {
+                        if (e3)
+                            break;
+                        if (it->is_regular_file(e3))
+                            extIndex += static_cast<std::uint64_t>(fs::file_size(it->path(), e3));
+                    }
+                }
+                indexBytes = extIndex;
+            }
+        } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
+        }
+        std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
+        std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
+        std::uint64_t totalComputed =
+            casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
+
+        const auto walkEnd = std::chrono::steady_clock::now();
+        const auto walkDurationMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(walkEnd - walkStart).count();
+
+        std::unique_lock lock(cacheMutex_);
+        lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
+        lastPhysicalAt_ = walkEnd;
+        lastWalkDurationMs_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, walkDurationMs));
+        cached_.casPhysicalBytes = casObjectsBytes;
+        cached_.metadataPhysicalBytes = metaBytes;
+        cached_.indexPhysicalBytes = indexBytes;
+        cached_.vectorPhysicalBytes = vecBytes;
+        cached_.logsTmpPhysicalBytes = tmpBytes;
+        cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
+    });
+}
+
+void DaemonMetrics::dispatchStoreStatsRefresh() const {
+    if (!services_) {
+        return;
+    }
+    dispatchOffStrand(storeStatsCollectInFlight_, "store stats refresh", [this]() {
+        auto cs = services_->getContentStore();
+        if (!cs)
+            return;
+        auto ss = cs->getStats();
+        CachedStoreStats cached;
+        cached.totalObjects = ss.totalObjects;
+        cached.totalBytes = ss.totalBytes;
+        cached.totalUncompressedBytes = ss.totalUncompressedBytes;
+        cached.deduplicatedBytes = ss.deduplicatedBytes;
+        cached.uniqueBlocks = ss.uniqueBlocks;
+        cached.compressionSaved = ss.compressionSaved();
+        cached.dedupRatio = ss.dedupRatio();
+        cached.populated = true;
+        std::unique_lock lock(cacheMutex_);
+        cachedStoreStats_ = cached;
+        lastStoreStatsAt_ = std::chrono::steady_clock::now();
+    });
+}
+
+void DaemonMetrics::dispatchDetailedCollect() const {
+    dispatchOffStrand(detailedCollectInFlight_, "detailed collect", [this]() {
+        auto detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
+        const auto publishedAt = std::chrono::steady_clock::now();
+        std::unique_lock lock(cacheMutex_);
+        cachedDetailedSnapshot_ = detailedSnapshot;
+        lastDetailedUpdate_ = publishedAt;
+    });
 }
 
 void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
@@ -286,7 +695,9 @@ void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
         // Invalidate snapshot cache so newly-attached SocketServer details (e.g. proxy socket path)
         // become visible immediately to status callers.
         cachedSnapshot_.reset();
+        cachedDetailedSnapshot_.reset();
         lastUpdate_ = {};
+        lastDetailedUpdate_ = {};
     }
 }
 
@@ -307,28 +718,45 @@ void DaemonMetrics::startPolling() {
 }
 
 void DaemonMetrics::stopPolling() {
-    // Check if polling was ever started
+    bool shouldStopPolling = true;
     {
         std::lock_guard<std::mutex> lk(pollingMutex_);
         if (pollingStopped_) {
-            return; // Not running or already stopped
+            shouldStopPolling = false; // Not running or already stopped.
         }
     }
 
-    // Signal the polling loop to stop
-    pollingActive_.store(false, std::memory_order_release);
+    if (shouldStopPolling) {
+        // Signal the polling loop to stop
+        pollingActive_.store(false, std::memory_order_release);
 
-    // Cancel the timer via the strand to wake up the coroutine
-    // This must be done on the strand to avoid racing with async_wait
-    boost::asio::post(strand_, [this]() {
-        if (pollingTimer_) {
-            pollingTimer_->cancel();
+        // Cancel the timer via the strand to wake up the coroutine
+        // This must be done on the strand to avoid racing with async_wait
+        boost::asio::post(strand_, [this]() {
+            if (pollingTimer_) {
+                pollingTimer_->cancel();
+            }
+        });
+
+        {
+            std::unique_lock<std::mutex> lk(pollingMutex_);
+            pollingCv_.wait(lk, [this]() { return pollingStopped_; });
         }
-    });
+    }
 
-    // Wait for the polling loop to finish
-    std::unique_lock<std::mutex> lk(pollingMutex_);
-    pollingCv_.wait(lk, [this]() { return pollingStopped_; });
+    // getSnapshot()/refresh() may dispatch off-strand collectors even when the
+    // polling loop was never started.  Always wait for those collectors before
+    // allowing the metrics object to be destroyed; their lambdas update this
+    // object's caches and guard atomics.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const bool anyInFlight = physicalWalkInFlight_.load(std::memory_order_acquire) ||
+                                 detailedCollectInFlight_.load(std::memory_order_acquire) ||
+                                 storeStatsCollectInFlight_.load(std::memory_order_acquire);
+        if (!anyInFlight)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
@@ -342,23 +770,15 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             // Poll CPU and memory here, and cache the results.
             {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
-                const std::uint64_t pss_kb = readPssKb();
-                const std::uint64_t rss_kb = readRssKb();
-                double mem_mb = 0.0;
-                std::map<std::string, std::uint64_t> mem_breakdown;
-                if (pss_kb > 0) {
-                    mem_mb = static_cast<double>(pss_kb) / 1024.0;
-                    mem_breakdown["pss_bytes"] = pss_kb * 1024ull;
-                } else {
-                    mem_mb = static_cast<double>(rss_kb) / 1024.0;
-                }
-                if (rss_kb > 0)
-                    mem_breakdown["rss_bytes"] = rss_kb * 1024ull;
+                const bool includeAllocatorBreakdown =
+                    allocatorBreakdownEnabled() || mallocStackLoggingEnabled();
+                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
-                cached_.memoryUsageMb = mem_mb;
-                cached_.memoryBreakdownBytes = mem_breakdown;
+                cached_.memoryUsageMb = memSample.memoryUsageMb;
+                cached_.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
+                cached_.diagnosticCounters = std::move(memSample.diagnosticCounters);
             }
 
             // Update expensive DB counts in background (separate from snapshot cache)
@@ -424,6 +844,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                                         (v == "1" || v == "true" || v == "yes" || v == "on");
                                 }
                             } catch (...) {
+                                // Metrics collection is best-effort; leave snapshot defaults.
                             }
                             if (!disableRebuilds) {
                                 searchComp->checkAndTriggerRebuildIfNeeded();
@@ -431,141 +852,71 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                         }
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
 
-            // Update physical filesystem stats in background (TTL-based)
+            // Update physical filesystem stats in background (adaptive TTL).
+            // The TTL scales with the previous walk's duration so a slow walk
+            // on a large/external mount does not re-fire before it finishes.
             bool updatePhysical = false;
             {
                 std::shared_lock lk(cacheMutex_);
                 if (lastPhysicalAt_.time_since_epoch().count() == 0) {
-                    updatePhysical = true; // First time
+                    updatePhysical = true;
                 } else {
-                    auto age =
+                    const auto age =
                         std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPhysicalAt_)
                             .count();
-                    updatePhysical = (age < 0) || (static_cast<uint32_t>(age) >= physicalTtlMs_);
+                    const auto ttlMs = computePhysicalWalkTtl(lastWalkDurationMs_);
+                    updatePhysical = (age < 0) || (static_cast<std::uint64_t>(age) >= ttlMs);
                 }
             }
 
             if (updatePhysical) {
-                try {
-                    std::uint64_t total = 0;
-                    std::uint64_t casObjectsBytes = 0;
-                    std::uint64_t refsDbBytes = 0;
-                    std::uint64_t dbBytes = 0;
-                    std::uint64_t dbWalBytes = 0;
-                    std::uint64_t dbShmBytes = 0;
-                    std::uint64_t vecDbBytes = 0;
-                    std::uint64_t vecIdxBytes = 0;
-                    std::uint64_t tmpBytes = 0;
-                    std::uint64_t indexBytes = 0;
-                    std::error_code ec;
-                    namespace fs = std::filesystem;
-                    fs::path root;
-                    try {
-                        root =
-                            services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
-                    } catch (...) {
-                    }
-                    if (!root.empty() && fs::exists(root, ec)) {
-                        for (fs::recursive_directory_iterator
-                                 it(root, fs::directory_options::skip_permission_denied, ec),
-                             end;
-                             it != end; it.increment(ec)) {
-                            if (ec) {
-                                ec.clear();
-                                continue;
-                            }
-                            if (it->is_regular_file(ec)) {
-                                std::uint64_t add = 0;
-                                try {
-#ifdef __unix__
-                                    struct stat st;
-                                    if (::stat(it->path().c_str(), &st) == 0 && st.st_blocks > 0) {
-                                        add = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
-                                    } else {
-                                        add = static_cast<std::uint64_t>(it->file_size(ec));
-                                    }
-#else
-                                    add = static_cast<std::uint64_t>(it->file_size(ec));
-#endif
-                                } catch (...) {
-                                    add = 0;
-                                }
-                                total += add;
-                                // attribute within storage/ subdirs
-                                auto p = it->path();
-                                if (p.string().find((root / "objects").string()) == 0) {
-                                    casObjectsBytes += add;
-                                } else if (p.filename() == "refs.db") {
-                                    refsDbBytes += add;
-                                } else if (p.string().find((root / "temp").string()) == 0) {
-                                    tmpBytes += add;
-                                }
-                            }
-                        }
-                    }
-                    // Data dir (siblings to storage): yams.db (+WAL/SHM), vectors.db,
-                    // vector_index.bin
-                    try {
-                        auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
-                        if (!dd.empty()) {
-                            auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
-                                std::error_code e2;
-                                return fs::exists(p, e2)
-                                           ? static_cast<std::uint64_t>(fs::file_size(p, e2))
-                                           : 0ULL;
-                            };
-                            dbBytes = sizeOf(dd / "yams.db");
-                            dbWalBytes = sizeOf(dd / "yams.db-wal");
-                            dbShmBytes = sizeOf(dd / "yams.db-shm");
-                            vecDbBytes = sizeOf(dd / "vectors.db");
-                            vecIdxBytes = sizeOf(dd / "vector_index.bin");
-                            // If search index is externalized under dataDir/search_index, attribute
-                            // here
-                            std::uint64_t extIndex = 0;
-                            std::error_code e3;
-                            fs::path idxRoot = dd / "search_index";
-                            if (fs::exists(idxRoot, e3)) {
-                                for (fs::recursive_directory_iterator it(idxRoot, e3), end;
-                                     it != end; it.increment(e3)) {
-                                    if (e3)
-                                        break;
-                                    if (it->is_regular_file(e3))
-                                        extIndex += static_cast<std::uint64_t>(
-                                            fs::file_size(it->path(), e3));
-                                }
-                            }
-                            indexBytes = extIndex;
-                        }
-                    } catch (...) {
-                    }
-                    std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
-                    std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
-                    std::uint64_t totalComputed =
-                        casObjectsBytes + metaBytes + indexBytes + vecBytes + tmpBytes;
-
-                    std::unique_lock lock(cacheMutex_);
-                    lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
-                    lastPhysicalAt_ = now;
-                    // Stash breakdown into cached_ as well for consumers using non-detailed
-                    // snapshot later
-                    cached_.casPhysicalBytes = casObjectsBytes;
-                    cached_.metadataPhysicalBytes = metaBytes;
-                    cached_.indexPhysicalBytes = indexBytes;
-                    cached_.vectorPhysicalBytes = vecBytes;
-                    cached_.logsTmpPhysicalBytes = tmpBytes;
-                    cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
-                } catch (const std::exception& e) {
-                    spdlog::debug("DaemonMetrics: failed to update physical stats: {}", e.what());
-                } catch (...) {
-                    spdlog::debug("DaemonMetrics: failed to update physical stats (unknown)");
-                }
+                // Disk walk can iterate millions of CAS objects on large corpora.
+                // Run it off the polling strand so it cannot starve snapshot
+                // publishes — the polling loop continues immediately regardless
+                // of how long the walk takes. dispatchPhysicalWalk is a no-op if
+                // a previous walk is still running.
+                dispatchPhysicalWalk();
             }
 
-            // Refresh main snapshot cache in background - no I/O on request path
-            (void)getSnapshot(false);
+            // Refresh cached snapshots in background so request-time status calls can return
+            // immediately without synchronous recompute. collectSnapshot(false) is fast
+            // (atomics + lifecycle snapshot + topology telemetry).
+            auto fastSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(false));
+            const auto publishedAt = std::chrono::steady_clock::now();
+            bool refreshDetailed =
+                detailedRefreshQueued_.exchange(false, std::memory_order_acq_rel);
+            {
+                std::shared_lock lock(cacheMutex_);
+                if (!cachedDetailedSnapshot_ ||
+                    lastDetailedUpdate_.time_since_epoch().count() == 0) {
+                    refreshDetailed = true;
+                } else if (!refreshDetailed) {
+                    refreshDetailed = age_ms(publishedAt, lastDetailedUpdate_) >=
+                                      static_cast<std::uint64_t>(tunerStateTtlMs_);
+                }
+            }
+            {
+                std::unique_lock lock(cacheMutex_);
+                cachedSnapshot_ = fastSnapshot;
+                lastUpdate_ = publishedAt;
+            }
+            refreshQueued_.store(false, std::memory_order_release);
+            // collectSnapshot(true) runs enrichDetailedSnapshot which hits SQLite
+            // (corpus stats) and SearchEngineManager; can take tens of seconds on
+            // big corpora. Run it off the strand so fast snapshot publishes are
+            // not starved. dispatchDetailedCollect coalesces concurrent requests.
+            if (refreshDetailed) {
+                dispatchDetailedCollect();
+            }
+            try {
+                MetricsSnapshotRegistry::instance().set(fastSnapshot);
+            } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
+            }
         } catch (const std::exception& e) {
             spdlog::warn("DaemonMetrics: polling iteration failed: {}", e.what());
         } catch (...) {
@@ -575,8 +926,14 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
         // Sleep for cache interval using async timer
         timer.expires_after(std::chrono::milliseconds(cacheMs_));
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
-        // If timer was cancelled (e.g., by stopPolling), exit the loop
-        if (ec == boost::asio::error::operation_aborted) {
+        // Timer cancel is used for two purposes:
+        //   1. stopPolling() — sets pollingActive_=false first, then cancels.
+        //   2. scheduleBackgroundRefresh() — cancels the timer to wake the loop
+        //      early for an on-demand refresh. pollingActive_ stays true.
+        // Only exit on (1). Previously this branch exited on any cancel, so the
+        // first refresh() killed the polling loop and status went permanently stale.
+        if (ec == boost::asio::error::operation_aborted &&
+            !pollingActive_.load(std::memory_order_acquire)) {
             break;
         }
     }
@@ -591,34 +948,95 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
 }
 
 void DaemonMetrics::refresh() {
-    // Legacy API - now just returns cached snapshot since background thread keeps it hot
-    // Kept for backwards compatibility with external callers
-    (void)getSnapshot(false);
+    scheduleBackgroundRefresh(false);
 }
 
 std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed) const {
-    // Phase 1: Try to read from cache with a shared lock
-    if (cacheMs_ > 0) {
-        auto now = std::chrono::steady_clock::now();
-        std::shared_ptr<const MetricsSnapshot> snap;
-        {
-            std::shared_lock lock(cacheMutex_);
-            if (lastUpdate_.time_since_epoch().count() != 0) {
-                auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate_)
-                               .count();
-                if (age >= 0 && static_cast<uint32_t>(age) < cacheMs_) {
-                    snap = cachedSnapshot_;
-                }
-            }
-        }
-        if (snap) {
-            return snap;
+    return buildDecoratedSnapshot(detailed);
+}
+
+DaemonMetrics::CachedSnapshotState DaemonMetrics::loadCachedSnapshotState() const {
+    CachedSnapshotState state;
+    std::shared_lock lock(cacheMutex_);
+    state.fast = cachedSnapshot_;
+    state.detailed = cachedDetailedSnapshot_;
+    state.fastAt = lastUpdate_;
+    state.detailedAt = lastDetailedUpdate_;
+    return state;
+}
+
+DaemonMetrics::SnapshotFreshness
+DaemonMetrics::evaluateSnapshotFreshness(const CachedSnapshotState& state,
+                                         std::chrono::steady_clock::time_point now) const {
+    SnapshotFreshness freshness;
+    freshness.snapshotAgeMs = age_ms(now, state.fastAt);
+    freshness.snapshotStale =
+        state.fastAt.time_since_epoch().count() == 0 ||
+        (cacheMs_ > 0 && freshness.snapshotAgeMs >= static_cast<std::uint64_t>(cacheMs_));
+
+    freshness.detailAvailable = (state.detailed != nullptr);
+    freshness.detailAgeMs = freshness.detailAvailable ? age_ms(now, state.detailedAt) : 0ULL;
+    const auto freshnessBudgetMs = static_cast<std::uint64_t>(std::max<uint32_t>(cacheMs_, 1));
+    freshness.detailStale = !freshness.detailAvailable ||
+                            state.detailedAt.time_since_epoch().count() == 0 ||
+                            (freshness.detailAgeMs >= freshnessBudgetMs);
+    return freshness;
+}
+
+void DaemonMetrics::applySnapshotFreshness(MetricsSnapshot& snapshot,
+                                           const SnapshotFreshness& freshness) const {
+    snapshot.statusSnapshotAgeMs = freshness.snapshotAgeMs;
+    snapshot.statusSnapshotStale = freshness.snapshotStale;
+    snapshot.statusDetailAvailable = freshness.detailAvailable;
+    snapshot.statusDetailAgeMs = freshness.detailAgeMs;
+    snapshot.statusDetailStale = freshness.detailStale;
+}
+
+void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& fastSnapshot,
+                                        const std::shared_ptr<MetricsSnapshot>& detailedSnapshot,
+                                        std::chrono::steady_clock::time_point publishedAt) const {
+    {
+        std::unique_lock lock(cacheMutex_);
+        cachedSnapshot_ = fastSnapshot;
+        lastUpdate_ = publishedAt;
+        if (detailedSnapshot) {
+            cachedDetailedSnapshot_ = detailedSnapshot;
+            lastDetailedUpdate_ = publishedAt;
         }
     }
 
+    try {
+        MetricsSnapshotRegistry::instance().set(fastSnapshot);
+    } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
+    }
+}
+
+std::shared_ptr<const MetricsSnapshot>
+DaemonMetrics::collectAndPublishSnapshot(bool detailed) const {
+    auto publishedAt = std::chrono::steady_clock::now();
+    auto fastSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(false));
+    std::shared_ptr<MetricsSnapshot> detailedSnapshot;
+    if (detailed) {
+        detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
+    }
+
+    publishSnapshotPair(fastSnapshot, detailedSnapshot, publishedAt);
+
+    MetricsSnapshot out = detailed ? *detailedSnapshot : *fastSnapshot;
+    SnapshotFreshness freshness;
+    freshness.snapshotAgeMs = 0;
+    freshness.snapshotStale = false;
+    freshness.detailAgeMs = 0;
+    freshness.detailStale = !detailed;
+    freshness.detailAvailable = detailed;
+    applySnapshotFreshness(out, freshness);
+    return std::make_shared<const MetricsSnapshot>(std::move(out));
+}
+
+MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
     MetricsSnapshot out;
     out.version = YAMS_VERSION_STRING;
-    // Uptime and counters
     try {
         auto now = std::chrono::steady_clock::now();
         auto uptime = now - state_->stats.startTime;
@@ -657,7 +1075,53 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairCurrentOperationCode =
+            state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
+        const auto repairStartedMs =
+            state_->stats.repairCurrentOperationStartedMs.load(std::memory_order_relaxed);
+        if (out.repairCurrentOperationCode > 0 && repairStartedMs > 0) {
+            const auto nowMs =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now().time_since_epoch())
+                                               .count());
+            out.repairCurrentOperationElapsedMs =
+                nowMs > repairStartedMs ? nowMs - repairStartedMs : 0;
+        }
         if (services_) {
+            try {
+                out.workerActive = services_->getWorkerActive();
+                out.workerQueued = services_->getWorkerQueueDepth();
+            } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
+            }
+            try {
+                if (auto pq = services_->getPostIngestQueue()) {
+                    out.postIngestQueued = pq->size();
+                    out.postIngestInflight = pq->totalInFlight();
+                    out.postIngestCapacity = pq->capacity();
+                    const std::size_t rpcCap =
+                        static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+                    out.postIngestRpcCapacity = rpcCap;
+                    if (rpcCap > 0) {
+                        auto rpcCh =
+                            InternalEventBus::instance()
+                                .get_channel<InternalEventBus::PostIngestTask>("post_ingest_rpc");
+                        if (rpcCh) {
+                            out.postIngestRpcQueued = rpcCh->size_approx();
+                        }
+                    }
+                }
+            } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
+            }
+            try {
+                auto searchLoad = services_->getSearchLoadMetrics();
+                out.searchActive = searchLoad.active;
+                out.searchQueued = searchLoad.queued;
+                out.searchExecuted = searchLoad.executed;
+            } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
+            }
             auto topology = services_->getTopologyTelemetrySnapshot();
             out.topologyRebuildRunning = topology.rebuildRunning;
             out.topologyArtifactsFresh = topology.artifactsFresh;
@@ -687,12 +1151,78 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.topologyLastAlgorithm = topology.lastAlgorithm;
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
+    }
+    return out;
+}
+
+std::shared_ptr<const MetricsSnapshot> DaemonMetrics::buildDecoratedSnapshot(bool detailed) const {
+    auto now = std::chrono::steady_clock::now();
+
+    const auto state = loadCachedSnapshotState();
+    if (!state.fast) {
+        // First call before the polling loop has published: one synchronous
+        // collect so callers without a running polling loop (tests) see a
+        // fully-populated snapshot. This is bounded — collectSnapshot(false)
+        // reads atomics + lifecycle snapshot, no SQLite or search engine.
+        return collectAndPublishSnapshot(detailed);
+    }
+
+    MetricsSnapshot out = *state.fast;
+    if (detailed && state.detailed) {
+        out = *state.detailed;
+    }
+
+    const auto freshness = evaluateSnapshotFreshness(state, now);
+    if (freshness.needsSyncRefresh(detailed)) {
+        // Subsequent requests whose cache went stale: return cached (with
+        // stale flag surfaced in the response) and kick off an async refresh
+        // instead of re-collecting on the IPC request thread. This is the
+        // actual starvation path under heavy indexing/repair load where the
+        // polling loop falls behind and inline collect would pile more work
+        // onto the saturated executor.
+        scheduleBackgroundRefresh(detailed);
+    }
+
+    applySnapshotFreshness(out, freshness);
+    return std::make_shared<const MetricsSnapshot>(std::move(out));
+}
+
+void DaemonMetrics::scheduleBackgroundRefresh(bool detailed) const {
+    auto& queued = detailed ? detailedRefreshQueued_ : refreshQueued_;
+    if (!pollingActive_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (queued.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    boost::asio::post(strand_, [this]() {
+        if (pollingTimer_) {
+            pollingTimer_->cancel();
+        }
+    });
+}
+
+MetricsSnapshot DaemonMetrics::collectSnapshot(bool detailed) const {
+    MetricsSnapshot out;
+    out.version = YAMS_VERSION_STRING;
+    populateCommonSnapshot(out, detailed);
+    if (detailed) {
+        enrichDetailedSnapshot(out);
+    }
+    return out;
+}
+
+void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
+    const std::string preservedVersion = std::move(out.version);
+    out = buildMinimalSnapshot();
+    if (!preservedVersion.empty()) {
+        out.version = preservedVersion;
     }
 
     // Readiness flags and progress
     try {
-        // Align boolean readiness with lifecycle readiness (authoritative)
-        // rather than deprecated DaemonReadiness::fullyReady().
+        // Align boolean readiness with lifecycle readiness rather than bootstrap-only summaries.
         if (lifecycle_) {
             try {
                 auto lsnap = lifecycle_->snapshot();
@@ -738,6 +1268,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 static_cast<uint8_t>(searchPct);
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Lifecycle (authoritative overall status)
@@ -811,6 +1342,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     out.kgJobsDepth = kgDepth;
                     out.kgJobsCapacity = kgCap;
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
 
                 // High-priority post-ingest channel for repair/stuck-doc recovery.
@@ -831,6 +1363,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         }
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
@@ -907,6 +1440,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Session watch status (best-effort)
@@ -930,6 +1464,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // FSM transport metrics (best-effort)
@@ -947,6 +1482,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.ipcPoolSize = fsnap.ipcPoolSize;
         out.ioPoolSize = fsnap.ioPoolSize;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // ResourceGovernor metrics (direct query)
@@ -957,6 +1493,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
         out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // ONNX concurrency metrics (direct query)
@@ -968,6 +1505,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.onnxEmbedUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used;
         out.onnxRerankerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // DatabaseManager metrics
@@ -1009,6 +1547,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // WorkCoordinator metrics
@@ -1021,6 +1560,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Stream metrics (from StreamMetricsRegistry)
@@ -1033,6 +1573,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.streamTtfbAvgMs = ssnap.ttfbSumMs / ssnap.ttfbCount;
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // InternalEventBus metrics (title extraction, FTS5, symbol)
@@ -1063,11 +1604,12 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
             out.deferredQueueDepth = ch->size_approx();
         } catch (...) {
+            // Metrics collection is best-effort; leave snapshot defaults.
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
-    int64_t muxQueuedBytesLocal = 0;
     try {
         auto msnap = MuxMetricsRegistry::instance().snapshot();
         out.muxActiveHandlers = msnap.activeHandlers;
@@ -1085,8 +1627,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.muxWriterBudgetBytes = 4096; // last-resort default
             }
         }
-        muxQueuedBytesLocal = msnap.queuedBytes;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
     // Shared overload snapshot for retry-after and per-command admission metrics.
     try {
@@ -1112,20 +1654,42 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.addRejected = state_->stats.addRequestsRejected.load(std::memory_order_relaxed);
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // OS resource hints (fast probes)
     try {
-        // Read from cache (no I/O on hot path)
-        std::shared_lock lock(cacheMutex_);
-        out.memoryUsageMb = cached_.memoryUsageMb;
-        out.cpuUsagePercent = cached_.cpuUsagePercent;
-        out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
+        bool needMemoryFallback = false;
+        {
+            // Read from cache (no I/O on hot path) when the background polling loop has populated
+            // it.
+            std::shared_lock lock(cacheMutex_);
+            out.memoryUsageMb = cached_.memoryUsageMb;
+            out.cpuUsagePercent = cached_.cpuUsagePercent;
+            out.memoryBreakdownBytes = cached_.memoryBreakdownBytes;
+            out.diagnosticCounters = cached_.diagnosticCounters;
+            needMemoryFallback = (out.memoryUsageMb <= 0.0 && out.memoryBreakdownBytes.empty());
+        }
+        if (needMemoryFallback) {
+            const bool includeAllocatorBreakdown =
+                (detailed && allocatorBreakdownEnabled()) || mallocStackLoggingEnabled();
+            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
+            out.memoryUsageMb = memSample.memoryUsageMb;
+            out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
+            out.diagnosticCounters = std::move(memSample.diagnosticCounters);
+        }
+        if (services_) {
+            const auto warnBytes = services_->getConfig().instrumentation.mslStackLogWarnBytes;
+            if (warnBytes > 0) {
+                out.diagnosticCounters["msl_stack_log_warn_bytes"] = warnBytes;
+            }
+        }
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
 #endif
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Vector DB snapshot (size and exact rows when available)
@@ -1136,6 +1700,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.vectorDbReady = state_->readiness.vectorDbReady.load();
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Do not touch the live VectorDatabase handle on the status path.
             // During startup the vector backend may be rebuilding HNSW under its internal mutex,
@@ -1152,6 +1717,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     }
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Exact rows via cached value ONLY (updated periodically in background)
             {
@@ -1167,12 +1733,33 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
 #endif
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Ensure readinessStates[vector_db] reflects the final vectorDbReady after healing.
     try {
         out.readinessStates[std::string(readiness::kVectorDb)] = out.vectorDbReady;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
+    }
+
+    // Database init phase + recovery + storage warning. Read under recoveryMutex
+    // because the writers in ServiceManager::co_openDatabase / co_migrateDatabase
+    // also hold it when mutating these fields.
+    try {
+        std::lock_guard<std::mutex> lk(state_->readiness.recoveryMutex);
+        out.databasePhase = state_->readiness.databasePhase;
+        if (state_->readiness.databasePhaseSince.time_since_epoch().count() != 0) {
+            out.databasePhaseElapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - state_->readiness.databasePhaseSince)
+                    .count());
+        }
+        out.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
+        out.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
+        out.storageWarning = state_->readiness.storageWarning;
+    } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Centralized service states
@@ -1191,18 +1778,22 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     out.contentStoreRoot = (dd / "storage").string();
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.metadataDbPath = services_->getMetadataDatabasePath();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.vectorDbPath = services_->getVectorDatabasePath();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             try {
                 out.contentStoreError = services_->getContentStoreError();
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             {
                 std::shared_lock lock(cacheMutex_);
@@ -1272,6 +1863,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;
@@ -1282,52 +1874,70 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     disableStoreStats = (v == "1" || v == "true" || v == "yes" || v == "on");
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             if (cs) {
-                try {
-                    auto ss = cs->getStats();
-                    // Lightweight fields
+                // Read cached ContentStore stats. cs->getStats() triggers a
+                // full-table scan on block_references; caching it at DaemonMetrics
+                // keeps the polling strand responsive. Refresh is dispatched
+                // off-strand via dispatchStoreStatsRefresh().
+                CachedStoreStats ss;
+                bool needsRefresh = false;
+                {
+                    const auto nowTs = std::chrono::steady_clock::now();
+                    std::shared_lock lk(cacheMutex_);
+                    ss = cachedStoreStats_;
+                    if (!ss.populated) {
+                        needsRefresh = true;
+                    } else {
+                        auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       nowTs - lastStoreStatsAt_)
+                                       .count();
+                        needsRefresh =
+                            (age < 0) || (static_cast<uint32_t>(age) >= storeStatsTtlMs_);
+                    }
+                }
+                if (needsRefresh) {
+                    dispatchStoreStatsRefresh();
+                }
+                if (ss.populated) {
                     out.storeObjects = ss.totalObjects;
-
-                    // Use persistent uncompressed bytes from reference counter stats
-                    // (now stored in block_references table and persisted across restarts)
-                    uint64_t compressSaved = ss.compressionSaved();
-
-                    // Calculate logical bytes (uncompressed size):
-                    // ss.totalUncompressedBytes comes from persistent ref_statistics
                     if (ss.totalUncompressedBytes > 0) {
                         out.logicalBytes = ss.totalUncompressedBytes;
                     } else {
-                        // Fallback: no uncompressed data tracked yet
                         out.logicalBytes = ss.totalBytes;
                     }
-
-                    // casUniqueRawBytes represents the unique bytes in CAS (on-disk)
-                    // which is ss.totalBytes minus dedup savings. When compression is
-                    // active, this is the compressed size.
                     out.casUniqueRawBytes = ss.totalBytes;
                     out.casDedupSavedBytes = ss.deduplicatedBytes;
-                    out.casCompressSavedBytes = compressSaved;
-
+                    out.casCompressSavedBytes = ss.compressionSaved;
                     if (detailed && !disableStoreStats) {
                         out.uniqueBlocks = ss.uniqueBlocks;
                         out.deduplicatedBytes = ss.deduplicatedBytes;
-                        out.compressionRatio = ss.dedupRatio();
+                        out.compressionRatio = ss.dedupRatio;
                     }
-                } catch (...) {
                 }
             }
             if (detailed) {
                 try {
-                    std::shared_lock lk(cacheMutex_);
-                    out.physicalBytes = lastPhysicalBytes_;
-                    out.casPhysicalBytes = cached_.casPhysicalBytes;
-                    out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
-                    out.indexPhysicalBytes = cached_.indexPhysicalBytes;
-                    out.vectorPhysicalBytes = cached_.vectorPhysicalBytes;
-                    out.logsTmpPhysicalBytes = cached_.logsTmpPhysicalBytes;
-                    out.physicalTotalBytes = cached_.physicalTotalBytes;
+                    std::filesystem::path dataDirForVolume;
+                    {
+                        std::shared_lock lk(cacheMutex_);
+                        out.physicalBytes = lastPhysicalBytes_;
+                        out.casPhysicalBytes = cached_.casPhysicalBytes;
+                        out.metadataPhysicalBytes = cached_.metadataPhysicalBytes;
+                        out.indexPhysicalBytes = cached_.indexPhysicalBytes;
+                        out.vectorPhysicalBytes = cached_.vectorPhysicalBytes;
+                        out.logsTmpPhysicalBytes = cached_.logsTmpPhysicalBytes;
+                        out.physicalTotalBytes = cached_.physicalTotalBytes;
+                    }
+                    if (services_) {
+                        dataDirForVolume = services_->getResolvedDataDir();
+                    }
+                    if (const auto volumeUsed = queryVolumeUsedBytes(dataDirForVolume)) {
+                        out.volumeUsedBytes = volumeUsed;
+                    }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
             // Search engine and reason when unavailable
@@ -1346,11 +1956,13 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     else
                         reason = "not_initialized";
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
                 out.searchEngineReason = reason;
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
     // Resolved data dir
     try {
@@ -1360,6 +1972,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.dataDir = dd.string();
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Embedding runtime details (best-effort)
@@ -1379,6 +1992,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                             static_cast<uint32_t>(provider->getEmbeddingDim(modelName));
                     }
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
             // Backend label and model details
@@ -1397,6 +2011,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                                         static_cast<uint32_t>(mi.value().embeddingDim);
                             }
                         } catch (...) {
+                            // Metrics collection is best-effort; leave snapshot defaults.
                         }
                     }
                     // Best-effort local model path resolution
@@ -1411,15 +2026,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                                     out.embeddingModelPath = p.string();
                             }
                         } catch (...) {
+                            // Metrics collection is best-effort; leave snapshot defaults.
                         }
                     }
                 } else {
                     out.embeddingBackend = "unknown";
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Add component-level memory where available (provider, vector index)
@@ -1431,14 +2049,15 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     prov = static_cast<std::uint64_t>(mp->getMemoryUsage());
                 }
             } catch (...) {
+                // Metrics collection is best-effort; leave snapshot defaults.
             }
             if (prov > 0)
                 out.memoryBreakdownBytes["provider_bytes"] = prov;
 
-            // Vector index memory stats removed - VectorIndexManager no longer used
-            // Memory is tracked by VectorDatabase (sqlite-vec) instead
+            // Vector memory is reported by VectorDatabase (sqlite-vec).
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 
     // Vector diagnostics (uses non-blocking cached snapshots)
@@ -1449,10 +2068,11 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.vectorScoringEnabled = d.scoringEnabled;
         out.searchEngineBuildReason = d.buildReason;
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
+}
 
-    // Search tuning state (from SearchTuner FSM - epic yams-7ez4)
-    // Cached with TTL and docCount change detection to avoid re-instantiation (yams-fbtq)
+void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
     try {
         if (services_) {
             auto metaRepo = services_->getMetadataRepo();
@@ -1462,22 +2082,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                     const auto& stats = statsResult.value();
                     auto now = std::chrono::steady_clock::now();
 
-                    // Check if refresh needed under shared lock
                     bool needsRefresh = false;
                     {
                         std::shared_lock tunerLock(tunerCacheMutex_);
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            now - lastTunerStateAt_)
                                            .count();
-                        // Recompute if: TTL expired OR corpus docCount changed
                         needsRefresh =
                             (elapsed > tunerStateTtlMs_) ||
                             (static_cast<uint64_t>(stats.docCount) != cachedTunerDocCount_);
                     }
 
                     if (needsRefresh) {
-                        // Keep corpus-derived tuner state/reason for classification, but report
-                        // the live built search engine config for effective runtime parameters.
                         yams::search::SearchTuner tuner(stats);
                         auto newState = yams::search::tuningStateToString(tuner.currentState());
                         auto newReason = tuner.stateReason();
@@ -1487,6 +2103,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                             const auto& cfg = engine->getConfig();
                             newParams["rrf_k"] = static_cast<double>(cfg.rrfK);
                             newParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                            newParams["simeon_text_weight"] =
+                                static_cast<double>(cfg.simeonTextWeight);
                             newParams["vector_weight"] = static_cast<double>(cfg.vectorWeight);
                             newParams["entity_vector_weight"] =
                                 static_cast<double>(cfg.entityVectorWeight);
@@ -1516,6 +2134,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                             const auto& p = tuner.getParams();
                             newParams["rrf_k"] = static_cast<double>(p.rrfK);
                             newParams["text_weight"] = static_cast<double>(p.weights.text.value);
+                            newParams["simeon_text_weight"] =
+                                static_cast<double>(p.weights.simeonText.value);
                             newParams["vector_weight"] =
                                 static_cast<double>(p.weights.vector.value);
                             newParams["entity_vector_weight"] =
@@ -1545,7 +2165,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                                 static_cast<double>(p.graphScoringBudgetMs);
                         }
 
-                        // Update cache under exclusive lock
                         std::unique_lock tunerLock(tunerCacheMutex_);
                         cachedTuningState_ = std::move(newState);
                         cachedTuningReason_ = std::move(newReason);
@@ -1554,7 +2173,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         lastTunerStateAt_ = now;
                     }
 
-                    // Use cached classification values under shared lock
                     {
                         std::shared_lock tunerLock(tunerCacheMutex_);
                         out.searchTuningState = cachedTuningState_;
@@ -1562,11 +2180,12 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         out.searchTuningParams = cachedTuningParams_;
                     }
 
-                    // Always prefer the live built engine config for effective runtime params.
                     if (auto engine = services_->getSearchEngineSnapshot()) {
                         const auto& cfg = engine->getConfig();
                         out.searchTuningParams["rrf_k"] = static_cast<double>(cfg.rrfK);
                         out.searchTuningParams["text_weight"] = static_cast<double>(cfg.textWeight);
+                        out.searchTuningParams["simeon_text_weight"] =
+                            static_cast<double>(cfg.simeonTextWeight);
                         out.searchTuningParams["vector_weight"] =
                             static_cast<double>(cfg.vectorWeight);
                         out.searchTuningParams["entity_vector_weight"] =
@@ -1602,30 +2221,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
-
-    // Exclusive write with unique_lock - blocks readers momentarily, then they continue
-    if (cacheMs_ > 0) {
-        std::unique_lock lock(cacheMutex_);
-        cachedSnapshot_ = std::make_shared<MetricsSnapshot>(out);
-        lastUpdate_ = std::chrono::steady_clock::now();
-    }
-    // Publish as shared snapshot for zero-copy readers
-    try {
-        MetricsSnapshotRegistry::instance().set(std::make_shared<const MetricsSnapshot>(out));
-    } catch (...) {
-    }
-
-#if defined(TRACY_ENABLE)
-    // Emit InternalEventBus drop counters as plots for quick backpressure visibility
-    try {
-        auto& bus = InternalEventBus::instance();
-        TracyPlot("bus.embed.dropped", static_cast<double>(bus.embedDropped()));
-        TracyPlot("bus.post.dropped", static_cast<double>(bus.postDropped()));
-    } catch (...) {
-    }
-#endif
-    return std::make_shared<const MetricsSnapshot>(out);
 }
 
 EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
@@ -1639,10 +2236,12 @@ EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
                     auto loaded = provider->getLoadedModels();
                     info.modelsLoaded = static_cast<int>(loaded.size());
                 } catch (...) {
+                    // Metrics collection is best-effort; leave snapshot defaults.
                 }
             }
         }
     } catch (...) {
+        // Metrics collection is best-effort; leave snapshot defaults.
     }
 #ifdef YAMS_USE_ONNX_RUNTIME
     info.onnxRuntimeEnabled = true;

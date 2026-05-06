@@ -35,8 +35,6 @@ TEST_CASE("QJL gamma contract: E[sgn·sgn] = (2/π)·arcsin(ρ)", "[turboquant][
 
     for (double rho : rhos) {
         double sum_sign_product = 0.0;
-        double sum_sq_sign_product = 0.0;
-
         for (size_t t = 0; t < kTrials; ++t) {
             // Generate two correlated standard normal variables (X, Y) with correlation rho
             // X ~ N(0,1), Y = rho·X + sqrt(1-rho²)·Z, Z~N(0,1) independent of X
@@ -51,7 +49,6 @@ TEST_CASE("QJL gamma contract: E[sgn·sgn] = (2/π)·arcsin(ρ)", "[turboquant][
             float sp = sx * sy; // sgn(a)·sgn(b)
 
             sum_sign_product += sp;
-            sum_sq_sign_product += sp * sp;
         }
 
         double empirical = sum_sign_product / static_cast<double>(kTrials);

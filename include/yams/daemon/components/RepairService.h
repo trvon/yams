@@ -14,6 +14,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
@@ -42,12 +43,15 @@ class RepairManager;
 
 namespace yams::daemon {
 
+class WriteCoordinator;
+
 class ServiceManager;
 struct StateComponent;
 class GraphComponent;
 class AbiSymbolExtractorAdapter;
 class PostIngestQueue;
 class IModelProvider;
+class VectorIndexCoordinator;
 
 /**
  * @brief Callback-based dependency bundle for RepairService.
@@ -65,6 +69,8 @@ struct RepairServiceContext {
     std::function<std::shared_ptr<PostIngestQueue>()> getPostIngestQueue;
     std::function<std::shared_ptr<integrity::RepairManager>()> getRepairManager;
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
+    std::function<std::size_t()> getEmbeddingQueuedJobs;
+    std::function<std::size_t()> getEmbeddingInFlightJobs;
     std::function<const std::vector<std::shared_ptr<extraction::IContentExtractor>>&()>
         getContentExtractors;
     std::function<const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&()>
@@ -74,6 +80,11 @@ struct RepairServiceContext {
     std::function<Result<TopologyManager::RebuildStats>(const std::string&, bool,
                                                         const std::vector<std::string>&)>
         rebuildTopologyArtifacts;
+    std::function<Result<std::size_t>(const std::string&, const std::string&)>
+        rebuildSemanticNeighborGraph;
+    // Coordinator for vector-index mutations (may be nullptr in tests / CLI contexts).
+    VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
+    std::function<WriteCoordinator*()> getWriteCoordinator;
 };
 
 /**
@@ -106,7 +117,7 @@ public:
         std::uint32_t maintenanceTokens{1};
         bool allowDegraded{true};
         std::uint32_t maxActiveDuringDegraded{1};
-        bool autoRebuildOnDimMismatch{true};
+        bool autoRebuildOnDimMismatch{false};
         std::int32_t maxRetries{3};
         std::chrono::seconds stalledThreshold{3600}; // 1 hour
         std::size_t maxPendingRepairs{1000};
@@ -123,6 +134,26 @@ public:
     };
 
     using ProgressFn = std::function<void(const RepairEvent&)>;
+
+    struct RepairBudget {
+        std::size_t maxDocuments{16};
+        std::chrono::milliseconds maxWallTime{250};
+    };
+
+    struct RepairSlice {
+        std::int64_t cursorDocumentId{0};
+        std::size_t processed{0};
+        std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+
+        bool exhausted(const RepairBudget& budget) const noexcept {
+            if (budget.maxDocuments > 0 && processed >= budget.maxDocuments)
+                return true;
+            if (budget.maxWallTime.count() > 0 &&
+                std::chrono::steady_clock::now() - started >= budget.maxWallTime)
+                return true;
+            return false;
+        }
+    };
 
     RepairService(ServiceManager* services, StateComponent* state,
                   std::function<size_t()> activeConnFn, Config cfg);
@@ -246,17 +277,6 @@ private:
     };
     KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, const ProgressFn& progress);
 
-    struct PathNodeMigrationStats {
-        uint64_t nodesScanned{0};
-        uint64_t nodesMigrated{0};
-        uint64_t edgesRewired{0};
-        uint64_t skipped{0};
-        uint64_t errors{0};
-        std::vector<std::string> issues;
-    };
-    PathNodeMigrationStats repairLegacyPathNodesInPlace(bool dryRun, bool verbose,
-                                                        ProgressFn progress);
-
     // ── Symbol extraction scheduling (ported from RepairCoordinator) ──
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
     virtual std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const;
@@ -286,6 +306,8 @@ private:
 
     // ── Progress helper ──
     void updateProgressPct();
+    void beginRepairOperation(std::string_view operation);
+    void endRepairOperation();
 
     // ── Members ──
     RepairServiceContext ctx_;
@@ -305,8 +327,8 @@ private:
     std::atomic<std::uint64_t> totalBacklog_{0};
     std::atomic<std::uint64_t> processed_{0};
 
-    std::atomic<bool> dimMismatchRebuildDone_{false};
     std::shared_ptr<ShutdownState> shutdownState_;
+    VectorIndexCoordinator* coordinator_{nullptr}; // not owned; injected via context
 
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;

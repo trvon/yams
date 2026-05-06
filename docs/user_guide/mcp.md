@@ -12,13 +12,13 @@ docker run -i ghcr.io/trvon/yams:latest serve
 
 ## Client configuration
 
-| Client           | Config file                                                   |
+| Client           | Config location                                               |
 |------------------|---------------------------------------------------------------|
-| Claude Desktop   | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · `~/.config/Claude/claude_desktop_config.json` (Linux) |
+| Desktop MCP clients | Client-specific MCP server configuration                  |
 | Continue.dev     | IDE config — `contextProviders` entry                         |
 | Cursor / Zed / custom | Any MCP-compliant stdio client                           |
 
-### Claude Desktop
+### Generic stdio client
 
 ```json
 {
@@ -172,7 +172,7 @@ Minimal Python and Node.js clients: drive the `yams serve` subprocess with newli
 |--------------------------------------|--------------------------------------------------------------|
 | Client times out on connect          | Pre-warm daemon: `yams status`; check protocol version (supported 2024-11-05 … 2025-06-18) |
 | No `tools/list` response             | Client isn't sending `notifications/initialized` after `initialize` |
-| Claude Desktop doesn't list YAMS     | Check config path/JSON; use absolute `yams` path; restart Claude Desktop |
+| Client doesn't list YAMS             | Check config path/JSON; use absolute `yams` path; restart the client |
 | Docker container exits immediately   | Missing `-i` — stdio needs an attached stdin                 |
 | `Ctrl+C` doesn't stop server         | Update to latest; else `kill -TERM <pid>`                    |
 
