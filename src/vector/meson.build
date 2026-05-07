@@ -190,6 +190,8 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'fragment_geometry.cpp'),
   join_paths(simeon_dir, 'src', 'persistent_homology.cpp'),
   join_paths(simeon_dir, 'src', 'query_router.cpp'),
+  join_paths(simeon_dir, 'src', 'retrieval_strategy.cpp'),
+  join_paths(simeon_dir, 'src', 'corpus_adapter.cpp'),
   join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
 ]
 

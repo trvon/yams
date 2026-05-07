@@ -3065,10 +3065,23 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 if (auto metadataRepo = getMetadataRepo()) {
                     auto countRes = metadataRepo->getDocumentCount();
                     if (countRes) {
+                        const uint64_t totalDocs = static_cast<uint64_t>(countRes.value());
+                        uint64_t recordedDocs = totalDocs;
+                        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+                            const auto lexical = engine->getSimeonLexicalStatus();
+                            if (lexical.configured && lexical.docCount == 0 && totalDocs > 0) {
+                                spdlog::info(
+                                    "[ServiceManager] co_enableEmbeddingsAndRebuild: Simeon "
+                                    "lexical is configured but reports 0 docs (corpus={}); "
+                                    "deferring build-count recording so rebuild can retry",
+                                    totalDocs);
+                                recordedDocs = 0;
+                            }
+                        }
                         if (searchComponent_) {
-                            searchComponent_->recordSuccessfulBuild(countRes.value());
+                            searchComponent_->recordSuccessfulBuild(recordedDocs);
                         } else {
-                            state_.readiness.searchEngineDocCount.store(countRes.value());
+                            state_.readiness.searchEngineDocCount.store(recordedDocs);
                         }
                     }
                 }

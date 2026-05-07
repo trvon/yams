@@ -89,7 +89,8 @@ makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend
         ids.push_back(r.document.id);
     }
 
-    auto decision = backend->scoreRouted(query, ids);
+    auto decision = backend->hasStrategyRouter() ? backend->scoreStrategyRouted(query, ids)
+                                                 : backend->scoreRouted(query, ids);
     if (!decision) {
         spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
                       decision.error().message);

@@ -2531,7 +2531,8 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", std::nullopt},
              {"YAMS_CANDIDATE_MULTIPLIER", std::nullopt},
              {"YAMS_FUSION_STRATEGY", std::nullopt},
-         }},
+         },
+         true},
         {"mixed_precision_profile",
          "MIXED precision preset with lexical and vector guardrails",
          {
@@ -2985,7 +2986,257 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.94"},
              {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.68"},
              {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.08"},
-         }},
+         },
+         true},
+        // ── SCIENTIFIC retrieval candidates ────────────────────────────
+        // Purpose: optimize pre-fusion recall and vector-text balance for
+        // scientific/benchmark corpora (SciFact, TREC-COVID, NFCorpus).
+        {"scientific_ablation_graph_off",
+         "SCIENTIFIC auto baseline with graph rerank disabled",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_ablation_no_semantic_rescue",
+         "SCIENTIFIC auto baseline with semantic rescue disabled",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "0"},
+         },
+         true},
+        {"scientific_semantic_recall_v1",
+         "SCIENTIFIC auto + extra semantic rescue + looser vector gate",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "4"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.55"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_vector_fanout_2x",
+         "SCIENTIFIC auto + 2x vector fanout (vectorMaxResults 150->300)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "2.0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_rrf_k6",
+         "SCIENTIFIC auto + tighter RRF k=6 (stronger top-rank preference)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_RRF_K", "6"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_rrf_k24",
+         "SCIENTIFIC auto + looser RRF k=24 (smoother cross-component fusion)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_RRF_K", "24"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        // ── Aggressive recall-push candidates (corpus-state-aware) ────────
+        {"scientific_recall_aggressive_v1",
+         "SCI scientific auto + recall push: vec200 sim0.10 rescue6 strong_vec0.60",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_SIMILARITY_THRESHOLD", "0.10"},
+             {"YAMS_SEARCH_VECTOR_MAX_RESULTS", "200"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "6"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.50"},
+             {"YAMS_SEARCH_ENABLE_STRONG_VECTOR_ONLY_RELIEF", "1"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_MIN_SCORE", "0.60"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_TOPRANK", "6"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_PENALTY", "0.94"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.82"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.90"},
+             {"YAMS_SEARCH_WEAK_QUERY_VECTOR_FANOUT_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_recall_max_v1",
+         "SCI max recall: vec250 sim0.05 rescue8 rerank20 strong_vec0.55 fanout3.5",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_SIMILARITY_THRESHOLD", "0.05"},
+             {"YAMS_SEARCH_VECTOR_MAX_RESULTS", "250"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "8"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.45"},
+             {"YAMS_SEARCH_ENABLE_STRONG_VECTOR_ONLY_RELIEF", "1"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_MIN_SCORE", "0.55"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_TOPRANK", "8"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_PENALTY", "0.95"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.80"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.92"},
+             {"YAMS_SEARCH_WEAK_QUERY_VECTOR_FANOUT_MULTIPLIER", "3.5"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_recall_vec300",
+         "SCI max pool: vec300 sim0.05 rescue10 rerank25",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_SIMILARITY_THRESHOLD", "0.05"},
+             {"YAMS_SEARCH_VECTOR_MAX_RESULTS", "300"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "10"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.40"},
+             {"YAMS_SEARCH_ENABLE_STRONG_VECTOR_ONLY_RELIEF", "1"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_MIN_SCORE", "0.50"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_TOPRANK", "10"},
+             {"YAMS_SEARCH_STRONG_VECTOR_ONLY_PENALTY", "0.95"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.78"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.94"},
+             {"YAMS_SEARCH_WEAK_QUERY_VECTOR_FANOUT_MULTIPLIER", "4.0"},
+             {"YAMS_SEARCH_RERANK_TOPK", "25"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        // ── Retrieval-lane candidates (enable disabled lanes for recall) ──
+        {"scientific_entity_vec_on",
+         "SCI scientific auto + entity vector retrieval enabled (GLiNER concepts)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_WEIGHT", "0.15"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_MAX_RESULTS", "80"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_concept_boost_on",
+         "SCI scientific auto + concept boosting enabled (mined concepts)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_CONCEPT_MIN_CONFIDENCE", "0.35"},
+             {"YAMS_SEARCH_CONCEPT_MAX_COUNT", "8"},
+             {"YAMS_SEARCH_CONCEPT_MAX_BOOST", "0.28"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_entity_concept_combined",
+         "SCI entity_vec + concept_boost + rescue=4 (multi-lane recall)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_MAX_RESULTS", "60"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.10"},
+             {"YAMS_SEARCH_CONCEPT_MIN_CONFIDENCE", "0.35"},
+             {"YAMS_SEARCH_CONCEPT_MAX_COUNT", "6"},
+             {"YAMS_SEARCH_CONCEPT_MAX_BOOST", "0.22"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "4"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_rrf_k8",
+         "SCI scientific auto + RRF k=8 (tight top-rank focus)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_RRF_K", "8"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_subphrase_aggressive",
+         "SCI + aggressive sub-phrase expansion + rescue=4",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_MIN_HITS", "2"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_PENALTY", "0.60"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "4"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_combined_v1",
+         "entity_vec + concept_boost + rrf_k6 + rescue=4 + subphrase aggressive",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENTITY_VECTOR_MAX_RESULTS", "60"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.10"},
+             {"YAMS_SEARCH_CONCEPT_MIN_CONFIDENCE", "0.35"},
+             {"YAMS_SEARCH_CONCEPT_MAX_COUNT", "6"},
+             {"YAMS_SEARCH_CONCEPT_MAX_BOOST", "0.22"},
+             {"YAMS_SEARCH_RRF_K", "6"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "4"},
+             {"YAMS_SEARCH_ENABLE_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_MIN_HITS", "2"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_PENALTY", "0.60"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_text_heavy",
+         "SCI text weight 0.55 + simeon 0.15 + vector 0.20 (lexical-first)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_TEXT_WEIGHT", "0.55"},
+             {"YAMS_SEARCH_SIMEON_TEXT_WEIGHT", "0.15"},
+             {"YAMS_SEARCH_VECTOR_WEIGHT", "0.20"},
+             {"YAMS_SEARCH_RRF_K", "6"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_strategy_router",
+         "SCI + simeon EntropyRouter (BM25/Keyphrase/LeadField per-query strategy)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SIMEON_STRATEGY_ROUTER_ENABLED", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
+        {"scientific_strategy_router_rrf6",
+         "SCI EntropyRouter + RRF k=6 + rescue=4 + subphrase aggressive",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SIMEON_STRATEGY_ROUTER_ENABLED", "1"},
+             {"YAMS_SEARCH_RRF_K", "6"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "4"},
+             {"YAMS_SEARCH_ENABLE_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_MIN_HITS", "2"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION_PENALTY", "0.60"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
         {"mixed_graph_off",
          "MIXED state with graph rerank disabled",
          {
@@ -3850,13 +4101,16 @@ static double computePrecisionFailurePenalty(const QueryDiagnosticsSummary& summ
     const double queryCount = static_cast<double>(std::max<std::uint64_t>(summary.queryCount, 1));
     const double noRelevantHitRate =
         static_cast<double>(summary.queryWithoutRelevantHitCount) / queryCount;
+    const double missPreFusionRate =
+        static_cast<double>(summary.missMissingPreFusionCount) / queryCount;
     const double fusionCutoffRate = static_cast<double>(summary.missFusionCutoffCount) / queryCount;
     const double rerankDropRate =
         static_cast<double>(summary.missRerankWindowDropCount) / queryCount;
     const double topKDropRate = static_cast<double>(summary.missTopKDropCount) / queryCount;
 
-    return std::min(0.20, noRelevantHitRate * 0.18 + fusionCutoffRate * 0.04 +
-                              rerankDropRate * 0.05 + topKDropRate * 0.03);
+    return std::min(0.25, missPreFusionRate * 0.25 + noRelevantHitRate * 0.10 +
+                              fusionCutoffRate * 0.04 + rerankDropRate * 0.05 +
+                              topKDropRate * 0.03);
 }
 
 static std::string summarizeTimingTradeoffs(const json& hybridDiag) {
@@ -5385,12 +5639,14 @@ struct BenchFixture {
                 }
             }
 
-            json onnxPluginConfig;
-            onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
-            onnxPluginConfig["reranker_model"] = "bge-reranker-base";
-            harnessOptions.pluginConfigs["onnx_plugin"] = onnxPluginConfig.dump();
-            spdlog::info("Configured ONNX plugin models: embedding=embeddinggemma-300m "
-                         "reranker=bge-reranker-base");
+            if (true) {
+                json onnxPluginConfig;
+                onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
+                onnxPluginConfig["reranker_model"] = "bge-reranker-base";
+                harnessOptions.pluginConfigs["onnx_plugin"] = onnxPluginConfig.dump();
+                spdlog::info("Configured ONNX plugin models: embedding=embeddinggemma-300m "
+                             "reranker=bge-reranker-base");
+            }
 
             std::vector<EnvSetting> pluginEnvOverrides;
             if (!std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
@@ -5454,7 +5710,7 @@ struct BenchFixture {
                     configOut << "[embeddings]\n";
                     if (embedBackendSimeon) {
                         configOut << "preferred_model = \"simeon-default\"\n";
-                        configOut << "embedding_dim = 384\n\n";
+                        configOut << "embedding_dim = 1024\n\n";
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = []\n";
                     } else {
@@ -6687,6 +6943,74 @@ struct BenchFixture {
             spdlog::error("This is likely due to vector publication not completing.");
         }
 
+        // Wait for Simeon lexical enhancement and concept mining to complete.
+        // The async build thread can still be running after the search engine reports
+        // ready, and concept mining can take additional wall-clock time.
+        if (!vectorsDisabled) {
+            const bool waitForConcepts =
+                std::getenv("YAMS_SEARCH_WAIT_FOR_CONCEPTS") &&
+                std::string(std::getenv("YAMS_SEARCH_WAIT_FOR_CONCEPTS")) != "0";
+            if (waitForConcepts) {
+                const auto lexicalReadyDeadline = std::chrono::steady_clock::now() + 120s;
+                bool lexicalReady = false;
+                spdlog::info("Waiting for Simeon lexical enhancement readiness...");
+                while (std::chrono::steady_clock::now() < lexicalReadyDeadline) {
+                    auto statusCheck = benchRunSync(client->status(true), 5s);
+                    if (statusCheck) {
+                        const auto& rc = statusCheck.value().requestCounts;
+                        const auto get = [&](const std::string& key) -> uint64_t {
+                            auto it = rc.find(key);
+                            return (it == rc.end()) ? 0ULL : it->second;
+                        };
+                        const bool configured =
+                            get("status_search_engine_lexical_enhancement_configured") > 0;
+                        const bool ready =
+                            get("status_search_engine_lexical_enhancement_ready") > 0;
+                        const bool building =
+                            get("status_search_engine_lexical_enhancement_building") > 0;
+                        const uint64_t docCount =
+                            get("status_search_engine_lexical_enhancement_doc_count");
+                        const uint64_t conceptCount =
+                            get("status_search_engine_lexical_enhancement_concept_count");
+                        const bool conceptMiningEnabled =
+                            get("status_search_engine_lexical_enhancement_concept_mining_enabled") >
+                            0;
+
+                        if (!configured) {
+                            spdlog::info("Simeon lexical enhancement not configured; skipping "
+                                         "lexical readiness wait");
+                            lexicalReady = true;
+                            break;
+                        }
+                        if (ready && !building && docCount >= static_cast<uint64_t>(corpusSize)) {
+                            if (conceptMiningEnabled && corpusSize >= 100 && conceptCount == 0) {
+                                spdlog::info("Simeon lexical ready (docs={}) but concept mining "
+                                             "still pending; waiting...",
+                                             docCount);
+                            } else {
+                                spdlog::info("Simeon lexical enhancement ready: configured={} "
+                                             "ready={} building={} doc_count={} concept_count={} "
+                                             "concept_mining_enabled={}",
+                                             configured, ready, building, docCount, conceptCount,
+                                             conceptMiningEnabled);
+                                lexicalReady = true;
+                                break;
+                            }
+                        } else {
+                            spdlog::info("Simeon lexical enhancement not yet ready: "
+                                         "configured={} ready={} building={} doc_count={} "
+                                         "concept_count={}",
+                                         configured, ready, building, docCount, conceptCount);
+                        }
+                    }
+                    std::this_thread::sleep_for(500ms);
+                }
+                if (!lexicalReady) {
+                    spdlog::error("Simeon lexical enhancement not ready after 120s");
+                }
+            }
+        }
+
         auto effectiveKgReadinessPolicy = kgReadinessPolicy;
         if (kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
             auto statusForKgPolicy = benchRunSync(client->status(true), 5s);
@@ -6782,6 +7106,7 @@ struct BenchFixture {
                 }
 
                 bool hasKg = false;
+                uint64_t docEntitiesInserted = 0;
                 if (statsCheck) {
                     const auto& stats = statsCheck.value();
                     if (auto it = stats.additionalStats.find("corpus_stats");
@@ -6795,10 +7120,15 @@ struct BenchFixture {
                         } catch (const json::exception&) {
                         }
                     }
+                    if (auto it = stats.additionalStats.find("kg_write_doc_entities_inserted");
+                        it != stats.additionalStats.end() && !it->second.empty()) {
+                        docEntitiesInserted = static_cast<uint64_t>(std::stoull(it->second));
+                    }
                 }
 
                 lastHasKg = hasKg;
-                const bool kgSignalReady = hasKg || (lastKgConsumed > 0);
+                const bool kgSignalReady =
+                    hasKg || (lastKgConsumed > 0) || (docEntitiesInserted > 0);
 
                 const bool queueIdle = (lastQueueDepth == 0 && lastPostQueued == 0);
                 const bool stageInflightIdle =

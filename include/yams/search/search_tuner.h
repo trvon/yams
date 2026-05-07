@@ -692,9 +692,8 @@ struct TuningContext {
     double nativeSymbolDensity = 0.0;
     double pathRelativeDepthAvg = 0.0;
     double binaryRatio = 0.0;
-    // kgEdgeDensity approximated as `CorpusStats::symbolDensity` in R2
-    // (entities per doc). R7+ will replace with true KG edge-count / doc
-    // once the KG store exposes an edge-count summary statistic.
+    // kgEdgeDensity: true KG edge count / doc when available (R7);
+    // falls back to symbolDensity when kg_edges have not been reconciled.
     double kgEdgeDensity = 0.0;
 
     // Query-fast features (per query).
@@ -724,7 +723,7 @@ inline void fillCorpusFeatures(TuningContext& ctx, const storage::CorpusStats& s
     ctx.nativeSymbolDensity = stats.nativeSymbolDensity;
     ctx.pathRelativeDepthAvg = stats.pathRelativeDepthAvg;
     ctx.binaryRatio = stats.binaryRatio;
-    ctx.kgEdgeDensity = stats.symbolDensity;
+    ctx.kgEdgeDensity = stats.kgEdgeDensity > 0.0 ? stats.kgEdgeDensity : stats.symbolDensity;
     ctx.corpusEpoch = static_cast<std::uint64_t>(stats.computedAtMs);
 }
 

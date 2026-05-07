@@ -275,6 +275,10 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             const bool presetOff = bm25Policy.routerPreset && *bm25Policy.routerPreset == "off";
             lexicalCfg.router_enabled = bm25Policy.routerEnabled.value_or(false) && !presetOff;
 
+            // Strategy router (EntropyRouter + Keyphrase/LeadField strategies).
+            // Test env: YAMS_SIMEON_STRATEGY_ROUTER_ENABLED=1
+            lexicalCfg.strategy_router_enabled = bm25Policy.strategyRouterEnabled.value_or(false);
+
             // RM3 SAB-smooth — test env: YAMS_SIMEON_RM3=1
             if (const char* rm3Env = std::getenv("YAMS_SIMEON_RM3")) {
                 lexicalCfg.rm3_enabled = std::string(rm3Env) == "1";

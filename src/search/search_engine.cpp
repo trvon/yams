@@ -742,7 +742,9 @@ public:
         status.ready = simeonLexical_->ready();
         status.building = simeonLexical_->building();
         status.fragmentGeometryReady = simeonLexical_->fragmentGeometryReady();
+        status.conceptMiningEnabled = simeonLexical_->concept_mining_enabled();
         status.docCount = simeonLexical_->doc_count();
+        status.conceptCount = simeonLexical_->concept_count();
         return status;
     }
 

@@ -1269,6 +1269,8 @@ TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases resc
 
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
+    // SCIENTIFIC profile's default vectorOnlyThreshold remains at 0.90
+    // (corpus_state pushes recall but doesn't touch vectorOnlyThreshold now)
     REQUIRE(before.vectorOnlyThreshold == Approx(0.90f));
     REQUIRE(before.semanticRescueSlots.value > 0);
 
@@ -1468,10 +1470,11 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     auto state = SearchTuner::computeState(stats);
     CHECK(state == TuningState::SCIENTIFIC);
 
-    // Verify SCIENTIFIC params activate
+    // Verify SCIENTIFIC params activate (with corpus_state recall push)
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    CHECK(p.semanticRescueSlots.value == 2);
+    // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
+    CHECK(p.semanticRescueSlots.value == 3);
     CHECK(p.enableSubPhraseRescoring == true);
     CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
 }
@@ -1499,11 +1502,12 @@ TEST_CASE("SearchTuner: path enumeration activates for rich KG",
     stats.docCount = 2000;
     stats.proseRatio = 0.90f;
     stats.codeRatio = 0.05f;
-    stats.symbolDensity = 0.8f; // graphRichness = (0.8-0.1)/1.5 ≈ 0.47 > 0.3
+    stats.symbolDensity = 0.8f; // graphRichness base
+    stats.kgEdgeDensity = 3.5;  // hasRichGraphTopology() requires > 2.0
     stats.embeddingCoverage = 0.80f;
     stats.pathRelativeDepthAvg = 0.5;
     stats.tagCoverage = 0.02f;
-    stats.nativeSymbolDensity = 0.0f;
+    stats.nativeSymbolDensity = 0.5f;
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
@@ -1517,11 +1521,12 @@ TEST_CASE("SearchTuner: path enumeration off for sparse KG",
     stats.docCount = 2000;
     stats.proseRatio = 0.90f;
     stats.codeRatio = 0.05f;
-    stats.symbolDensity = 0.2f; // graphRichness = (0.2-0.1)/1.5 ≈ 0.067 < 0.3
+    stats.symbolDensity = 0.2f; // low density
+    stats.kgEdgeDensity = 0.8;  // below hasRichGraphTopology() threshold
     stats.embeddingCoverage = 0.80f;
     stats.pathRelativeDepthAvg = 0.5;
     stats.tagCoverage = 0.02f;
-    stats.nativeSymbolDensity = 0.0f;
+    stats.nativeSymbolDensity = 0.05f;
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
@@ -1836,4 +1841,116 @@ TEST_CASE("SearchTuner: hasConverged requires both observations and cooldown",
     const bool midConverged = tuner.hasConverged(5);
     (void)midConverged; // could be true or false depending on cooldown constant
     CHECK(tuner.hasConverged(1000000) == false); // impossible threshold never converges
+}
+
+// =============================================================================
+// R7: New CorpusStats signals (extraction, FTS, titles, KG edge density)
+// =============================================================================
+
+TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph fully",
+          "[unit][search_tuner][r7_signals]") {
+    CorpusStats stats;
+    stats.docCount = 5183;
+    stats.proseRatio = 0.92;
+    stats.codeRatio = 0.03;
+    stats.embeddingCoverage = 1.0;
+    stats.contentExtractedCoverage = 1.0;
+    stats.ftsIndexedCoverage = 1.0;
+    stats.titleCoverage = 1.0;
+    stats.nativeSymbolDensity = 0.0;
+    stats.nerEntityDensity = 33.3;
+    stats.symbolDensity = 33.3;
+    stats.kgEdgeCount = 450000;
+    stats.kgEdgeDensity = 86.8;
+    stats.kgAliasCount = 250000;
+    stats.kgAliasDensity = 48.2;
+    stats.pathRelativeDepthAvg = 0.0;
+    stats.tagCoverage = 0.0;
+
+    // SCIENTIFIC classification
+    CHECK(stats.isScientific() == true);
+    CHECK(stats.hasKnowledgeGraph() == true);
+    CHECK(stats.hasRichGraphTopology() == true);
+    CHECK(stats.hasExtractedContent() == true);
+    CHECK(stats.hasFtsIndexing() == true);
+    CHECK(stats.hasTitles() == true);
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+
+    // Graph should be fully enabled with rich edge topology
+    CHECK(p.enableGraphRerank == true);
+    CHECK(p.graphRerankTopN >= 30);
+    CHECK(p.kgMaxResults >= 80);
+    // Rich edges + high edge density → path enumeration and expansion enabled
+    CHECK(p.graphEnablePathEnumeration == true);
+    CHECK(p.enableGraphQueryExpansion == true);
+    // SCIENTIFIC profile characteristics preserved
+    CHECK(p.weights.vector.value > 0.30f);
+    CHECK(p.weights.text.value > 0.35f);
+    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+}
+
+TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",
+          "[unit][search_tuner][r7_signals]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90;
+    stats.codeRatio = 0.05;
+    // High NER entities but NO structural edges (pure GLiNER output, no code symbols)
+    stats.nerEntityDensity = 15.0;
+    stats.nativeSymbolDensity = 0.0;
+    stats.symbolDensity = 15.0;
+    stats.kgEdgeDensity = 0.0; // No edges reconciled yet
+    stats.kgAliasDensity = 0.0;
+    stats.embeddingCoverage = 1.0;
+    stats.pathRelativeDepthAvg = 0.0;
+
+    CHECK(stats.hasKnowledgeGraph() == true);
+    CHECK(stats.hasRichGraphTopology() == false); // no edges = not rich
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+
+    // Graph rerank still enabled (hasKG) but damped
+    CHECK(p.enableGraphRerank == true);
+    // Path enumeration and expansion should be OFF: no edges means no rich topology
+    CHECK(p.graphEnablePathEnumeration == false);
+    CHECK(p.enableGraphQueryExpansion == false);
+    // KG budget/weight should be minimal (nerOnlyNoEdges applies 0.35x damp)
+    CHECK(p.kgMaxResults <= 85);
+    CHECK(p.weights.kg.value <= 0.08f);
+}
+
+TEST_CASE("CorpusStats: JSON roundtrip preserves new signals", "[unit][search_tuner][r7_signals]") {
+    CorpusStats original;
+    original.docCount = 100;
+    original.contentExtractedCount = 80;
+    original.contentExtractedCoverage = 0.8;
+    original.ftsIndexedCount = 75;
+    original.ftsIndexedCoverage = 0.75;
+    original.titleCount = 90;
+    original.titleCoverage = 0.9;
+    original.docsWithLanguage = 95;
+    original.languageCoverage = 0.95;
+    original.kgEdgeCount = 300;
+    original.kgEdgeDensity = 3.0;
+    original.kgAliasCount = 150;
+    original.kgAliasDensity = 1.5;
+
+    auto j = original.toJson();
+    auto restored = CorpusStats::fromJson(j);
+
+    CHECK(restored.contentExtractedCount == 80);
+    CHECK(restored.contentExtractedCoverage == 0.8);
+    CHECK(restored.ftsIndexedCount == 75);
+    CHECK(restored.ftsIndexedCoverage == 0.75);
+    CHECK(restored.titleCount == 90);
+    CHECK(restored.titleCoverage == 0.9);
+    CHECK(restored.docsWithLanguage == 95);
+    CHECK(restored.languageCoverage == 0.95);
+    CHECK(restored.kgEdgeCount == 300);
+    CHECK(restored.kgEdgeDensity == 3.0);
+    CHECK(restored.kgAliasCount == 150);
+    CHECK(restored.kgAliasDensity == 1.5);
 }

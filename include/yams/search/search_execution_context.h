@@ -29,6 +29,9 @@ struct IndexFreshnessSnapshot {
     bool simeonLexicalReady{false};
     bool simeonLexicalBuilding{false};
     bool simeonFragmentGeometryReady{false};
+    bool simeonLexicalConceptMiningEnabled{false};
+    std::size_t simeonLexicalDocCount{0};
+    std::size_t simeonLexicalConceptCount{0};
 
     [[nodiscard]] bool corpusWarming() const noexcept {
         return ingestQueued > 0 || ingestInFlight > 0 || postIngestQueued > 0 ||
