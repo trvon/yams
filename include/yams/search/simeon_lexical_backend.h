@@ -25,6 +25,10 @@ class PmiEmbeddings;
 class QueryRouter;
 struct RouterConfig;
 enum class Recipe : std::uint8_t;
+class RetrievalStrategy;
+class StrategyRouter;
+class TextAdapter;
+struct QueryProfile;
 } // namespace simeon
 
 namespace yams::metadata {
@@ -94,6 +98,12 @@ public:
         bool router_enabled = false;
         RouterPreset router_preset{};
 
+        // Enable the new simeon strategy-routing framework (retrieval_strategy.hpp).
+        // When true, replaces per-query QueryRouter selection with an EntropyRouter
+        // that chooses among BM25, Keyphrase, and LeadField strategies based on
+        // query BM25-score entropy. Requires router_enabled=false (they conflict).
+        bool strategy_router_enabled = false;
+
         // When true, build both SabSmooth and Atire BM25 variants and RRF-fuse
         // their rankings instead of routing to a single variant. Shown to
         // improve nDCG@10 by +0.009 on NFCorpus in simeon benchmarks.
@@ -155,7 +165,14 @@ public:
 
     bool ready() const noexcept { return ready_.load(std::memory_order_acquire); }
     bool building() const noexcept { return building_.load(std::memory_order_acquire); }
+    bool hasStrategyRouter() const noexcept { return strategy_router_ != nullptr; }
     std::size_t doc_count() const noexcept { return doc_count_; }
+    bool concept_mining_enabled() const noexcept { return cfg_.concept_mining_enabled; }
+    std::uint32_t concept_count() const noexcept {
+        if (concept_index_)
+            return concept_index_->size();
+        return 0;
+    }
     const Config& config() const noexcept { return cfg_; }
     bool fragmentGeometryReady() const noexcept {
         return fragment_encoder_ != nullptr && !doc_frags_.empty();
@@ -187,6 +204,14 @@ public:
     Result<RescoreDecision> scoreRouted(std::string_view query,
                                         std::span<const std::int64_t> candidate_doc_ids) const;
 
+    // Strategy-router driven rescore (new retrieval_strategy.hpp framework).
+    // When strategy_router_enabled is true, uses an EntropyRouter to choose
+    // among BM25, Keyphrase, and LeadField strategies per query. Falls back
+    // to scoreRouted() when the strategy router is not configured.
+    Result<RescoreDecision>
+    scoreStrategyRouted(std::string_view query,
+                        std::span<const std::int64_t> candidate_doc_ids) const;
+
 private:
     Config cfg_;
     std::atomic<bool> ready_{false};
@@ -207,6 +232,12 @@ private:
     std::unique_ptr<simeon::Encoder> fragment_encoder_;
     std::unique_ptr<simeon::ConceptIndex> concept_index_;
     std::vector<std::vector<simeon::SemanticFragment>> doc_frags_;
+
+    // Strategy router (new retrieval_strategy.hpp framework)
+    std::unique_ptr<simeon::TextAdapter> text_adapter_;
+    std::vector<std::string> doc_lead_texts_;
+    std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
+    std::unique_ptr<simeon::StrategyRouter> strategy_router_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
     std::size_t doc_count_ = 0;
 };

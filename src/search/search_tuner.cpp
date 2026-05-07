@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <system_error>
 #include <vector>
@@ -202,15 +203,26 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
         return;
     }
 
+    // Compute graph richness from edge density when available (faithful signal),
+    // falling back to symbol density when KG edges have not been reconciled yet.
+    // GLiNER NER entity density alone can be very high on scientific corpora
+    // without meaningful structural edges — using it as the sole richness proxy
+    // would over-activate graph reranking and path enumeration on flat prose.
+    const float kgEdgeDensityAvailable = stats.kgEdgeDensity > 0.0
+                                             ? static_cast<float>(stats.kgEdgeDensity)
+                                             : static_cast<float>(stats.symbolDensity);
+    const float graphRichness = std::clamp((kgEdgeDensityAvailable - 0.1f) / 1.5f, 0.0f, 1.0f);
+
+    // When only NER entities exist but no edges, damp graph activation
+    const bool nerOnlyNoEdges = stats.nerEntityDensity > 0.1 && stats.nativeSymbolDensity < 0.1 &&
+                                stats.kgEdgeDensity < 0.5;
+    const float effectiveRichness = nerOnlyNoEdges ? graphRichness * 0.35f : graphRichness;
+
     // Multiplicative scaling preserves profile weight ratios (unlike the
     // old absolute subtraction which destroyed them).
-    const float graphRichness =
-        std::clamp(static_cast<float>((stats.symbolDensity - 0.1) / 1.5), 0.0f, 1.0f);
-
-    // Scale KG weight up: 1.3x–2.5x depending on graph richness
-    params.weights.kg.scaleBy(1.3f + (1.2f * graphRichness), TuningLayer::Corpus);
+    params.weights.kg.scaleBy(1.3f + (1.2f * effectiveRichness), TuningLayer::Corpus);
     // Scale down other weights proportionally to make room for KG
-    const float reductionFactor = 1.0f - (0.15f * graphRichness);
+    const float reductionFactor = 1.0f - (0.15f * effectiveRichness);
     params.weights.text.scaleBy(reductionFactor, TuningLayer::Corpus);
     params.weights.simeonText.scaleBy(reductionFactor, TuningLayer::Corpus);
     params.weights.vector.scaleBy(reductionFactor, TuningLayer::Corpus);
@@ -219,16 +231,17 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
 
     params.enableGraphRerank = true;
     params.graphRerankTopN = stats.docCount >= 1000 ? 40 : 30;
-    params.graphRerankWeight = 0.18f + (0.14f * graphRichness);
-    params.graphRerankMaxBoost = 0.22f + (0.16f * graphRichness);
-    params.graphRerankMinSignal = std::max(0.005f, 0.02f - (0.012f * graphRichness));
-    params.graphCommunityWeight = 0.08f + (0.08f * graphRichness);
-    params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + (60.0 * graphRichness)));
-    params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + (6.0 * graphRichness)));
+    params.graphRerankWeight = 0.18f + (0.14f * effectiveRichness);
+    params.graphRerankMaxBoost = 0.22f + (0.16f * effectiveRichness);
+    params.graphRerankMinSignal = std::max(0.005f, 0.02f - (0.012f * effectiveRichness));
+    params.graphCommunityWeight = 0.08f + (0.08f * effectiveRichness);
+    params.kgMaxResults = static_cast<size_t>(std::lround(60.0 + (60.0 * effectiveRichness)));
+    params.graphScoringBudgetMs = static_cast<int>(std::lround(8.0 + (6.0 * effectiveRichness)));
 
-    // Enable path enumeration and graph query expansion for rich KGs
-    params.graphEnablePathEnumeration = (graphRichness > 0.3F);
-    params.enableGraphQueryExpansion = (graphRichness > 0.3F);
+    // Enable path enumeration and graph query expansion for rich KGs with structural edges
+    const bool hasRichTopology = stats.hasRichGraphTopology();
+    params.graphEnablePathEnumeration = (hasRichTopology && effectiveRichness > 0.3F);
+    params.enableGraphQueryExpansion = (hasRichTopology && effectiveRichness > 0.3F);
 
     params.weights.normalize();
 
@@ -249,12 +262,85 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
 
     std::ostringstream suffix;
     suffix << ", graph=on(symbol_density=" << stats.symbolDensity
-           << ", kg_weight=" << params.weights.kg.value
+           << ", edge_density=" << stats.kgEdgeDensity << ", kg_weight=" << params.weights.kg.value
            << ", graph_rerank_weight=" << params.graphRerankWeight
            << ", graph_community_weight=" << params.graphCommunityWeight
            << ", path_enum=" << params.graphEnablePathEnumeration
-           << ", expansion=" << params.enableGraphQueryExpansion << ")";
+           << ", expansion=" << params.enableGraphQueryExpansion
+           << ", ner_only_no_edges=" << nerOnlyNoEdges << ")";
     stateReason += suffix.str();
+}
+
+void applyCorpusStateAdjustments(const storage::CorpusStats& stats, TuningState state,
+                                 TunedParams& params, std::string& stateReason) {
+    std::ostringstream cs;
+    cs << std::fixed << std::setprecision(2);
+    bool any = false;
+
+    const bool isSci = stats.isScientific();
+    const bool isProseLarge = state == TuningState::LARGE_PROSE;
+    const bool isOverlay = statsAreOverlayBacked(stats);
+
+    // ── Extraction / FTS readiness ────────────────────────────────────────
+    if (stats.contentExtractedCoverage > 0.9) {
+        const size_t prev = params.textMaxResults;
+        params.textMaxResults = static_cast<size_t>(std::lround(prev * 1.33));
+        cs << "text_max=" << prev << "->" << params.textMaxResults;
+        any = true;
+    }
+    if (stats.ftsIndexedCoverage > 0.8) {
+        const size_t prev = params.textMaxResults;
+        params.textMaxResults = std::max(prev, size_t{400});
+        cs << (any ? ", " : "") << "fts_text_max=" << prev << "->" << params.textMaxResults;
+        any = true;
+    }
+
+    // ── Scientific / flat-prose recall push ───────────────────────────────
+    // Only when not overlay or contentExtractedCoverage confirmed from atomics.
+    const bool readyForRecallPush = !isOverlay || stats.contentExtractedCoverage > 0.85;
+
+    if (readyForRecallPush && (isSci || isProseLarge)) {
+        // Minimal, non-destructive recall adjustments.
+        // Benchmarks show that aggressive sim_thresh lowering (< 0.25) and
+        // fanout explosion flood fusion with noise and regress recall.
+
+        // 1. Widen vector pool slightly for weak-query corpora.
+        const size_t prevVec = params.vectorMaxResults;
+        if (prevVec < 180) {
+            params.vectorMaxResults = 180;
+            cs << (any ? ", " : "") << "vec_max=" << prevVec << "->180";
+            any = true;
+        }
+
+        // 2. Boost semantic rescue for vector-only docs.
+        const size_t prevRescue = params.semanticRescueSlots.value;
+        if (prevRescue < 3) {
+            params.semanticRescueSlots.set(size_t{3}, TuningLayer::Corpus);
+            cs << (any ? ", " : "") << "rescue_slots=" << prevRescue << "->3";
+            any = true;
+        }
+
+        // 3. Stronger weak-query fanout: SciFact queries are short claims.
+        if (params.weakQueryVectorFanoutMultiplier < 2.3f) {
+            params.weakQueryVectorFanoutMultiplier = 2.3f;
+            cs << (any ? ", " : "") << "weak_vec_fanout->2.3";
+            any = true;
+        }
+    }
+
+    // ── NER entity density → entity vector expansion ──────────────────────
+    if (stats.nerEntityDensity > 10.0) {
+        params.weights.entityVector.scaleBy(1.8f, TuningLayer::Corpus);
+        params.entityVectorMaxResults = std::max(params.entityVectorMaxResults, size_t{80});
+        cs << (any ? ", " : "") << "entity_vec_on(d=" << stats.nerEntityDensity << ")";
+        any = true;
+    }
+
+    if (any) {
+        stateReason += ", corpus_state=active(" + cs.str() + ")";
+    } else {
+        stateReason += ", corpus_state=stable(no_adjustments)";
+    }
 }
 
 double rate(std::size_t part, std::size_t total) {
@@ -461,6 +547,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
 
     params_ = getTunedParams(state_);
     applyGraphAwareAdjustments(stats_, params_, stateReason_);
+    applyCorpusStateAdjustments(stats_, state_, params_, stateReason_);
     applyAdaptiveClamp(stats_, params_);
     baseParams_ = params_;
     baseConfig_ = buildConfigFromParamsLocked();
@@ -953,6 +1040,13 @@ nlohmann::json SearchTuner::toJson() const {
     j["corpus"]["tag_coverage"] = stats_.tagCoverage;
     j["corpus"]["embedding_coverage"] = stats_.embeddingCoverage;
     j["corpus"]["symbol_density"] = stats_.symbolDensity;
+    j["corpus"]["native_symbol_density"] = stats_.nativeSymbolDensity;
+    j["corpus"]["ner_entity_density"] = stats_.nerEntityDensity;
+    j["corpus"]["content_extracted_coverage"] = stats_.contentExtractedCoverage;
+    j["corpus"]["fts_indexed_coverage"] = stats_.ftsIndexedCoverage;
+    j["corpus"]["title_coverage"] = stats_.titleCoverage;
+    j["corpus"]["kg_edge_density"] = stats_.kgEdgeDensity;
+    j["corpus"]["kg_alias_density"] = stats_.kgAliasDensity;
     j["corpus"]["used_online_overlay"] = stats_.usedOnlineOverlay;
     j["corpus"]["reconciled_computed_at_ms"] = stats_.reconciledComputedAtMs;
     j["corpus"]["path_depth_max_approximate"] = stats_.pathDepthMaxApproximate;
@@ -1153,6 +1247,11 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
     if (stats.usedOnlineOverlay) {
         reason << ", overlay_stats";
     }
+
+    reason << ", extracted=" << static_cast<int>(stats.contentExtractedCoverage * 100)
+           << "% fts=" << static_cast<int>(stats.ftsIndexedCoverage * 100)
+           << "% titles=" << static_cast<int>(stats.titleCoverage * 100) << "% edges=" << std::fixed
+           << std::setprecision(1) << stats.kgEdgeDensity;
 
     outReason = reason.str();
     return state;

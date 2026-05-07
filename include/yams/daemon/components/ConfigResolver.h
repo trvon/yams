@@ -119,6 +119,7 @@ public:
         // (default — best BEIR result from simeon bench), "off" (disable).
         std::optional<bool> routerEnabled;
         std::optional<std::string> routerPreset;
+        std::optional<bool> strategyRouterEnabled;
     };
 
     struct VectorBackendPolicy {

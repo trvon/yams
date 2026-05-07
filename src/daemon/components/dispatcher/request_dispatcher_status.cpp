@@ -938,6 +938,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     freshness.simeonLexicalBuilding ? 1u : 0u;
                 res.requestCounts["status_search_engine_fragment_geometry_ready"] =
                     freshness.simeonFragmentGeometryReady ? 1u : 0u;
+                res.requestCounts["status_search_engine_lexical_enhancement_doc_count"] =
+                    freshness.simeonLexicalDocCount;
+                res.requestCounts["status_search_engine_lexical_enhancement_concept_count"] =
+                    freshness.simeonLexicalConceptCount;
+                res.requestCounts
+                    ["status_search_engine_lexical_enhancement_concept_mining_enabled"] =
+                    freshness.simeonLexicalConceptMiningEnabled ? 1u : 0u;
             } catch (...) {
             }
         }
@@ -1253,6 +1260,13 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         freshness.simeonLexicalBuilding ? "1" : "0";
                     response.additionalStats["search_engine_fragment_geometry_ready"] =
                         freshness.simeonFragmentGeometryReady ? "1" : "0";
+                    response.additionalStats["search_engine_lexical_enhancement_doc_count"] =
+                        std::to_string(freshness.simeonLexicalDocCount);
+                    response.additionalStats["search_engine_lexical_enhancement_concept_count"] =
+                        std::to_string(freshness.simeonLexicalConceptCount);
+                    response.additionalStats
+                        ["search_engine_lexical_enhancement_concept_mining_enabled"] =
+                        freshness.simeonLexicalConceptMiningEnabled ? "1" : "0";
                     if (!freshness.simeonLexicalConfigured) {
                         response.additionalStats["search_engine_lexical_enhancement_state"] =
                             "disabled";

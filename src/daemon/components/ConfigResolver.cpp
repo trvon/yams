@@ -1074,6 +1074,11 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
         policy.routerPreset = std::move(v);
 
+    if (const char* raw = std::getenv("YAMS_SIMEON_STRATEGY_ROUTER_ENABLED")) {
+        if (auto b = parseTomlBool(std::string(raw)))
+            policy.strategyRouterEnabled = b;
+    }
+
     return policy;
 }
 

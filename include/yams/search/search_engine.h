@@ -34,7 +34,9 @@ public:
         bool ready{false};
         bool building{false};
         bool fragmentGeometryReady{false};
+        bool conceptMiningEnabled{false};
         std::size_t docCount{0};
+        std::size_t conceptCount{0};
     };
 
     explicit SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,

@@ -283,6 +283,9 @@ public:
             snapshot.simeonLexicalReady = lexical.ready;
             snapshot.simeonLexicalBuilding = lexical.building;
             snapshot.simeonFragmentGeometryReady = lexical.fragmentGeometryReady;
+            snapshot.simeonLexicalConceptMiningEnabled = lexical.conceptMiningEnabled;
+            snapshot.simeonLexicalDocCount = lexical.docCount;
+            snapshot.simeonLexicalConceptCount = lexical.conceptCount;
         }
         return snapshot;
     }

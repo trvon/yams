@@ -10,6 +10,8 @@
 #include <simeon/pmi.hpp>
 #include <simeon/prf.hpp>
 #include <simeon/query_router.hpp>
+#include <simeon/retrieval_strategy.hpp>
+#include <simeon/corpus_adapter.hpp>
 #include <simeon/simeon.hpp>
 
 #if defined(__APPLE__)
@@ -332,6 +334,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::vector<std::int64_t> dense_doc_ids;
         dense_doc_ids.reserve(ids.size());
         std::vector<std::string> pmi_sample_texts;
+        std::vector<std::string> build_doc_texts; // for strategy router lead-field extraction
         if (considerFragmentGeometry) {
             const auto reserveDocs =
                 cfg_.fragment_geometry_pmi_sample_docs == 0
@@ -392,6 +395,9 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             }
             mapping.emplace(docId, dense++);
             dense_doc_ids.push_back(docId);
+            if (cfg_.strategy_router_enabled) {
+                build_doc_texts.emplace_back(buildText.view);
+            }
         }
         if (stop.stop_requested()) {
             // Owner is going away — drop locally owned indexes; do not publish
@@ -483,6 +489,40 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             const simeon::Bm25Index& rindex = atire ? *atire : *primary;
             router =
                 std::make_unique<simeon::QueryRouter>(rindex, toRouterConfig(cfg_.router_preset));
+        }
+
+        // Strategy router: build TextAdapter + EntropyRouter with BM25 +
+        // Keyphrase + LeadField strategies for query-adaptive lexical retrieval.
+        std::unique_ptr<simeon::TextAdapter> textAdapter;
+        std::vector<std::string> docLeadTexts;
+        std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies;
+        std::unique_ptr<simeon::StrategyRouter> strategyRouter;
+        if (cfg_.strategy_router_enabled && !ids.empty()) {
+            textAdapter = std::make_unique<simeon::TextAdapter>();
+
+            // Extract lead texts from the documents we just indexed.
+            const std::size_t ndocs = std::min(build_doc_texts.size(), ids.size());
+            docLeadTexts.reserve(ndocs);
+            for (std::size_t di = 0; di < ndocs && !stop.stop_requested(); ++di) {
+                simeon::AdapterEvidence ev =
+                    textAdapter->process_doc(std::to_string(ids[di]), build_doc_texts[di]);
+                docLeadTexts.push_back(std::move(ev.aux_field));
+            }
+
+            if (!stop.stop_requested() && primary) {
+                strategies.push_back(std::make_unique<simeon::Bm25Strategy>(*primary));
+
+                strategies.push_back(
+                    std::make_unique<simeon::KeyphraseStrategy>(*primary, 0.25f, 0.30f));
+
+                strategies.push_back(std::make_unique<simeon::LeadFieldStrategy>(
+                    *primary, docLeadTexts, 0.85f, 0.15f));
+
+                strategyRouter = std::make_unique<simeon::EntropyRouter>();
+                spdlog::info("[simeon-lexical] strategy router: EntropyRouter "
+                             "with {} strategies over {} docs",
+                             strategies.size(), ndocs);
+            }
         }
 
         std::unique_ptr<simeon::PmiEmbeddings> pmi;
@@ -603,6 +643,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         concept_index_ = std::move(conceptIdx);
         fragment_encoder_ = std::move(fragmentEncoder);
         doc_frags_ = std::move(docFrags);
+        text_adapter_ = std::move(textAdapter);
+        doc_lead_texts_ = std::move(docLeadTexts);
+        strategies_ = std::move(strategies);
+        strategy_router_ = std::move(strategyRouter);
         doc_id_to_index_ = std::move(mapping);
         doc_count_ = dense;
         ready_.store(true, std::memory_order_release);
@@ -763,6 +807,99 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         }
         const auto di = it->second;
         const float score = std::isfinite(full[di]) ? full[di] : lexical[di];
+        decision.scores.push_back(score);
+    }
+    return decision;
+}
+
+Result<SimeonLexicalBackend::RescoreDecision>
+SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
+                                          std::span<const std::int64_t> candidate_doc_ids) const {
+    if (!ready_.load(std::memory_order_acquire) || !index_) {
+        return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
+    }
+
+    // Fall back to standard routed scoring when strategy router isn't active.
+    if (!strategy_router_ || strategies_.empty()) {
+        return scoreRouted(query, candidate_doc_ids);
+    }
+
+    std::vector<float> full(doc_count_, 0.0f);
+    const char* recipe_label = "Bm25SabSmooth";
+
+    // Build query profile from the primary index for routing decisions.
+    simeon::QueryProfile profile;
+    {
+        std::vector<float> tmp(doc_count_, 0.0f);
+        index_->score(query, std::span<float>{tmp});
+        auto [minIt, maxIt] = std::minmax_element(tmp.begin(), tmp.end());
+        if (maxIt != tmp.end() && *maxIt > 0.0f) {
+            double sum = 0.0;
+            double sumSq = 0.0;
+            for (float s : tmp) {
+                if (s <= 0.0f)
+                    continue;
+                double sn = s / *maxIt;
+                if (sn > 0.0) {
+                    sum += sn * (-std::log(sn));
+                }
+                sumSq += 1.0;
+            }
+            profile.bm25_entropy = sumSq > 0.0 ? static_cast<float>(sum / sumSq) : 0.0f;
+        }
+    }
+    profile.n_terms = 0;
+    {
+        bool inToken = false;
+        for (char c : query) {
+            if (c == ' ' || c == '\t') {
+                inToken = false;
+            } else if (!inToken) {
+                ++profile.n_terms;
+                inToken = true;
+            }
+        }
+    }
+    profile.keyphrases = simeon::extract_keyphrases(query);
+
+    // Route: build strategy pointer span from our pool.
+    std::vector<simeon::RetrievalStrategy*> pool;
+    pool.reserve(strategies_.size());
+    for (const auto& s : strategies_)
+        pool.push_back(s.get());
+
+    // Use TextAdapter for evidence if available.
+    simeon::AdapterEvidence evidence;
+    if (text_adapter_) {
+        evidence = text_adapter_->process_query("query", query);
+    }
+
+    strategy_router_->route(query, profile, evidence,
+                            std::span<simeon::RetrievalStrategy* const>(pool),
+                            std::span<float>{full});
+    recipe_label = "StrategyRouted";
+
+    // Blend concept scores when available.
+    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+        std::vector<float> conceptScores(doc_count_, 0.0f);
+        concept_index_->score(query, std::span<float>{conceptScores});
+        const float cw = cfg_.concept_config.concept_weight;
+        for (size_t i = 0; i < doc_count_; ++i) {
+            full[i] += cw * conceptScores[i];
+        }
+    }
+
+    RescoreDecision decision;
+    decision.recipe_name = recipe_label;
+    decision.scores.reserve(candidate_doc_ids.size());
+    for (auto id : candidate_doc_ids) {
+        auto it = doc_id_to_index_.find(id);
+        if (it == doc_id_to_index_.end()) {
+            decision.scores.push_back(0.0f);
+            continue;
+        }
+        const auto di = it->second;
+        const float score = std::isfinite(full[di]) ? full[di] : 0.0f;
         decision.scores.push_back(score);
     }
     return decision;
