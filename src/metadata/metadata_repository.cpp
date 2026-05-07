@@ -1775,6 +1775,25 @@ Result<void> MetadataRepository::setMetadataBatch(
         return Result<void>();
     }
 
+    // Deduplicate entries by (document_id, key) within the batch.
+    // Duplicate pairs cause SQLite ON CONFLICT DO UPDATE to fail.
+    // Keep the last entry for each key (latest write wins).
+    std::vector<std::tuple<int64_t, std::string, MetadataValue>> deduped;
+    deduped.reserve(entries.size());
+    std::unordered_map<uint64_t, size_t> seen;
+    for (const auto& entry : entries) {
+        auto docId = std::get<0>(entry);
+        auto& key = std::get<1>(entry);
+        uint64_t hash = static_cast<uint64_t>(docId) * 31 + std::hash<std::string>{}(key);
+        auto it = seen.find(hash);
+        if (it != seen.end()) {
+            deduped[it->second] = entry;
+        } else {
+            seen[hash] = deduped.size();
+            deduped.push_back(entry);
+        }
+    }
+
     uint64_t tagCountDelta = 0;
     uint64_t docsWithTagsDelta = 0;
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
@@ -1809,7 +1828,7 @@ Result<void> MetadataRepository::setMetadataBatch(
         auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
 
         std::unordered_map<int64_t, std::vector<std::string>> pendingTagKeysByDoc;
-        for (const auto& [documentId, key, _value] : entries) {
+        for (const auto& [documentId, key, _value] : deduped) {
             if (isTagMetadataKey(key)) {
                 pendingTagKeysByDoc[documentId].push_back(key);
             }
@@ -1851,15 +1870,15 @@ Result<void> MetadataRepository::setMetadataBatch(
             }
         }
 
-        for (size_t offset = 0; offset < entries.size(); offset += kMaxRowsPerChunk) {
+        for (size_t offset = 0; offset < deduped.size(); offset += kMaxRowsPerChunk) {
             const int rows = static_cast<int>(
-                std::min(entries.size() - offset, static_cast<size_t>(kMaxRowsPerChunk)));
+                std::min(deduped.size() - offset, static_cast<size_t>(kMaxRowsPerChunk)));
 
             if (rows == kMaxRowsPerChunk) {
                 YAMS_TRY_UNWRAP(stmt, db.prepareCached(fullChunkSql));
                 int bindIndex = 1;
                 for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = entries[offset + static_cast<size_t>(i)];
+                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
                     YAMS_TRY(stmt->bind(bindIndex++, documentId));
                     YAMS_TRY(stmt->bind(bindIndex++, key));
                     YAMS_TRY(stmt->bind(bindIndex++, value.value));
@@ -1872,7 +1891,7 @@ Result<void> MetadataRepository::setMetadataBatch(
                 YAMS_TRY_UNWRAP(stmt, db.prepare(tailSql));
                 int bindIndex = 1;
                 for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = entries[offset + static_cast<size_t>(i)];
+                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
                     YAMS_TRY(stmt.bind(bindIndex++, documentId));
                     YAMS_TRY(stmt.bind(bindIndex++, key));
                     YAMS_TRY(stmt.bind(bindIndex++, value.value));
@@ -3738,6 +3757,16 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                 static_cast<double>(stats.nativeSymbolCount) / static_cast<double>(stats.docCount);
             stats.nerEntityDensity =
                 static_cast<double>(stats.nerEntityCount) / static_cast<double>(stats.docCount);
+
+            stats.contentExtractedCount =
+                static_cast<int64_t>(cachedExtractedCount_.load(std::memory_order_relaxed));
+            stats.contentExtractedCoverage = static_cast<double>(stats.contentExtractedCount) /
+                                             static_cast<double>(stats.docCount);
+            stats.ftsIndexedCount =
+                static_cast<int64_t>(cachedIndexedCount_.load(std::memory_order_relaxed));
+            stats.ftsIndexedCoverage =
+                static_cast<double>(stats.ftsIndexedCount) / static_cast<double>(stats.docCount);
+
             stats.pathDepthAvg = static_cast<double>(std::max<int64_t>(livePathDepthSum, 0)) /
                                  static_cast<double>(stats.docCount);
             stats.pathDepthMax = static_cast<double>(std::max<int64_t>(livePathDepthMax, 0));
@@ -3772,6 +3801,18 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.symbolDensity = 0.0;
             stats.nativeSymbolDensity = 0.0;
             stats.nerEntityDensity = 0.0;
+            stats.contentExtractedCount = 0;
+            stats.contentExtractedCoverage = 0.0;
+            stats.ftsIndexedCount = 0;
+            stats.ftsIndexedCoverage = 0.0;
+            stats.titleCount = 0;
+            stats.titleCoverage = 0.0;
+            stats.docsWithLanguage = 0;
+            stats.languageCoverage = 0.0;
+            stats.kgEdgeCount = 0;
+            stats.kgEdgeDensity = 0.0;
+            stats.kgAliasCount = 0;
+            stats.kgAliasDensity = 0.0;
             stats.avgDocLengthBytes = 0.0;
             stats.pathDepthAvg = 0.0;
             stats.pathDepthMax = 0.0;
@@ -4021,6 +4062,125 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                             stats.nerEntityCount = stmt.getInt64(0);
                             stats.nerEntityDensity = static_cast<double>(stats.nerEntityCount) /
                                                      static_cast<double>(stats.docCount);
+                        }
+                    }
+                }
+            }
+
+            // 5a. Content extracted count
+            {
+                auto stmtResult =
+                    db.prepare("SELECT COUNT(*) FROM documents WHERE content_extracted = 1");
+                if (stmtResult) {
+                    auto& stmt = stmtResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        stats.contentExtractedCount = stmt.getInt64(0);
+                        stats.contentExtractedCoverage =
+                            static_cast<double>(stats.contentExtractedCount) /
+                            static_cast<double>(stats.docCount);
+                    }
+                }
+            }
+
+            // 5b. FTS indexed count (documents with an FTS row)
+            {
+                auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents_fts_docsize");
+                if (!stmtResult) {
+                    stmtResult = db.prepare("SELECT COUNT(*) FROM documents_fts");
+                }
+                if (stmtResult) {
+                    auto& stmt = stmtResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        stats.ftsIndexedCount = stmt.getInt64(0);
+                        stats.ftsIndexedCoverage = static_cast<double>(stats.ftsIndexedCount) /
+                                                   static_cast<double>(stats.docCount);
+                    }
+                }
+            }
+
+            // 5c. Title coverage (metadata key = 'title')
+            {
+                auto stmtResult = db.prepare(
+                    "SELECT COUNT(DISTINCT document_id) FROM metadata WHERE key = 'title'");
+                if (stmtResult) {
+                    auto& stmt = stmtResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        stats.titleCount = stmt.getInt64(0);
+                        stats.titleCoverage = static_cast<double>(stats.titleCount) /
+                                              static_cast<double>(stats.docCount);
+                    }
+                }
+            }
+
+            // 5d. Language coverage (document_content.language is non-empty)
+            {
+                auto stmtResult = db.prepare("SELECT COUNT(*) FROM document_content "
+                                             "WHERE language IS NOT NULL AND language != ''");
+                if (stmtResult) {
+                    auto& stmt = stmtResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        stats.docsWithLanguage = stmt.getInt64(0);
+                        stats.languageCoverage = static_cast<double>(stats.docsWithLanguage) /
+                                                 static_cast<double>(stats.docCount);
+                    }
+                }
+            }
+
+            // 5e. KG edge density (check if kg_edges table exists first)
+            {
+                auto checkResult = db.prepare(R"(
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type='table' AND name='kg_edges'
+                )");
+                bool edgeTableExists = false;
+                if (checkResult) {
+                    auto& stmt = checkResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        edgeTableExists = stmt.getInt64(0) > 0;
+                    }
+                }
+                if (edgeTableExists) {
+                    auto stmtResult = db.prepare("SELECT COUNT(*) FROM kg_edges");
+                    if (stmtResult) {
+                        auto& stmt = stmtResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.kgEdgeCount = stmt.getInt64(0);
+                            stats.kgEdgeDensity = static_cast<double>(stats.kgEdgeCount) /
+                                                  static_cast<double>(stats.docCount);
+                        }
+                    }
+                }
+            }
+
+            // 5f. KG alias density (check if kg_aliases table exists)
+            {
+                auto checkResult = db.prepare(R"(
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type='table' AND name='kg_aliases'
+                )");
+                bool aliasTableExists = false;
+                if (checkResult) {
+                    auto& stmt = checkResult.value();
+                    auto stepResult = stmt.step();
+                    if (stepResult && stepResult.value()) {
+                        aliasTableExists = stmt.getInt64(0) > 0;
+                    }
+                }
+                if (aliasTableExists) {
+                    auto stmtResult = db.prepare("SELECT COUNT(*) FROM kg_aliases");
+                    if (stmtResult) {
+                        auto& stmt = stmtResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.kgAliasCount = stmt.getInt64(0);
+                            stats.kgAliasDensity = static_cast<double>(stats.kgAliasCount) /
+                                                   static_cast<double>(stats.docCount);
                         }
                     }
                 }
