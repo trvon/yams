@@ -57,6 +57,26 @@ struct CorpusStats {
     double pathDepthMax{0.0};         // Maximum absolute path depth
     double pathRelativeDepthAvg{0.0}; // AVG(depth) - MIN(depth): nesting within corpus root
 
+    // --- Extraction / retrieval readiness ---
+    int64_t contentExtractedCount{0};
+    double contentExtractedCoverage{0.0};
+    int64_t ftsIndexedCount{0};
+    double ftsIndexedCoverage{0.0};
+
+    // --- Title coverage ---
+    int64_t titleCount{0};
+    double titleCoverage{0.0};
+
+    // --- Language coverage ---
+    int64_t docsWithLanguage{0};
+    double languageCoverage{0.0};
+
+    // --- KG topology richness ---
+    int64_t kgEdgeCount{0};
+    double kgEdgeDensity{0.0};
+    int64_t kgAliasCount{0};
+    double kgAliasDensity{0.0};
+
     // --- Language distribution (optional, for future use) ---
     std::unordered_map<std::string, int64_t> extensionCounts; // extension -> count
 
@@ -84,6 +104,14 @@ struct CorpusStats {
     [[nodiscard]] bool hasPaths() const noexcept { return pathDepthAvg > 1.0; }
     [[nodiscard]] bool hasTags() const noexcept { return tagCoverage > 0.1; }
     [[nodiscard]] bool hasEmbeddings() const noexcept { return embeddingCoverage > 0.5; }
+    [[nodiscard]] bool hasExtractedContent() const noexcept {
+        return contentExtractedCoverage > 0.5;
+    }
+    [[nodiscard]] bool hasFtsIndexing() const noexcept { return ftsIndexedCoverage > 0.5; }
+    [[nodiscard]] bool hasTitles() const noexcept { return titleCoverage > 0.1; }
+    [[nodiscard]] bool hasRichGraphTopology() const noexcept {
+        return kgEdgeDensity > 2.0 || kgAliasDensity > 1.0;
+    }
 
     // Size classification for FSM
     [[nodiscard]] bool isMinimal() const noexcept { return docCount < 100; }
@@ -130,6 +158,18 @@ struct CorpusStats {
         j["path_depth_avg"] = pathDepthAvg;
         j["path_depth_max"] = pathDepthMax;
         j["path_relative_depth_avg"] = pathRelativeDepthAvg;
+        j["content_extracted_count"] = contentExtractedCount;
+        j["content_extracted_coverage"] = contentExtractedCoverage;
+        j["fts_indexed_count"] = ftsIndexedCount;
+        j["fts_indexed_coverage"] = ftsIndexedCoverage;
+        j["title_count"] = titleCount;
+        j["title_coverage"] = titleCoverage;
+        j["docs_with_language"] = docsWithLanguage;
+        j["language_coverage"] = languageCoverage;
+        j["kg_edge_count"] = kgEdgeCount;
+        j["kg_edge_density"] = kgEdgeDensity;
+        j["kg_alias_count"] = kgAliasCount;
+        j["kg_alias_density"] = kgAliasDensity;
         j["computed_at_ms"] = computedAtMs;
         j["used_online_overlay"] = usedOnlineOverlay;
         j["reconciled_computed_at_ms"] = reconciledComputedAtMs;
@@ -162,6 +202,10 @@ struct CorpusStats {
         j["classification"]["has_paths"] = hasPaths();
         j["classification"]["has_tags"] = hasTags();
         j["classification"]["has_embeddings"] = hasEmbeddings();
+        j["classification"]["has_extracted_content"] = hasExtractedContent();
+        j["classification"]["has_fts_indexing"] = hasFtsIndexing();
+        j["classification"]["has_titles"] = hasTitles();
+        j["classification"]["has_rich_graph_topology"] = hasRichGraphTopology();
 
         return j;
     }
@@ -211,6 +255,30 @@ struct CorpusStats {
             stats.pathDepthMax = j["path_depth_max"].get<double>();
         if (j.contains("path_relative_depth_avg"))
             stats.pathRelativeDepthAvg = j["path_relative_depth_avg"].get<double>();
+        if (j.contains("content_extracted_count"))
+            stats.contentExtractedCount = j["content_extracted_count"].get<int64_t>();
+        if (j.contains("content_extracted_coverage"))
+            stats.contentExtractedCoverage = j["content_extracted_coverage"].get<double>();
+        if (j.contains("fts_indexed_count"))
+            stats.ftsIndexedCount = j["fts_indexed_count"].get<int64_t>();
+        if (j.contains("fts_indexed_coverage"))
+            stats.ftsIndexedCoverage = j["fts_indexed_coverage"].get<double>();
+        if (j.contains("title_count"))
+            stats.titleCount = j["title_count"].get<int64_t>();
+        if (j.contains("title_coverage"))
+            stats.titleCoverage = j["title_coverage"].get<double>();
+        if (j.contains("docs_with_language"))
+            stats.docsWithLanguage = j["docs_with_language"].get<int64_t>();
+        if (j.contains("language_coverage"))
+            stats.languageCoverage = j["language_coverage"].get<double>();
+        if (j.contains("kg_edge_count"))
+            stats.kgEdgeCount = j["kg_edge_count"].get<int64_t>();
+        if (j.contains("kg_edge_density"))
+            stats.kgEdgeDensity = j["kg_edge_density"].get<double>();
+        if (j.contains("kg_alias_count"))
+            stats.kgAliasCount = j["kg_alias_count"].get<int64_t>();
+        if (j.contains("kg_alias_density"))
+            stats.kgAliasDensity = j["kg_alias_density"].get<double>();
         if (j.contains("computed_at_ms"))
             stats.computedAtMs = j["computed_at_ms"].get<int64_t>();
         if (j.contains("used_online_overlay"))
