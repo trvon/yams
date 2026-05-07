@@ -45,6 +45,7 @@ jobs:
     timeout-minutes: 135
     env:
       BUILD_DIR: builddir
+      YAMS_DISABLE_FAISS: 1
       # Opt-in switch to run the daemon warm-latency bench (off by default)
       RUN_DAEMON_WARM_BENCH: 'false'
     steps:
@@ -68,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config meson ninja-build cmake python3-pip libboost-all-dev
+          sudo apt-get install -y --no-install-recommends pkg-config meson ninja-build cmake python3-pip libboost-all-dev libomp-18-dev ccache
 
       - name: Install Conan
         shell: bash
@@ -97,6 +98,24 @@ jobs:
           key: nightly-conan2-linux-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
           restore-keys: |
             nightly-conan2-linux-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: nightly-ccache-linux-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          restore-keys: |
+            nightly-ccache-linux-
+
+      - name: Setup ccache env
+        shell: bash
+        run: |
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
+          ccache -z >/dev/null 2>&1 || true
 
       - name: Configure (Release) and Build
         shell: bash
@@ -139,6 +158,22 @@ jobs:
         run: |
           set -euo pipefail
           meson test -C "$BUILD_DIR" --suite bench -t 7 --no-rebuild
+
+      - name: Capture failing test diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "### Failing Bench Diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          LOG="$BUILD_DIR/meson-logs/testlog.txt"
+          if [ -f "$LOG" ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            grep -E 'FAIL|killed|SIGABRT|Signal|abort|Error|error:' "$LOG" | head -80 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "### ccache stats" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ccache -s 2>/dev/null | head -10 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Daemon Warm-Latency Bench (opt-in)
         if: env.RUN_DAEMON_WARM_BENCH == 'true'
