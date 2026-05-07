@@ -1106,18 +1106,19 @@ private:
             // Check if it's a lock error that we should retry
             bool isLockError =
                 result.error().message.find("database is locked") != std::string::npos;
-            // Constraint failures are not retryable - don't waste time
-            bool isConstraintError =
-                result.error().message.find("constraint failed") != std::string::npos;
+            // Constraint failures can be transient (e.g. FOREIGN KEY race when
+            // a document insert hasn't committed yet). Retry with backoff.
+            bool isRetryable = isLockError || result.error().message.find("constraint failed") !=
+                                                  std::string::npos;
 
-            if (!isLockError || isConstraintError || attempt == kMaxRetries - 1) {
-                // Non-lock error, constraint error, or final attempt - report and return error
+            if (!isRetryable || attempt == kMaxRetries - 1) {
+                // Non-retryable error or final attempt - report and return error
                 if (isLockError) {
                     daemon::TuneAdvisor::reportDbLockError();
                 }
                 // Always log operation context for constraint errors (helps debugging)
                 auto op = current_metadata_op();
-                if (isConstraintError || metadata_trace_enabled()) {
+                if (isRetryable || metadata_trace_enabled()) {
                     spdlog::warn(
                         "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
                         route, op.empty() ? "(unknown)" : op, result.error().message);
