@@ -112,6 +112,7 @@ jobs:
     name: Tests (${{ matrix.suffix }})
     env:
       BUILD_DIR: builddir
+      YAMS_DISABLE_FAISS: 1
     strategy:
       fail-fast: false
       matrix:
