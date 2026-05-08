@@ -3797,6 +3797,13 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             stats.nerEntityDensity =
                 static_cast<double>(stats.nerEntityCount) / static_cast<double>(stats.docCount);
 
+            stats.kgEdgeCount = std::max<int64_t>(liveKgCounts.edgeCount, 0);
+            stats.kgEdgeDensity =
+                static_cast<double>(stats.kgEdgeCount) / static_cast<double>(stats.docCount);
+            stats.kgAliasCount = std::max<int64_t>(liveKgCounts.aliasCount, 0);
+            stats.kgAliasDensity =
+                static_cast<double>(stats.kgAliasCount) / static_cast<double>(stats.docCount);
+
             stats.contentExtractedCount =
                 static_cast<int64_t>(cachedExtractedCount_.load(std::memory_order_relaxed));
             stats.contentExtractedCoverage = static_cast<double>(stats.contentExtractedCount) /

@@ -180,6 +180,8 @@ struct KGEntityCountSnapshot {
     std::int64_t totalCount{0};
     std::int64_t nativeSymbolCount{0};
     std::int64_t nerEntityCount{0};
+    std::int64_t edgeCount{0};
+    std::int64_t aliasCount{0};
 };
 
 /**
