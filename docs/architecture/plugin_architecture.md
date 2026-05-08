@@ -33,7 +33,7 @@ Content extraction is driven by plugins implementing the `content_extractor_v1` 
 1. **Plugin discovery**: The daemon scans for extractors via `PluginLoader` at startup, matching file types to capable plugins.
 2. **Extraction dispatch**: During `add`/ingest, the `PostIngestQueue` dispatches documents to registered extractors based on MIME type (e.g., PDF extractor, tree-sitter symbol extractor).
 3. **Symbol extraction**: The tree-sitter plugin (`plugin-symbols`) parses source files and emits function/class/import definitions into the knowledge graph, enabling symbol-aware search.
-4. **PDF extraction**: The PDF extractor plugin uses qpdf/poppler to extract text content, which is then indexed for full-text and vector search.
+4. **PDF extraction**: PDF extractor plugins extract text content, which is then indexed for full-text and vector search.
 
 ## Plugin Interfaces
 

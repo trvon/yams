@@ -156,6 +156,9 @@ struct TunedParams {
     float conceptMaxBoost = 0.25f;
     size_t conceptMaxScanResults = 200;
 
+    SearchEngineConfig::ConceptExtractionBackend conceptExtractionBackend =
+        SearchEngineConfig::ConceptExtractionBackend::GlinerWithFallback;
+
     // Cross-reranker controls
     size_t rerankTopK = 5;
     // Minimum relative score (vs. rank-1) for a multi-source doc to count as "competitive
@@ -345,6 +348,7 @@ struct TunedParams {
         config.conceptMaxCount = conceptMaxCount;
         config.conceptMaxBoost = conceptMaxBoost;
         config.conceptMaxScanResults = conceptMaxScanResults;
+        config.conceptExtractionBackend = conceptExtractionBackend;
         config.rerankTopK = rerankTopK;
         config.rerankAnchoredMinRelativeScore = rerankAnchoredMinRelativeScore;
         config.enableReranking = enableReranking;
@@ -486,6 +490,11 @@ struct TunedParams {
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component.
             params.rrfK = 12; // Low k for better top-rank discrimination
+            // GLiNER concept extraction returns empty for 99% of short biomedical
+            // claims (verified by benchmark diagnostics). Use the fast fallback
+            // (sub-phrase mining + IDF-weighted tokens, <1ms) instead.
+            params.conceptExtractionBackend =
+                SearchEngineConfig::ConceptExtractionBackend::Fallback;
             // KG entity weighting is disabled by default: queryKnowledgeGraph() FTS5
             // searches document text for entity labels, which is redundant with the
             // text component on scientific corpora where queries are short biomedical
@@ -530,6 +539,11 @@ struct TunedParams {
             // the graph scorer enough time to resolve query concepts against KG
             // entities — critical for biomedical corpora with ~15 entities/doc.
             params.graphScoringBudgetMs = 30;
+            // Tighter min-signal threshold matches the elevated edge-confidence
+            // floor (0.08) from PostIngestQueue's biomedical-edge filtering.
+            // Pre-Phase-1 edges hovered around 0.05-0.10; post-Phase-1
+            // biomedical edges land at 0.20-0.45.
+            params.graphRerankMinSignal = 0.08F;
             params.graphEntitySignalWeight = 0.50F;
             params.graphStructuralSignalWeight = 0.15F;
             params.graphCoverageSignalWeight = 0.15F;

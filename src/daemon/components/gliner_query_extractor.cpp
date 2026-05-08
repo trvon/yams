@@ -4,15 +4,12 @@
 #include <cctype>
 #include <chrono>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
-#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/plugins/entity_extractor_v2.h>
 #include <yams/search/query_text_utils.h>
-
 #include <algorithm>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <unordered_set>
 
 namespace yams::daemon {
@@ -195,155 +192,6 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
 
         spdlog::debug("GLiNER query extraction: {} concepts in {:.2f}ms", result.concepts.size(),
                       result.extractionTimeMs);
-
-        return result;
-    };
-}
-
-search::EntityExtractionFunc createGlinerExtractionFuncFromProvider(
-    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& providers) {
-    std::shared_ptr<ExternalEntityProviderAdapter> bestProvider;
-    for (const auto& p : providers) {
-        if (p) {
-            bestProvider = p;
-            break;
-        }
-    }
-
-    if (!bestProvider) {
-        spdlog::debug("createGlinerExtractionFuncFromProvider: No entity provider available");
-        return nullptr;
-    }
-
-    spdlog::info("createGlinerExtractionFuncFromProvider: Using external entity provider {}",
-                 bestProvider->name());
-
-    auto providerMutex = std::make_shared<std::mutex>();
-
-    return [providers, bestProvider = std::move(bestProvider),
-            providerMutex = std::move(providerMutex)](
-               const std::string& content,
-               const std::vector<std::string>& entityTypes) -> Result<search::QueryConceptResult> {
-        (void)providers;
-
-        search::QueryConceptResult result;
-        result.usedGliner = false;
-
-        if (content.empty()) {
-            return result;
-        }
-
-        auto startTime = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> extractorLock(*providerMutex);
-
-        // Convert query text to bytes
-        std::vector<std::byte> bytes;
-        bytes.reserve(content.size());
-        for (char c : content) {
-            bytes.push_back(static_cast<std::byte>(c));
-        }
-
-        // Call the external entity provider with a text-like placeholder path
-        // so the Glint plugin treats it as text extraction.
-        const std::string kPlaceholderPath =
-            "query://" + content.substr(0, std::min(content.size(), size_t{40}));
-        auto extractionResult = bestProvider->extractEntities(bytes, kPlaceholderPath, 0, 256);
-
-        if (!extractionResult) {
-            spdlog::debug("GLiNER provider extraction failed: {}",
-                          extractionResult.error().message);
-            return result;
-        }
-
-        result.usedGliner = true;
-
-        std::unordered_set<std::string> requestedTypes;
-        if (!entityTypes.empty()) {
-            for (const auto& t : entityTypes) {
-                requestedTypes.insert(yams::search::canonicalizeEntityType(t));
-            }
-        }
-
-        std::unordered_map<std::string, search::QueryConcept> bestByKey;
-        bestByKey.reserve(extractionResult.value().nodes.size());
-
-        for (const auto& node : extractionResult.value().nodes) {
-            std::string text =
-                node.label.has_value() ? trimAndCollapse(node.label.value()) : std::string{};
-            if (text.empty() || isLikelyNoiseEntity(text, "")) {
-                continue;
-            }
-
-            std::string entityType;
-            if (node.type.has_value()) {
-                entityType = yams::search::canonicalizeEntityType(node.type.value(), text);
-            } else if (node.properties.has_value()) {
-                try {
-                    auto props = nlohmann::json::parse(node.properties.value());
-                    if (props.contains("entity_type")) {
-                        entityType = yams::search::canonicalizeEntityType(
-                            props["entity_type"].get<std::string>(), text);
-                    }
-                } catch (...) {
-                }
-            }
-            if (entityType.empty()) {
-                entityType = "unknown";
-            }
-
-            float confidence = 0.5f;
-            if (node.properties.has_value()) {
-                try {
-                    auto props = nlohmann::json::parse(node.properties.value());
-                    if (props.contains("confidence")) {
-                        confidence = props["confidence"].get<float>();
-                    }
-                } catch (...) {
-                }
-            }
-            if (confidence < kMinConfidence) {
-                continue;
-            }
-
-            if (!requestedTypes.empty() &&
-                requestedTypes.find(entityType) == requestedTypes.end()) {
-                continue;
-            }
-
-            std::string dedupeKey = entityType;
-            dedupeKey.push_back('|');
-            dedupeKey.append(yams::search::normalizeEntityTextForKey(text));
-
-            if (bestByKey.find(dedupeKey) == bestByKey.end() ||
-                confidence > bestByKey[dedupeKey].confidence) {
-                search::QueryConcept qc;
-                qc.text = std::move(text);
-                qc.type = std::move(entityType);
-                qc.confidence = confidence;
-                bestByKey[std::move(dedupeKey)] = std::move(qc);
-            }
-        }
-
-        result.concepts.reserve(bestByKey.size());
-        for (auto& [dedupeKey, qc] : bestByKey) {
-            (void)dedupeKey;
-            result.concepts.push_back(std::move(qc));
-        }
-
-        std::sort(result.concepts.begin(), result.concepts.end(),
-                  [](const search::QueryConcept& a, const search::QueryConcept& b) {
-                      if (a.confidence != b.confidence) {
-                          return a.confidence > b.confidence;
-                      }
-                      return a.text < b.text;
-                  });
-
-        auto endTime = std::chrono::steady_clock::now();
-        result.extractionTimeMs =
-            std::chrono::duration<double, std::milli>(endTime - startTime).count();
-
-        spdlog::debug("GLiNER provider query extraction: {} concepts in {:.2f}ms",
-                      result.concepts.size(), result.extractionTimeMs);
 
         return result;
     };
