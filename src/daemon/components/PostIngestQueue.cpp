@@ -94,221 +94,6 @@ bool isHighValueGraphType(std::string_view normalizedType) {
     return simeon::ScientificAdapter::is_biomedical_suffix(normalizedType);
 }
 
-bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
-    const std::string normEntity = normalizeEntityTextForKey(entityText);
-    const std::string normTitle = normalizeEntityTextForKey(titleText);
-    if (normEntity.empty() || normTitle.empty()) {
-        return false;
-    }
-    return normTitle.find(normEntity) != std::string::npos ||
-           (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
-}
-
-struct TextSegmentWindow {
-    std::string text;
-    std::size_t startOffset = 0;
-    std::size_t endOffset = 0;
-};
-
-std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnippet,
-                                                      std::string_view titleText,
-                                                      std::size_t maxSegments = 3) {
-    std::vector<TextSegmentWindow> segments;
-    if (textSnippet.empty() || maxSegments == 0) {
-        return segments;
-    }
-
-    // IMRAD-aware segmentation: detect structural sections first, then
-    // split each section into sentence windows independently. Fall back
-    // to naive 2-sentence windows when no sections are detected.
-    auto docSections = yams::extraction::util::detectDocumentSections(textSnippet);
-    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
-        if (segEnd <= segStart)
-            return;
-        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
-        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
-        if (cleaned.size() < 24)
-            return;
-        segments.push_back({std::move(cleaned), segStart, segEnd});
-    };
-
-    if (!docSections.sections.empty() && docSections.sections.size() >= 2) {
-        // Distribute maxSegments across sections proportionally
-        std::size_t totalSecs = docSections.sections.size();
-        std::size_t perSec = std::max<std::size_t>(1u, maxSegments / totalSecs);
-        std::size_t remainder = maxSegments % totalSecs;
-
-        for (std::size_t si = 0; si < totalSecs && segments.size() < maxSegments; ++si) {
-            const auto& sec = docSections.sections[si];
-            std::size_t secBudget = perSec + (si < remainder ? 1 : 0);
-            if (secBudget == 0)
-                continue;
-
-            std::string_view secText =
-                textSnippet.substr(sec.startOffset, sec.endOffset - sec.startOffset);
-
-            std::size_t sentenceStart = 0;
-            std::size_t sentenceCount = 0;
-            std::size_t secSegments = 0;
-
-            for (std::size_t i = 0; i < secText.size() && secSegments < secBudget; ++i) {
-                const char c = secText[i];
-                const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-                if (boundary)
-                    ++sentenceCount;
-                if (!boundary)
-                    continue;
-
-                if (sentenceCount >= 2 || c == '\n') {
-                    std::size_t absStart = sec.startOffset + sentenceStart;
-                    std::size_t absEnd = sec.startOffset + i + 1;
-                    flushSegment(absStart, absEnd);
-                    sentenceStart = i + 1;
-                    sentenceCount = 0;
-                    ++secSegments;
-                }
-            }
-            // Final window in this section
-            if (secSegments < secBudget && sentenceStart < secText.size()) {
-                std::size_t absStart = sec.startOffset + sentenceStart;
-                flushSegment(absStart, sec.endOffset);
-            }
-        }
-    }
-
-    // Fallback: naive 2-sentence windows over entire text
-    if (segments.empty()) {
-        std::size_t start = 0;
-        if (!titleText.empty()) {
-            const std::string normTitle = normalizeEntityTextForKey(titleText);
-            const auto newline = textSnippet.find('\n');
-            if (newline != std::string_view::npos) {
-                const std::string firstLine =
-                    normalizeEntityTextForKey(textSnippet.substr(0, newline));
-                if (!firstLine.empty() && firstLine == normTitle) {
-                    start = newline + 1;
-                }
-            }
-        }
-
-        std::size_t sentenceStart = start;
-        std::size_t sentenceCount = 0;
-        for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
-            const char c = textSnippet[i];
-            const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-            if (!boundary)
-                continue;
-            ++sentenceCount;
-            if (sentenceCount >= 2 || c == '\n') {
-                flushSegment(sentenceStart, i + 1);
-                sentenceStart = i + 1;
-                sentenceCount = 0;
-            }
-        }
-        if (segments.size() < maxSegments) {
-            flushSegment(sentenceStart, textSnippet.size());
-        }
-    }
-
-    return segments;
-}
-
-std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
-    const bool lhsBio = isHighValueGraphType(lhsType);
-    const bool rhsBio = isHighValueGraphType(rhsType);
-    if (lhsBio && rhsBio) {
-        return "co_occurs_biomedical";
-    }
-    if ((lhsType == "protein" && rhsType == "cell") ||
-        (lhsType == "cell" && rhsType == "protein")) {
-        return "protein_cell_association";
-    }
-    if ((lhsType == "protein" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "protein")) {
-        return "protein_disease_association";
-    }
-    if ((lhsType == "drug" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "drug")) {
-        return "drug_disease_association";
-    }
-    return "co_mentioned_with";
-}
-
-bool isUsefulNlEntity(const search::QueryConcept& qc) {
-    if (qc.text.empty() || qc.confidence < kMinNlEntityConfidence) {
-        return false;
-    }
-
-    if (qc.text.size() > 160) {
-        return false;
-    }
-
-    bool hasAlphaNum = false;
-    for (unsigned char c : qc.text) {
-        if (std::isalnum(c)) {
-            hasAlphaNum = true;
-            break;
-        }
-    }
-    if (!hasAlphaNum) {
-        return false;
-    }
-
-    const std::string normalizedText = normalizeEntityTextForKey(qc.text);
-    const std::string normalizedType = canonicalizeNlEntityType(qc.type, qc.text);
-    if (isLowValueNlEntity(normalizedText, normalizedType)) {
-        return false;
-    }
-    return true;
-}
-
-struct NlAliasVariant {
-    std::string text;
-    float confidence = 1.0f;
-    std::string sourceTag;
-};
-
-std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
-                                                 const std::string& entityType,
-                                                 float baseConfidence) {
-    std::vector<NlAliasVariant> variants;
-    std::unordered_set<std::string> seen;
-    const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
-
-    auto addVariant = [&](const std::string& value, float confScale, std::string sourceTag) {
-        std::string normalized = normalizeEntityTextForKey(value);
-        if (normalized.size() < 2) {
-            return;
-        }
-        if (!seen.insert(normalized).second) {
-            return;
-        }
-        float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
-        variants.push_back(NlAliasVariant{std::move(normalized), conf, std::move(sourceTag)});
-    };
-
-    auto addGeneratedVariants = [&](const std::string& value, float primaryScale,
-                                    float secondaryScale, std::string primarySource,
-                                    std::string secondarySource) {
-        auto generated = yams::search::generateSurfaceVariants(value, kind, 8);
-        for (size_t i = 0; i < generated.size() && variants.size() < 8; ++i) {
-            addVariant(generated[i], i == 0 ? primaryScale : secondaryScale,
-                       i == 0 ? primarySource : secondarySource);
-        }
-    };
-
-    // Primary alias: full normalized entity text.
-    addGeneratedVariants(entityText, 1.0f, 0.72f, "surface", "variant");
-
-    // Type-qualified alias helps disambiguation for collisions.
-    if (!entityType.empty()) {
-        addGeneratedVariants(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified",
-                             "type_qualified");
-    }
-
-    return variants;
-}
-
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
@@ -1481,6 +1266,9 @@ void PostIngestQueue::processSymbolExtractionBatch(
 void PostIngestQueue::dispatchToSymbolChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
+    if (maxSymbolConcurrent() == 0) {
+        return;
+    }
     auto channel = symbolChannel_;
 
     InternalEventBus::SymbolExtractionJob job;
@@ -1562,6 +1350,9 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
+    if (maxEntityConcurrent() == 0) {
+        return;
+    }
     auto channel = entityChannel_;
 
     InternalEventBus::EntityExtractionJob job;
@@ -3004,16 +2795,10 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.skipExisting = true;
         job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
-        constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
         if (!embedQ->try_push(std::move(job))) {
             auto capturedJob = std::make_shared<InternalEventBus::EmbedJob>(std::move(job));
-            auto capturedPreparedCount = preparedDocsCount;
-            auto capturedChunksCount = preparedChunksCount;
-            auto capturedHashOnlyCount = hashOnlyDocsCount;
             auto capturedBatchSz = batchSize;
-            boost::asio::post(coordinator_->getExecutor(), [capturedJob, capturedPreparedCount,
-                                                            capturedChunksCount,
-                                                            capturedHashOnlyCount,
+            boost::asio::post(coordinator_->getExecutor(), [capturedJob,
                                                             capturedBatchSz]() mutable {
                 int remainingRetries = 8;
                 while (remainingRetries-- > 0) {
