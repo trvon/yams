@@ -1003,10 +1003,6 @@ PostIngestQueue::prepareMetadataEntry(
         prepared.symbolLanguage = symIt->second;
     }
 
-    // Entity extraction via binary provider (Ghidra, Zyp). For text-based
-    // documents, the title extraction stage already runs GLiNER which
-    // produces NL entities and stores them in the KG — no need to dispatch
-    // a separate entity extraction job for the same text.
     prepared.shouldDispatchEntity =
         extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
@@ -1442,15 +1438,10 @@ void PostIngestQueue::dispatchToEntityChannel(
         spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}", hash);
         InternalEventBus::instance().incEntityDropped();
     } else {
+        spdlog::info("[PostIngestQueue] Dispatched entity extraction job for {} ({}) ext={}",
+                     filePath, hash.substr(0, 12), extension);
         InternalEventBus::instance().incEntityQueued();
         TuningManager::notifyWakeup();
-
-        // Throttled dispatch logging: per-document is too spammy for 5k+ docs.
-        const auto nth = entityDispatched_.fetch_add(1, std::memory_order_relaxed) + 1;
-        if ((nth % 1000) == 0 || nth == 1) {
-            spdlog::info("[PIQ-entity] dispatched n={} ext={} file={} hash={}", nth, extension,
-                         filePath, hash.substr(0, 12));
-        }
     }
 }
 
@@ -1494,18 +1485,13 @@ void PostIngestQueue::processEntityExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-
-    // Process all entity jobs. Fast-text entities are accumulated into the
-    // shared batch by the stage function and written directly to the KG via
-    // the metadata repository (bypassing the WriteCoordinator, whose writer
-    // loop cap of 8 batches/iteration cannot keep up with 5K+ small writes).
     for (auto& job : jobs) {
         processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
                                      job.contentBytes.get());
     }
 }
 
-void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
+void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
                                                    const std::string& filePath,
                                                    const std::string& extension,
                                                    std::vector<std::byte>* contentBytes) {
@@ -1528,11 +1514,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         }
 
         if (!provider) {
-            // No binary provider matches this extension. Text-based entity
-            // extraction is handled by the title extraction stage (GLiNER),
-            // which produces NL entities → KG during title processing.
-            // Avoid dispatching duplicate GLiNER work via the entity poller.
-            InternalEventBus::instance().incEntityDropped();
+            spdlog::warn("[PostIngestQueue] No entity provider for extension {}", extension);
             return;
         }
 
@@ -1562,8 +1544,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         size_t totalNodesInserted = 0;
         size_t totalEdgesInserted = 0;
         size_t totalAliasesInserted = 0;
-        // Track entity type distribution for diagnostics.
-        std::unordered_map<std::string, size_t> entityTypeCounts;
         const std::string snapshotId = hash;
 
         // NOTE: Entity embeddings (entity_vectors table) are intentionally NOT generated here.
@@ -1576,7 +1556,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         auto result = provider->extractEntitiesStreaming(
             content, filePath,
             [this, &totalNodesInserted, &totalEdgesInserted, &totalAliasesInserted, &hash,
-             &snapshotId, &entityTypeCounts,
+             &snapshotId,
              &filePath](ExternalEntityProviderAdapter::EntityResult batch,
                         const ExternalEntityProviderAdapter::ExtractionProgress& progress) -> bool {
                 if (batch.nodes.empty()) {
@@ -1595,13 +1575,6 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
                 for (const auto& node : batch.nodes) {
                     canonicalNodes.push_back(node);
-
-                    if (node.type.has_value() && !node.type->empty()) {
-                        entityTypeCounts[canonicalizeNlEntityType(*node.type,
-                                                                  node.label.value_or(""))] += 1;
-                    } else {
-                        entityTypeCounts["unknown"] += 1;
-                    }
 
                     if (hasSnapshot) {
                         metadata::KGNode versionNode = node;
@@ -1731,17 +1704,10 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         double ms = std::chrono::duration<double, std::milli>(duration).count();
 
         if (result) {
-            // Build entity type summary for diagnostics.
-            std::string typeSummary;
-            for (const auto& [type, count] : entityTypeCounts) {
-                if (!typeSummary.empty())
-                    typeSummary += ", ";
-                typeSummary += type + "=" + std::to_string(count);
-            }
-            spdlog::info("[PIQ-entity] completed {} in {:.2f}ms "
-                         "(batches={}, nodes={}, edges={}, aliases={}, types=[{}])",
+            spdlog::info("[PostIngestQueue] Entity extraction completed for {} in {:.2f}ms "
+                         "(batches={}, nodes={}, edges={}, aliases={})",
                          hash.substr(0, 12), ms, result.value().batchNumber, totalNodesInserted,
-                         totalEdgesInserted, totalAliasesInserted, typeSummary);
+                         totalEdgesInserted, totalAliasesInserted);
         } else {
             // Partial success - some batches may have been ingested
             if (totalNodesInserted > 0) {
@@ -1876,36 +1842,10 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         // NL types for knowledge graph population
         static const std::vector<std::string> kCombinedEntityTypes = {
             // Title-related types
-            "title",
-            "heading",
-            "function",
-            "class",
-            "method",
-            "module",
-            "file",
-            "symbol",
+            "title", "heading", "function", "class", "method", "module", "file", "symbol",
             // NL entity types (from Glint plugin defaults)
-            "person",
-            "organization",
-            "location",
-            "date",
-            "event",
-            "product",
-            "technology",
-            "concept",
-            // Biomedical entity types for scientific text
-            "protein",
-            "gene",
-            "cell",
-            "disease",
-            "chemical",
-            "drug",
-            "pathway",
-            "biological_process",
-            "biomarker",
-            "anatomy",
-            "organism",
-        };
+            "person", "organization", "location", "date", "event", "product", "technology",
+            "concept"};
 
         // Title type set for filtering
         static const std::unordered_set<std::string> kTitleTypes = {

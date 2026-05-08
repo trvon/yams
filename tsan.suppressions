@@ -48,18 +48,3 @@ mutex:boost::asio::detail::strand_executor_service
 
 race:TuningManager
 race:unique_ptr*TuningManager
-
-# tinyfsm uses CRTP static state per Fsm class, so concurrent construction
-# of multiple YamsDaemon instances in the same process (test-only scenario)
-# races on the static snapshot/entry storage. Production has one daemon
-# per process; the race cannot occur there.
-race:yams::daemon::detail::LifecycleMachine
-race:yams::daemon::detail::PluginHostMachine
-race:yams::daemon::detail::EmbeddingProviderMachine
-race:yams::daemon::detail::SearchEngineMachine
-race:yams::daemon::detail::ServiceManagerMachine
-race:yams::daemon::LifecycleSnapshot
-race:yams::daemon::ProviderSnapshot
-race:yams::daemon::PluginHostSnapshot
-race:yams::daemon::SearchEngineSnapshot
-race:yams::daemon::ServiceManagerSnapshot

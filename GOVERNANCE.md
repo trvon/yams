@@ -28,7 +28,7 @@ At present, the sole Maintainer and Owner is: `@trvon`.
 - DCO sign-off is required for all commits.
 
 ## Release Process
-- Versioning follows SemVer. User-visible or interface changes require CHANGELOG updates and, when applicable, stability notes.
+- Versioning follows SemVer. User-visible or interface changes require CHANGELOG updates and, when applicable, stability PBI updates.
 - Release cadence: monthly minor releases, ad-hoc patch releases as needed.
 - A Release Manager (default: `@trvon`) coordinates tagging, artifacts, and notes.
 

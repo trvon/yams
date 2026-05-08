@@ -83,25 +83,6 @@ struct SearchEngineConfig {
     size_t conceptMaxScanResults = 200;
     bool waitForConceptExtraction = true;
 
-    /// Controls which backend produces query-time concepts for entity matching
-    /// and graph-based reranking. Fallback uses sub-phrase mining + IDF-weighted
-    /// tokens (<1ms per query); GlinerWithFallback tries GLiNER first and falls
-    /// back when GLiNER returns empty or times out.
-    enum class ConceptExtractionBackend {
-        Fallback,
-        GlinerWithFallback,
-    } conceptExtractionBackend = ConceptExtractionBackend::GlinerWithFallback;
-
-    static const char* conceptExtractionBackendToString(ConceptExtractionBackend backend) noexcept {
-        switch (backend) {
-            case ConceptExtractionBackend::Fallback:
-                return "Fallback";
-            case ConceptExtractionBackend::GlinerWithFallback:
-                return "GlinerWithFallback";
-        }
-        return "Fallback";
-    }
-
     size_t maxResults = 100;
     float similarityThreshold = 0.0f;
     bool enableParallelExecution = true;

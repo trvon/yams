@@ -2869,6 +2869,10 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     }
 
     cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+    if (!cachedQueryConceptExtractor_) {
+        cachedQueryConceptExtractor_ =
+            createGlinerExtractionFuncFromProvider(pluginManager_->getEntityProviders());
+    }
     engine->setConceptExtractor(cachedQueryConceptExtractor_);
     if (cachedQueryConceptExtractor_) {
         spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);

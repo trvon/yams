@@ -2,7 +2,6 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/simeon_lexical_backend.h>
@@ -195,8 +194,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
     builder->withMetadataRepo(std::move(metadataRepo));
-    // Capture kgStore for the entity-export callback before it moves into the builder.
-    auto entityExportKg = kgStore;
     if (kgStore)
         builder->withKGStore(std::move(kgStore));
     if (vectorEnabled && vectorDatabase)
@@ -285,28 +282,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // RM3 SAB-smooth — test env: YAMS_SIMEON_RM3=1
             if (const char* rm3Env = std::getenv("YAMS_SIMEON_RM3")) {
                 lexicalCfg.rm3_enabled = std::string(rm3Env) == "1";
-            }
-
-            // Enable concept mining and wire its entity export to the KG
-            // store so the graph reranker can match query concepts against
-            // per-document concept bigrams.
-            lexicalCfg.concept_mining_enabled = true;
-            if (entityExportKg) {
-                auto capturedKg = entityExportKg;
-                lexicalCfg.entity_callback =
-                    [capturedKg](std::int64_t docId, std::string entityText, float confidence) {
-                        auto batchResult = capturedKg->beginWriteBatch();
-                        if (!batchResult)
-                            return;
-                        auto& batch = *batchResult.value();
-                        metadata::DocEntity docEnt;
-                        docEnt.documentId = docId;
-                        docEnt.entityText = std::move(entityText);
-                        docEnt.confidence = confidence;
-                        docEnt.extractor = "simeon_concept";
-                        batch.addDocEntities({std::move(docEnt)});
-                        batch.commit();
-                    };
             }
 
             opts.simeonLexicalConfig = lexicalCfg;

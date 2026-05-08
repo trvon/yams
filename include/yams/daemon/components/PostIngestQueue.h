@@ -621,9 +621,6 @@ private:
     std::atomic<std::uint64_t> gs_highValueEntities_{0};
     std::atomic<std::uint64_t> gs_totalEdges_{0};
     std::atomic<std::uint64_t> gs_totalPrimaryTopicEdges_{0};
-
-    // Entity dispatch diagnostics
-    std::atomic<std::uint64_t> entityDispatched_{0};
 };
 
 } // namespace yams::daemon

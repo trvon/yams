@@ -528,7 +528,7 @@ using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
 
 ## 7. Recommendations
 
-### Short-Term (external extraction plugin work Completion)
+### Short-Term (PBI-075 Completion)
 1. ✅ **DONE:** ContentExtractorFactory integration
 2. ⏳ **IN PROGRESS:** Document extraction pipeline (this document)
 3. 🔄 **NEXT:** Create `IndexingService::indexContentForDocument()` utility
@@ -585,7 +585,7 @@ using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
 
 ## 10. References
 
-- **external extraction plugin work:** Binary File Extraction via Ghidra Plugin Integration
+- **PBI-075:** Binary File Extraction via Ghidra Plugin Integration
 - **Extraction Utility:** `src/extraction/extraction_util.cpp`
 - **ServiceManager:** `src/daemon/components/ServiceManager.cpp`
 - **RepairCoordinator:** `src/daemon/components/RepairCoordinator.cpp`

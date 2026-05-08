@@ -134,20 +134,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         cfg.enableParallelExecution = options.config.enableParallelExecution;
         cfg.includeDebugInfo = options.config.includeDebugInfo;
 
-        spdlog::info(
-            "SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, "
-            "simeon_text={:.2f}, vector={:.2f}, "
-            "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
-            "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f}, "
-            "concept_backend={})",
-            tuningStateToString(overrideState),
-            SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
-            cfg.textWeight, cfg.simeonTextWeight, cfg.vectorWeight,
-            SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy), cfg.vectorOnlyThreshold,
-            cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN, cfg.lexicalFloorBoost,
-            cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak, cfg.semanticRescueSlots,
-            cfg.semanticRescueMinVectorScore,
-            SearchEngineConfig::conceptExtractionBackendToString(cfg.conceptExtractionBackend));
+        spdlog::info("SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, "
+                     "simeon_text={:.2f}, vector={:.2f}, "
+                     "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
+                     "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
+                     tuningStateToString(overrideState),
+                     SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
+                     cfg.textWeight, cfg.simeonTextWeight, cfg.vectorWeight,
+                     SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                     cfg.vectorOnlyThreshold, cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN,
+                     cfg.lexicalFloorBoost, cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak,
+                     cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
     } else if (options.autoTune && metadataRepo_) {
         // Get corpus statistics from metadata repository
         auto statsResult = metadataRepo_->getCorpusStats();
