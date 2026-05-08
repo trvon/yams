@@ -1,0 +1,32 @@
+[
+  {
+    "name": "sqlite_distance_final",
+    "status": "ok",
+    "duration_sec": 20.208,
+    "user_cpu_sec": 20.01,
+    "sys_cpu_sec": 0.11,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/distance_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_batch_final",
+    "status": "ok",
+    "duration_sec": 11.681,
+    "user_cpu_sec": 8.94,
+    "sys_cpu_sec": 0.06,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/batch_distance_benchmark"
+    ]
+  },
+  {
+    "name": "sqlite_vec0_final",
+    "status": "ok",
+    "duration_sec": 1.021,
+    "user_cpu_sec": 5.94,
+    "sys_cpu_sec": 0.07,
+    "cmd": [
+      ".artifacts/build/sqlite-vec-cpp-profile/benchmarks/vec0_ann_benchmark"
+    ]
+  }
+]

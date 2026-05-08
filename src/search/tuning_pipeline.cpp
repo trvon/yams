@@ -116,6 +116,7 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.graphCoverageSignalWeight = config.graphCoverageSignalWeight;
     params.graphPathSignalWeight = config.graphPathSignalWeight;
     params.graphCorroborationFloor = config.graphCorroborationFloor;
+    params.conceptExtractionBackend = config.conceptExtractionBackend;
     return params;
 }
 

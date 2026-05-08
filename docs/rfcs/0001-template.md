@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Authors: @your-handle
-- Tracking: link to PR / issue / PBI
+- Tracking: link to PR / issue / work item
 
 ## Summary
 

@@ -1,0 +1,16 @@
+rules:
+  - id: yams.cpp.memcpy-non-pod-object
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      memcpy writes into a non-byte destination expression. Verify the destination type is trivially
+      copyable and alignment-safe; prefer typed deserialization helpers for structured data.
+    metadata:
+      category: correctness
+      cwe: "CWE-704"
+      confidence: low
+      precision: low
+      yams_triage: binary-codec
+    patterns:
+      - pattern: std::memcpy(&$DST, $SRC, $N)
+      - pattern-not: std::memcpy(&$DST, $SRC, sizeof($DST))

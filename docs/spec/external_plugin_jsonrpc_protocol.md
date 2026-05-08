@@ -3,7 +3,7 @@
 **Version:** 1.0  
 **Date:** 2025-11-01  
 **Status:** Draft  
-**Related:** PBI-075, docs/PLUGINS.md, external/yams_sdk/
+**Related:** docs/PLUGINS.md, external/yams_sdk/
 
 ---
 
@@ -677,7 +677,7 @@ class ExternalPluginExtractor {
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0 | 2025-11-01 | Initial specification for PBI-075 |
+| 1.0 | 2025-11-01 | Initial specification |
 
 ---
 

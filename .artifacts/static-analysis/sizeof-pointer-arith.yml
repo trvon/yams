@@ -1,0 +1,9 @@
+rules:
+  - id: local-suspicious-add-sizeof
+    languages: [cpp]
+    severity: WARNING
+    message: Pointer arithmetic with sizeof; verify pointer element type is byte-sized or use explicit byte helper/std::next.
+    patterns:
+      - pattern-either:
+          - pattern: $PTR + sizeof($T)
+          - pattern: sizeof($T) + $PTR
