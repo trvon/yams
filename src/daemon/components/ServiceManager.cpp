@@ -2531,7 +2531,6 @@ void ServiceManager::startDeferredMetadataWarmup() {
 
         try {
             spdlog::info("[ServiceManager] Deferred metadata warmup started");
-            (void)metadataRepo->getCorpusStats();
             metadataRepo->warmValueCountsCache();
             spdlog::info("[ServiceManager] Deferred metadata warmup finished");
 

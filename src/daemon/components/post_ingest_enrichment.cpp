@@ -293,6 +293,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto ch = kgChannel_;
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
+    cfg.batchLimiterPerTask = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[1];
     cfg.pauseFlag = &stagePaused_[1];
@@ -694,6 +695,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                                   const std::string& language,
                                                   const std::string& /*mimeType*/) {
     titleNlDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
+    InternalEventBus::instance().incTitleConsumed();
     auto te = getTitleExtractor();
     if (!te)
         return;
@@ -710,7 +712,6 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             "title", "heading", "function", "class", "method", "module", "file", "symbol"};
         auto r = te(textSnippet, kTypes);
         if (!r || !r.value().usedGliner || r.value().concepts.empty()) {
-            InternalEventBus::instance().incTitleConsumed();
             return;
         }
 
@@ -1021,7 +1022,6 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     std::move(batch), "PostIngestQueue::nlEntityKg/" + batch->sourceFile));
             }
         }
-        InternalEventBus::instance().incTitleConsumed();
         auto d = std::chrono::steady_clock::now() - t0;
         spdlog::info("[PostIngestQueue] Title+NL for {} in {:.2f}ms (title={}, nl={})",
                      hash.substr(0, 12), std::chrono::duration<double, std::milli>(d).count(),

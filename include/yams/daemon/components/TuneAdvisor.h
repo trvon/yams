@@ -1992,7 +1992,8 @@ public:
         return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).title;
     }
     static uint32_t postTitleConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).title;
+        return std::max<uint32_t>(1u,
+                                  postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).title);
     }
     static void setPostTitleConcurrent(uint32_t v) {
         postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
