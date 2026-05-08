@@ -8,7 +8,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -220,9 +219,7 @@ BenchConfig loadConfig(const fs::path& configPath) {
         run.repeat = std::max(1, entry.value("repeat", 1));
         run.enableEmbeddings = entry.value("enable_embeddings", false);
         run.requireTopologyFresh = entry.value("require_topology_fresh", run.enableEmbeddings);
-        run.requireSearchProbe = entry.value("require_search_probe", run.enableEmbeddings);
         run.embeddingModel = entry.value("embedding_model", std::string("simeon-default"));
-        run.searchProbeTimeoutSecs = entry.value("search_probe_timeout_secs", 120);
         if (entry.contains("args")) {
             for (const auto& arg : entry["args"]) {
                 run.args.push_back(arg.get<std::string>());
@@ -464,8 +461,8 @@ bool probeDaemonSearch(yams::daemon::DaemonClient& client, const std::string& qu
     req.searchType = searchType;
     req.limit = 5;
     req.pathsOnly = true;
-    req.timeout = std::chrono::milliseconds(2000);
-    auto result = yams::cli::run_sync(client.search(req), std::chrono::seconds(3));
+    req.timeout = std::chrono::milliseconds(5000);
+    auto result = yams::cli::run_sync(client.search(req), std::chrono::seconds(6));
     if (!result)
         return false;
     for (const auto& r : result.value().results) {
@@ -526,7 +523,7 @@ SearchableWaitResult waitForSearchable(yams::daemon::DaemonClient& client,
     StatusSnapshot last;
     bool havePrevious = false;
     int stableCount = 0;
-    constexpr int kStableRequired = 2;
+    constexpr int kStableRequired = 3;
     bool keywordFound = !requireSearchProbe;
     bool hybridFound = !requireSearchProbe;
     const auto start = std::chrono::steady_clock::now();
@@ -578,7 +575,7 @@ SearchableWaitResult waitForSearchable(yams::daemon::DaemonClient& client,
 
         previous = current;
         havePrevious = true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     result.lastSnapshot = last;
@@ -743,10 +740,6 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         } else {
             harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
         }
-        harnessOptions.trustedPluginPaths = {
-            fs::path("/opt/homebrew/lib/yams/plugins"),
-            fs::path("/usr/local/lib/yams/plugins"),
-        };
     }
     harnessOptions.enableAutoRepair = false;
     harnessOptions.isolateState = true;
@@ -766,6 +759,13 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     clientCfg.socketPath = harness.socketPath();
     clientCfg.autoStart = false;
     yams::daemon::DaemonClient client(clientCfg);
+
+    std::string probeToken;
+    std::string probeExpectedPath;
+    if (run.requireSearchProbe) {
+        probeExpectedPath = createSentinelFile(runRoot, probeToken);
+        spdlog::info("[bench] Search probe: token={} path={}", probeToken, probeExpectedPath);
+    }
 
     DocumentIngestionService ingestion;
     AddOptions addOptions;
@@ -791,21 +791,6 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         }
     }
 
-    std::string probeToken;
-    std::string probeExpectedPath;
-    if (run.requireSearchProbe) {
-        probeExpectedPath = createSentinelFile(runRoot, probeToken);
-        spdlog::info("[bench] Search probe: token={} path={}", probeToken, probeExpectedPath);
-        AddOptions sentinelOpts = addOptions;
-        sentinelOpts.path = probeExpectedPath;
-        sentinelOpts.recursive = false;
-        auto sentinelResult = ingestion.addViaDaemon(sentinelOpts);
-        if (!sentinelResult) {
-            throw std::runtime_error("Sentinel ingest failed: " + sentinelResult.error().message);
-        }
-        spdlog::info("[bench] Sentinel document ingested: {}", probeToken);
-    }
-
     auto& bus = yams::daemon::InternalEventBus::instance();
     const auto baseEmbedQueued = bus.embedQueued();
     const auto baseEmbedConsumed = bus.embedConsumed();
@@ -828,6 +813,17 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     const auto baseTitleQueued = bus.titleQueued();
     const auto baseTitleConsumed = bus.titleConsumed();
     const auto baseTitleDropped = bus.titleDropped();
+
+    if (run.requireSearchProbe && !probeToken.empty()) {
+        AddOptions sentinelOpts = addOptions;
+        sentinelOpts.path = probeExpectedPath;
+        sentinelOpts.recursive = false;
+        auto sentinelResult = ingestion.addViaDaemon(sentinelOpts);
+        if (!sentinelResult) {
+            throw std::runtime_error("Sentinel ingest failed: " + sentinelResult.error().message);
+        }
+        spdlog::info("[bench] Sentinel document ingested: {}", probeToken);
+    }
 
     const auto start = std::chrono::steady_clock::now();
     auto addResult = ingestion.addViaDaemon(addOptions);
@@ -907,10 +903,11 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
 
     const bool isSimeonFullPipeline = run.enableEmbeddings && !useMockEmbeddings && useSimeon;
     if (isSimeonFullPipeline && result.titleQueued == 0 && result.titleConsumed == 0) {
-        spdlog::warn("[bench] Simeon run '{}' has titleQueued==0 — GLiNER title+NL async "
-                     "extractor not wired (no entity-extractor plugins loaded). "
-                     "Deterministic title fallback remains active.",
-                     run.label);
+        spdlog::error(
+            "[bench] Simeon full-pipeline run '{}' has titleQueued==0 and titleConsumed==0 — "
+            "title extractor was not wired. This benchmark is misconfigured.",
+            run.label);
+        result.exitCode = 4;
     }
     return result;
 }
