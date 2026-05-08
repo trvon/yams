@@ -200,6 +200,8 @@ public:
         bool shouldDispatchTitle = false;
         bool shouldDispatchEmbed = true;
         std::string titleTextSnippet; // First N chars for async GLiNER title extraction
+        std::vector<std::string> fallbackEntities; // ScientificAdapter entities for bulk write
+        std::vector<std::string> fallbackAliases;  // ScientificAdapter aliases for bulk write
     };
 
     /// Result of failed text extraction, requires status update.

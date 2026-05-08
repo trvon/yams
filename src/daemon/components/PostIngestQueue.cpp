@@ -1075,64 +1075,14 @@ PostIngestQueue::prepareMetadataEntry(
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
     }
-    // Training-free entity extraction: always runs. Provides baseline entity
-    // coverage even when GLiNER is unavailable or fails. Entities are written
-    // via WriteCoordinator alongside GLiNER output for complementary coverage.
+    // Training-free entity extraction: always runs. Entities are stored
+    // for bulk write in commitBatchResults to avoid WriteCoordinator backlog.
     if (!prepared.extractedText.empty() && writeCoordinator_ && kg_) {
         auto entities =
             simeon::ScientificAdapter::extract_entities(prepared.extractedText, /*max=*/24);
-        if (!entities.empty()) {
-            auto batch = std::make_unique<DeferredKGBatch>();
-            batch->nodes.reserve(entities.size());
-            batch->aliases.reserve(entities.size());
-            std::string normPath = normalizeGraphPath(prepared.filePath);
-            batch->sourceFile = normPath.empty() ? prepared.filePath : normPath;
-            batch->documentIdToDelete = prepared.documentId;
-
-            for (const auto& entity : entities) {
-                std::string nodeKey = "nl_entity:scientific:" + normalizeEntityTextForKey(entity);
-                metadata::KGNode node;
-                node.nodeKey = nodeKey;
-                node.label = entity;
-                node.type = "scientific_entity";
-                nlohmann::json props;
-                props["entity_text"] = entity;
-                props["entity_type"] = "scientific_entity";
-                props["confidence"] = 0.55f;
-                props["first_seen_file"] = common::sanitizeUtf8(prepared.filePath);
-                if (!prepared.hash.empty())
-                    props["first_seen_hash"] = prepared.hash;
-                node.properties = props.dump();
-                batch->nodes.push_back(std::move(node));
-
-                metadata::KGAlias alias;
-                alias.alias = normalizeEntityTextForKey(entity);
-                alias.source = "scientific_adapter|" + nodeKey;
-                alias.confidence = 0.55f;
-                batch->aliases.push_back(std::move(alias));
-
-                DeferredDocEntity docEnt;
-                docEnt.documentId = prepared.documentId;
-                docEnt.entityText = entity;
-                docEnt.nodeKey = nodeKey;
-                docEnt.confidence = 0.55f;
-                docEnt.extractor = "scientific_adapter";
-                batch->deferredDocEntities.push_back(std::move(docEnt));
-            }
-
-            if (kg_)
-                kg_->updateEnqueueCounts(static_cast<std::int64_t>(entities.size()), 0,
-                                         static_cast<std::int64_t>(batch->aliases.size()));
-            // Invalidate corpus stats cache so KG readiness poll sees the entity data
-            if (meta_)
-                meta_->signalCorpusStatsStale();
-
-            auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
-                                                        "PostIngestQueue::scientificAdapter/" +
-                                                            prepared.hash.substr(0, 12));
-            writeCoordinator_->enqueue(std::move(wb));
-            deferredDocEntitiesQueued_.fetch_add(entities.size(), std::memory_order_relaxed);
-        }
+        prepared.fallbackEntities = std::move(entities);
+        for (const auto& e : prepared.fallbackEntities)
+            prepared.fallbackAliases.push_back(normalizeEntityTextForKey(e));
     }
 
     return prepared;
@@ -2898,6 +2848,49 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                     spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
                                  metaResult.error().message);
                 }
+            }
+        }
+
+        // Bulk entity write: accumulate ScientificAdapter entities across
+        // all successes into one batch. Reduces WriteCoordinator enqueue
+        // count from O(N) per-document to O(1) per extraction batch.
+        if (writeCoordinator_ && kg_) {
+            std::vector<std::string> allEnts;
+            for (const auto& s : successes)
+                for (const auto& e : s.fallbackEntities)
+                    allEnts.push_back(e);
+            if (!allEnts.empty()) {
+                auto batch = std::make_unique<DeferredKGBatch>();
+                batch->nodes.reserve(allEnts.size());
+                batch->aliases.reserve(allEnts.size());
+                batch->sourceFile = "PostIngestQueue::bulkScientificAdapter";
+                std::unordered_set<std::string> seen;
+                for (const auto& e : allEnts) {
+                    std::string nk = normalizeEntityTextForKey(e);
+                    if (!seen.insert(nk).second)
+                        continue;
+                    metadata::KGNode n;
+                    n.nodeKey = "nl_entity:scientific:" + nk;
+                    n.label = e;
+                    n.type = "scientific_entity";
+                    n.properties = nlohmann::json{{"entity_text", e},
+                                                  {"entity_type", "scientific_entity"},
+                                                  {"confidence", 0.55f}}
+                                       .dump();
+                    batch->nodes.push_back(std::move(n));
+                    metadata::KGAlias al;
+                    al.alias = nk;
+                    al.source = "scientific_adapter|" + n.nodeKey;
+                    al.confidence = 0.55f;
+                    batch->aliases.push_back(std::move(al));
+                }
+                kg_->updateEnqueueCounts(static_cast<std::int64_t>(batch->nodes.size()), 0,
+                                         static_cast<std::int64_t>(batch->aliases.size()));
+                meta_->signalCorpusStatsStale();
+                writeCoordinator_->enqueue(makeWriteBatchFromDeferredKGBatch(
+                    std::move(batch), "PostIngestQueue::bulkScientificAdapter"));
+                deferredDocEntitiesQueued_.fetch_add(batch->nodes.size(),
+                                                     std::memory_order_relaxed);
             }
         }
     }
