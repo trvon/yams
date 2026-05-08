@@ -470,6 +470,7 @@ struct StoreDocumentResponse {
     std::string hash;
     std::uint64_t bytesStored{0};
     std::uint64_t bytesDeduped{0};
+    int64_t documentId{-1};
 };
 
 struct RetrieveDocumentRequest {

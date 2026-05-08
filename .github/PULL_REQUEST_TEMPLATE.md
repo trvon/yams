@@ -24,7 +24,7 @@
 ## Links
 - Related tickets:
 
-## Compliance
-- [ ] DCO: Each commit includes a `Signed-off-by: Your Name <you@example.com>` line
+## Sign-off
+- [ ] DCO: Please include a `Signed-off-by: Your Name <you@example.com>` line in each commit if using DCO
 
-> Note: Codeowners review is required. See GOVERNANCE.md.
+> Note: Codeowners review is appreciated. See GOVERNANCE.md for more on our process.

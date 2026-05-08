@@ -3,7 +3,7 @@
 Thanks for your interest in contributing!
 
 ## Bug reports and features
-- Tracker: SourceHut tickets (GitHub Issues will be disabled once SourceHut is stable).
+- Tracker: We currently use GitHub Issues.
 - Filing URL: https://sr.ht/~trvon/yams/trackers
 - Use the ticket template in `TICKET_TEMPLATE.md` for bug reports and feature requests.
 - Please include: version/commit, platform, repro steps, expected/actual behavior, logs. For security issues, see SECURITY.md.
@@ -49,5 +49,5 @@ Thanks for your interest in contributing!
 ## Governance and Process
 - Please review GOVERNANCE.md for roles, decision process, and releases.
 - Material changes require an RFC (`docs/rfcs`) and, once accepted, an ADR (`docs/adrs`).
-- All commits must include DCO sign-off: add a line `Signed-off-by: Your Name <you@example.com>` to your commit message.
-- CODEOWNERS reviews are required; see `.github/CODEOWNERS`.
+- We prefer commits to include DCO sign-off: add a line `Signed-off-by: Your Name <you@example.com>` to your commit message.
+- CODEOWNERS reviews are encouraged; see `.github/CODEOWNERS`.

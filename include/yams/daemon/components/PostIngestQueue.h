@@ -143,7 +143,7 @@ struct MetadataCache {
 
 class PostIngestQueue {
 public:
-    static constexpr double kKgBackpressureThreshold = 0.95;
+    static constexpr double kKgBackpressureThreshold = 0.85;
 
     struct Timing {
         std::uint64_t calls{0};
@@ -170,6 +170,9 @@ public:
     struct Task {
         std::string hash;
         std::string mime;
+        int64_t documentId{-1};
+        std::string filePath;
+        bool noEmbeddings{false};
     };
 
     /// Result of successful text extraction, ready for batch DB insertion.
@@ -180,6 +183,7 @@ public:
         std::string filePath; // Full path for KG node creation
         std::string title;
         std::string extractedText;
+        std::string abstract; // IMRAD-detected abstract section
         std::string mimeType;
         std::string extension;
         std::vector<std::string> tags;

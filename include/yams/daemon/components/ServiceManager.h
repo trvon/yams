@@ -245,6 +245,7 @@ public:
     IngestMetricsPublisher& getIngestMetricsPublisher() { return metricsPublisher_; }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
+    void enqueuePostIngestBatch(std::vector<PostIngestQueue::Task> tasks);
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }
@@ -706,6 +707,8 @@ private:
 
     std::atomic<bool> shutdownInvoked_{false};
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
+    std::atomic<bool> topologyRebuildPending_{false};
+    std::atomic<bool> topologyRebuildInProgress_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 

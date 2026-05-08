@@ -2572,7 +2572,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     }
                 }
             }
-            spdlog::info(
+            spdlog::debug(
                 "[graph_rerank-gate] enable={} kgScorer={} results={} resultSize={} "
                 "shortQueryBudgeted={} corpusWarming={} bypassWarmingGate={} "
                 "lexicalReady={} awaitingDrain={} postIngestInflight={} postIngestQueued={} "

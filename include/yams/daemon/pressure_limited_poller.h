@@ -75,12 +75,12 @@ inline std::chrono::milliseconds pollerMaxIdleDelay() {
     if (auto snap = TuningSnapshotRegistry::instance().get()) {
         if (snap->daemonIdle) {
             return std::chrono::milliseconds(
-                std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+                std::max<uint32_t>(10u, std::min<uint32_t>(TuneAdvisor::idleTickMs(), 50u)));
         }
         return std::chrono::milliseconds(
-            std::max<uint32_t>(5u, std::min<uint32_t>(snap->workerPollMs, 25u)));
+            std::max<uint32_t>(2u, std::min<uint32_t>(snap->workerPollMs, 10u)));
     }
-    return std::chrono::milliseconds(5);
+    return std::chrono::milliseconds(2);
 }
 
 } // namespace detail

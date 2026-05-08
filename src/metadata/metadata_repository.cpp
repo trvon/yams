@@ -1601,7 +1601,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 return execResult.error();
             }
 
-            // 2. Insert FTS index
+            // 2. Insert FTS index with field-weighted content
+            // Title tokens repeated 3x, abstract tokens 2x, body tokens 1x.
+            // This gives BM25 natural field weighting without schema changes.
             if (hasFts5 && ftsStmtOpt) {
                 auto& ftsStmt = **ftsStmtOpt;
                 if (auto r = ftsStmt.reset(); !r) {
@@ -1612,7 +1614,44 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     db.execute("ROLLBACK");
                     return r.error();
                 }
-                auto ftsBind = ftsStmt.bindAll(entry.documentId, sanitizedContent, sanitizedTitle);
+
+                // Build boosted content: title (3x) + abstract (2x) + body
+                std::string boosted;
+                constexpr std::size_t kMaxBoostedBytes = kMaxTextBytes;
+                boosted.reserve(
+                    std::min<std::size_t>(sanitizedContent.size() + 512, kMaxBoostedBytes));
+
+                auto append_repeated = [&](std::string_view text, int times) {
+                    if (text.empty())
+                        return;
+                    for (int t = 0; t < times; ++t) {
+                        if (boosted.size() >= kMaxBoostedBytes)
+                            break;
+                        if (!boosted.empty() && boosted.back() != ' ')
+                            boosted.push_back(' ');
+                        std::size_t avail = kMaxBoostedBytes - boosted.size();
+                        if (avail < text.size() + 1) {
+                            boosted.append(text.data(), std::min(text.size(), avail));
+                            break;
+                        }
+                        boosted.append(text);
+                    }
+                };
+
+                append_repeated(sanitizedTitle, 3);
+                if (!entry.abstract.empty()) {
+                    std::string absStorage;
+                    auto sanitizedAbstract = common::ensureValidUtf8(entry.abstract, absStorage);
+                    append_repeated(sanitizedAbstract, 2);
+                }
+                if (!boosted.empty() && boosted.back() != ' ')
+                    boosted.push_back(' ');
+                std::size_t bodySpace =
+                    kMaxBoostedBytes > boosted.size() ? kMaxBoostedBytes - boosted.size() : 0;
+                boosted.append(sanitizedContent.data(),
+                               std::min(bodySpace, sanitizedContent.size()));
+
+                auto ftsBind = ftsStmt.bindAll(entry.documentId, boosted, sanitizedTitle);
                 if (!ftsBind) {
                     db.execute("ROLLBACK");
                     return ftsBind.error();

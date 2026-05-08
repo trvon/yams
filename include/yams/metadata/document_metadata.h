@@ -231,6 +231,7 @@ struct DocumentContent {
 struct BatchContentEntry {
     int64_t documentId = 0;       ///< Document ID in database
     std::string title;            ///< Document title (for FTS)
+    std::string abstract;         ///< Document abstract/summary (for field-weighted FTS)
     std::string contentText;      ///< Extracted text content
     std::string mimeType;         ///< MIME type for FTS content_type
     std::string extractionMethod; ///< Method used for extraction

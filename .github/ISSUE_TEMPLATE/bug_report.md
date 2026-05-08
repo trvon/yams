@@ -27,4 +27,4 @@ assignees: trvon
 - Component: daemon | cli | search | vector | model | docs | ci | packaging
 - Workarounds tried: any temporary workaround you found
 
-Security Note: Do NOT file security issues here. Email security@yams.dev (see SECURITY.md).
+Security Note: Please report security issues privately (see SECURITY.md).
