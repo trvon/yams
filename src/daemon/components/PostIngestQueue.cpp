@@ -104,6 +104,163 @@ inline bool isGlinerTitleExtractionDisabled() {
     return disabled;
 }
 
+// Enrichment utilities shared with post_ingest_enrichment.cpp
+
+bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
+    const std::string normEntity = normalizeEntityTextForKey(entityText);
+    const std::string normTitle = normalizeEntityTextForKey(titleText);
+    if (normEntity.empty() || normTitle.empty())
+        return false;
+    return normTitle.find(normEntity) != std::string::npos ||
+           (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
+}
+
+struct TextSegmentWindow {
+    std::string text;
+    std::size_t startOffset = 0;
+    std::size_t endOffset = 0;
+};
+
+std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnippet,
+                                                      std::string_view titleText,
+                                                      std::size_t maxSegments = 3) {
+    std::vector<TextSegmentWindow> segments;
+    if (textSnippet.empty() || maxSegments == 0)
+        return segments;
+    auto docSections = yams::extraction::util::detectDocumentSections(textSnippet);
+    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
+        if (segEnd <= segStart)
+            return;
+        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
+        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
+        if (cleaned.size() < 24)
+            return;
+        segments.push_back({std::move(cleaned), segStart, segEnd});
+    };
+    if (!docSections.sections.empty() && docSections.sections.size() >= 2) {
+        std::size_t totalSecs = docSections.sections.size();
+        std::size_t perSec = std::max<std::size_t>(1u, maxSegments / totalSecs);
+        std::size_t remainder = maxSegments % totalSecs;
+        for (std::size_t si = 0; si < totalSecs && segments.size() < maxSegments; ++si) {
+            const auto& sec = docSections.sections[si];
+            std::size_t secBudget = perSec + (si < remainder ? 1 : 0);
+            if (secBudget == 0)
+                continue;
+            std::string_view secText =
+                textSnippet.substr(sec.startOffset, sec.endOffset - sec.startOffset);
+            std::size_t sentenceStart = 0, sentenceCount = 0, secSegments = 0;
+            for (std::size_t i = 0; i < secText.size() && secSegments < secBudget; ++i) {
+                const char c = secText[i];
+                bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
+                if (boundary)
+                    ++sentenceCount;
+                if (!boundary)
+                    continue;
+                if (sentenceCount >= 2 || c == '\n') {
+                    flushSegment(sec.startOffset + sentenceStart, sec.startOffset + i + 1);
+                    sentenceStart = i + 1;
+                    sentenceCount = 0;
+                    ++secSegments;
+                }
+            }
+            if (secSegments < secBudget && sentenceStart < secText.size())
+                flushSegment(sec.startOffset + sentenceStart, sec.endOffset);
+        }
+    }
+    if (segments.empty()) {
+        std::size_t start = 0;
+        if (!titleText.empty()) {
+            const std::string normTitle = normalizeEntityTextForKey(titleText);
+            const auto newline = textSnippet.find('\n');
+            if (newline != std::string_view::npos) {
+                if (normalizeEntityTextForKey(textSnippet.substr(0, newline)) == normTitle)
+                    start = newline + 1;
+            }
+        }
+        std::size_t sentenceStart = start, sentenceCount = 0;
+        for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
+            const char c = textSnippet[i];
+            bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
+            if (!boundary)
+                continue;
+            ++sentenceCount;
+            if (sentenceCount >= 2 || c == '\n') {
+                flushSegment(sentenceStart, i + 1);
+                sentenceStart = i + 1;
+                sentenceCount = 0;
+            }
+        }
+        if (segments.size() < maxSegments)
+            flushSegment(sentenceStart, textSnippet.size());
+    }
+    return segments;
+}
+
+std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
+    bool lhsBio = isHighValueGraphType(lhsType);
+    bool rhsBio = isHighValueGraphType(rhsType);
+    if (lhsBio && rhsBio)
+        return "co_occurs_biomedical";
+    if ((lhsType == "protein" && rhsType == "cell") || (lhsType == "cell" && rhsType == "protein"))
+        return "protein_cell_association";
+    if ((lhsType == "protein" && rhsType == "disease") ||
+        (lhsType == "disease" && rhsType == "protein"))
+        return "protein_disease_association";
+    if ((lhsType == "drug" && rhsType == "disease") || (lhsType == "disease" && rhsType == "drug"))
+        return "drug_disease_association";
+    return "co_mentioned_with";
+}
+
+bool isUsefulNlEntity(const search::QueryConcept& qc) {
+    if (qc.text.empty() || qc.confidence < kMinNlEntityConfidence)
+        return false;
+    if (qc.text.size() > 160)
+        return false;
+    bool hasAlphaNum = false;
+    for (unsigned char c : qc.text)
+        if (std::isalnum(c)) {
+            hasAlphaNum = true;
+            break;
+        }
+    if (!hasAlphaNum)
+        return false;
+    auto nt = normalizeEntityTextForKey(qc.text);
+    auto ntype = canonicalizeNlEntityType(qc.type, qc.text);
+    if (isLowValueNlEntity(nt, ntype))
+        return false;
+    return true;
+}
+
+struct NlAliasVariant {
+    std::string text;
+    float confidence = 1.0f;
+    std::string sourceTag;
+};
+
+std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
+                                                 const std::string& entityType,
+                                                 float baseConfidence) {
+    std::vector<NlAliasVariant> variants;
+    std::unordered_set<std::string> seen;
+    const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
+    auto addVariant = [&](const std::string& value, float cs, std::string st) {
+        std::string n = normalizeEntityTextForKey(value);
+        if (n.size() < 2 || !seen.insert(n).second)
+            return;
+        float c = std::clamp(baseConfidence * cs, 0.05f, 1.0f);
+        variants.push_back({std::move(n), c, std::move(st)});
+    };
+    auto addGen = [&](const std::string& v, float ps, float ss, std::string pS, std::string sS) {
+        auto g = yams::search::generateSurfaceVariants(v, kind, 8);
+        for (size_t i = 0; i < g.size() && variants.size() < 8; ++i)
+            addVariant(g[i], i == 0 ? ps : ss, i == 0 ? pS : sS);
+    };
+    addGen(entityText, 1.0f, 0.72f, "surface", "variant");
+    if (!entityType.empty())
+        addGen(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified", "type_qualified");
+    return variants;
+}
+
 } // namespace
 
 // Dynamic concurrency limits from TuneAdvisor
