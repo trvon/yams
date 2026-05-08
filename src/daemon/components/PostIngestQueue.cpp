@@ -39,6 +39,7 @@
 
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/extraction/title_util.h>
+#include <simeon/corpus_adapter.hpp>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -80,11 +81,17 @@ bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normal
 }
 
 bool isHighValueGraphType(std::string_view normalizedType) {
-    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
-           normalizedType == "disease" || normalizedType == "chemical" ||
-           normalizedType == "drug" || normalizedType == "pathway" ||
-           normalizedType == "biological_process" || normalizedType == "biomarker" ||
-           normalizedType == "anatomy" || normalizedType == "organism";
+    // Use simeon ScientificAdapter for suffix-based biomedical detection.
+    // Covers 40+ biomedical suffixes (vs. 11 hardcoded types previously).
+    // Falls back to known type names for direct matches.
+    if (normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
+        normalizedType == "disease" || normalizedType == "chemical" || normalizedType == "drug" ||
+        normalizedType == "pathway" || normalizedType == "biological_process" ||
+        normalizedType == "biomarker" || normalizedType == "anatomy" ||
+        normalizedType == "organism") {
+        return true;
+    }
+    return simeon::ScientificAdapter::is_biomedical_suffix(normalizedType);
 }
 
 bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
@@ -1092,6 +1099,14 @@ std::string PostIngestQueue::deriveTitle(const std::string& text, const std::str
     auto codeTitle = yams::extraction::util::extractCodeSignature(text);
     if (!codeTitle.empty()) {
         return codeTitle;
+    }
+
+    // === IMRAD: language-agnostic structural section detection ===
+    // Detects title/abstract/body boundaries using structural heuristics
+    // (short standalone lines, numbering, ALL_CAPS) — no word matching.
+    auto sections = yams::extraction::util::detectDocumentSections(text);
+    if (!sections.title.empty()) {
+        return sections.title;
     }
 
     // NOTE: GLiNER inference moved to async title extraction pipeline (titlePoller)
