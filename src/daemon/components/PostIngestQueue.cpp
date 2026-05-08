@@ -118,48 +118,98 @@ std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnipp
         return segments;
     }
 
-    std::size_t start = 0;
-    if (!titleText.empty()) {
-        const std::string normTitle = normalizeEntityTextForKey(titleText);
-        const auto newline = textSnippet.find('\n');
-        if (newline != std::string_view::npos) {
-            const std::string firstLine = normalizeEntityTextForKey(textSnippet.substr(0, newline));
-            if (!firstLine.empty() && firstLine == normTitle) {
-                start = newline + 1;
+    // IMRAD-aware segmentation: detect structural sections first, then
+    // split each section into sentence windows independently. Fall back
+    // to naive 2-sentence windows when no sections are detected.
+    auto docSections = yams::extraction::util::detectDocumentSections(textSnippet);
+    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
+        if (segEnd <= segStart)
+            return;
+        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
+        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
+        if (cleaned.size() < 24)
+            return;
+        segments.push_back({std::move(cleaned), segStart, segEnd});
+    };
+
+    if (!docSections.sections.empty() && docSections.sections.size() >= 2) {
+        // Distribute maxSegments across sections proportionally
+        std::size_t totalSecs = docSections.sections.size();
+        std::size_t perSec = std::max<std::size_t>(1u, maxSegments / totalSecs);
+        std::size_t remainder = maxSegments % totalSecs;
+
+        for (std::size_t si = 0; si < totalSecs && segments.size() < maxSegments; ++si) {
+            const auto& sec = docSections.sections[si];
+            std::size_t secBudget = perSec + (si < remainder ? 1 : 0);
+            if (secBudget == 0)
+                continue;
+
+            std::string_view secText =
+                textSnippet.substr(sec.startOffset, sec.endOffset - sec.startOffset);
+
+            std::size_t sentenceStart = 0;
+            std::size_t sentenceCount = 0;
+            std::size_t secSegments = 0;
+
+            for (std::size_t i = 0; i < secText.size() && secSegments < secBudget; ++i) {
+                const char c = secText[i];
+                const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
+                if (boundary)
+                    ++sentenceCount;
+                if (!boundary)
+                    continue;
+
+                if (sentenceCount >= 2 || c == '\n') {
+                    std::size_t absStart = sec.startOffset + sentenceStart;
+                    std::size_t absEnd = sec.startOffset + i + 1;
+                    flushSegment(absStart, absEnd);
+                    sentenceStart = i + 1;
+                    sentenceCount = 0;
+                    ++secSegments;
+                }
+            }
+            // Final window in this section
+            if (secSegments < secBudget && sentenceStart < secText.size()) {
+                std::size_t absStart = sec.startOffset + sentenceStart;
+                flushSegment(absStart, sec.endOffset);
             }
         }
     }
 
-    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
-        if (segEnd <= segStart) {
-            return;
+    // Fallback: naive 2-sentence windows over entire text
+    if (segments.empty()) {
+        std::size_t start = 0;
+        if (!titleText.empty()) {
+            const std::string normTitle = normalizeEntityTextForKey(titleText);
+            const auto newline = textSnippet.find('\n');
+            if (newline != std::string_view::npos) {
+                const std::string firstLine =
+                    normalizeEntityTextForKey(textSnippet.substr(0, newline));
+                if (!firstLine.empty() && firstLine == normTitle) {
+                    start = newline + 1;
+                }
+            }
         }
-        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
-        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
-        if (cleaned.size() < 24) {
-            return;
-        }
-        segments.push_back({std::move(cleaned), segStart, segEnd});
-    };
 
-    std::size_t sentenceStart = start;
-    std::size_t sentenceCount = 0;
-    for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
-        const char c = textSnippet[i];
-        const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-        if (!boundary) {
-            continue;
+        std::size_t sentenceStart = start;
+        std::size_t sentenceCount = 0;
+        for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
+            const char c = textSnippet[i];
+            const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
+            if (!boundary)
+                continue;
+            ++sentenceCount;
+            if (sentenceCount >= 2 || c == '\n') {
+                flushSegment(sentenceStart, i + 1);
+                sentenceStart = i + 1;
+                sentenceCount = 0;
+            }
         }
-        ++sentenceCount;
-        if (sentenceCount >= 2 || c == '\n') {
-            flushSegment(sentenceStart, i + 1);
-            sentenceStart = i + 1;
-            sentenceCount = 0;
+        if (segments.size() < maxSegments) {
+            flushSegment(sentenceStart, textSnippet.size());
         }
     }
-    if (segments.size() < maxSegments) {
-        flushSegment(sentenceStart, textSnippet.size());
-    }
+
     return segments;
 }
 
@@ -772,6 +822,9 @@ void PostIngestQueue::enqueue(Task t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     uint32_t waits = 0;
@@ -801,6 +854,9 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         InternalEventBus::PostIngestTask task;
         task.hash = std::move(t.hash);
         task.mime = std::move(t.mime);
+        task.documentId = t.documentId;
+        task.filePath = std::move(t.filePath);
+        task.noEmbeddings = t.noEmbeddings;
         busTasks.push_back(std::move(task));
     }
 
@@ -847,6 +903,9 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
     task.mime = t.mime;
+    task.documentId = t.documentId;
+    task.filePath = t.filePath;
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(task);
     if (pushed) {
@@ -873,6 +932,9 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(std::move(task));
     if (pushed) {
@@ -1056,12 +1118,68 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
                                  prepared.extension);
 
+    // IMRAD-aware abstract extraction for field-weighted FTS5 indexing
+    auto sections = yams::extraction::util::detectDocumentSections(prepared.extractedText);
+    if (!sections.abstract.empty()) {
+        prepared.abstract = std::move(sections.abstract);
+    }
+
     // Title+NL extraction: single GLiNER call for both title and NL entities
     if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
+    } else if (!prepared.extractedText.empty() && writeCoordinator_ && kg_) {
+        // Training-free entity extraction fallback (no ONNX/GLiNER needed).
+        // Uses ScientificAdapter suffix/pattern detection for entity discovery.
+        auto entities =
+            simeon::ScientificAdapter::extract_entities(prepared.extractedText, /*max=*/24);
+        if (!entities.empty()) {
+            auto batch = std::make_unique<DeferredKGBatch>();
+            batch->nodes.reserve(entities.size());
+            batch->aliases.reserve(entities.size());
+            std::string normPath = normalizeGraphPath(prepared.filePath);
+            batch->sourceFile = normPath.empty() ? prepared.filePath : normPath;
+            batch->documentIdToDelete = prepared.documentId;
+
+            for (const auto& entity : entities) {
+                std::string nodeKey = "nl_entity:scientific:" + normalizeEntityTextForKey(entity);
+                metadata::KGNode node;
+                node.nodeKey = nodeKey;
+                node.label = entity;
+                node.type = "scientific_entity";
+                nlohmann::json props;
+                props["entity_text"] = entity;
+                props["entity_type"] = "scientific_entity";
+                props["confidence"] = 0.55f;
+                props["first_seen_file"] = common::sanitizeUtf8(prepared.filePath);
+                if (!prepared.hash.empty())
+                    props["first_seen_hash"] = prepared.hash;
+                node.properties = props.dump();
+                batch->nodes.push_back(std::move(node));
+
+                metadata::KGAlias alias;
+                alias.alias = normalizeEntityTextForKey(entity);
+                alias.source = "scientific_adapter|" + nodeKey;
+                alias.confidence = 0.55f;
+                batch->aliases.push_back(std::move(alias));
+
+                DeferredDocEntity docEnt;
+                docEnt.documentId = prepared.documentId;
+                docEnt.entityText = entity;
+                docEnt.nodeKey = nodeKey;
+                docEnt.confidence = 0.55f;
+                docEnt.extractor = "scientific_adapter";
+                batch->deferredDocEntities.push_back(std::move(docEnt));
+            }
+
+            auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
+                                                        "PostIngestQueue::scientificAdapter/" +
+                                                            prepared.hash.substr(0, 12));
+            writeCoordinator_->enqueue(std::move(wb));
+            deferredDocEntitiesQueued_.fetch_add(entities.size(), std::memory_order_relaxed);
+        }
     }
 
     return prepared;
@@ -1793,25 +1911,30 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.language = language;
     job.mimeType = mimeType;
 
-    // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
-    // TuningManager tick) without changing steady-state drop behavior.
     auto jobCopy = job;
-    bool pushed = channel->try_push(std::move(job));
-    if (!pushed) {
+    if (!channel->try_push(std::move(job))) {
         TuningManager::notifyWakeup();
-        constexpr int kMaxRetries = 8;
-        constexpr std::chrono::milliseconds kBackoff{4};
-        for (int attempt = 0; attempt < kMaxRetries && !pushed; ++attempt) {
-            std::this_thread::sleep_for(kBackoff);
-            auto retryJob = jobCopy;
-            pushed = channel->try_push(std::move(retryJob));
-        }
-    }
-    if (!pushed) {
-        spdlog::debug(
-            "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
-            hash.substr(0, 12));
-        InternalEventBus::instance().incTitleDropped();
+        auto capturedJob =
+            std::make_shared<InternalEventBus::TitleExtractionJob>(std::move(jobCopy));
+        auto capturedHash = hash;
+        boost::asio::post(coordinator_->getExecutor(), [capturedJob, capturedHash]() mutable {
+            int remainingRetries = 8;
+            while (remainingRetries-- > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                auto ch =
+                    InternalEventBus::instance().get_channel<InternalEventBus::TitleExtractionJob>(
+                        "title_extraction");
+                if (ch && ch->try_push(std::move(*capturedJob))) {
+                    InternalEventBus::instance().incTitleQueued();
+                    TuningManager::notifyWakeup();
+                    return;
+                }
+            }
+            spdlog::debug("[PostIngestQueue] Title channel full after async retry, "
+                          "dropping async title for {}",
+                          capturedHash.substr(0, 12));
+            InternalEventBus::instance().incTitleDropped();
+        });
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
@@ -2743,6 +2866,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
             entry.language = prepared.language;
+            entry.abstract = prepared.abstract;
             entry.priorStateKnown = true;
             entry.priorContentExtracted = prepared.priorContentExtracted;
             entry.priorExtractionStatus = prepared.priorExtractionStatus;
@@ -2881,33 +3005,43 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
-        uint32_t waits = 0;
-        while (!stop_.load(std::memory_order_acquire)) {
-            if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
-                InternalEventBus::instance().incEmbedQueued(batchSize);
-                embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
-                embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
-                embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
-                embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
-                TuningManager::notifyWakeup();
-                if (preparedDocsCount > 0) {
-                    InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
-                                                                        preparedChunksCount);
+        if (!embedQ->try_push(std::move(job))) {
+            auto capturedJob = std::make_shared<InternalEventBus::EmbedJob>(std::move(job));
+            auto capturedPreparedCount = preparedDocsCount;
+            auto capturedChunksCount = preparedChunksCount;
+            auto capturedHashOnlyCount = hashOnlyDocsCount;
+            auto capturedBatchSz = batchSize;
+            boost::asio::post(coordinator_->getExecutor(), [capturedJob, capturedPreparedCount,
+                                                            capturedChunksCount,
+                                                            capturedHashOnlyCount,
+                                                            capturedBatchSz]() mutable {
+                int remainingRetries = 8;
+                while (remainingRetries-- > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    auto ch = InternalEventBus::instance().get_channel<InternalEventBus::EmbedJob>(
+                        "embed_jobs");
+                    if (ch && ch->try_push(std::move(*capturedJob))) {
+                        InternalEventBus::instance().incEmbedQueued(capturedBatchSz);
+                        TuningManager::notifyWakeup();
+                        return;
+                    }
                 }
-                if (hashOnlyDocsCount > 0) {
-                    InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);
-                }
-                break;
+                InternalEventBus::instance().incEmbedDropped(capturedBatchSz);
+            });
+        } else {
+            InternalEventBus::instance().incEmbedQueued(batchSize);
+            embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
+            embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
+            embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
+            embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
+            TuningManager::notifyWakeup();
+            if (preparedDocsCount > 0) {
+                InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
+                                                                    preparedChunksCount);
             }
-            ++waits;
-            if ((waits % 20u) == 1u) {
-                spdlog::warn(
-                    "[PostIngestQueue] embed enqueue waiting on full channel (batch={}, waits={})",
-                    batchSize, waits);
+            if (hashOnlyDocsCount > 0) {
+                InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);
             }
-        }
-        if (stop_.load(std::memory_order_acquire)) {
-            InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();
         embedHashBatch.clear();
@@ -3039,12 +3173,32 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     auto stageCfg = snapshotStageConfig();
     auto prepareTask = [this, &stageCfg](const InternalEventBus::PostIngestTask& task)
         -> std::variant<PreparedMetadataEntry, ExtractionFailure> {
-        auto infoOpt = getCachedDocumentInfo(task.hash);
+        std::optional<metadata::DocumentInfo> infoOpt;
+        if (task.documentId >= 0 && !task.filePath.empty()) {
+            metadata::DocumentInfo info;
+            info.id = task.documentId;
+            info.filePath = task.filePath;
+            info.fileName = task.fileName.empty()
+                                ? std::filesystem::path(task.filePath).filename().string()
+                                : task.fileName;
+            info.fileExtension = std::filesystem::path(info.fileName).extension().string();
+            info.sha256Hash = task.hash;
+            info.mimeType = task.mime;
+            info.extractionStatus = metadata::ExtractionStatus::Pending;
+            infoOpt = std::move(info);
+        } else {
+            infoOpt = getCachedDocumentInfo(task.hash);
+        }
         if (!infoOpt) {
             return ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"};
         }
 
-        auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+        std::optional<std::vector<std::string>> tagsOpt;
+        if (task.documentId >= 0 && task.noEmbeddings) {
+            tagsOpt = std::vector<std::string>{"no_embeddings"};
+        } else {
+            tagsOpt = getCachedDocumentTags(infoOpt->id);
+        }
         const std::vector<std::string> emptyTags;
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
