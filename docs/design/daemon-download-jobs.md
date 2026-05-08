@@ -26,15 +26,9 @@ The design explicitly does not start with arbitrary remote download capability.
   - CAS finalization
   - optional export
 - The current resume store is local-manager scoped and keyed by URL in
-<<<<<<< HEAD
   [src/downloader/download_manager.cpp](../../src/downloader/download_manager.cpp).
 - The daemon exposes a guarded download path in
   [src/daemon/components/dispatcher/request_dispatcher_documents.cpp](../../src/daemon/components/dispatcher/request_dispatcher_documents.cpp)
-=======
-  [src/downloader/download_manager.cpp](/Users/trevon/work/tools/yams/src/downloader/download_manager.cpp).
-- The daemon exposes a guarded download path in
-  [src/daemon/components/dispatcher/request_dispatcher_documents.cpp](/Users/trevon/work/tools/yams/src/daemon/components/dispatcher/request_dispatcher_documents.cpp)
->>>>>>> origin/main
   behind `YAMS_ENABLE_DAEMON_DOWNLOAD`.
 - The daemon now enforces the narrow policy boundary before network activity:
   - feature gate enabled
@@ -50,21 +44,13 @@ The design explicitly does not start with arbitrary remote download capability.
   - status polling and list APIs
   - cooperative cancel signaling
 - The CLI exposes daemon job controls in
-<<<<<<< HEAD
   [src/cli/commands/download_command.cpp](../../src/cli/commands/download_command.cpp):
-=======
-  [src/cli/commands/download_command.cpp](/Users/trevon/work/tools/yams/src/cli/commands/download_command.cpp):
->>>>>>> origin/main
   - `yams download <url>`
   - `yams download --status <job-id>`
   - `yams download --list-jobs`
   - `yams download --cancel <job-id>`
 - MCP exposes the same read/control surface in
-<<<<<<< HEAD
   [src/mcp/mcp_server.cpp](../../src/mcp/mcp_server.cpp):
-=======
-  [src/mcp/mcp_server.cpp](/Users/trevon/work/tools/yams/src/mcp/mcp_server.cpp):
->>>>>>> origin/main
   - `download_status`
   - `download_list_jobs`
   - `download_cancel`
@@ -178,11 +164,7 @@ Those can remain local CLI or MCP-only until the daemon has a stronger policy an
 ## Policy Enforcement
 
 Use the existing `DaemonConfig::DownloadPolicy` in
-<<<<<<< HEAD
 [include/yams/daemon/daemon.h](../../include/yams/daemon/daemon.h), but
-=======
-[include/yams/daemon/daemon.h](/Users/trevon/work/tools/yams/include/yams/daemon/daemon.h), but
->>>>>>> origin/main
 enforce it in the handler before invoking the download service.
 
 Implemented checks today:

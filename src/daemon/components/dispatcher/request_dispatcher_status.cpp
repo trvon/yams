@@ -947,6 +947,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     freshness.simeonLexicalConceptMiningEnabled ? 1u : 0u;
             } catch (...) {
             }
+
+            try {
+                auto topo = serviceManager_->getTopologyTelemetrySnapshot();
+                res.readinessStates[std::string(readiness::kTopologyArtifactsFresh)] =
+                    topo.artifactsFresh;
+                res.readinessStates[std::string(readiness::kTopologyRebuildRunning)] =
+                    topo.rebuildRunning;
+            } catch (...) {
+            }
         }
 
         // Proto status transport still omits several newer structured fields.

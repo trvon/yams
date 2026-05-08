@@ -143,25 +143,10 @@ citations, or domain-specific anchors. English ArguAna experiments moved from
 showed the remaining headroom is structure recognition rather than more vector
 similarity.
 
-<<<<<<< HEAD
 YAMS plans to expose this as a first-class search component in an upcoming
 release: a `CorpusAdapter` interface for schema-aware query seeding with
 built-in path-fragment and agent-memory metadata queries such as
 `pbi=PBI-043 task=list-json-refresh`. PRs are welcome for qrel-backed English corpora, yams-specific corpus adapters,
-=======
-YAMS now exposes this as a first-class search component: implement
-`yams::search::CorpusAdapter`, register it with `SearchEngine::addCorpusAdapter()`,
-or rely on the built-in `YamsNativeCorpusAdapter` for path-fragment and
-agent-memory metadata queries such as `pbi=PBI-043 task=list-json-refresh`.
-The native adapter uses English-first query seeding: it breaks natural-language
-requests into compact content/path fragments, keeps structured tokens such as
-`docs/research` or `PBI-043`, and records `adapter_us`, `seed_count`, and
-`path_seed_queries` in debug metadata for profiling. The component is enabled
-by default with `SearchEngineConfig::enableCorpusAdapters` and fused as
-`corpus_adapter` evidence.
-
-PRs are welcome for qrel-backed English corpora, yams-specific corpus adapters,
->>>>>>> origin/main
 and language/profile contributions that make this retrieval path testable beyond
 the current research fixture.
 

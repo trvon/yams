@@ -3414,21 +3414,25 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     if (!serviceFsm_.isReady())
         return;
 
-    if (!topologyManager_.tryScheduleRebuild())
-        return;
+    topologyRebuildPending_.store(true, std::memory_order_release);
 
     auto weakSelf = weak_from_this();
     auto executor = getWorkerExecutor();
-    auto debounceTimer = std::make_shared<boost::asio::steady_timer>(executor);
-    debounceTimer->expires_after(std::chrono::milliseconds(250));
-    debounceTimer->async_wait([weakSelf, reason,
-                               debounceTimer](const boost::system::error_code& ec) mutable {
-        if (ec) {
-            if (auto self = weakSelf.lock())
-                self->topologyManager_.clearScheduled();
+
+    boost::asio::post(executor, [weakSelf, reason]() mutable {
+        auto self = weakSelf.lock();
+        if (!self || self->shutdownInvoked_.load(std::memory_order_acquire))
+            return;
+
+        bool expected = false;
+        if (!self->topologyRebuildInProgress_.compare_exchange_strong(expected, true,
+                                                                      std::memory_order_acq_rel)) {
             return;
         }
-        if (auto self = weakSelf.lock()) {
+
+        while (self->topologyRebuildPending_.load(std::memory_order_acquire)) {
+            self->topologyRebuildPending_.store(false, std::memory_order_release);
+
             const auto ingestMetrics = self->getIngestMetricsSnapshot();
             auto piq = std::atomic_load_explicit(&self->postIngest_, std::memory_order_acquire);
             const auto postQueued = piq ? piq->size() : 0U;
@@ -3444,15 +3448,12 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
-                self->topologyManager_.clearScheduled();
-                self->requestTopologyRebuild(reason);
-                return;
+                break;
             }
 
             auto rebuildHashes = self->topologyManager_.drainDirtyHashes();
-            self->topologyManager_.clearScheduled();
             if (rebuildHashes.empty())
-                return;
+                break;
 
             if (auto metadataRepo = self->getMetadataRepo()) {
                 auto statsResult = metadataRepo->getCorpusStats();
@@ -3481,8 +3482,7 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                     }();
                     if (!overlayHeavy && !overlayAged && !forceImmediate) {
                         self->topologyManager_.restoreDirtyHashes(rebuildHashes);
-                        self->requestTopologyRebuild(reason);
-                        return;
+                        break;
                     }
                 }
             }
@@ -3496,6 +3496,8 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             }
         }
+
+        self->topologyRebuildInProgress_.store(false, std::memory_order_release);
     });
 }
 

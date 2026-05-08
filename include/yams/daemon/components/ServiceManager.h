@@ -707,6 +707,8 @@ private:
 
     std::atomic<bool> shutdownInvoked_{false};
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
+    std::atomic<bool> topologyRebuildPending_{false};
+    std::atomic<bool> topologyRebuildInProgress_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 

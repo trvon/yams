@@ -28,11 +28,7 @@ Currently, `@trvon` serves as Maintainer.
 - We ask contributors to include DCO sign-off on commits.
 
 ## Release Process
-<<<<<<< HEAD
 - Versioning follows SemVer. User-visible or interface changes should come with CHANGELOG updates and, when applicable, stability notes.
-=======
-- Versioning follows SemVer. User-visible or interface changes require CHANGELOG updates and, when applicable, stability notes.
->>>>>>> origin/main
 - Release cadence: monthly minor releases, ad-hoc patch releases as needed.
 - A Release Manager (default: `@trvon`) coordinates tagging, artifacts, and notes.
 
