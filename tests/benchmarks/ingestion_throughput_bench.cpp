@@ -464,8 +464,8 @@ bool probeDaemonSearch(yams::daemon::DaemonClient& client, const std::string& qu
     req.searchType = searchType;
     req.limit = 5;
     req.pathsOnly = true;
-    req.timeout = std::chrono::milliseconds(5000);
-    auto result = yams::cli::run_sync(client.search(req), std::chrono::seconds(6));
+    req.timeout = std::chrono::milliseconds(2000);
+    auto result = yams::cli::run_sync(client.search(req), std::chrono::seconds(3));
     if (!result)
         return false;
     for (const auto& r : result.value().results) {
@@ -578,7 +578,7 @@ SearchableWaitResult waitForSearchable(yams::daemon::DaemonClient& client,
 
         previous = current;
         havePrevious = true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
 
     result.lastSnapshot = last;
