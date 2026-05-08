@@ -3448,7 +3448,10 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
-                break;
+                self->topologyRebuildPending_.store(true, std::memory_order_release);
+                self->topologyRebuildInProgress_.store(false, std::memory_order_release);
+                self->requestTopologyRebuild(reason);
+                return;
             }
 
             auto rebuildHashes = self->topologyManager_.drainDirtyHashes();
