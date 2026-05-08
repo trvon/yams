@@ -455,6 +455,10 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             return;
                         } else if constexpr (std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
                             r = applyMetadataOp(concrete);
+                            if (!r &&
+                                r.error().message.find("database is locked") != std::string::npos) {
+                                return;
+                            }
                         } else {
                             return;
                         }

@@ -743,6 +743,10 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         } else {
             harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
         }
+        harnessOptions.trustedPluginPaths = {
+            fs::path("/opt/homebrew/lib/yams/plugins"),
+            fs::path("/usr/local/lib/yams/plugins"),
+        };
     }
     harnessOptions.enableAutoRepair = false;
     harnessOptions.isolateState = true;
@@ -903,8 +907,9 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
 
     const bool isSimeonFullPipeline = run.enableEmbeddings && !useMockEmbeddings && useSimeon;
     if (isSimeonFullPipeline && result.titleQueued == 0 && result.titleConsumed == 0) {
-        spdlog::warn("[bench] Simeon run '{}' has titleQueued==0 — title extractor not wired "
-                     "(no entity-extractor plugins loaded). Title+NL extraction skipped.",
+        spdlog::warn("[bench] Simeon run '{}' has titleQueued==0 — GLiNER title+NL async "
+                     "extractor not wired (no entity-extractor plugins loaded). "
+                     "Deterministic title fallback remains active.",
                      run.label);
     }
     return result;
