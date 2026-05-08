@@ -27,7 +27,7 @@ struct RouterConfig;
 enum class Recipe : std::uint8_t;
 class RetrievalStrategy;
 class StrategyRouter;
-class TextAdapter;
+class CorpusAdapter;
 struct QueryProfile;
 } // namespace simeon
 
@@ -99,9 +99,10 @@ public:
         RouterPreset router_preset{};
 
         // Enable the new simeon strategy-routing framework (retrieval_strategy.hpp).
-        // When true, replaces per-query QueryRouter selection with an EntropyRouter
+        //         When true, replaces per-query QueryRouter selection with an EntropyRouter
         // that chooses among BM25, Keyphrase, and LeadField strategies based on
-        // query BM25-score entropy. Requires router_enabled=false (they conflict).
+        // query BM25-score entropy. When combined with rm3_enabled=true, the
+        // strategy router also scores via simeon RM3 PRF and blends the result.
         bool strategy_router_enabled = false;
 
         // When true, build both SabSmooth and Atire BM25 variants and RRF-fuse
@@ -234,7 +235,7 @@ private:
     std::vector<std::vector<simeon::SemanticFragment>> doc_frags_;
 
     // Strategy router (new retrieval_strategy.hpp framework)
-    std::unique_ptr<simeon::TextAdapter> text_adapter_;
+    std::unique_ptr<simeon::CorpusAdapter> corpus_adapter_;
     std::vector<std::string> doc_lead_texts_;
     std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
     std::unique_ptr<simeon::StrategyRouter> strategy_router_;
