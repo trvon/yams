@@ -15,9 +15,8 @@ std::string extractFirstMeaningfulLine(std::string_view text);
 // Helper to normalize a title candidate (trim, collapse whitespace, truncate)
 std::string normalizeTitleCandidate(std::string s);
 
-// IMRAD-aware document structure extraction.
-// Detects section boundaries in scientific/technical prose using regex
-// patterns for common section headers. Training-free.
+// Language-agnostic document structure extraction using structural
+// heuristics (section-length patterns and heading detection). Training-free.
 struct DocumentSections {
     std::string title;    // text before any recognized section header
     std::string abstract; // text in abstract/summary section

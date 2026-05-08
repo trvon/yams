@@ -1,6 +1,7 @@
 #include <yams/search/concept_resolver.h>
 
 #include <spdlog/spdlog.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_text_utils.h>
@@ -8,15 +9,16 @@
 namespace yams::search {
 
 void enrichWithFallbackConcepts(const std::string& query, std::vector<QueryConcept>& concepts,
-                                size_t maxConcepts) {
+                                size_t maxConcepts,
+                                const std::unordered_map<std::string, float>* idfMap) {
     if (maxConcepts == 0 || concepts.size() >= maxConcepts) {
         return;
     }
 
-    // IDF from metadata is optional; generateFallbackQueryConcepts handles
-    // an empty map gracefully (falls back to token salience scoring).
+    // Use provided IDF map when available; fall back to empty (token salience).
     std::unordered_map<std::string, float> emptyIdf;
-    auto fallbackConcepts = generateFallbackQueryConcepts(query, emptyIdf, maxConcepts);
+    const auto& idf = (idfMap && !idfMap->empty()) ? *idfMap : emptyIdf;
+    auto fallbackConcepts = generateFallbackQueryConcepts(query, idf, maxConcepts);
     if (fallbackConcepts.empty()) {
         return;
     }

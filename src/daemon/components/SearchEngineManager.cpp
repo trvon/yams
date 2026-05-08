@@ -291,21 +291,42 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // store so the graph reranker can match query concepts against
             // per-document concept bigrams.
             lexicalCfg.concept_mining_enabled = true;
+            // TODO: concept mining currently invokes mine_concepts() in bulk
+            // without a per-document hook.  The callback is wired here but
+            // not yet called during build; reconnect when concept mining
+            // supports per-document export.
             if (entityExportKg) {
                 auto capturedKg = entityExportKg;
                 lexicalCfg.entity_callback =
                     [capturedKg](std::int64_t docId, std::string entityText, float confidence) {
-                        auto batchResult = capturedKg->beginWriteBatch();
-                        if (!batchResult)
-                            return;
-                        auto& batch = *batchResult.value();
+                        thread_local std::int64_t tlsCurrentDoc = -1;
+                        thread_local std::vector<metadata::DocEntity> tlsBuffer;
+                        constexpr size_t kFlushThreshold = 128;
+                        if (tlsCurrentDoc != docId && !tlsBuffer.empty()) {
+                            auto br = capturedKg->beginWriteBatch();
+                            if (br) {
+                                auto& batch = *br.value();
+                                batch.addDocEntities(std::move(tlsBuffer));
+                                batch.commit();
+                            }
+                            tlsBuffer.clear();
+                        }
+                        tlsCurrentDoc = docId;
                         metadata::DocEntity docEnt;
                         docEnt.documentId = docId;
                         docEnt.entityText = std::move(entityText);
                         docEnt.confidence = confidence;
                         docEnt.extractor = "simeon_concept";
-                        batch.addDocEntities({std::move(docEnt)});
-                        batch.commit();
+                        tlsBuffer.push_back(std::move(docEnt));
+                        if (tlsBuffer.size() >= kFlushThreshold) {
+                            auto br = capturedKg->beginWriteBatch();
+                            if (br) {
+                                auto& batch = *br.value();
+                                batch.addDocEntities(std::move(tlsBuffer));
+                                batch.commit();
+                            }
+                            tlsBuffer.clear();
+                        }
                     };
             }
 
