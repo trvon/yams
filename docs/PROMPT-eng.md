@@ -1,6 +1,6 @@
 ---
 description: YAMS-first agent with blackboard coordination and persistent memory
-argument-hint: [TASK=<description>] [PBI=<pbi-id>] [PHASE=<start|checkpoint|complete>]
+argument-hint: [TASK=<description>] [PHASE=<start|checkpoint|complete>]
 ---
 
 # Agent Workflow (YAMS + Blackboard)
@@ -48,7 +48,7 @@ YAMS is the single source of truth for agent memory. When multiple agents are in
 - Deleting files (must index in YAMS first)
 - Installing new dependencies
 
-## Required Metadata (Memory + PBI Tracking)
+## Required Metadata (Memory Tracking)
 
 Attach metadata to every `yams add`.
 
@@ -59,7 +59,6 @@ Attach metadata to every `yams add`.
 
 Optional (when applicable):
 
-- `pbi` - PBI identifier (example: `PBI-043`)
 - `agent_id` - your canonical agent ID (example: `opencode-index-speedup`)
 
 ## Project Structure (Where To Look First)
@@ -114,14 +113,14 @@ yams search "task=$TASK" --type keyword --limit 20
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Working on: $TASK" \
-  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 If blackboard is available, claim or create a task there. If not, "claim" files via YAMS metadata:
 
 ```bash
 yams add - --name "claim-$TASK.md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
+  --metadata "task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
   <<'EOF'
 ## Claim
 Agent: opencode-$TASK
@@ -135,7 +134,7 @@ EOF
 ```bash
 yams add <changed-files> \
   --label "$TASK: checkpoint" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 ### 4) Complete (Index + Close Loop)
@@ -144,14 +143,13 @@ yams add <changed-files> \
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Completed: $TASK" \
-  --metadata "pbi=$PBI,task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --metadata "task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
 ## Response Template
 
 ```text
 TASK: $TASK
-PBI: $PBI
 PHASE: $PHASE
 AGENT: opencode-$TASK
 

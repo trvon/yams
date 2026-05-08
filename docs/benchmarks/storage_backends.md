@@ -30,6 +30,58 @@ This page tracks local vs S3-compatible backend behavior for CLI-level CRUD work
 - CRUD gate passed (`PUT/GET/UPDATE/DELETE` semantics validated by harness checks).
 - List output currently reports duplicate rows (`120` rows for `60` unique paths) for both backends; benchmark normalizes to unique paths for timing.
 
+## Compression-mode speed track
+
+R2/S3 writes now use the same transparent compression wrapper as local storage: content is hashed
+as original bytes, then compressible chunks are compressed before the object-storage backend sees
+the payload. This affects both upload bandwidth/cost and retrieval latency, so live backend runs
+should compare both modes.
+
+Harness:
+
+```bash
+YAMS_BENCH_BIN=$PWD/build/debug/tools/yams-cli/yams-cli \
+YAMS_BENCH_R2_BUCKET=<bucket> \
+YAMS_BENCH_R2_ENDPOINT=<account-id>.r2.cloudflarestorage.com \
+YAMS_BENCH_R2_ACCESS_KEY=<r2-s3-access-key> \
+YAMS_BENCH_R2_SECRET_KEY=<r2-s3-secret-key> \
+YAMS_BENCH_R2_REGION=auto \
+python3 tests/benchmarks/run_local_vs_r2_benchmark.py \
+  --backends r2 \
+  --compression-modes both \
+  --iterations 3 \
+  --files 60 \
+  --file-size-kb 64 \
+  --retrieve-count 20 \
+  --require-remote \
+  --output-dir bench_results/storage_backends/r2-compression-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+For temporary Cloudflare R2 credentials instead of direct S3 keys:
+
+```bash
+YAMS_BENCH_R2_AUTH_MODE=temp_credentials
+YAMS_BENCH_R2_API_TOKEN=<cloudflare-api-token>
+YAMS_BENCH_R2_ACCOUNT_ID=<account-id> # optional if encoded in endpoint
+```
+
+Latest local harness smoke (2026-05-02, credentials not present in this shell for live R2):
+
+- Backends: `local`
+- Compression modes: `compressed,raw`
+- Params: `iterations=1`, `files=8`, `file_size_kb=4`, `retrieve_count=3`
+
+| Backend | Store (files/s) | Retrieve mean (ms) | Retrieve ops/s | Search mean (ms) | Search qps | Delete mean (ms) | Delete ops/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| local_compressed | 7.61 | 2171.09 | 0.46 | 1064.63 | 0.94 | 1066.49 | 0.94 |
+| local_raw | 7.60 | 2197.76 | 0.46 | 1067.01 | 0.94 | 1071.99 | 0.93 |
+
+Live R2 result status:
+
+- Not run in this shell: required `YAMS_BENCH_R2_*` credentials were absent.
+- The harness now fails fast with `--require-remote` when credentials are missing, and it uses
+  distinct object prefixes for `compressed` vs `raw` runs.
+
 ## Multi-client backend benchmark track
 
 - Scope: agent-like read-heavy workloads.

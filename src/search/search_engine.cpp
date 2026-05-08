@@ -13,6 +13,7 @@
 #include <yams/search/lexical_scoring.h>
 #include <yams/search/meta_path_router.h>
 #include <yams/search/query_expansion.h>
+#include <yams/search/concept_resolver.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
@@ -1108,7 +1109,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
     size_t graphQueryNeighborSeedDocCount = 0;
-    if (conceptExtractor_ && !params.semanticOnly) {
+    if (conceptExtractor_ && !params.semanticOnly &&
+        workingConfig.conceptExtractionBackend ==
+            SearchEngineConfig::ConceptExtractionBackend::GlinerWithFallback) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
             [this, &query]() {
@@ -1234,80 +1237,55 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
-        if (conceptsMaterialized || !conceptFuture.valid()) {
+        if (conceptsMaterialized) {
             return;
         }
 
-        std::future_status conceptStatus = std::future_status::deferred;
-        if (waitIfConfigured) {
-            if (workingConfig.componentTimeout.count() > 0) {
-                conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
+        if (conceptFuture.valid()) {
+            std::future_status conceptStatus = std::future_status::deferred;
+            if (waitIfConfigured) {
+                if (workingConfig.componentTimeout.count() > 0) {
+                    conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
+                } else {
+                    conceptFuture.wait();
+                    conceptStatus = std::future_status::ready;
+                }
             } else {
-                conceptFuture.wait();
-                conceptStatus = std::future_status::ready;
+                conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
             }
-        } else {
-            conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
-        }
 
-        if (conceptStatus == std::future_status::ready) {
-            auto conceptEnd = std::chrono::steady_clock::now();
-            componentTiming["concepts"] =
-                std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
-                    .count();
-            auto conceptResult = conceptFuture.get();
-            conceptsMaterialized = true;
-            if (conceptResult) {
-                const auto& extracted = conceptResult.value().concepts;
-                concepts.reserve(extracted.size());
-                for (const auto& conceptItem : extracted) {
-                    if (conceptItem.confidence >= workingConfig.conceptMinConfidence) {
-                        concepts.push_back(conceptItem);
+            if (conceptStatus == std::future_status::ready) {
+                auto conceptEnd = std::chrono::steady_clock::now();
+                componentTiming["concepts"] =
+                    std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
+                        .count();
+                auto conceptResult = conceptFuture.get();
+                conceptsMaterialized = true;
+                if (conceptResult) {
+                    const auto& extracted = conceptResult.value().concepts;
+                    concepts.reserve(extracted.size());
+                    for (const auto& conceptItem : extracted) {
+                        if (conceptItem.confidence >= workingConfig.conceptMinConfidence) {
+                            concepts.push_back(conceptItem);
+                        }
+                    }
+                    if (concepts.size() > workingConfig.conceptMaxCount) {
+                        concepts.resize(workingConfig.conceptMaxCount);
                     }
                 }
-                if (concepts.size() > workingConfig.conceptMaxCount) {
-                    concepts.resize(workingConfig.conceptMaxCount);
-                }
+            } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
+                timedOut.push_back("concepts");
+                conceptsMaterialized = true;
+                traceCollector.markStageTimeout("concepts");
             }
-        } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
-            timedOut.push_back("concepts");
+        } else {
+            // Concept backend is Fallback — no GLiNER future. Mark as
+            // materialized so the fallback enrichment below runs.
             conceptsMaterialized = true;
-            traceCollector.markStageTimeout("concepts");
         }
 
         if (conceptsMaterialized && concepts.size() < workingConfig.conceptMaxCount) {
-            auto idfByToken = detail::lookupQueryTermIdf(metadataRepo_, query);
-            auto fallbackConcepts =
-                generateFallbackQueryConcepts(query, idfByToken, workingConfig.conceptMaxCount);
-            if (!fallbackConcepts.empty()) {
-                std::unordered_set<std::string> seenConceptKeys;
-                seenConceptKeys.reserve(concepts.size() + fallbackConcepts.size());
-                for (const auto& existingConcept : concepts) {
-                    std::string key = normalizeEntityTextForKey(existingConcept.text);
-                    key.push_back('|');
-                    key.append(existingConcept.type);
-                    seenConceptKeys.insert(std::move(key));
-                }
-
-                const size_t beforeFallback = concepts.size();
-                for (auto& fallbackConcept : fallbackConcepts) {
-                    if (concepts.size() >= workingConfig.conceptMaxCount) {
-                        break;
-                    }
-                    std::string key = normalizeEntityTextForKey(fallbackConcept.text);
-                    key.push_back('|');
-                    key.append(fallbackConcept.type);
-                    if (!seenConceptKeys.insert(std::move(key)).second) {
-                        continue;
-                    }
-                    concepts.push_back(std::move(fallbackConcept));
-                }
-
-                if (concepts.size() > beforeFallback) {
-                    spdlog::debug("concepts: added {} fallback query concepts for '{}'",
-                                  concepts.size() - beforeFallback, query.substr(0, 60));
-                }
-            }
+            enrichWithFallbackConcepts(query, concepts, workingConfig.conceptMaxCount);
         }
 
         if (conceptsMaterialized) {
@@ -2574,6 +2552,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (stageTraceEnabled) {
                 postFusionSnapshot = response.results;
             }
+        }
+    }
+
+    // Diagnostic: log graph reranker gate status once per benchmark run.
+    {
+        static std::atomic<bool> gsLogged{false};
+        if (!gsLogged.exchange(true, std::memory_order_relaxed)) {
+            // Verify entities are in the KG by querying the store directly.
+            size_t firstDocEntityCount = 0;
+            if (kgScorer_ && !response.results.empty()) {
+                const auto& first = response.results[0];
+                std::string hash = first.document.sha256Hash;
+                if (auto docIdRes = kgStore_->getDocumentIdByHash(hash)) {
+                    auto entities =
+                        kgStore_->getDocEntitiesForDocument(docIdRes.value().value(), 5, 0);
+                    if (entities) {
+                        firstDocEntityCount = entities.value().size();
+                    }
+                }
+            }
+            spdlog::info(
+                "[graph_rerank-gate] enable={} kgScorer={} results={} resultSize={} "
+                "shortQueryBudgeted={} corpusWarming={} bypassWarmingGate={} "
+                "lexicalReady={} awaitingDrain={} postIngestInflight={} postIngestQueued={} "
+                "firstDocEntities={}",
+                workingConfig.enableGraphRerank ? 1 : 0, kgScorer_ ? 1 : 0,
+                !response.results.empty() ? 1 : 0, response.results.size(),
+                shortQueryBudgeted ? 1 : 0, corpusWarming ? 1 : 0,
+                workingConfig.bypassCorpusWarmingGate ? 1 : 0, freshness.lexicalReady ? 1 : 0,
+                freshness.awaitingDrain ? 1 : 0, freshness.postIngestInFlight,
+                freshness.postIngestQueued, firstDocEntityCount);
         }
     }
 
