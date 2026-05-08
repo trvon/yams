@@ -3,13 +3,13 @@
 If you believe you have found a security vulnerability in YAMS, please report it responsibly.
 
 Reporting
-- Do not open public tickets for vulnerabilities.
+- Please report vulnerabilities privately, not in public tickets.
 - Email: admin@yamsmemory.ai (PGP optional)
 - Include: affected version/commit, platform, impact, minimal PoC and repro steps, logs if available.
 
 Response targets
 - Acknowledge receipt within 48 hours.
-- Triage within 7 days; we will inform you of severity and next steps.
+- Triage within 7 days; we'll let you know about severity and next steps.
 - Fix or mitigation target within 90 days for high/critical, the best effort otherwise.
 
 Disclosure
