@@ -3237,6 +3237,17 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
          },
          true},
+        {"scientific_strategy_rm3",
+         "SCI EntropyRouter + RM3 PRF blend + ScientificAdapter entities",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SIMEON_STRATEGY_ROUTER_ENABLED", "1"},
+             {"YAMS_SIMEON_RM3", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         },
+         true},
         {"mixed_graph_off",
          "MIXED state with graph rerank disabled",
          {
