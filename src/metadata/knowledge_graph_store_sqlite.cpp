@@ -129,6 +129,18 @@ public:
                 static_cast<std::int64_t>(aliasCount_.load(std::memory_order_relaxed))};
     }
 
+    void updateEnqueueCounts(std::int64_t entities, std::int64_t edges,
+                             std::int64_t aliases) override {
+        entityCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(entities, 0)),
+                               std::memory_order_relaxed);
+        nerEntityCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(entities, 0)),
+                                  std::memory_order_relaxed);
+        edgeCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(edges, 0)),
+                             std::memory_order_relaxed);
+        aliasCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(aliases, 0)),
+                              std::memory_order_relaxed);
+    }
+
     // Nodes
     Result<std::int64_t> upsertNode(const KGNode& node) override {
         // Perform an INSERT ... ON CONFLICT(node_key) DO UPDATE to ensure presence

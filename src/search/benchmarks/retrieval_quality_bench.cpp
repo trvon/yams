@@ -5639,7 +5639,14 @@ struct BenchFixture {
                 }
             }
 
-            if (true) {
+            if (embedBackendSimeon) {
+                // Simeon backend handles embeddings in-process — only configure
+                // ONNX reranker. Skip preferred_model to avoid model download.
+                json onnxConfig;
+                onnxConfig["reranker_model"] = "bge-reranker-base";
+                harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
+                spdlog::info("Configured ONNX plugin: reranker=bge-reranker-base (simeon backend)");
+            } else {
                 json onnxPluginConfig;
                 onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
                 onnxPluginConfig["reranker_model"] = "bge-reranker-base";

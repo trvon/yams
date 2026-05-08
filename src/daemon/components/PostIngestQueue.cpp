@@ -40,6 +40,7 @@
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/extraction/title_util.h>
 #include <simeon/corpus_adapter.hpp>
+#include <simeon/text_rank.hpp>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -1116,6 +1117,10 @@ PostIngestQueue::prepareMetadataEntry(
                 batch->deferredDocEntities.push_back(std::move(docEnt));
             }
 
+            if (kg_)
+                kg_->updateEnqueueCounts(static_cast<std::int64_t>(entities.size()), 0,
+                                         static_cast<std::int64_t>(batch->aliases.size()));
+
             auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
                                                         "PostIngestQueue::scientificAdapter/" +
                                                             prepared.hash.substr(0, 12));
@@ -1167,6 +1172,26 @@ std::string PostIngestQueue::deriveTitle(const std::string& text, const std::str
     auto sections = yams::extraction::util::detectDocumentSections(text);
     if (!sections.title.empty()) {
         return sections.title;
+    }
+
+    // Deterministic, training-free sentence ranking fallback when no structural
+    // title is available. This keeps title quality reasonable without GLiNER.
+    {
+        simeon::TextRankConfig cfg;
+        cfg.max_sentences = 64;
+        cfg.max_sentence_tokens = 40;
+        cfg.min_sentence_tokens = 3;
+        simeon::TextRank ranker(cfg);
+        std::string_view sample(text);
+        constexpr std::size_t kMaxTextRankChars = 8192;
+        if (sample.size() > kMaxTextRankChars) {
+            sample = sample.substr(0, kMaxTextRankChars);
+        }
+        auto ranked = ranker.top_sentence(sample);
+        auto title = yams::extraction::util::normalizeTitleCandidate(std::string(ranked));
+        if (!title.empty()) {
+            return title;
+        }
     }
 
     // NOTE: GLiNER inference moved to async title extraction pipeline (titlePoller)
