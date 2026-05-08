@@ -442,37 +442,6 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                                           .count();
                     spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
                                  conceptIdx->size(), cmMs);
-
-                    // Export per-document entities from concept posting lists.
-                    if (conceptIdx && cfg_.entity_callback && !stop.stop_requested()) {
-                        const auto eet0 = std::chrono::steady_clock::now();
-                        size_t totalEntities = 0;
-                        for (size_t di = 0; di < conceptTexts.size(); ++di) {
-                            if (stop.stop_requested())
-                                break;
-                            if (conceptTexts[di].empty())
-                                continue;
-                            const auto docId = ids[di];
-                            conceptIdx->collect_doc_concepts(
-                                conceptTexts[di],
-                                std::function<void(std::uint64_t, float)>(
-                                    [&](std::uint64_t conceptHash, float pmi) {
-                                        auto entry = conceptIdx->find(conceptHash);
-                                        if (!entry)
-                                            return;
-                                        std::string entityText =
-                                            "simeon_concept_" + std::to_string(conceptHash);
-                                        cfg_.entity_callback(docId, std::move(entityText),
-                                                             std::clamp(pmi / 10.0f, 0.2f, 0.8f));
-                                        ++totalEntities;
-                                    }));
-                        }
-                        const auto eeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now() - eet0)
-                                              .count();
-                        spdlog::info("[simeon-lexical] entity export: {} entities in {} ms",
-                                     totalEntities, eeMs);
-                    }
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[simeon-lexical] concept mining failed: {}", e.what());
@@ -491,23 +460,21 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::make_unique<simeon::QueryRouter>(rindex, toRouterConfig(cfg_.router_preset));
         }
 
-        // Strategy router: build ScientificAdapter + EntropyRouter with BM25 +
-        // Keyphrase + LeadField + RM3Diverse strategies for query-adaptive
-        // scientific/technical lexical retrieval.
-        std::unique_ptr<simeon::CorpusAdapter> corpusAdapter;
+        // Strategy router: build TextAdapter + EntropyRouter with BM25 +
+        // Keyphrase + LeadField strategies for query-adaptive lexical retrieval.
+        std::unique_ptr<simeon::TextAdapter> textAdapter;
         std::vector<std::string> docLeadTexts;
         std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies;
         std::unique_ptr<simeon::StrategyRouter> strategyRouter;
-        bool hasDocEmbeddings = false;
         if (cfg_.strategy_router_enabled && !ids.empty()) {
-            corpusAdapter = std::make_unique<simeon::ScientificAdapter>();
+            textAdapter = std::make_unique<simeon::TextAdapter>();
 
             // Extract lead texts from the documents we just indexed.
             const std::size_t ndocs = std::min(build_doc_texts.size(), ids.size());
             docLeadTexts.reserve(ndocs);
             for (std::size_t di = 0; di < ndocs && !stop.stop_requested(); ++di) {
                 simeon::AdapterEvidence ev =
-                    corpusAdapter->process_doc(std::to_string(ids[di]), build_doc_texts[di]);
+                    textAdapter->process_doc(std::to_string(ids[di]), build_doc_texts[di]);
                 docLeadTexts.push_back(std::move(ev.aux_field));
             }
 
@@ -522,7 +489,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
 
                 strategyRouter = std::make_unique<simeon::EntropyRouter>();
                 spdlog::info("[simeon-lexical] strategy router: EntropyRouter "
-                             "with {} strategies over {} docs (ScientificAdapter)",
+                             "with {} strategies over {} docs",
                              strategies.size(), ndocs);
             }
         }
@@ -645,7 +612,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         concept_index_ = std::move(conceptIdx);
         fragment_encoder_ = std::move(fragmentEncoder);
         doc_frags_ = std::move(docFrags);
-        corpus_adapter_ = std::move(corpusAdapter);
+        text_adapter_ = std::move(textAdapter);
         doc_lead_texts_ = std::move(docLeadTexts);
         strategies_ = std::move(strategies);
         strategy_router_ = std::move(strategyRouter);
@@ -870,28 +837,16 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     for (const auto& s : strategies_)
         pool.push_back(s.get());
 
-    // Use corpus adapter for evidence if available.
+    // Use TextAdapter for evidence if available.
     simeon::AdapterEvidence evidence;
-    if (corpus_adapter_) {
-        evidence = corpus_adapter_->process_query("query", query);
+    if (text_adapter_) {
+        evidence = text_adapter_->process_query("query", query);
     }
 
     strategy_router_->route(query, profile, evidence,
                             std::span<simeon::RetrievalStrategy* const>(pool),
                             std::span<float>{full});
     recipe_label = "StrategyRouted";
-
-    // Blend RM3 PRF scores when enabled (pseudo-relevance feedback).
-    if (cfg_.rm3_enabled && index_) {
-        std::vector<float> rm3Scores(doc_count_, 0.0f);
-        simeon::score_with_prf(*index_, query, std::span<float>{rm3Scores}, cfg_.rm3_config);
-        constexpr float kRm3BlendWeight = 0.30f;
-        constexpr float kBaseBlendWeight = 0.70f;
-        for (size_t i = 0; i < doc_count_; ++i) {
-            full[i] = kBaseBlendWeight * full[i] + kRm3BlendWeight * rm3Scores[i];
-        }
-        recipe_label = "StrategyRoutedRm3";
-    }
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {

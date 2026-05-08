@@ -3237,17 +3237,6 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
          },
          true},
-        {"scientific_strategy_rm3",
-         "SCI EntropyRouter + RM3 PRF blend + ScientificAdapter entities",
-         {
-             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
-             {"YAMS_TUNING_OVERRIDE", std::nullopt},
-             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
-             {"YAMS_SIMEON_STRATEGY_ROUTER_ENABLED", "1"},
-             {"YAMS_SIMEON_RM3", "1"},
-             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
-         },
-         true},
         {"mixed_graph_off",
          "MIXED state with graph rerank disabled",
          {
@@ -5325,13 +5314,7 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
-        addEnvDefault("YAMS_POST_ENTITY_CONCURRENT", "4");
         addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
-
-        // Benchmark queries should not be gated by freshness/corpus-warming checks.
-        // The benchmark already waits for ingestion, embedding, and lexical readiness
-        // before starting queries.
-        addEnvDefault("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE", "1");
 
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
