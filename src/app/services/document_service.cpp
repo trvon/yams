@@ -658,22 +658,33 @@ public:
             // Detect MIME when not provided or generic
             info.mimeType = !req.mimeType.empty() ? req.mimeType : "";
             if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-                try {
-                    (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-                    auto& det = yams::detection::FileTypeDetector::instance();
-                    if (auto sig = det.detectFromFile(p)) {
-                        if (!sig.value().mimeType.empty())
-                            info.mimeType = sig.value().mimeType;
+                bool triedDetection = false;
+                if (!info.fileExtension.empty()) {
+                    info.mimeType = yams::detection::FileTypeDetector::getMimeTypeFromExtension(
+                        info.fileExtension);
+                    if (!info.mimeType.empty() && info.mimeType != "application/octet-stream") {
+                        triedDetection = true;
                     }
-                    if (info.mimeType.empty()) {
-                        // Prefer logical file extension (from --name) over temp file extension
-                        const auto& extForMime = info.fileExtension.empty() ? p.extension().string()
-                                                                            : info.fileExtension;
-                        info.mimeType =
-                            yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
+                }
+                if (!triedDetection) {
+                    try {
+                        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                        auto& det = yams::detection::FileTypeDetector::instance();
+                        if (auto sig = det.detectFromFile(p)) {
+                            if (!sig.value().mimeType.empty())
+                                info.mimeType = sig.value().mimeType;
+                        }
+                        if (info.mimeType.empty()) {
+                            const auto& extForMime = info.fileExtension.empty()
+                                                         ? p.extension().string()
+                                                         : info.fileExtension;
+                            info.mimeType =
+                                yams::detection::FileTypeDetector::getMimeTypeFromExtension(
+                                    extForMime);
+                        }
+                    } catch (...) {
+                        // fallback below
                     }
-                } catch (...) {
-                    // fallback below
                 }
             }
             if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {

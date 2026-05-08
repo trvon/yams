@@ -2008,74 +2008,79 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
-    // Initialize EmbeddingService for async embedding generation
-    try {
-        using TA = yams::daemon::TuneAdvisor;
-        uint32_t taThreads = 0;
+    // Skip EmbeddingService init when vectors are disabled (benchmark/compat mode)
+    const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS"));
+    if (!vectorsDisabled) {
+        // Initialize EmbeddingService for async embedding generation
         try {
-            taThreads = TA::postIngestThreads();
-        } catch (...) {
-        }
-        (void)taThreads; // Retrieved for future use in embedding service configuration
-        auto embeddingService = std::make_shared<EmbeddingService>(
-            getContentStore(), getMetadataRepo(), workCoordinator_.get());
+            using TA = yams::daemon::TuneAdvisor;
+            uint32_t taThreads = 0;
+            try {
+                taThreads = TA::postIngestThreads();
+            } catch (...) {
+            }
+            (void)taThreads; // Retrieved for future use in embedding service configuration
+            auto embeddingService = std::make_shared<EmbeddingService>(
+                getContentStore(), getMetadataRepo(), workCoordinator_.get());
 
-        auto initRes = embeddingService->initialize();
-        if (initRes) {
-            auto weakSelf = weak_from_this();
-            embeddingService->setProviders(
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->resolvePreferredModel() : std::string{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->getVectorDatabase()
-                                : std::shared_ptr<yams::vector::VectorDatabase>{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->getKgStore()
-                                : std::shared_ptr<metadata::KnowledgeGraphStore>{};
-                },
-                [weakSelf](const std::string& model,
-                           std::function<void(const ModelLoadEvent&)> progress) {
-                    auto self = weakSelf.lock();
-                    if (!self) {
-                        return Result<std::string>(
-                            Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
-                    }
-                    return self->ensureEmbeddingModelReadySync(model, std::move(progress),
-                                                               /*timeoutMs=*/0,
-                                                               /*keepHot=*/true, /*warmup=*/true);
-                });
-            embeddingService->setTopologyRebuildRequester(
-                [weakSelf](const std::vector<std::string>& hashes) {
-                    if (auto self = weakSelf.lock()) {
-                        self->requestTopologyRebuild("embedding_batch_complete", hashes);
-                    }
-                });
-            embeddingService->start();
-            std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
+            auto initRes = embeddingService->initialize();
+            if (initRes) {
+                auto weakSelf = weak_from_this();
+                embeddingService->setProviders(
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->resolvePreferredModel() : std::string{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->getVectorDatabase()
+                                    : std::shared_ptr<yams::vector::VectorDatabase>{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->getKgStore()
+                                    : std::shared_ptr<metadata::KnowledgeGraphStore>{};
+                    },
+                    [weakSelf](const std::string& model,
+                               std::function<void(const ModelLoadEvent&)> progress) {
+                        auto self = weakSelf.lock();
+                        if (!self) {
+                            return Result<std::string>(
+                                Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
+                        }
+                        return self->ensureEmbeddingModelReadySync(model, std::move(progress),
+                                                                   /*timeoutMs=*/0,
+                                                                   /*keepHot=*/true,
+                                                                   /*warmup=*/true);
+                    });
+                embeddingService->setTopologyRebuildRequester(
+                    [weakSelf](const std::vector<std::string>& hashes) {
+                        if (auto self = weakSelf.lock()) {
+                            self->requestTopologyRebuild("embedding_batch_complete", hashes);
+                        }
+                    });
+                embeddingService->start();
+                std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
+                                           std::memory_order_release);
+                spdlog::info("EmbeddingService initialized");
+            } else {
+                spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
+                std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
+                                           std::memory_order_release);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("EmbeddingService init failed: {}", e.what());
+            std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
                                        std::memory_order_release);
-            spdlog::info("EmbeddingService initialized");
-        } else {
-            spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
+        } catch (...) {
+            spdlog::warn("EmbeddingService init failed (unknown)");
             std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
                                        std::memory_order_release);
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("EmbeddingService init failed: {}", e.what());
-        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
-                                   std::memory_order_release);
-    } catch (...) {
-        spdlog::warn("EmbeddingService init failed (unknown)");
-        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
-                                   std::memory_order_release);
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
@@ -2225,7 +2230,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     refreshPluginStatusSnapshot();
 
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
-    {
+    if (!vectorsDisabled) {
         auto vdbRes = vectorSystemManager_ ? vectorSystemManager_->initializeOnce(dataDir)
                                            : Result<bool>(false);
         if (!vdbRes) {
