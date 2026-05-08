@@ -1011,11 +1011,12 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             }
 
             if (writeCoordinator_) {
-                // Update KG atomics immediately so overlay stats see data
                 if (kg_)
                     kg_->updateEnqueueCounts(static_cast<std::int64_t>(nl.size()),
                                              static_cast<std::int64_t>(batch->deferredEdges.size()),
                                              static_cast<std::int64_t>(batch->aliases.size()));
+                if (meta_)
+                    meta_->signalCorpusStatsStale();
                 writeCoordinator_->enqueue(makeWriteBatchFromDeferredKGBatch(
                     std::move(batch), "PostIngestQueue::nlEntityKg/" + batch->sourceFile));
             }

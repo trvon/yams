@@ -1121,6 +1121,9 @@ PostIngestQueue::prepareMetadataEntry(
             if (kg_)
                 kg_->updateEnqueueCounts(static_cast<std::int64_t>(entities.size()), 0,
                                          static_cast<std::int64_t>(batch->aliases.size()));
+            // Invalidate corpus stats cache so KG readiness poll sees the entity data
+            if (meta_)
+                meta_->signalCorpusStatsStale();
 
             auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
                                                         "PostIngestQueue::scientificAdapter/" +
