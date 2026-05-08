@@ -1074,9 +1074,11 @@ PostIngestQueue::prepareMetadataEntry(
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
-    } else if (!prepared.extractedText.empty() && writeCoordinator_ && kg_) {
-        // Training-free entity extraction fallback (no ONNX/GLiNER needed).
-        // Uses ScientificAdapter suffix/pattern detection for entity discovery.
+    }
+    // Training-free entity extraction: always runs. Provides baseline entity
+    // coverage even when GLiNER is unavailable or fails. Entities are written
+    // via WriteCoordinator alongside GLiNER output for complementary coverage.
+    if (!prepared.extractedText.empty() && writeCoordinator_ && kg_) {
         auto entities =
             simeon::ScientificAdapter::extract_entities(prepared.extractedText, /*max=*/24);
         if (!entities.empty()) {
