@@ -1648,16 +1648,39 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         }
                     }
 
-                    int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
                         getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-                        reason, build_timeout, getWorkerExecutor(),
+                        reason, getWorkerExecutor(),
                         !config_.instrumentation.suppressSimeonLexicalBuild);
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
+                        state_.readiness.searchProgress = 100;
+                        try {
+                            lifecycleFsm_.setSubsystemDegraded("search", false);
+                        } catch (...) {
+                        }
+                        if (auto metadataRepo = getMetadataRepo()) {
+                            auto countRes = metadataRepo->getDocumentCount();
+                            if (countRes) {
+                                if (searchComponent_) {
+                                    searchComponent_->recordSuccessfulBuild(countRes.value());
+                                } else {
+                                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                                }
+                            }
+                        }
+                        writeBootstrapStatusFile(config_, state_, this);
                         spdlog::info("[ServiceManager] FSM-triggered rebuild succeeded");
                     } else {
+                        state_.readiness.searchEngineReady.store(false);
+                        state_.readiness.searchProgress = 100;
+                        try {
+                            lifecycleFsm_.setSubsystemDegraded("search", true,
+                                                               result.error().message);
+                        } catch (...) {
+                        }
+                        writeBootstrapStatusFile(config_, state_, this);
                         spdlog::error("[ServiceManager] FSM-triggered rebuild failed: {}",
                                       result.error().message);
                     }
@@ -2336,8 +2359,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             progress = 70;
         state_.readiness.searchProgress = progress;
         writeBootstrapStatusFile(config_, state_, this);
-        int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
-
         // Determine vector readiness: honor env disables and presence of vector infra
         const bool vectorsDisabled =
             ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
@@ -2414,7 +2435,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
+            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial",
             getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (buildResult.has_value()) {
@@ -2510,6 +2531,7 @@ void ServiceManager::startDeferredMetadataWarmup() {
 
         try {
             spdlog::info("[ServiceManager] Deferred metadata warmup started");
+            (void)metadataRepo->getCorpusStats();
             metadataRepo->warmValueCountsCache();
             spdlog::info("[ServiceManager] Deferred metadata warmup finished");
 
@@ -2933,10 +2955,9 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             }
         }
 
-        int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-            "rebuild_enabled", build_timeout, getWorkerExecutor(),
+            "rebuild_enabled", getWorkerExecutor(),
             !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (rebuildResult.has_value()) {
@@ -3025,8 +3046,6 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
         }
         if (!buildingAlready) {
             spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
-            int build_timeout = 15000; // Generous timeout for rebuild
-
             // Get embedding generator from model provider if available
             std::shared_ptr<vector::EmbeddingGenerator> embGen;
             auto modelProvider = loadModelProvider();
@@ -3043,8 +3062,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
                 getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen), "rebuild",
-                build_timeout, getWorkerExecutor(),
-                !config_.instrumentation.suppressSimeonLexicalBuild);
+                getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();

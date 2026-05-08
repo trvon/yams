@@ -657,6 +657,19 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
             }
 
+            if (serviceManager_) {
+                try {
+                    const auto searchSnapshot = serviceManager_->getSearchEngineFsmSnapshot();
+                    const bool searchReady = searchSnapshot.state == SearchEngineState::Ready;
+                    res.readinessStates[std::string(readiness::kSearchEngine)] = searchReady;
+                    res.readinessStates[std::string(readiness::kSearchEngineLexicalReady)] =
+                        searchReady;
+                    res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
+                        searchReady && vectorBackendUsable;
+                } catch (...) {
+                }
+            }
+
             try {
                 if (serviceManager_) {
                     const auto contentExtractorCount =

@@ -164,7 +164,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                                  std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                                  std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                                  std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-                                 const std::string& reason, int timeoutMs,
+                                 const std::string& reason,
                                  const boost::asio::any_io_executor& workerExecutor,
                                  bool enableSimeonLexicalBuild) {
     auto ex = co_await boost::asio::this_coro::executor;
@@ -189,8 +189,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     } catch (...) { // NOLINT(bugprone-empty-catch): FSM failures must not interrupt build
     }
 
-    spdlog::info("[SearchEngineManager] Build started: reason={} vector={} timeout={}ms", reason,
-                 vectorEnabled, timeoutMs);
+    spdlog::info("[SearchEngineManager] Build started: reason={} vector={} hang_guard=300s", reason,
+                 vectorEnabled);
 
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
@@ -351,46 +351,32 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
     using RetT = Result<std::shared_ptr<yams::search::SearchEngine>>;
 
-    // Use async_initiate pattern with timeout racing (no experimental APIs)
+    // Event-driven build: post to worker, awaitable completes when work finishes.
+    // A generous safety timer (300s) guards against true hangs only.
+
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(std::exception_ptr, RetT)>(
-        [this, builder, opts, workerExecutor, ex, timeoutMs, vectorEnabled](auto handler) mutable {
-            // Shared state for race coordination
-            auto completed = std::make_shared<std::atomic<bool>>(false);
-            auto timer = std::make_shared<boost::asio::steady_timer>(ex);
-            timer->expires_after(std::chrono::milliseconds(timeoutMs));
-
-            // Capture handler in shared_ptr for safe sharing between timer and work
+        [this, builder, opts, workerExecutor, ex, vectorEnabled](auto handler) mutable {
             using HandlerT = std::decay_t<decltype(handler)>;
             auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
             auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, ex);
+            auto completed = std::make_shared<std::atomic<bool>>(false);
 
-            // Set up timeout
-            timer->async_wait([this, completed, handlerPtr, completion_exec,
-                               timeoutMs](const boost::system::error_code& ec) mutable {
+            auto timer = std::make_shared<boost::asio::steady_timer>(ex);
+            timer->expires_after(std::chrono::seconds(300));
+            timer->async_wait([=](const boost::system::error_code& ec) mutable {
                 if (ec)
-                    return; // Timer cancelled
+                    return;
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                    // Timeout won
-                    spdlog::warn("[SearchEngineManager] Build timeout after {}ms", timeoutMs);
-                    try {
-                        SearchEngineRebuildFailedEvent ev;
-                        ev.error = "build_timeout";
-                        fsm_.dispatch(ev);
-                    } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
-                    }
+                    spdlog::error("[SearchEngineManager] Build hang guard triggered after 300s");
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
                         std::move(h)(std::exception_ptr{},
-                                     RetT(Error{ErrorCode::InternalError, "build_timeout"}));
+                                     RetT(Error{ErrorCode::InternalError, "build_hang_guard"}));
                     });
                 }
             });
 
-            // Post build work to worker executor (blocking operations)
-            boost::asio::post(workerExecutor, [this, builder, opts, timer, completed, handlerPtr,
-                                               completion_exec, vectorEnabled,
-                                               workerExecutor]() mutable {
+            boost::asio::post(workerExecutor, [=, this]() mutable {
                 RetT result(Error{ErrorCode::InternalError, "unknown_error"});
                 try {
                     auto r = builder->buildEmbedded(opts);
@@ -402,8 +388,22 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             engine_ = newEngine;
                         }
                         refreshSnapshot();
+                        try {
+                            SearchEngineRebuildCompletedEvent ev;
+                            ev.vectorEnabled = vectorEnabled;
+                            ev.durationMs = 0;
+                            fsm_.dispatch(ev);
+                        } catch (...) {
+                        }
+
                         result = RetT(newEngine);
                     } else {
+                        try {
+                            SearchEngineRebuildFailedEvent ev;
+                            ev.error = r.error().message;
+                            fsm_.dispatch(ev);
+                        } catch (...) {
+                        }
                         result = RetT(Error{ErrorCode::InternalError, r.error().message});
                     }
                 } catch (const std::exception& e) {
@@ -413,38 +413,17 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                 }
 
                 if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                    // Work won
                     timer->cancel();
-
-                    // Update FSM based on result
-                    if (result.has_value()) {
-                        try {
-                            SearchEngineRebuildCompletedEvent ev;
-                            ev.vectorEnabled = vectorEnabled;
-                            ev.durationMs = 0;
-                            fsm_.dispatch(ev);
-                            refreshSnapshot();
-                        } catch (...) {
-                            // Intentional best-effort path; keep the primary operation unaffected.
-                        }
-                        spdlog::info("[SearchEngineManager] Build completed: vector={}",
-                                     vectorEnabled);
-                    } else {
-                        try {
-                            SearchEngineRebuildFailedEvent ev;
-                            ev.error = result.error().message;
-                            fsm_.dispatch(ev);
-                        } catch (...) {
-                            // Intentional best-effort path; keep the primary operation unaffected.
-                        }
-                        spdlog::error("[SearchEngineManager] Build failed: {}",
-                                      result.error().message);
-                    }
-
+                    const bool ok = result.has_value();
+                    spdlog::info("[SearchEngineManager] Build {}: vector={}",
+                                 ok ? "completed" : "failed", vectorEnabled);
                     boost::asio::post(completion_exec, [h = std::move(*handlerPtr),
                                                         r = std::move(result)]() mutable {
                         std::move(h)(std::exception_ptr{}, std::move(r));
                     });
+                } else {
+                    spdlog::warn("[SearchEngineManager] Build finished after hang guard; "
+                                 "engine installed for future use");
                 }
             });
         },
