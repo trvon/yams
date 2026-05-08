@@ -245,6 +245,7 @@ public:
     IngestMetricsPublisher& getIngestMetricsPublisher() { return metricsPublisher_; }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
+    void enqueuePostIngestBatch(std::vector<PostIngestQueue::Task> tasks);
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }

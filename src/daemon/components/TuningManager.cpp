@@ -818,6 +818,17 @@ bool TuningManager::tick_once() {
                 embedFloor = std::max<uint32_t>(embedFloor, 4u);
             }
 
+            uint32_t kgFloor = 0;
+            if (kgQueued >= 32) {
+                kgFloor = 2;
+            }
+            if (kgQueued >= 128) {
+                kgFloor = 4;
+            }
+            if (kgQueued >= 512) {
+                kgFloor = 6;
+            }
+
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
                 const auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
@@ -930,7 +941,8 @@ bool TuningManager::tick_once() {
 
                 const uint32_t minExtraction =
                     (totalBudget >= 1 && stageAllowed[0] && !allowZeroTargets) ? 1u : 0u;
-                const uint32_t minKg = (stageAllowed[1] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minKg =
+                    (stageAllowed[1] && !allowZeroTargets) ? std::max(kgFloor, 1u) : 0u;
                 const uint32_t minSymbol = (stageAllowed[2] && !allowZeroTargets) ? 1u : 0u;
                 const uint32_t minEntity = (stageAllowed[3] && !allowZeroTargets) ? 1u : 0u;
                 const uint32_t minTitle = (stageAllowed[4] && !allowZeroTargets) ? 1u : 0u;

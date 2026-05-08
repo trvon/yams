@@ -3313,6 +3313,26 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
     }
 }
 
+void ServiceManager::enqueuePostIngestBatch(std::vector<PostIngestQueue::Task> tasks) {
+    auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+    if (!piq || tasks.empty()) {
+        return;
+    }
+
+    std::vector<std::string> hashes;
+    hashes.reserve(tasks.size());
+    for (const auto& t : tasks) {
+        if (!t.hash.empty()) {
+            hashes.push_back(t.hash);
+        }
+    }
+    if (!hashes.empty()) {
+        searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
+        topologyManager_.markDirtyBatch(hashes);
+        piq->enqueueBatch(std::move(tasks));
+    }
+}
+
 void ServiceManager::enqueuePostIngest(const std::string& hash, const std::string& mime) {
     auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     if (!piq) {
@@ -3321,7 +3341,9 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
 
     topologyManager_.markDirty(hash);
 
-    PostIngestQueue::Task task{hash, mime};
+    PostIngestQueue::Task task{};
+    task.hash = hash;
+    task.mime = mime;
     searchEngineManager_.noteLexicalDeltaQueued();
     piq->enqueue(std::move(task));
 }
@@ -3341,7 +3363,10 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
         if (hash.empty()) {
             continue;
         }
-        tasks.push_back(PostIngestQueue::Task{hash, mime});
+        PostIngestQueue::Task task{};
+        task.hash = hash;
+        task.mime = mime;
+        tasks.push_back(std::move(task));
     }
     if (!tasks.empty()) {
         searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
@@ -3395,7 +3420,7 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     auto weakSelf = weak_from_this();
     auto executor = getWorkerExecutor();
     auto debounceTimer = std::make_shared<boost::asio::steady_timer>(executor);
-    debounceTimer->expires_after(std::chrono::milliseconds(1000));
+    debounceTimer->expires_after(std::chrono::milliseconds(250));
     debounceTimer->async_wait([weakSelf, reason,
                                debounceTimer](const boost::system::error_code& ec) mutable {
         if (ec) {

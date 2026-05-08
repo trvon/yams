@@ -295,44 +295,17 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                 auto capturedKg = entityExportKg;
                 lexicalCfg.entity_callback =
                     [capturedKg](std::int64_t docId, std::string entityText, float confidence) {
-                        // Buffer entities per document; commit in chunks to
-                        // avoid per-entity write amplification.
-                        thread_local std::int64_t tlsCurrentDoc = -1;
-                        thread_local std::vector<metadata::DocEntity> tlsBuffer;
-                        constexpr size_t kFlushThreshold = 128;
-                        if (tlsCurrentDoc != docId && !tlsBuffer.empty()) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                auto cr = batch.commit();
-                                if (!cr) {
-                                    spdlog::warn("[SimeonConcepts] batch commit failed: {}",
-                                                 cr.error().message);
-                                }
-                            }
-                            tlsBuffer.clear();
-                        }
-                        tlsCurrentDoc = docId;
+                        auto batchResult = capturedKg->beginWriteBatch();
+                        if (!batchResult)
+                            return;
+                        auto& batch = *batchResult.value();
                         metadata::DocEntity docEnt;
                         docEnt.documentId = docId;
                         docEnt.entityText = std::move(entityText);
                         docEnt.confidence = confidence;
                         docEnt.extractor = "simeon_concept";
-                        tlsBuffer.push_back(std::move(docEnt));
-                        if (tlsBuffer.size() >= kFlushThreshold) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                auto cr = batch.commit();
-                                if (!cr) {
-                                    spdlog::warn("[SimeonConcepts] batch commit failed: {}",
-                                                 cr.error().message);
-                                }
-                            }
-                            tlsBuffer.clear();
-                        }
+                        batch.addDocEntities({std::move(docEnt)});
+                        batch.commit();
                     };
             }
 

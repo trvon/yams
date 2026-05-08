@@ -143,7 +143,7 @@ struct MetadataCache {
 
 class PostIngestQueue {
 public:
-    static constexpr double kKgBackpressureThreshold = 0.95;
+    static constexpr double kKgBackpressureThreshold = 0.85;
 
     struct Timing {
         std::uint64_t calls{0};

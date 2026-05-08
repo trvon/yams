@@ -164,7 +164,9 @@ struct RunConfig {
     int repeat{1};
     bool enableEmbeddings{false};
     bool requireTopologyFresh{false};
+    bool requireSearchProbe{false};
     std::string embeddingModel{"simeon-default"};
+    int searchProbeTimeoutSecs{120};
     std::vector<std::string> args;
 };
 
@@ -217,7 +219,9 @@ BenchConfig loadConfig(const fs::path& configPath) {
         run.repeat = std::max(1, entry.value("repeat", 1));
         run.enableEmbeddings = entry.value("enable_embeddings", false);
         run.requireTopologyFresh = entry.value("require_topology_fresh", run.enableEmbeddings);
+        run.requireSearchProbe = entry.value("require_search_probe", run.enableEmbeddings);
         run.embeddingModel = entry.value("embedding_model", std::string("simeon-default"));
+        run.searchProbeTimeoutSecs = entry.value("search_probe_timeout_secs", 120);
         if (entry.contains("args")) {
             for (const auto& arg : entry["args"]) {
                 run.args.push_back(arg.get<std::string>());
@@ -349,6 +353,8 @@ struct StatusSnapshot {
     uint64_t postIngestInflight{0};
     uint64_t postIngestProcessed{0};
     uint64_t postIngestFailed{0};
+    uint64_t embedQueued{0};
+    uint64_t embedInflight{0};
     uint64_t topologyDirtyDocuments{0};
     uint64_t topologyLastSuccessAgeMs{0};
     uint64_t topologyRebuildLagMs{0};
@@ -366,6 +372,8 @@ struct StatusSnapshot {
     uint64_t topologyLastFallbackFullRebuilds{0};
     bool topologyArtifactsFresh{false};
     bool topologyRebuildRunning{false};
+    bool simeonLexicalReady{false};
+    bool simeonLexicalConfigured{false};
 
     [[nodiscard]] bool pipelineIdle(bool requireTopologyFresh) const {
         const bool topologyIdle =
@@ -373,6 +381,13 @@ struct StatusSnapshot {
             (topologyArtifactsFresh && !topologyRebuildRunning && topologyDirtyDocuments == 0);
         return workerQueued == 0 && workerActive == 0 && postIngestQueued == 0 &&
                postIngestInflight == 0 && topologyIdle;
+    }
+
+    [[nodiscard]] bool searchable(bool requireTopologyFresh) const {
+        return pipelineIdle(requireTopologyFresh) && embedQueued == 0 && embedInflight == 0 &&
+               (!requireTopologyFresh || (topologyArtifactsFresh && !topologyRebuildRunning &&
+                                          topologyDirtyDocuments == 0)) &&
+               (!simeonLexicalConfigured || simeonLexicalReady);
     }
 
     static StatusSnapshot capture(yams::daemon::DaemonClient& client) {
@@ -387,6 +402,10 @@ struct StatusSnapshot {
             auto it = status.requestCounts.find(std::string(key));
             return it != status.requestCounts.end() ? it->second : 0;
         };
+        auto getReady = [&](std::string_view key) -> bool {
+            auto it = status.readinessStates.find(std::string(key));
+            return it != status.readinessStates.end() ? it->second : false;
+        };
 
         snapshot.documentsTotal = getCount(yams::daemon::metrics::kDocumentsTotal);
         snapshot.documentsIndexed = getCount(yams::daemon::metrics::kDocumentsIndexed);
@@ -396,6 +415,8 @@ struct StatusSnapshot {
         snapshot.postIngestInflight = getCount(yams::daemon::metrics::kPostIngestInflight);
         snapshot.postIngestProcessed = getCount(yams::daemon::metrics::kPostIngestProcessed);
         snapshot.postIngestFailed = getCount(yams::daemon::metrics::kPostIngestFailed);
+        snapshot.embedQueued = getCount(yams::daemon::metrics::kEmbedQueued);
+        snapshot.embedInflight = getCount(yams::daemon::metrics::kEmbedInflight);
         snapshot.topologyDirtyDocuments = getCount(yams::daemon::metrics::kTopologyDirtyDocuments);
         snapshot.topologyLastSuccessAgeMs =
             getCount(yams::daemon::metrics::kTopologyLastSuccessAgeMs);
@@ -422,51 +443,133 @@ struct StatusSnapshot {
             getCount(yams::daemon::metrics::kTopologyLastCoalescedDirtySets);
         snapshot.topologyLastFallbackFullRebuilds =
             getCount(yams::daemon::metrics::kTopologyLastFallbackFullRebuilds);
-        if (auto readyIt = status.readinessStates.find(
-                std::string(yams::daemon::readiness::kTopologyArtifactsFresh));
-            readyIt != status.readinessStates.end()) {
-            snapshot.topologyArtifactsFresh = readyIt->second;
-        }
-        if (auto readyIt = status.readinessStates.find(
-                std::string(yams::daemon::readiness::kTopologyRebuildRunning));
-            readyIt != status.readinessStates.end()) {
-            snapshot.topologyRebuildRunning = readyIt->second;
-        }
+        snapshot.topologyArtifactsFresh =
+            getReady(yams::daemon::readiness::kTopologyArtifactsFresh);
+        snapshot.topologyRebuildRunning =
+            getReady(yams::daemon::readiness::kTopologyRebuildRunning);
+        snapshot.simeonLexicalConfigured =
+            getReady(yams::daemon::readiness::kSearchEngineLexicalEnhancementConfigured);
+        snapshot.simeonLexicalReady =
+            getReady(yams::daemon::readiness::kSearchEngineLexicalEnhancementReady);
         return snapshot;
     }
 };
 
-struct IdleWaitResult {
+bool probeDaemonSearch(yams::daemon::DaemonClient& client, const std::string& query,
+                       const std::string& searchType, const std::string& expectedPath) {
+    using namespace yams::daemon;
+    SearchRequest req;
+    req.query = query;
+    req.searchType = searchType;
+    req.limit = 5;
+    req.pathsOnly = true;
+    req.timeout = std::chrono::milliseconds(5000);
+    auto result = yams::cli::run_sync(client.search(req), std::chrono::seconds(6));
+    if (!result)
+        return false;
+    for (const auto& r : result.value().results) {
+        if (expectedPath.empty())
+            return true;
+        if (!r.path.empty() && r.path.find(expectedPath) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+static std::string randomToken() {
+    static const char* cs = "abcdefghijklmnopqrstuvwxyz0123456789";
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<size_t> dist(0, 35);
+    std::string out;
+    for (int i = 0; i < 16; ++i)
+        out.push_back(cs[dist(rng)]);
+    return out;
+}
+
+std::string createSentinelFile(const fs::path& rootDir, std::string& tokenOut) {
+    tokenOut = "yams_bench_probe_" + randomToken();
+    fs::path sentinelPath = rootDir / ".yams_bench_probe.txt";
+    std::error_code ec;
+    fs::create_directories(rootDir, ec);
+    std::ofstream out(sentinelPath);
+    if (!out) {
+        throw std::runtime_error("Failed to create sentinel file: " + sentinelPath.string());
+    }
+    out << "YAMS_BENCH_SENTINEL_TOKEN: " << tokenOut << "\n";
+    out << "This file exists solely for the ingestion throughput benchmark search probe.\n";
+    return sentinelPath.string();
+}
+
+struct SearchableWaitResult {
     bool completed{false};
+    bool keywordHit{false};
+    bool hybridHit{false};
     StatusSnapshot lastSnapshot{};
+    std::chrono::nanoseconds keywordHitAt{};
+    std::chrono::nanoseconds hybridHitAt{};
+    std::chrono::nanoseconds drainedAt{};
+    std::chrono::nanoseconds searchableAt{};
+    std::string probeQuery;
+    std::string probeExpectedPath;
 };
 
-IdleWaitResult waitForPipelineIdle(yams::daemon::DaemonClient& client, std::chrono::seconds timeout,
-                                   bool requireTopologyFresh) {
+SearchableWaitResult waitForSearchable(yams::daemon::DaemonClient& client,
+                                       std::chrono::seconds timeout, bool requireTopologyFresh,
+                                       bool requireSearchProbe, const std::string& probeToken,
+                                       const std::string& probeExpectedPath) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
+    SearchableWaitResult result;
+    result.probeQuery = probeToken;
+    result.probeExpectedPath = probeExpectedPath;
     StatusSnapshot previous;
     StatusSnapshot last;
     bool havePrevious = false;
     int stableCount = 0;
-    constexpr int kStableRequired = 5;
+    constexpr int kStableRequired = 2;
+    bool keywordFound = !requireSearchProbe;
+    bool hybridFound = !requireSearchProbe;
+    const auto start = std::chrono::steady_clock::now();
 
     while (std::chrono::steady_clock::now() < deadline) {
         StatusSnapshot current = StatusSnapshot::capture(client);
         last = current;
-        bool stable = current.documentsTotal > 0 && current.pipelineIdle(requireTopologyFresh);
-        if (stable && havePrevious) {
-            stable = current.documentsTotal == previous.documentsTotal &&
-                     current.documentsIndexed == previous.documentsIndexed &&
-                     current.postIngestProcessed == previous.postIngestProcessed &&
-                     current.postIngestFailed == previous.postIngestFailed &&
-                     current.topologyRebuildsTotal == previous.topologyRebuildsTotal &&
-                     current.topologyDirtyDocuments == previous.topologyDirtyDocuments;
+
+        if (!keywordFound && requireSearchProbe && !probeToken.empty()) {
+            if (probeDaemonSearch(client, probeToken, "keyword", probeExpectedPath)) {
+                keywordFound = true;
+                if (result.keywordHitAt == std::chrono::nanoseconds{}) {
+                    result.keywordHitAt = std::chrono::steady_clock::now() - start;
+                }
+            }
+        }
+        if (!hybridFound && requireSearchProbe && !probeToken.empty() && keywordFound) {
+            if (probeDaemonSearch(client, probeToken, "hybrid", probeExpectedPath)) {
+                hybridFound = true;
+                if (result.hybridHitAt == std::chrono::nanoseconds{}) {
+                    result.hybridHitAt = std::chrono::steady_clock::now() - start;
+                }
+            }
         }
 
-        if (stable) {
+        bool searchable = current.documentsTotal > 0 && current.searchable(requireTopologyFresh);
+        if (searchable && havePrevious) {
+            searchable = current.documentsTotal == previous.documentsTotal &&
+                         current.documentsIndexed == previous.documentsIndexed &&
+                         current.postIngestProcessed == previous.postIngestProcessed &&
+                         current.postIngestFailed == previous.postIngestFailed &&
+                         current.topologyRebuildsTotal == previous.topologyRebuildsTotal &&
+                         current.topologyDirtyDocuments == previous.topologyDirtyDocuments;
+        }
+
+        if (searchable) {
             ++stableCount;
-            if (stableCount >= kStableRequired) {
-                return IdleWaitResult{.completed = true, .lastSnapshot = current};
+            if (stableCount >= kStableRequired && keywordFound && hybridFound) {
+                result.completed = true;
+                result.lastSnapshot = current;
+                result.keywordHit = keywordFound;
+                result.hybridHit = hybridFound;
+                result.searchableAt = std::chrono::steady_clock::now() - start;
+                return result;
             }
         } else {
             stableCount = 0;
@@ -474,10 +577,13 @@ IdleWaitResult waitForPipelineIdle(yams::daemon::DaemonClient& client, std::chro
 
         previous = current;
         havePrevious = true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    return IdleWaitResult{.completed = false, .lastSnapshot = last};
+    result.lastSnapshot = last;
+    result.keywordHit = keywordFound;
+    result.hybridHit = hybridFound;
+    return result;
 }
 
 bool useMockEmbeddingsForBench() {
@@ -534,12 +640,20 @@ struct RunResult {
     int exitCode{0};
     double durationSeconds{0.0};
     double throughputFilesPerSecond{0.0};
+    double timeToKeywordHitMs{0.0};
+    double timeToHybridHitMs{0.0};
+    double timeToDrainedMs{0.0};
+    double timeToSearchableMs{0.0};
     std::string command;
     fs::path dataDir;
     StatusSnapshot finalSnapshot{};
     bool drained{false};
     bool timedOut{false};
+    bool keywordHit{false};
+    bool hybridHit{false};
     bool topologyValidated{false};
+    std::string probeToken;
+    std::string probeExpectedPath;
     std::uint64_t addDocumentsAdded{0};
     std::string addMessage;
     std::uint64_t embedQueued{0};
@@ -617,7 +731,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     yams::test::DaemonHarness::Options harnessOptions;
     harnessOptions.enableModelProvider = true;
     harnessOptions.useMockModelProvider = !run.enableEmbeddings || useMockEmbeddings;
-    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddings && !useSimeon;
+    harnessOptions.autoLoadPlugins = run.enableEmbeddings && !useMockEmbeddings;
     harnessOptions.configureModelPool = run.enableEmbeddings && !useMockEmbeddings;
     harnessOptions.modelPoolLazyLoading = false;
     if (run.enableEmbeddings && !useMockEmbeddings) {
@@ -664,12 +778,27 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     addOptions.timeoutMs = 30000;
     addOptions.retries = 2;
 
-    int drainTimeoutSecs = 120;
+    int searchableTimeoutSecs = run.searchProbeTimeoutSecs;
     if (const char* envDrain = std::getenv("YAMS_BENCH_DRAIN_TIMEOUT_S"); envDrain && *envDrain) {
         try {
-            drainTimeoutSecs = std::max(10, std::stoi(envDrain));
+            searchableTimeoutSecs = std::max(10, std::stoi(envDrain));
         } catch (...) {
         }
+    }
+
+    std::string probeToken;
+    std::string probeExpectedPath;
+    if (run.requireSearchProbe) {
+        probeExpectedPath = createSentinelFile(runRoot, probeToken);
+        spdlog::info("[bench] Search probe: token={} path={}", probeToken, probeExpectedPath);
+        AddOptions sentinelOpts = addOptions;
+        sentinelOpts.path = probeExpectedPath;
+        sentinelOpts.recursive = false;
+        auto sentinelResult = ingestion.addViaDaemon(sentinelOpts);
+        if (!sentinelResult) {
+            throw std::runtime_error("Sentinel ingest failed: " + sentinelResult.error().message);
+        }
+        spdlog::info("[bench] Sentinel document ingested: {}", probeToken);
     }
 
     auto& bus = yams::daemon::InternalEventBus::instance();
@@ -700,8 +829,9 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     if (!addResult) {
         throw std::runtime_error("Daemon ingestion failed: " + addResult.error().message);
     }
-    auto waitResult = waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs),
-                                          run.requireTopologyFresh);
+    auto waitResult = waitForSearchable(client, std::chrono::seconds(searchableTimeoutSecs),
+                                        run.requireTopologyFresh, run.requireSearchProbe,
+                                        probeToken, probeExpectedPath);
     const auto end = std::chrono::steady_clock::now();
 
     harness.stop();
@@ -710,6 +840,10 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     const uint64_t documentsTotal = waitResult.lastSnapshot.documentsTotal;
     const double throughput =
         (documentsTotal > 0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
+
+    auto nsToMs = [](std::chrono::nanoseconds ns) -> double {
+        return ns.count() > 0 ? std::chrono::duration<double, std::milli>(ns).count() : 0.0;
+    };
 
     std::ostringstream cmd;
     cmd << "daemon_ingest_full_pipeline label=" << run.label << " workers=" << run.workers
@@ -732,7 +866,15 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.finalSnapshot = waitResult.lastSnapshot;
     result.drained = waitResult.completed;
     result.timedOut = !waitResult.completed;
+    result.keywordHit = waitResult.keywordHit;
+    result.hybridHit = waitResult.hybridHit;
     result.topologyValidated = run.requireTopologyFresh;
+    result.probeToken = probeToken;
+    result.probeExpectedPath = probeExpectedPath;
+    result.timeToKeywordHitMs = nsToMs(waitResult.keywordHitAt);
+    result.timeToHybridHitMs = nsToMs(waitResult.hybridHitAt);
+    result.timeToDrainedMs = nsToMs(waitResult.drainedAt);
+    result.timeToSearchableMs = nsToMs(waitResult.searchableAt);
     result.addDocumentsAdded = addResult.value().documentsAdded;
     result.addMessage = addResult.value().message;
     result.embedQueued = bus.embedQueued() - baseEmbedQueued;
@@ -757,6 +899,13 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.titleQueued = bus.titleQueued() - baseTitleQueued;
     result.titleConsumed = bus.titleConsumed() - baseTitleConsumed;
     result.titleDropped = bus.titleDropped() - baseTitleDropped;
+
+    const bool isSimeonFullPipeline = run.enableEmbeddings && !useMockEmbeddings && useSimeon;
+    if (isSimeonFullPipeline && result.titleQueued == 0 && result.titleConsumed == 0) {
+        spdlog::warn("[bench] Simeon run '{}' has titleQueued==0 — title extractor not wired "
+                     "(no entity-extractor plugins loaded). Title+NL extraction skipped.",
+                     run.label);
+    }
     return result;
 }
 
@@ -799,6 +948,14 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"files_skipped", skipped},
         {"files_failed", failed},
         {"throughput_files_per_second", throughput},
+        {"time_to_keyword_hit_ms", result.timeToKeywordHitMs},
+        {"time_to_hybrid_hit_ms", result.timeToHybridHitMs},
+        {"time_to_drained_ms", result.timeToDrainedMs},
+        {"time_to_searchable_ms", result.timeToSearchableMs},
+        {"keyword_hit", result.keywordHit},
+        {"hybrid_hit", result.hybridHit},
+        {"probe_token", result.probeToken},
+        {"probe_expected_path", result.probeExpectedPath},
         {"timed_out", result.timedOut},
         {"add_documents_added", result.addDocumentsAdded},
         {"add_message", result.addMessage},
@@ -842,21 +999,10 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         {"topology_artifacts_fresh", result.finalSnapshot.topologyArtifactsFresh},
         {"topology_rebuild_running", result.finalSnapshot.topologyRebuildRunning},
         {"topology_dirty_documents", result.finalSnapshot.topologyDirtyDocuments},
-        {"topology_last_success_age_ms", result.finalSnapshot.topologyLastSuccessAgeMs},
-        {"topology_rebuild_lag_ms", result.finalSnapshot.topologyRebuildLagMs},
-        {"topology_rebuild_running_age_ms", result.finalSnapshot.topologyRebuildRunningAgeMs},
-        {"topology_last_duration_ms", result.finalSnapshot.topologyLastDurationMs},
-        {"topology_rebuilds_total", result.finalSnapshot.topologyRebuildsTotal},
-        {"topology_rebuild_failures_total", result.finalSnapshot.topologyRebuildFailuresTotal},
-        {"topology_last_documents_requested", result.finalSnapshot.topologyLastDocumentsRequested},
-        {"topology_last_documents_processed", result.finalSnapshot.topologyLastDocumentsProcessed},
-        {"topology_last_clusters_built", result.finalSnapshot.topologyLastClustersBuilt},
-        {"topology_last_memberships_built", result.finalSnapshot.topologyLastMembershipsBuilt},
-        {"topology_last_dirty_seed_count", result.finalSnapshot.topologyLastDirtySeedCount},
-        {"topology_last_dirty_region_docs", result.finalSnapshot.topologyLastDirtyRegionDocs},
-        {"topology_last_coalesced_dirty_sets", result.finalSnapshot.topologyLastCoalescedDirtySets},
-        {"topology_last_fallback_full_rebuilds",
-         result.finalSnapshot.topologyLastFallbackFullRebuilds},
+        {"simeon_lexical_configured", result.finalSnapshot.simeonLexicalConfigured},
+        {"simeon_lexical_ready", result.finalSnapshot.simeonLexicalReady},
+        {"embed_queued", result.finalSnapshot.embedQueued},
+        {"embed_inflight", result.finalSnapshot.embedInflight},
         {"drained", result.drained},
         {"command", result.command},
         {"data_dir", result.dataDir.string()},

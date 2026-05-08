@@ -1,0 +1,29 @@
+{
+  "dataset_path": "src/daemon/components/",
+  "output_metrics": "build/benchmarks/profile_test.jsonl",
+  "post_run_cleanup": true,
+  "runs": [
+    {
+      "label": "fts-baseline-2w",
+      "workers": 2,
+      "repeat": 1,
+      "args": [
+        "--recursive",
+        "--include=*.cpp,*.h"
+      ]
+    },
+    {
+      "label": "simeon-searchable-2w",
+      "workers": 2,
+      "repeat": 1,
+      "enable_embeddings": true,
+      "embedding_model": "simeon-default",
+      "require_topology_fresh": true,
+      "require_search_probe": true,
+      "args": [
+        "--recursive",
+        "--include=*.cpp,*.h"
+      ]
+    }
+  ]
+}

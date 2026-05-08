@@ -528,7 +528,11 @@ using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
 
 ## 7. Recommendations
 
+<<<<<<< HEAD
 ### Short-Term (External extraction plugin work completion)
+=======
+### Short-Term (external extraction plugin work Completion)
+>>>>>>> origin/main
 1. ✅ **DONE:** ContentExtractorFactory integration
 2. ⏳ **IN PROGRESS:** Document extraction pipeline (this document)
 3. 🔄 **NEXT:** Create `IndexingService::indexContentForDocument()` utility

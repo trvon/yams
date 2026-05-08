@@ -1,7 +1,6 @@
 #include <yams/search/concept_resolver.h>
 
 #include <spdlog/spdlog.h>
-#include <unordered_map>
 #include <unordered_set>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_text_utils.h>

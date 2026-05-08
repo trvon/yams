@@ -1,1 +1,0 @@
-{"version":"1.20.0","results":[],"errors":[{"code":2,"level":"error","type":"SemgrepError","message":"Failed to download configuration from https://semgrep.dev/p/cpp HTTP 404."},{"code":7,"level":"error","type":"SemgrepError","message":"invalid configuration file found (1 configs were invalid)"}],"paths":{"scanned":[]},"skipped_rules":[]}

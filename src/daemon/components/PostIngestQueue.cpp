@@ -1286,6 +1286,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
+    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[1];
     cfg.pauseFlag = &stagePaused_[1];
@@ -1319,6 +1320,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
 
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
+    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[2];
     cfg.pauseFlag = &stagePaused_[2];
@@ -1540,6 +1542,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
 
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
+    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[3];
     cfg.pauseFlag = &stagePaused_[3];
@@ -1896,6 +1899,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
 
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";
+    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[4];
     cfg.pauseFlag = &stagePaused_[4];
@@ -3172,8 +3176,13 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
         extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
         extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
+
+        auto executor = coordinator_->getExecutor();
+        boost::asio::post(executor, [this, allSuccesses = std::move(allSuccesses),
+                                     allFailures = std::move(allFailures)]() mutable {
+            commitBatchResults(allSuccesses, allFailures);
+            dispatchSuccesses(allSuccesses);
+        });
         return;
     }
 
@@ -3234,8 +3243,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
     extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
     extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-    commitBatchResults(allSuccesses, allFailures);
-    dispatchSuccesses(allSuccesses);
+
+    boost::asio::post(executor, [this, allSuccesses = std::move(allSuccesses),
+                                 allFailures = std::move(allFailures)]() mutable {
+        commitBatchResults(allSuccesses, allFailures);
+        dispatchSuccesses(allSuccesses);
+    });
 }
 
 } // namespace yams::daemon

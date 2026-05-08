@@ -742,6 +742,7 @@ public:
                 ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
             if (ins) {
                 int64_t docId = ins.value();
+                out.documentId = docId;
 
                 // Update path tree for this document (best-effort, separate txn)
                 try {

@@ -1,6 +1,9 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
+<<<<<<< HEAD
     "C_Cpp.default.compileCommands": "z:\\yams\\builddir/compile_commands.json",
+=======
+>>>>>>> origin/main
     "mesonbuild.configureOnOpen": false,
     "mesonbuild.buildFolder": "builddir",
     "files.associations": {

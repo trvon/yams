@@ -13,6 +13,20 @@
         "--include=*.txt,*.md,*.cpp,*.h",
         "--exclude=**/.git/**,**/node_modules/**,**/build/**"
       ]
+    },
+    {
+      "label": "simeon-searchable-1w",
+      "workers": 1,
+      "repeat": 3,
+      "enable_embeddings": true,
+      "embedding_model": "simeon-default",
+      "require_topology_fresh": true,
+      "require_search_probe": true,
+      "args": [
+        "--recursive",
+        "--include=*.txt,*.md,*.cpp,*.h",
+        "--exclude=**/.git/**,**/node_modules/**,**/build/**"
+      ]
     }
   ]
 }

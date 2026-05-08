@@ -25,7 +25,7 @@
 namespace yams::daemon {
 
 // Forward declare helper
-using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<std::string>>;
+using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<PostIngestQueue::Task>>;
 static PendingPostIngestByMime processTask(ServiceManager* sm,
                                            const InternalEventBus::StoreDocumentTask& task);
 static std::future<PendingPostIngestByMime>
@@ -127,11 +127,11 @@ static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestB
         pending.clear();
         return;
     }
-    for (auto& [mime, hashes] : pending) {
-        if (hashes.empty()) {
+    for (auto& [mime, tasks] : pending) {
+        if (tasks.empty()) {
             continue;
         }
-        sm->enqueuePostIngestBatch(hashes, mime);
+        sm->enqueuePostIngestBatch(std::move(tasks));
     }
     pending.clear();
 }
@@ -212,10 +212,10 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         auto snap = TuningSnapshotRegistry::instance().get();
         if (snap && snap->daemonIdle) {
             return std::chrono::milliseconds(
-                std::max<uint32_t>(TuneAdvisor::idleTickMs(), snap->workerPollMs));
+                std::max<uint32_t>(10u, std::min<uint32_t>(TuneAdvisor::idleTickMs(), 50u)));
         }
         uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(50, pollMs));
+        return std::chrono::milliseconds(std::max<uint32_t>(2u, std::min<uint32_t>(pollMs, 10u)));
     };
 
     while (!stop_.load()) {
@@ -308,7 +308,7 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
             if (correctnessMode && backlogHigh) {
                 continue;
             }
-            timer.expires_after(std::chrono::milliseconds(25));
+            timer.expires_after(std::chrono::milliseconds(10));
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
     }
@@ -394,7 +394,12 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
             if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
                 spdlog::debug("[IngestService] Enqueuing post-ingest for hash={}",
                               serviceResp.hash);
-                pendingPostIngest[req.mimeType].push_back(serviceResp.hash);
+                PostIngestQueue::Task t;
+                t.hash = serviceResp.hash;
+                t.mime = req.mimeType;
+                t.documentId = serviceResp.documentId;
+                t.noEmbeddings = req.noEmbeddings;
+                pendingPostIngest[req.mimeType].push_back(std::move(t));
             } else {
                 spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",
                              sm != nullptr, sm ? (sm->getPostIngestQueue() != nullptr) : false,
