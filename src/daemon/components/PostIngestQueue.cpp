@@ -666,17 +666,18 @@ PostIngestQueue::BackpressureStatus PostIngestQueue::getBackpressureStatus() con
 }
 
 void PostIngestQueue::checkDrainAndSignal() {
-    // Check if queue is now drained (all stages idle)
     if (totalInFlight() == 0) {
-        // Only signal if we were previously active (had work)
         bool expected = true;
         if (wasActive_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
-            // Queue just became drained - signal corpus stats stale
+            // Flush WriteCoordinator: ensure all entity/edge/alias batches
+            // are committed to DB before corpus stats read or search rebuild.
+            if (writeCoordinator_)
+                writeCoordinator_->flush(std::chrono::milliseconds(30000));
+
             if (meta_) {
                 meta_->signalCorpusStatsStale();
             }
 
-            // Invoke drain callback (for search engine rebuild trigger)
             DrainCallback cb;
             {
                 std::lock_guard<std::mutex> lock(drainCallbackMutex_);
