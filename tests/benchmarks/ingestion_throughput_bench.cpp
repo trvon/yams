@@ -575,7 +575,7 @@ SearchableWaitResult waitForSearchable(yams::daemon::DaemonClient& client,
 
         previous = current;
         havePrevious = true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
 
     result.lastSnapshot = last;

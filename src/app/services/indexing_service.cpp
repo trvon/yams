@@ -602,6 +602,23 @@ private:
                 storeReq.metadata["collection"] = req.collection;
             }
 
+            // Pre-compute the file hash so ContentStore can reuse it instead
+            // of re-reading+re-hashing the file inside store().
+            auto hasher = yams::crypto::createSHA256Hasher();
+            storeReq.precomputedHash = hasher->hashFile(filePath);
+            std::error_code preHashEc;
+            auto preSize = std::filesystem::file_size(entry.path(), preHashEc);
+            if (!preHashEc) {
+                storeReq.precomputedFileSize = preSize;
+            }
+            auto preMtime = std::filesystem::last_write_time(entry.path(), preHashEc);
+            if (!preHashEc) {
+                storeReq.precomputedLastWriteTimeNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        preMtime.time_since_epoch())
+                        .count();
+            }
+
             auto docService = makeDocumentService(ctx_);
             auto result = docService->store(storeReq);
 
@@ -759,7 +776,8 @@ private:
             return 1;
         if (ctx_.service_manager) {
             auto target = ctx_.service_manager->ingestWorkerTarget();
-            return target == 0 ? 1 : target;
+            if (target > 1)
+                return target;
         }
         if (!yams::daemon::TuneAdvisor::enableParallelIngest())
             return 1;

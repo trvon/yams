@@ -982,6 +982,27 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.priorContentExtracted = info.contentExtracted;
     prepared.priorExtractionStatus = info.extractionStatus;
 
+    // For known code file extensions, skip NLP-centric enrichment that does not
+    // apply to source code (GLiNER title extraction, binary entity providers).
+    // KG registration, text extraction, and embeddings all stay enabled so the
+    // file remains fully searchable via both keyword and vector paths.
+    static const std::unordered_set<std::string> kCodeExtensions = {
+        "cpp",   "c",     "cc",  "cxx", "h",     "hpp",  "hh",    "hxx",   "rs",   "go",
+        "py",    "js",    "ts",  "tsx", "jsx",   "java", "swift", "kt",    "kts",  "rb",
+        "cs",    "scala", "m",   "mm",  "lua",   "zig",  "hs",    "elm",   "dart", "nim",
+        "r",     "cob",   "pas", "bas", "asm",   "s",    "S",     "cmake", "make", "mk",
+        "bazel", "bzl",   "gn",  "gni", "proto", "idl",  "def",   "inc",   "inl",  "tcc",
+    };
+    bool isCodeFile = false;
+    {
+        std::string checkExt = prepared.extension;
+        if (!checkExt.empty() && checkExt[0] == '.') {
+            checkExt = checkExt.substr(1);
+        }
+        std::transform(checkExt.begin(), checkExt.end(), checkExt.begin(), ::tolower);
+        isCodeFile = kCodeExtensions.count(checkExt) > 0;
+    }
+
     // Respect per-document opt-out (set by StoreDocumentRequest.noEmbeddings).
     // DocumentService persists this as a real tag key "tag:no_embeddings".
     try {
@@ -1015,7 +1036,7 @@ PostIngestQueue::prepareMetadataEntry(
     // produces NL entities and stores them in the KG — no need to dispatch
     // a separate entity extraction job for the same text.
     prepared.shouldDispatchEntity =
-        extensionSupportsEntityProviders(entityProviders, prepared.extension);
+        isCodeFile ? false : extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
     // Extract document text
     const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
@@ -1056,8 +1077,10 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
                                  prepared.extension);
 
-    // Title+NL extraction: single GLiNER call for both title and NL entities
-    if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
+    // Title+NL extraction: single GLiNER call for both title and NL entities.
+    // Skip for code files — GLiNER does not extract meaningful titles from
+    // source code, and the deriveTitle heuristic already produces good results.
+    if (!isCodeFile && hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
