@@ -2142,7 +2142,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::info("ServiceManager: embeddingPreloadOnStartup={}",
                      embeddingLifecycle_.preloadOnStartup());
 
-        if (enableAutoload) {
+        if (enableAutoload && !vectorsDisabled) {
             auto loadResult = co_await init::await_step(
                 "plugin_autoload_now",
                 [&]() -> boost::asio::awaitable<Result<size_t>> { return autoloadPluginsNow(); });

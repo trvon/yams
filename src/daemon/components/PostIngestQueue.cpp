@@ -711,6 +711,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cached)");
     }
 
+    extractionWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+
     PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
     cfg.stageName = "extraction";
     cfg.stopFlag = &stop_;
@@ -762,6 +765,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     // CPU throttle adds 2-25ms delays after every productive batch, compounding
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;
+    cfg.wakeTimer = extractionWakeTimer_;
 
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
@@ -778,6 +782,8 @@ void PostIngestQueue::enqueue(Task t) {
     while (!stop_.load(std::memory_order_acquire)) {
         if (channel->push_wait(task, kEnqueueTimeout)) {
             TuningManager::notifyWakeup();
+            if (extractionWakeTimer_)
+                extractionWakeTimer_->cancel();
             return;
         }
         ++waits;
@@ -1217,6 +1223,8 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     if (channel->try_push(std::move(job))) {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
+        if (kgWakeTimer_)
+            kgWakeTimer_->cancel();
         return;
     }
 
@@ -1233,11 +1241,15 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     } else {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
+        if (kgWakeTimer_)
+            kgWakeTimer_->cancel();
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto channel = kgChannel_;
+    kgWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
@@ -1266,11 +1278,14 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         processKnowledgeGraphBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = kgWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     auto channel = symbolChannel_;
+    symbolWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
@@ -1301,6 +1316,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         processSymbolExtractionBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = symbolWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1395,6 +1411,8 @@ void PostIngestQueue::dispatchToSymbolChannel(
                      filePath, hash.substr(0, 12), language);
         InternalEventBus::instance().incSymbolQueued();
         TuningManager::notifyWakeup();
+        if (symbolWakeTimer_)
+            symbolWakeTimer_->cancel();
     }
 }
 
@@ -1474,6 +1492,8 @@ void PostIngestQueue::dispatchToEntityChannel(
     } else {
         InternalEventBus::instance().incEntityQueued();
         TuningManager::notifyWakeup();
+        if (entityWakeTimer_)
+            entityWakeTimer_->cancel();
 
         // Throttled dispatch logging: per-document is too spammy for 5k+ docs.
         const auto nth = entityDispatched_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1486,6 +1506,8 @@ void PostIngestQueue::dispatchToEntityChannel(
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     auto channel = entityChannel_;
+    entityWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
@@ -1516,6 +1538,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         processEntityExtractionBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = entityWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1832,11 +1855,15 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleQueued();
         TuningManager::notifyWakeup();
+        if (titleWakeTimer_)
+            titleWakeTimer_->cancel();
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     auto channel = titleChannel_;
+    titleWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";
@@ -3048,6 +3075,15 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping {} tasks",
                      tasks.size());
         failed_.fetch_add(tasks.size(), std::memory_order_relaxed);
+        return;
+    }
+
+    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
+    // ready yet, requeue the batch so it is retried after the hookup arrives.
+    if (!writeCoordinator_) {
+        for (auto& task : tasks) {
+            (void)postIngestChannel_->try_push(std::move(task));
+        }
         return;
     }
 
