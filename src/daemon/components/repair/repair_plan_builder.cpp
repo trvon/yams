@@ -46,7 +46,8 @@ bool RepairPlanBuilder::hasWork(const RepairRequest& request) {
     return request.repairOrphans || request.repairMime || request.repairDownloads ||
            request.repairPathTree || request.repairChunks || request.repairBlockRefs ||
            request.repairFts5 || request.repairEmbeddings || request.repairStuckDocs ||
-           request.repairGraph || request.repairDedupe || request.optimizeDb;
+           request.repairGraph || request.repairTopology || request.repairDedupe ||
+           request.optimizeDb;
 }
 
 } // namespace yams::daemon::repair

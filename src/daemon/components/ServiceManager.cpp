@@ -63,6 +63,7 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/db_recovery.h>
+#include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -1842,6 +1843,45 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
+
+    // Phase: Salvage document records from corrupt DB after recovery.
+    // When the daemon startup detects a corrupt DB, it quarantines the old file
+    // and opens a fresh empty DB. After migrations, we attempt to salvage
+    // document records from the most recent quarantined corrupt DB so that
+    // derived indexes can be rebuilt rather than lost entirely.
+    {
+        std::string recoveredFrom;
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            recoveredFrom = state_.readiness.databaseRecoveredFrom;
+        }
+        if (!recoveredFrom.empty()) {
+            spdlog::info("[ServiceManager] DB was recovered from corruption; "
+                         "attempting to salvage document records");
+            auto sentinel = readLatestRecoverySentinel(dbPath);
+            if (sentinel && !sentinel->quarantinedPath.empty() &&
+                fs::exists(sentinel->quarantinedPath)) {
+                auto salvageResult = salvageFromCorruptDb(sentinel->quarantinedPath, dbPath);
+                if (salvageResult) {
+                    auto& salvaged = salvageResult.value();
+                    spdlog::info(
+                        "[ServiceManager] Salvaged {} document(s) from corrupt DB ({} failed)",
+                        salvaged.documentsSalvaged, salvaged.documentsFailed);
+                    {
+                        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                        state_.readiness.databaseRecoveredFrom = "salvaged-" + sentinel->timestamp;
+                        state_.readiness.databaseSalvaged = true;
+                    }
+                } else {
+                    spdlog::warn("[ServiceManager] Salvage from corrupt DB failed: {}",
+                                 salvageResult.error().message);
+                }
+            } else {
+                spdlog::warn("[ServiceManager] Recovery sentinel missing or corrupt DB not found; "
+                             "skipping salvage");
+            }
+        }
+    }
 
     // Phase: Connection pool + repo (owned by DatabaseManager)
     if (db_ok && databaseManager_) {

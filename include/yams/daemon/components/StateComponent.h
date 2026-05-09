@@ -40,6 +40,7 @@ struct DaemonReadiness {
     mutable std::mutex recoveryMutex;
     std::string databaseRecoveredAt;
     std::string databaseRecoveredFrom;
+    std::atomic<bool> databaseSalvaged{false};
 
     // Database init phase visibility. Lets `yams daemon status` show what the
     // daemon is doing during a slow open/migrate/recover instead of a generic

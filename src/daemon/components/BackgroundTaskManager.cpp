@@ -665,6 +665,43 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                 }
             }
 
+            // One-shot salvage sweep-up: when the daemon recovered from a
+            // corrupt metadata DB and salvaged document records, rebuild
+            // derived indexes (FTS5, graph, embeddings) from the recovered rows.
+            // Runs once after initial delay; subsequent tiered ticks handle
+            // any remaining repair work.
+            {
+                std::string recoveredFrom;
+                {
+                    std::lock_guard<std::mutex> lk(self->getState().readiness.recoveryMutex);
+                    recoveredFrom = self->getState().readiness.databaseRecoveredFrom;
+                }
+                if (!recoveredFrom.empty() && recoveredFrom.rfind("salvaged-", 0) == 0) {
+                    spdlog::info("[AutoRepair] Detected salvage recovery ({}), "
+                                 "scheduling derived-index rebuild",
+                                 recoveredFrom);
+                    auto rs = self->getRepairServiceShared();
+                    if (rs && !rs->isRepairInProgress()) {
+                        RepairRequest salvageRebuild;
+                        salvageRebuild.repairFts5 = true;
+                        salvageRebuild.repairGraph = true;
+                        salvageRebuild.repairTopology = true;
+                        salvageRebuild.repairEmbeddings = true;
+                        salvageRebuild.repairPathTree = true;
+                        salvageRebuild.foreground = false;
+                        if (repair::RepairPlanBuilder::hasWork(salvageRebuild)) {
+                            RepairResponse resp =
+                                co_await rs->executeRepairAsync(salvageRebuild, nullptr);
+                            if (resp.success) {
+                                spdlog::info("[AutoRepair] Salvage sweep-up completed");
+                            } else {
+                                spdlog::warn("[AutoRepair] Salvage sweep-up had errors");
+                            }
+                        }
+                    }
+                }
+            }
+
             const auto maxTime = std::chrono::steady_clock::time_point::max();
             auto now = std::chrono::steady_clock::now();
             auto nextFast = (fastInterval.count() > 0) ? now + fastInterval : maxTime;
