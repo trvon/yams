@@ -1,6 +1,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
+#include <yams/metadata/versioning_util.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 
@@ -754,6 +755,22 @@ public:
             if (ins) {
                 int64_t docId = ins.value();
                 out.documentId = docId;
+
+                // Path-series versioning (best-effort)
+                try {
+                    auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                    if (priorDoc && priorDoc.value().has_value()) {
+                        auto& prior = priorDoc.value().value();
+                        if (prior.sha256Hash != info.sha256Hash) {
+                            metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
+                                                                docId, prior);
+                        }
+                    } else {
+                        metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
+                                                            docId, std::nullopt);
+                    }
+                } catch (...) {
+                }
 
                 // Update path tree for this document (best-effort, separate txn)
                 try {

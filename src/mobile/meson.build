@@ -11,7 +11,6 @@ mobile_deps = [
   dependency('yams_api'),
   dependency('yams_search'),
   dependency('yams_vector'),
-  dependency('yams_indexing'),
   dependency('yams_storage_engine'),
   dependency('yams_manifest'),
   dependency('yams_chunking'),

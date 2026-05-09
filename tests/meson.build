@@ -63,7 +63,6 @@ test_deps = [
   dependency('yams_detection'),
   dependency('yams_content'),
   dependency('yams_downloader'),
-  dependency('yams_indexing'),
   dependency('yams_vector'),
   dependency('yams_search'),
   dependency('yams_api'),
@@ -1458,12 +1457,11 @@ if catch2_dep.found()
     install: false,
   )
 
-#Versioning Test Suites(Catch2) - document versioning, indexer
-#Migrated from GTest as part of yams - 3s4 / yams - 1jm
+#Versioning Test Suites(Catch2) - versioning utility
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_versioning_submodule_exe = executable('catch2_versioning_submodule',
     files(
-      'unit/versioning_document_indexer_catch2_test.cpp',
+      'unit/metadata/versioning_util_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

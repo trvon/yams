@@ -29,9 +29,8 @@ void populateDerivedPathFields(metadata::DocumentInfo& info) {
 } // namespace
 
 MetadataApi::MetadataApi(std::shared_ptr<metadata::MetadataRepository> repository,
-                         std::shared_ptr<indexing::IDocumentIndexer> indexer,
                          const MetadataApiConfig& config)
-    : repository_(repository), indexer_(indexer), config_(config) {
+    : repository_(repository), config_(config) {
     if (!repository_) {
         throw std::invalid_argument("Repository cannot be null");
     }
@@ -85,13 +84,6 @@ CreateMetadataResponse MetadataApi::createMetadata(const CreateMetadataRequest& 
         response.documentId = result.value();
         response.createdMetadata = requestCopy;
         response.createdMetadata.info.id = response.documentId;
-
-        // Trigger indexing if requested
-        if (request.indexImmediately && indexer_) {
-            indexing::IndexingConfig indexConfig;
-            auto indexResult = indexer_->indexDocument(requestCopy.info.filePath, indexConfig);
-            response.wasIndexed = indexResult.has_value();
-        }
 
         response.setSuccess("Document created successfully");
 
@@ -1221,20 +1213,13 @@ GetHistoryResponse MetadataApi::getHistory(const GetHistoryRequest& request) {
 
 std::unique_ptr<MetadataApi>
 MetadataApiFactory::create(std::shared_ptr<metadata::MetadataRepository> repository) {
-    return std::make_unique<MetadataApi>(repository, nullptr);
+    return std::make_unique<MetadataApi>(repository);
 }
 
 std::unique_ptr<MetadataApi>
 MetadataApiFactory::create(std::shared_ptr<metadata::MetadataRepository> repository,
-                           std::shared_ptr<indexing::IDocumentIndexer> indexer) {
-    return std::make_unique<MetadataApi>(repository, indexer);
-}
-
-std::unique_ptr<MetadataApi>
-MetadataApiFactory::create(std::shared_ptr<metadata::MetadataRepository> repository,
-                           std::shared_ptr<indexing::IDocumentIndexer> indexer,
                            const MetadataApiConfig& config) {
-    return std::make_unique<MetadataApi>(repository, indexer, config);
+    return std::make_unique<MetadataApi>(repository, config);
 }
 
 } // namespace yams::api
