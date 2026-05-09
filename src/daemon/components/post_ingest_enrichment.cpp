@@ -231,6 +231,21 @@ std::string makePathFileNodeKey(const std::string& path) {
 } // namespace
 
 // =========================================================================
+// ScientificAdapter Fallback
+// =========================================================================
+
+void runScientificAdapterFallback(PostIngestQueue::PreparedMetadataEntry& entry) {
+    if (entry.extractedText.empty())
+        return;
+    auto entities = simeon::ScientificAdapter::extract_entities(entry.extractedText, /*max=*/24);
+    entry.fallbackEntities = std::move(entities);
+    entry.fallbackAliases.clear();
+    entry.fallbackAliases.reserve(entry.fallbackEntities.size());
+    for (const auto& e : entry.fallbackEntities)
+        entry.fallbackAliases.push_back(search::normalizeEntityTextForKey(e));
+}
+
+// =========================================================================
 // KG Stage
 // =========================================================================
 

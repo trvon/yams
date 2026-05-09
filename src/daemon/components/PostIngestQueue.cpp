@@ -671,6 +671,13 @@ void PostIngestQueue::checkDrainAndSignal() {
         // Only signal if we were previously active (had work)
         bool expected = true;
         if (wasActive_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+            // Flush pending WriteCoordinator batches before signaling.
+            // Ensures entity/edge/alias writes are committed before the
+            // search engine rebuild reads corpus stats.
+            if (writeCoordinator_) {
+                writeCoordinator_->flush(std::chrono::seconds(30));
+            }
+
             // Queue just became drained - signal corpus stats stale
             if (meta_) {
                 meta_->signalCorpusStatsStale();
