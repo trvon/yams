@@ -1952,7 +1952,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         auto newPostIngest = std::make_shared<PostIngestQueue>(
             getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
             loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
-        newPostIngest->start();
 
         try {
             if (config_.tuning.postIngestCapacity > 0)
@@ -2220,6 +2219,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
+
+    // Start post-ingest queue pollers now that all extractors/providers are wired.
+    // This was deferred from PIQ construction so that plugin-based content extractors
+    // (zyp, etc.) are available before the first document is processed.
+    {
+        auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+        if (piq) {
+            piq->start();
+        }
+    }
     // Update pluginsReady flag after actual loading completes
     try {
         const auto ps = getPluginHostFsmSnapshot();
