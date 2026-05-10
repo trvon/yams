@@ -135,21 +135,6 @@ Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|m
 
 YAMS uses `simeon` by default for both dense vector embeddings and lexical (BM25) search — no model download required. Set `embeddings.backend = "simeon"` in your TOML config (or leave it unset; simeon is the default). Fine-grained knobs live under `[embeddings.simeon]`.
 
-Simeon research now points to a practical ceiling-closing path for YAMS: pair
-retrieval with **corpus adapters** that expose structure the generic vector
-backend cannot infer alone — file paths, titles, sections, headings, issue IDs,
-citations, or domain-specific anchors. English ArguAna experiments moved from
-~0.32 nDCG@10 with BM25 to ~0.76 with a topic adapter, while schema diagnostics
-showed the remaining headroom is structure recognition rather than more vector
-similarity.
-
-YAMS plans to expose this as a first-class search component in an upcoming
-release: a `CorpusAdapter` interface for schema-aware query seeding with
-built-in path-fragment and agent-memory metadata queries such as
-`pbi=PBI-043 task=list-json-refresh`. PRs are welcome for qrel-backed English corpora, yams-specific corpus adapters,
-and language/profile contributions that make this retrieval path testable beyond
-the current research fixture.
-
 Full config reference and dim tradeoffs: [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md).
 
 ## Troubleshooting
