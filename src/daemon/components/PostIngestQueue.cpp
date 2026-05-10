@@ -3078,15 +3078,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         return;
     }
 
-    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
-    // ready yet, requeue the batch so it is retried after the hookup arrives.
-    if (!writeCoordinator_) {
-        for (auto& task : tasks) {
-            (void)postIngestChannel_->try_push(std::move(task));
-        }
-        return;
-    }
-
     auto stageCfg = snapshotStageConfig();
     auto prepareTask = [this, &stageCfg](const InternalEventBus::PostIngestTask& task)
         -> std::variant<PreparedMetadataEntry, ExtractionFailure> {
@@ -3102,6 +3093,35 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
     };
+
+    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
+    // ready yet, process directly without WriteCoordinator batching so that
+    // standalone tests and early-init phases can still complete task processing.
+    if (!writeCoordinator_) {
+        std::vector<PreparedMetadataEntry> allSuccesses;
+        std::vector<ExtractionFailure> allFailures;
+        allSuccesses.reserve(tasks.size());
+        allFailures.reserve(tasks.size() / 10);
+
+        const auto prepareStart = std::chrono::steady_clock::now();
+        for (const auto& task : tasks) {
+            auto result = prepareTask(task);
+            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
+                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
+            } else {
+                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
+            }
+        }
+        recordTiming("prepare_metadata", prepareStart);
+
+        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        commitBatchResults(allSuccesses, allFailures);
+        dispatchSuccesses(allSuccesses);
+        return;
+    }
 
     // Get current concurrency limits from TuneAdvisor
     const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
