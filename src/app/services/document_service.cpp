@@ -51,6 +51,96 @@ namespace yams::app::services {
 
 namespace {
 
+constexpr std::size_t kWriteBatchCoalesceThreshold = 50;
+
+struct WriteBatchCoalescer {
+    std::mutex mtx;
+    std::unique_ptr<daemon::WriteBatch> versioningBatch;
+    std::unique_ptr<daemon::WriteBatch> kgSyncBatch;
+
+    ~WriteBatchCoalescer() {
+        // Batches are flushed via explicit flush() calls by the caller.
+        // If any unreleased batches remain, the WriteCoordinator was
+        // unavailable (no op to flush to), so we just drop them.
+    }
+
+    void addVersioning(std::unique_ptr<daemon::WriteBatch> wb,
+                       daemon::WriteCoordinator* writeCoord) {
+        std::unique_ptr<daemon::WriteBatch> toFlush;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (!versioningBatch) {
+                versioningBatch = std::make_unique<daemon::WriteBatch>();
+                versioningBatch->source = "doc_svc/versioning";
+            }
+            for (auto& op : wb->ops) {
+                versioningBatch->ops.push_back(std::move(op));
+            }
+            if (versioningBatch->ops.size() >= kWriteBatchCoalesceThreshold) {
+                toFlush = std::move(versioningBatch);
+            }
+        }
+        if (toFlush) {
+            writeCoord->tryEnqueue(std::move(toFlush));
+        }
+    }
+
+    void addKgSync(std::unique_ptr<daemon::WriteBatch> wb, daemon::WriteCoordinator* writeCoord) {
+        std::unique_ptr<daemon::WriteBatch> toFlush;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (!kgSyncBatch) {
+                kgSyncBatch = std::make_unique<daemon::WriteBatch>();
+                kgSyncBatch->source = "doc_svc/kg_sync";
+            }
+            for (auto& op : wb->ops) {
+                kgSyncBatch->ops.push_back(std::move(op));
+            }
+            if (kgSyncBatch->ops.size() >= kWriteBatchCoalesceThreshold) {
+                toFlush = std::move(kgSyncBatch);
+            }
+        }
+        if (toFlush) {
+            writeCoord->tryEnqueue(std::move(toFlush));
+        }
+    }
+
+    bool shouldFlush() {
+        std::lock_guard<std::mutex> lock(mtx);
+        std::size_t total = 0;
+        if (versioningBatch)
+            total += versioningBatch->ops.size();
+        if (kgSyncBatch)
+            total += kgSyncBatch->ops.size();
+        return total >= kWriteBatchCoalesceThreshold;
+    }
+
+    void flush(daemon::WriteCoordinator* writeCoord) {
+        std::unique_ptr<daemon::WriteBatch> vb;
+        std::unique_ptr<daemon::WriteBatch> kb;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            vb = std::move(versioningBatch);
+            kb = std::move(kgSyncBatch);
+        }
+        if (vb && !vb->ops.empty()) {
+            writeCoord->tryEnqueue(std::move(vb));
+        }
+        if (kb && !kb->ops.empty()) {
+            writeCoord->tryEnqueue(std::move(kb));
+        }
+    }
+};
+
+WriteBatchCoalescer& getWriteBatchCoalescer() {
+    static WriteBatchCoalescer instance;
+    return instance;
+}
+
+} // namespace
+
+namespace {
+
 constexpr std::size_t kCentroidPreviewLimit = 16;
 
 // Use project compatibility helpers from cpp23_features.hpp
@@ -831,7 +921,7 @@ public:
                              {docId, "is_latest", metadata::MetadataValue(true)},
                              {docId, "series_key", metadata::MetadataValue(info.filePath)}}});
 
-                        writeCoord->tryEnqueue(std::move(wb));
+                        getWriteBatchCoalescer().addVersioning(std::move(wb), writeCoord);
                     } else {
                         auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                         if (priorDoc && priorDoc.value().has_value()) {
@@ -921,7 +1011,7 @@ public:
                             wb->ops.emplace_back(daemon::AddDeferredEdgesOp{
                                 {std::move(pathVerEdge), std::move(hasVerEdge)}});
 
-                            writeCoord->tryEnqueue(std::move(wb));
+                            getWriteBatchCoalescer().addKgSync(std::move(wb), writeCoord);
                         } else {
                             auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                             if (!blobNodeResult) {
