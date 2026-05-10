@@ -910,15 +910,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(repairResp.success);
     const auto op = findOperationResult(repairResp, "stuck_docs");
     REQUIRE(op.has_value());
-    CHECK(op->succeeded >= 0);
+    CHECK(op->succeeded >= 1);
 
-    drainQueue(postIngestRpc);
-    piq->resumeAll();
-    drainQueue(postIngestRpc);
     repair.stop();
-    sm->shutdown();
-    piq->resumeAll();
     drainQueue(postIngestRpc);
+    piq->resumeAll();
     sm->shutdown();
 }
 

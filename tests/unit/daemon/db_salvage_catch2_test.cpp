@@ -6,6 +6,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <sqlite3.h>
 
 namespace fs = std::filesystem;
