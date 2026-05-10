@@ -3,6 +3,7 @@
 #include <yams/core/uuid.h>
 #include <yams/metadata/versioning_util.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteBatchCoalescer.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
@@ -51,89 +52,13 @@ namespace yams::app::services {
 
 namespace {
 
-constexpr std::size_t kWriteBatchCoalesceThreshold = 50;
+daemon::WriteBatchCoalescer& getVersioningCoalescer() {
+    static daemon::WriteBatchCoalescer instance("doc_svc/versioning");
+    return instance;
+}
 
-struct WriteBatchCoalescer {
-    std::mutex mtx;
-    std::unique_ptr<daemon::WriteBatch> versioningBatch;
-    std::unique_ptr<daemon::WriteBatch> kgSyncBatch;
-
-    ~WriteBatchCoalescer() {
-        // Batches are flushed via explicit flush() calls by the caller.
-        // If any unreleased batches remain, the WriteCoordinator was
-        // unavailable (no op to flush to), so we just drop them.
-    }
-
-    void addVersioning(std::unique_ptr<daemon::WriteBatch> wb,
-                       daemon::WriteCoordinator* writeCoord) {
-        std::unique_ptr<daemon::WriteBatch> toFlush;
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            if (!versioningBatch) {
-                versioningBatch = std::make_unique<daemon::WriteBatch>();
-                versioningBatch->source = "doc_svc/versioning";
-            }
-            for (auto& op : wb->ops) {
-                versioningBatch->ops.push_back(std::move(op));
-            }
-            if (versioningBatch->ops.size() >= kWriteBatchCoalesceThreshold) {
-                toFlush = std::move(versioningBatch);
-            }
-        }
-        if (toFlush) {
-            writeCoord->tryEnqueue(std::move(toFlush));
-        }
-    }
-
-    void addKgSync(std::unique_ptr<daemon::WriteBatch> wb, daemon::WriteCoordinator* writeCoord) {
-        std::unique_ptr<daemon::WriteBatch> toFlush;
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            if (!kgSyncBatch) {
-                kgSyncBatch = std::make_unique<daemon::WriteBatch>();
-                kgSyncBatch->source = "doc_svc/kg_sync";
-            }
-            for (auto& op : wb->ops) {
-                kgSyncBatch->ops.push_back(std::move(op));
-            }
-            if (kgSyncBatch->ops.size() >= kWriteBatchCoalesceThreshold) {
-                toFlush = std::move(kgSyncBatch);
-            }
-        }
-        if (toFlush) {
-            writeCoord->tryEnqueue(std::move(toFlush));
-        }
-    }
-
-    bool shouldFlush() {
-        std::lock_guard<std::mutex> lock(mtx);
-        std::size_t total = 0;
-        if (versioningBatch)
-            total += versioningBatch->ops.size();
-        if (kgSyncBatch)
-            total += kgSyncBatch->ops.size();
-        return total >= kWriteBatchCoalesceThreshold;
-    }
-
-    void flush(daemon::WriteCoordinator* writeCoord) {
-        std::unique_ptr<daemon::WriteBatch> vb;
-        std::unique_ptr<daemon::WriteBatch> kb;
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            vb = std::move(versioningBatch);
-            kb = std::move(kgSyncBatch);
-        }
-        if (vb && !vb->ops.empty()) {
-            writeCoord->tryEnqueue(std::move(vb));
-        }
-        if (kb && !kb->ops.empty()) {
-            writeCoord->tryEnqueue(std::move(kb));
-        }
-    }
-};
-
-WriteBatchCoalescer& getWriteBatchCoalescer() {
-    static WriteBatchCoalescer instance;
+daemon::WriteBatchCoalescer& getKgSyncCoalescer() {
+    static daemon::WriteBatchCoalescer instance("doc_svc/kg_sync");
     return instance;
 }
 
@@ -900,12 +825,11 @@ public:
 
                         int64_t newVersion = prevLatestId.has_value() ? maxVersion + 1 : 1;
 
-                        auto wb = std::make_unique<daemon::WriteBatch>();
-                        wb->source = "doc_svc/versioning";
-
+                        auto& vc = getVersioningCoalescer();
                         if (prevLatestId.has_value()) {
-                            wb->ops.emplace_back(daemon::SetMetadataBatchOp{
-                                {{*prevLatestId, "is_latest", metadata::MetadataValue(false)}}});
+                            vc.addOp(daemon::SetMetadataBatchOp{{{*prevLatestId, "is_latest",
+                                                                  metadata::MetadataValue(false)}}},
+                                     writeCoord);
 
                             metadata::DocumentRelationship rel;
                             rel.parentId = *prevLatestId;
@@ -913,15 +837,15 @@ public:
                             rel.relationshipType = metadata::RelationshipType::VersionOf;
                             rel.createdTime = std::chrono::floor<std::chrono::seconds>(
                                 std::chrono::system_clock::now());
-                            wb->ops.emplace_back(daemon::InsertRelationshipOp{std::move(rel)});
+                            vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, writeCoord);
                         }
 
-                        wb->ops.emplace_back(daemon::SetMetadataBatchOp{
-                            {{docId, "version", metadata::MetadataValue(newVersion)},
-                             {docId, "is_latest", metadata::MetadataValue(true)},
-                             {docId, "series_key", metadata::MetadataValue(info.filePath)}}});
-
-                        getWriteBatchCoalescer().addVersioning(std::move(wb), writeCoord);
+                        vc.addOp(
+                            daemon::SetMetadataBatchOp{
+                                {{docId, "version", metadata::MetadataValue(newVersion)},
+                                 {docId, "is_latest", metadata::MetadataValue(true)},
+                                 {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
+                            writeCoord);
                     } else {
                         auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                         if (priorDoc && priorDoc.value().has_value()) {
@@ -991,11 +915,11 @@ public:
                                 std::string("{\"path\":\"") + info.filePath +
                                 "\",\"is_directory\":false,\"logical\":true}";
 
-                            auto wb = std::make_unique<daemon::WriteBatch>();
-                            wb->source = "doc_svc/kg_sync";
-                            wb->ops.emplace_back(daemon::UpsertNodesOp{
-                                {std::move(blobNode), std::move(docNode),
-                                 std::move(snapshotPathNode), std::move(logicalPathNode)}});
+                            auto& kc = getKgSyncCoalescer();
+                            kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
+                                                            std::move(snapshotPathNode),
+                                                            std::move(logicalPathNode)}},
+                                     writeCoord);
 
                             daemon::DeferredEdgeOp pathVerEdge;
                             pathVerEdge.srcNodeKey = logicalPathKey;
@@ -1008,10 +932,9 @@ public:
                             hasVerEdge.relation = "has_version";
                             hasVerEdge.properties = "{\"diff_id\":0}";
 
-                            wb->ops.emplace_back(daemon::AddDeferredEdgesOp{
-                                {std::move(pathVerEdge), std::move(hasVerEdge)}});
-
-                            getWriteBatchCoalescer().addKgSync(std::move(wb), writeCoord);
+                            kc.addOp(daemon::AddDeferredEdgesOp{{std::move(pathVerEdge),
+                                                                 std::move(hasVerEdge)}},
+                                     writeCoord);
                         } else {
                             auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                             if (!blobNodeResult) {
