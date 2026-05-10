@@ -1,5 +1,6 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/daemon/components/MetadataWriteFacade.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -1522,6 +1523,9 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
         co_return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     auto stuckDocs = detectStuckDocuments(req.maxRetries);
     result.processed = stuckDocs.size();
 
@@ -1574,9 +1578,8 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
                 (void)meta->updateDocument(doc);
             }
 
-            (void)meta->updateDocumentExtractionStatus(s.docId, false,
-                                                       metadata::ExtractionStatus::Pending,
-                                                       "RepairService: recovery attempt");
+            metaFacade.updateExtractionStatus(s.docId, false, metadata::ExtractionStatus::Pending,
+                                              "RepairService: recovery attempt");
             submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
                                      metadata::RepairStatus::Pending,
                                      "RepairService::recovery/single");
@@ -1599,6 +1602,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             progress(ev);
         }
     }
+    metaFacade.flush();
 
     result.message = "Recovered " + std::to_string(result.succeeded) + " stuck documents";
     if (result.failed > 0) {
@@ -1618,6 +1622,9 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         result.message = "Metadata repository not available";
         return result;
     }
+
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto stuckDocs = detectStuckDocuments(req.maxRetries);
     result.processed = stuckDocs.size();
@@ -1678,9 +1685,8 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             }
 
             // Reset extraction status to Pending
-            (void)meta->updateDocumentExtractionStatus(s.docId, false,
-                                                       metadata::ExtractionStatus::Pending,
-                                                       "RepairService: recovery attempt");
+            metaFacade.updateExtractionStatus(s.docId, false, metadata::ExtractionStatus::Pending,
+                                              "RepairService: recovery attempt");
 
             submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
                                      metadata::RepairStatus::Pending,
@@ -1711,6 +1717,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         result.message += " (" + std::to_string(result.failed) +
                           " could not be enqueued — re-run repair to retry)";
     }
+    metaFacade.flush();
     return result;
 }
 
