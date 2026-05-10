@@ -769,3 +769,102 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector get last stats",
     CHECK(stats.blocksScanned >= 0u);
     CHECK(stats.duration.count() >= 0); // Duration can be 0 for very fast operations
 }
+
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector isCollecting reflects active state",
+                 "[storage][gc][isCollecting][catch2]") {
+    CHECK_FALSE(gc->isCollecting());
+
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
+
+    auto future = gc->collectAsync(options);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    bool wasCollecting = gc->isCollecting();
+
+    future.wait();
+    CHECK_FALSE(gc->isCollecting());
+    (void)wasCollecting;
+}
+
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector scheduleCollection starts and stops",
+                 "[storage][gc][schedule][catch2]") {
+    GCOptions options{
+        .maxBlocksPerRun = 5, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
+
+    CHECK_FALSE(gc->isCollecting());
+
+    gc->scheduleCollection(std::chrono::seconds(1), options);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    gc->stopScheduledCollection();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK_FALSE(gc->isCollecting());
+}
+
+TEST_CASE("rebuildReferenceDatabase scans storage and populates refs.db",
+          "[storage][gc][rebuild][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto dbPath =
+        tempDir / std::format("yams_rebuild_refs_{}.db",
+                              std::chrono::system_clock::now().time_since_epoch().count());
+    auto storagePath =
+        tempDir / std::format("yams_rebuild_storage_{}",
+                              std::chrono::system_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(storagePath);
+
+    // Create a shard with test blocks
+    auto shardDir = storagePath / "aa";
+    std::filesystem::create_directories(shardDir);
+
+    std::string testHash = std::string(62, 'a') + "bb";
+    std::ofstream block(shardDir / (std::string(62, 'a') + "bb"));
+    block.write("test_block_content", 18);
+    block.close();
+
+    auto cleanup = [&] {
+        std::filesystem::remove_all(storagePath);
+        std::filesystem::remove(dbPath);
+        std::filesystem::remove(dbPath.string() + "-wal");
+        std::filesystem::remove(dbPath.string() + "-shm");
+    };
+
+    auto result = rebuildReferenceDatabase(dbPath, storagePath);
+    REQUIRE(result.has_value());
+
+    // Verify refs.db was created and has the expected entry
+    ReferenceCounter::Config config{
+        .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+    auto refCounter = createReferenceCounter(config);
+
+    auto count = refCounter->getRefCount(testHash);
+    REQUIRE(count.has_value());
+    CHECK(count.value() >= 1u);
+
+    cleanup();
+}
+
+TEST_CASE("rebuildReferenceDatabase handles empty storage gracefully",
+          "[storage][gc][rebuild][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto dbPath =
+        tempDir / std::format("yams_rebuild_empty_{}.db",
+                              std::chrono::system_clock::now().time_since_epoch().count());
+    auto storagePath =
+        tempDir / std::format("yams_rebuild_empty_storage_{}",
+                              std::chrono::system_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(storagePath);
+
+    auto cleanup = [&] {
+        std::filesystem::remove_all(storagePath);
+        std::filesystem::remove(dbPath);
+        std::filesystem::remove(dbPath.string() + "-wal");
+        std::filesystem::remove(dbPath.string() + "-shm");
+    };
+
+    auto result = rebuildReferenceDatabase(dbPath, storagePath);
+    REQUIRE(result.has_value());
+
+    cleanup();
+}

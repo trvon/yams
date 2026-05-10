@@ -182,4 +182,75 @@ TEST_CASE("RepairUtilScan prioritizes extractable documents ahead of skipped bin
     std::filesystem::remove_all(tmp, ec);
 }
 
+TEST_CASE("RepairUtilScan returns empty list when all documents embedded",
+          "[repair][embedding][catch2]") {
+    if (std::getenv("YAMS_DISABLE_VECTORS") || std::getenv("YAMS_DISABLE_VECTOR_DB")) {
+        SKIP("Vectors disabled via environment");
+    }
+
+    auto tmp = std::filesystem::temp_directory_path() /
+               ("yams_repair_all_embedded_" + std::to_string(std::rand()));
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+    std::filesystem::create_directories(tmp);
+
+    auto repo = std::make_shared<InMemoryMetadata>();
+    metadata::DocumentInfo doc{};
+    doc.id = 1;
+    doc.sha256Hash = "embedded-doc";
+    doc.fileName = "readme.md";
+    doc.mimeType = "text/markdown";
+    doc.contentExtracted = true;
+    doc.extractionStatus = metadata::ExtractionStatus::Success;
+    repo->add(doc);
+
+    yams::vector::VectorDatabaseConfig cfg{};
+    cfg.database_path = (tmp / "vectors.db").string();
+    cfg.create_if_missing = true;
+    cfg.embedding_dim = 384;
+    auto vdb = std::make_unique<yams::vector::VectorDatabase>(cfg);
+    REQUIRE(vdb->initialize());
+    yams::vector::VectorRecord rec;
+    rec.document_hash = "embedded-doc";
+    rec.chunk_id = "c-1";
+    rec.embedding = std::vector<float>(384, 0.2f);
+    rec.content = "content";
+    REQUIRE(vdb->insertVector(rec));
+    vdb.reset();
+
+    auto missing = getDocumentsMissingEmbeddings(repo, tmp);
+    REQUIRE(missing);
+    CHECK(missing.value().empty());
+
+    std::filesystem::remove_all(tmp, ec);
+}
+
+TEST_CASE("RepairUtilScan returns empty list for empty metadata", "[repair][embedding][catch2]") {
+    if (std::getenv("YAMS_DISABLE_VECTORS") || std::getenv("YAMS_DISABLE_VECTOR_DB")) {
+        SKIP("Vectors disabled via environment");
+    }
+
+    auto tmp = std::filesystem::temp_directory_path() /
+               ("yams_repair_empty_repo_" + std::to_string(std::rand()));
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+    std::filesystem::create_directories(tmp);
+
+    auto repo = std::make_shared<InMemoryMetadata>();
+
+    yams::vector::VectorDatabaseConfig cfg{};
+    cfg.database_path = (tmp / "vectors.db").string();
+    cfg.create_if_missing = true;
+    cfg.embedding_dim = 384;
+    auto vdb = std::make_unique<yams::vector::VectorDatabase>(cfg);
+    REQUIRE(vdb->initialize());
+    vdb.reset();
+
+    auto missing = getDocumentsMissingEmbeddings(repo, tmp);
+    REQUIRE(missing);
+    CHECK(missing.value().empty());
+
+    std::filesystem::remove_all(tmp, ec);
+}
+
 } // namespace yams::repair::test
