@@ -312,6 +312,16 @@ PostIngestQueue::~PostIngestQueue() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
     std::unique_lock<std::mutex> lock(lifecycleMutex_);
     lifecycleCv_.wait_until(lock, deadline, [this]() { return totalInFlight() == 0; });
+
+    // Detach wake timers to prevent use-after-free in steady_timer destructor.
+    // The timers hold references to io_context service objects that may be
+    // destroyed before PostIngestQueue member destructors run during shutdown.
+    if (extractionWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
+    }
+    if (kgWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
+    }
 }
 
 void PostIngestQueue::start() {
