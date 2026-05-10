@@ -52,6 +52,22 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     }
 }
 
+bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch> batch) {
+    if (!batch)
+        return false;
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    if (pendingBatches_.size() >= config_.channelCapacity) {
+        return false;
+    }
+    batch->enqueueTime = std::chrono::steady_clock::now();
+    pendingBatches_.push_back(std::move(batch));
+    {
+        std::lock_guard<std::mutex> slock(statsMutex_);
+        stats_.batchesEnqueued++;
+    }
+    return true;
+}
+
 void WriteCoordinator::start() {
     stop_.store(false);
     boost::asio::co_spawn(strand_, writerLoop(), boost::asio::detached);

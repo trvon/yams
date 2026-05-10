@@ -831,7 +831,7 @@ public:
                              {docId, "is_latest", metadata::MetadataValue(true)},
                              {docId, "series_key", metadata::MetadataValue(info.filePath)}}});
 
-                        writeCoord->enqueue(std::move(wb));
+                        writeCoord->tryEnqueue(std::move(wb));
                     } else {
                         auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                         if (priorDoc && priorDoc.value().has_value()) {
@@ -921,7 +921,7 @@ public:
                             wb->ops.emplace_back(daemon::AddDeferredEdgesOp{
                                 {std::move(pathVerEdge), std::move(hasVerEdge)}});
 
-                            writeCoord->enqueue(std::move(wb));
+                            writeCoord->tryEnqueue(std::move(wb));
                         } else {
                             auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                             if (!blobNodeResult) {
