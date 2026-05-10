@@ -140,9 +140,12 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     }
 
     SECTION("initializeOnce prepares persisted search index for warm vectors") {
-        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
-        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
-        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                                std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                                 std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
+                                                     std::optional<std::string>("0"));
         yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
@@ -184,9 +187,12 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     }
 
     SECTION("initializeOnce does not block on rebuilding missing persisted search index") {
-        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::nullopt);
-        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::nullopt);
-        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
+        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                                std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                                 std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
+                                                     std::optional<std::string>("0"));
         yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
 
         auto warmDeps = makeDeps();
