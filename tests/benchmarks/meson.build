@@ -270,6 +270,36 @@ endif
 # Only build if Catch2 is available (requires build_tests=true in conan)
 catch2_with_main_dep = dependency('catch2-with-main', required: false)
 if catch2_with_main_dep.found()
+  write_coordinator_bench = executable('write_coordinator_bench',
+    files('write_coordinator_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  write_coordinator_bench_env = {
+    'YAMS_TESTING': '1',
+    'YAMS_DISABLE_VECTORS': '1',
+    'YAMS_DISABLE_SESSION_WATCHER': '1',
+    'YAMS_SKIP_MODEL_LOADING': '1',
+    'LD_LIBRARY_PATH': _test_env_ld_library_path,
+  }
+
+  test('write_coordinator_bench', write_coordinator_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'write-coordinator'],
+       is_parallel: false,
+       timeout: 600,
+       env: write_coordinator_bench_env)
+
+  alias_target('bench_write_coordinator', write_coordinator_bench)
+
   symbol_extraction_bench = executable('symbol_extraction_bench',
     files('symbol_extraction_bench.cpp'),
     include_directories: incs,
