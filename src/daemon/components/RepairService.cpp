@@ -1792,6 +1792,9 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
@@ -1863,7 +1866,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     if (oldWasText && !newIsText) {
                         (void)meta->deleteContent(id);
                         (void)meta->removeFromIndex(id);
-                        (void)meta->updateDocumentExtractionStatus(
+                        metaFacade.updateExtractionStatus(
                             id, false, metadata::ExtractionStatus::Pending,
                             "MIME repaired; stale text content cleared");
                     }
@@ -1893,6 +1896,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
     } else {
         result.message = "Repaired " + std::to_string(result.succeeded) + " MIME types";
     }
+    metaFacade.flush();
     return result;
 }
 
@@ -1906,6 +1910,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         result.message = "Metadata not available";
         return result;
     }
+
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
     if (!docsResult) {
@@ -1967,19 +1974,20 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         }
 
         try {
-            meta->setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
-            meta->setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
+            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
+            metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
             auto host = extract_host(sourceUrl);
             auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
-                meta->setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
+                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
-                meta->setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
+                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
         } catch (...) {
         }
     }
 
     result.message = "Updated " + std::to_string(result.succeeded) + " download documents";
+    metaFacade.flush();
     return result;
 }
 
@@ -2685,6 +2693,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
     const auto& customExtractors =
         ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
@@ -2770,9 +2781,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                     auto contentRes = meta->getContent(d.id);
                     successHasContent = contentRes && contentRes.value().has_value();
                     if (!successHasContent) {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Pending,
-                            "Missing content row; reset by repair");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Pending,
+                                                          "Missing content row; reset by repair");
                         extractionStatus = metadata::ExtractionStatus::Pending;
                     }
                 }
@@ -2806,9 +2817,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                     auto extractedOpt = yams::extraction::util::extractDocumentText(
                         store, d.sha256Hash, effectiveMime, extension, customExtractors);
                     if (extractedOpt && !extractedOpt->empty()) {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Pending,
-                            "repair fts5 processing");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Pending,
+                                                          "repair fts5 processing");
 
                         metadata::DocumentContent content;
                         content.documentId = d.id;
@@ -2831,27 +2842,27 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                                                              effectiveMime);
 
                         if (ir && contentResult) {
-                            (void)meta->updateDocumentExtractionStatus(
-                                d.id, true, metadata::ExtractionStatus::Success);
+                            metaFacade.updateExtractionStatus(
+                                d.id, true, metadata::ExtractionStatus::Success, "");
                             result.succeeded++;
                         } else {
                             static const std::string kUnknownFailure = "unknown";
                             const std::string& failMsg =
                                 !contentResult ? contentResult.error().message
                                                : (!ir ? ir.error().message : kUnknownFailure);
-                            (void)meta->updateDocumentExtractionStatus(
+                            metaFacade.updateExtractionStatus(
                                 d.id, false, metadata::ExtractionStatus::Failed, failMsg);
                             result.failed++;
                         }
                     } else {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Skipped,
-                            "No extractable text");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Skipped,
+                                                          "No extractable text");
                         result.skipped++;
                     }
                 } catch (const std::exception& e) {
-                    (void)meta->updateDocumentExtractionStatus(
-                        d.id, false, metadata::ExtractionStatus::Failed, e.what());
+                    metaFacade.updateExtractionStatus(d.id, false,
+                                                      metadata::ExtractionStatus::Failed, e.what());
                     result.failed++;
                 }
 
@@ -2884,6 +2895,7 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     result.message = "FTS5 rebuild: " + std::to_string(result.succeeded) + " ok, " +
                      std::to_string(result.failed) + " failed, " + std::to_string(result.skipped) +
                      " skipped";
+    metaFacade.flush();
     return result;
 }
 
