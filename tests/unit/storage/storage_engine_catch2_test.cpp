@@ -425,3 +425,167 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine verify detects content has
     REQUIRE_FALSE(verifyResult.has_value());
     CHECK(verifyResult.error().code == ErrorCode::CorruptedData);
 }
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine stores and retrieves manifest keys",
+                 "[storage][manifest][catch2]") {
+    const std::string hash32 = std::string(62, 'a') + "bb";
+    const std::string manifestKey = hash32 + ".manifest";
+    std::vector<std::byte> data = generateRandomBytes(2048);
+
+    auto storeResult = storage->store(manifestKey, data);
+    REQUIRE(storeResult.has_value());
+
+    CHECK(storage->exists(manifestKey));
+
+    auto retrieveResult = storage->retrieve(manifestKey);
+    REQUIRE(retrieveResult.has_value());
+    CHECK(retrieveResult.value() == data);
+
+    storage->remove(manifestKey);
+    CHECK_FALSE(storage->exists(manifestKey));
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine stores manifests in separate shard directory",
+                 "[storage][manifest][sharding][catch2]") {
+    const std::string hash32 = std::string(62, 'c') + "dd";
+    const std::string manifestKey = hash32 + ".manifest";
+    std::vector<std::byte> data = generateRandomBytes(512);
+
+    REQUIRE(storage->store(manifestKey, data).has_value());
+
+    auto manifestPath =
+        storagePath / "objects" / hash32.substr(0, 2) / (hash32.substr(2) + ".manifest");
+    CHECK(std::filesystem::exists(manifestPath));
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine retrieveRaw returns raw stored bytes",
+                 "[storage][retrieveRaw][catch2]") {
+    auto [hash, data] = generateTestData(4096);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto rawResult = storage->retrieveRaw(hash);
+    REQUIRE(rawResult.has_value());
+    CHECK(rawResult.value().data == data);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine retrieveRaw returns NotFound for missing hash",
+                 "[storage][retrieveRaw][catch2]") {
+    const std::string missingHash = std::string(64, '0');
+    auto result = storage->retrieveRaw(missingHash);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::ChunkNotFound);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine retrieveRawAsync works for existing hash",
+                 "[storage][retrieveRaw][async][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto future = storage->retrieveRawAsync(hash);
+    auto result = future.get();
+    REQUIRE(result.has_value());
+    CHECK(result.value().data == data);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine getBlockSize returns stored size",
+                 "[storage][blockSize][catch2]") {
+    auto [hash, data] = generateTestData(3333);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto sizeResult = storage->getBlockSize(hash);
+    REQUIRE(sizeResult.has_value());
+    CHECK(sizeResult.value() == static_cast<uint64_t>(3333));
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine getBlockSize returns NotFound for missing hash",
+                 "[storage][blockSize][catch2]") {
+    const std::string missingHash = std::string(64, 'f');
+    auto result = storage->getBlockSize(missingHash);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::ChunkNotFound);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanupTempFiles returns successfully",
+                 "[storage][cleanup][catch2]") {
+    auto [hash, data] = generateTestData(512);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto tempDir = storagePath / "temp";
+    REQUIRE(std::filesystem::exists(tempDir));
+
+    auto statsExist = storage->getStats();
+    REQUIRE(statsExist.totalObjects >= 1);
+
+    auto cleanupResult = storage->cleanupTempFiles();
+    REQUIRE(cleanupResult.has_value());
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns successfully",
+                 "[storage][compact][catch2]") {
+    auto [hash1, data1] = generateTestData(1024);
+    auto [hash2, data2] = generateTestData(2048);
+    REQUIRE(storage->store(hash1, data1).has_value());
+    REQUIRE(storage->store(hash2, data2).has_value());
+
+    auto compactResult = storage->compact();
+    CHECK(compactResult.has_value());
+}
+
+TEST_CASE("StorageEngine verifies manifest keys during integrity check",
+          "[storage][manifest][integrity][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_storage_manifest_verify_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    };
+
+    StorageConfig config{.basePath = testDir / "storage", .shardDepth = 2, .mutexPoolSize = 64};
+    StorageEngine engine(std::move(config));
+
+    const std::string hash32 = std::string(62, 'm') + "vv";
+    const std::string manifestKey = hash32 + ".manifest";
+    std::vector<std::byte> mdata = generateRandomBytes(1024);
+    REQUIRE(engine.store(manifestKey, mdata).has_value());
+
+    auto verifyResult = engine.verify();
+    REQUIRE(verifyResult.has_value());
+
+    cleanup();
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine verify detects corruption in compressed or manifest object content",
+                 "[storage][integrity][manifest][catch2]") {
+    auto [hash, data] = generateTestData(2048);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto objectPath = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2);
+    {
+        std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(static_cast<bool>(file));
+        file.seekp(10);
+        const char corrupt = static_cast<char>(0xfe);
+        file.write(&corrupt, 1);
+        REQUIRE(static_cast<bool>(file));
+    }
+
+    auto verifyResult = storage->verify();
+    REQUIRE_FALSE(verifyResult.has_value());
+    CHECK(verifyResult.error().code == ErrorCode::CorruptedData);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine stats track delete operations",
+                 "[storage][stats][catch2]") {
+    auto [hash, data] = generateTestData(256);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    REQUIRE(storage->remove(hash).has_value());
+
+    auto stats = storage->getStats();
+    CHECK(stats.deleteOperations > 0);
+}
