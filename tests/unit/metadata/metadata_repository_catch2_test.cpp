@@ -1761,8 +1761,8 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
     std::vector<BatchContentEntry> entries;
     for (int i = 0; i < 3; ++i) {
         entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
-                           "Content text for document " + std::to_string(i), "text/plain", "test",
-                           "en"});
+                           /* abstract */ "", "Content text for document " + std::to_string(i),
+                           "text/plain", "test", "en"});
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE(batchResult.has_value());
