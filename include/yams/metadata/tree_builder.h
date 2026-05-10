@@ -59,11 +59,16 @@ public:
      */
     void addEntry(TreeEntry entry);
 
+    void addEntries(std::vector<TreeEntry> entries);
+
     /**
      * @brief Get all entries in this tree node
      * @return Sorted vector of entries
      */
-    const std::vector<TreeEntry>& entries() const { return entries_; }
+    const std::vector<TreeEntry>& entries() const {
+        ensureSorted();
+        return entries_;
+    }
 
     /**
      * @brief Compute the SHA-256 hash of this tree node
@@ -108,8 +113,11 @@ public:
     bool empty() const { return entries_.empty(); }
 
 private:
-    std::vector<TreeEntry> entries_;
+    void ensureSorted() const;
+
+    mutable std::vector<TreeEntry> entries_;
     mutable std::optional<std::string> cachedHash_;
+    mutable bool sorted_{true};
 };
 
 /**

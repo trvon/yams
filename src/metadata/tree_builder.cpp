@@ -19,20 +19,34 @@ namespace yams::metadata {
 // -----------------------------------------------------------------------------
 
 TreeNode::TreeNode(std::vector<TreeEntry> entries) : entries_(std::move(entries)) {
-    // Ensure entries are sorted for canonical representation
     std::sort(entries_.begin(), entries_.end());
+    sorted_ = true;
 }
 
 void TreeNode::addEntry(TreeEntry entry) {
     entries_.push_back(std::move(entry));
-    // Invalidate cached hash
     cachedHash_.reset();
-    // Keep sorted for canonical representation
-    std::sort(entries_.begin(), entries_.end());
+    sorted_ = false;
+}
+
+void TreeNode::addEntries(std::vector<TreeEntry> entries) {
+    entries_.reserve(entries_.size() + entries.size());
+    for (auto& e : entries)
+        entries_.push_back(std::move(e));
+    cachedHash_.reset();
+    sorted_ = false;
+}
+
+void TreeNode::ensureSorted() const {
+    if (!sorted_) {
+        std::sort(entries_.begin(), entries_.end());
+        sorted_ = true;
+    }
 }
 
 std::string TreeNode::computeHash() const {
-    // Return cached hash if available
+    ensureSorted();
+
     if (cachedHash_) {
         return *cachedHash_;
     }
@@ -58,6 +72,7 @@ std::string TreeNode::computeHash() const {
 }
 
 std::vector<uint8_t> TreeNode::serialize() const {
+    ensureSorted();
     std::vector<uint8_t> result;
 
     for (const auto& entry : entries_) {

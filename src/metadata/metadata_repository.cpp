@@ -5596,46 +5596,188 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
     if (segments.empty())
         return Result<void>();
 
-    const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
 
-    int64_t parentNodeId = kPathTreeNullParent;
-    std::string currentPath = isAbsolute ? std::string("/") : std::string{};
+        auto findStmtRes =
+            db.prepare("SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                       "centroid_weight, centroid FROM path_tree_nodes "
+                       "WHERE parent_id IS ? AND path_segment = ?");
+        if (!findStmtRes)
+            return findStmtRes.error();
+        auto findStmt = std::move(findStmtRes).value();
 
-    for (const auto& part : segments) {
-        if (!currentPath.empty() && currentPath.back() != '/')
-            currentPath.push_back('/');
-        currentPath += part;
+        auto insertStmtRes = db.prepare("INSERT OR IGNORE INTO path_tree_nodes "
+                                        "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
+        if (!insertStmtRes)
+            return insertStmtRes.error();
+        auto insertStmt = std::move(insertStmtRes).value();
 
-        auto nodeResult = findPathTreeNode(parentNodeId, part);
-        if (!nodeResult)
-            return nodeResult.error();
+        auto selectStmtRes = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
+                                        "doc_count, centroid_weight, centroid "
+                                        "FROM path_tree_nodes WHERE full_path = ?");
+        if (!selectStmtRes)
+            return selectStmtRes.error();
+        auto selectStmt = std::move(selectStmtRes).value();
 
-        PathTreeNode node;
-        if (nodeResult.value()) {
-            node = *nodeResult.value();
-        } else {
-            auto insertResult = insertPathTreeNode(parentNodeId, part, currentPath);
-            if (!insertResult)
-                return insertResult.error();
-            node = insertResult.value();
+        auto assocInsertRes =
+            db.prepare("INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) "
+                       "VALUES (?, ?)");
+        if (!assocInsertRes)
+            return assocInsertRes.error();
+        auto assocStmt = std::move(assocInsertRes).value();
+
+        auto docCountRes = db.prepare("UPDATE path_tree_nodes "
+                                      "SET doc_count = doc_count + 1, last_updated = unixepoch() "
+                                      "WHERE node_id = ?");
+        if (!docCountRes)
+            return docCountRes.error();
+        auto docCountStmt = std::move(docCountRes).value();
+
+        auto centroidSelectRes =
+            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
+        if (!centroidSelectRes)
+            return centroidSelectRes.error();
+        auto centroidSelStmt = std::move(centroidSelectRes).value();
+
+        auto centroidUpdateRes =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!centroidUpdateRes)
+            return centroidUpdateRes.error();
+        auto centroidUpdStmt = std::move(centroidUpdateRes).value();
+
+        int64_t parentNodeId = kPathTreeNullParent;
+        std::string currentPath = isAbsolute ? std::string("/") : std::string{};
+
+        for (const auto& part : segments) {
+            if (!currentPath.empty() && currentPath.back() != '/')
+                currentPath.push_back('/');
+            currentPath += part;
+
+            // --- findPathTreeNode (inlined) ---
+            findStmt.reset();
+            if (parentNodeId == kPathTreeNullParent) {
+                if (auto b = findStmt.bind(1, nullptr); !b)
+                    return b.error();
+            } else {
+                if (auto b = findStmt.bind(1, parentNodeId); !b)
+                    return b.error();
+            }
+            if (auto b = findStmt.bind(2, part); !b)
+                return b.error();
+
+            auto stepRes = findStmt.step();
+            if (!stepRes)
+                return stepRes.error();
+
+            int64_t nodeId = 0;
+            bool found = stepRes.value();
+            if (found) {
+                nodeId = findStmt.getInt64(0);
+            } else {
+                // --- insertPathTreeNode (inlined) ---
+                insertStmt.reset();
+                if (auto b = bindParentId(insertStmt, 1, parentNodeId); !b)
+                    return b.error();
+                if (auto b = insertStmt.bind(2, part); !b)
+                    return b.error();
+                if (auto b = insertStmt.bind(3, currentPath); !b)
+                    return b.error();
+                if (auto execRes = insertStmt.execute(); !execRes)
+                    return execRes.error();
+
+                selectStmt.reset();
+                if (auto b = selectStmt.bind(1, currentPath); !b)
+                    return b.error();
+                auto selRes = selectStmt.step();
+                if (!selRes)
+                    return selRes.error();
+                if (!selRes.value())
+                    return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
+                nodeId = selectStmt.getInt64(0);
+            }
+
+            if (isNewDocument) {
+                // --- incrementPathTreeDocCount (inlined) ---
+                assocStmt.reset();
+                if (auto b = assocStmt.bind(1, nodeId); !b)
+                    return b.error();
+                if (auto b = assocStmt.bind(2, documentId); !b)
+                    return b.error();
+                if (auto execRes = assocStmt.execute(); !execRes)
+                    return execRes.error();
+
+                if (db.changes() > 0) {
+                    docCountStmt.reset();
+                    if (auto b = docCountStmt.bind(1, nodeId); !b)
+                        return b.error();
+                    if (auto execRes = docCountStmt.execute(); !execRes)
+                        return execRes.error();
+                }
+            }
+
+            if (!embeddingValues.empty()) {
+                // --- accumulatePathTreeCentroid (inlined) ---
+                centroidSelStmt.reset();
+                if (auto b = centroidSelStmt.bind(1, nodeId); !b)
+                    return b.error();
+                auto cStepRes = centroidSelStmt.step();
+                if (!cStepRes)
+                    return cStepRes.error();
+                if (!cStepRes.value())
+                    return Error{ErrorCode::NotFound, "Path tree node not found"};
+
+                int64_t currentWeight = centroidSelStmt.getInt64(1);
+                bool hasBlob = !centroidSelStmt.isNull(0);
+
+                std::size_t dimCount = embeddingValues.size();
+                std::vector<float> centroid;
+                centroid.reserve(dimCount);
+
+                if (hasBlob && currentWeight > 0) {
+                    auto blob = centroidSelStmt.getBlob(0);
+                    if (blob.size() == dimCount * sizeof(float)) {
+                        centroid.resize(dimCount);
+                        std::memcpy(centroid.data(), blob.data(), blob.size());
+                    } else {
+                        centroid.assign(embeddingValues.begin(), embeddingValues.end());
+                        currentWeight = 0;
+                    }
+                } else {
+                    centroid.assign(embeddingValues.begin(), embeddingValues.end());
+                    currentWeight = 0;
+                }
+
+                int64_t newWeight = currentWeight + 1;
+                if (currentWeight > 0) {
+                    const double weightFactor = static_cast<double>(currentWeight);
+                    for (std::size_t i = 0; i < dimCount; ++i) {
+                        double updated = (centroid[i] * weightFactor + embeddingValues[i]) /
+                                         static_cast<double>(newWeight);
+                        centroid[i] = static_cast<float>(updated);
+                    }
+                }
+
+                centroidUpdStmt.reset();
+                std::span<const std::byte> blob(reinterpret_cast<const std::byte*>(centroid.data()),
+                                                centroid.size() * sizeof(float));
+                if (auto b = centroidUpdStmt.bind(1, blob); !b)
+                    return b.error();
+                if (auto b = centroidUpdStmt.bind(2, newWeight); !b)
+                    return b.error();
+                if (auto b = centroidUpdStmt.bind(3, nodeId); !b)
+                    return b.error();
+                if (auto execRes = centroidUpdStmt.execute(); !execRes)
+                    return execRes.error();
+            }
+
+            parentNodeId = nodeId;
         }
 
-        if (isNewDocument) {
-            auto inc = incrementPathTreeDocCount(node.id, documentId);
-            if (!inc)
-                return inc.error();
-        }
-
-        if (!embeddingValues.empty()) {
-            auto acc = accumulatePathTreeCentroid(node.id, embeddingValues);
-            if (!acc)
-                return acc.error();
-        }
-
-        parentNodeId = node.id;
-    }
-
-    return Result<void>();
+        return Result<void>();
+    });
 }
 
 Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& info,
