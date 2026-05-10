@@ -2286,6 +2286,14 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
     auto scanType = [&](const std::string& type, const std::string& prefix, bool deleteByHash) {
         constexpr std::size_t kBatchSize = 500;
         std::size_t offset = 0;
+        std::unique_ptr<WriteBatch> orphanDeleteBatch;
+        {
+            auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+            if (coord) {
+                orphanDeleteBatch = std::make_unique<WriteBatch>();
+                orphanDeleteBatch->source = "RepairService::orphanKgNodeDelete";
+            }
+        }
         while (true) {
             auto nodesRes = kgStore->findNodesByType(type, kBatchSize, offset);
             if (!nodesRes) {
@@ -2322,32 +2330,38 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                         ++stats.skipped;
                         continue;
                     }
-                    auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
-                    if (!coord) {
-                        ++stats.errors;
-                        stats.issues.push_back(
-                            "WriteCoordinator unavailable for orphan KG node delete");
-                        continue;
-                    }
-                    auto wb = std::make_unique<WriteBatch>();
-                    wb->source = "RepairService::orphanKgNodeDelete";
-                    if (deleteByHash) {
-                        wb->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
-                        // The exact number is tracked by WriteCoordinator stats; keep local repair
-                        // progress as attempted-orphan groups to avoid direct writes.
-                        ++stats.nodesDeleted;
+                    if (orphanDeleteBatch) {
+                        if (deleteByHash) {
+                            orphanDeleteBatch->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
+                        } else {
+                            orphanDeleteBatch->ops.emplace_back(DeleteNodeByIdOp{node.id});
+                        }
                     } else {
-                        wb->ops.emplace_back(DeleteNodeByIdOp{node.id});
-                        ++stats.nodesDeleted;
+                        auto* coord =
+                            ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+                        if (!coord) {
+                            ++stats.errors;
+                            stats.issues.push_back(
+                                "WriteCoordinator unavailable for orphan KG node delete");
+                            continue;
+                        }
+                        auto wb = std::make_unique<WriteBatch>();
+                        wb->source = "RepairService::orphanKgNodeDelete";
+                        if (deleteByHash) {
+                            wb->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
+                        } else {
+                            wb->ops.emplace_back(DeleteNodeByIdOp{node.id});
+                        }
+                        coord->enqueue(std::move(wb));
+                        auto flushRes = coord->flush();
+                        if (!flushRes) {
+                            ++stats.errors;
+                            stats.issues.push_back("orphan KG node delete flush failed for " +
+                                                   node.nodeKey + ": " + flushRes.error().message);
+                            continue;
+                        }
                     }
-                    coord->enqueue(std::move(wb));
-                    auto flushRes = coord->flush();
-                    if (!flushRes) {
-                        ++stats.errors;
-                        stats.issues.push_back("orphan KG node delete flush failed for " +
-                                               node.nodeKey + ": " + flushRes.error().message);
-                        continue;
-                    }
+                    ++stats.nodesDeleted;
                     ++deletedNodesInBatch;
                 }
 
@@ -2368,6 +2382,20 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 }
             }
             offset += nodes.size();
+        }
+
+        // Flush accumulated orphan node deletes as a single batch.
+        if (orphanDeleteBatch && !orphanDeleteBatch->ops.empty()) {
+            auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+            if (coord) {
+                coord->enqueue(std::move(orphanDeleteBatch));
+                auto flushRes = coord->flush();
+                if (!flushRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("orphan KG node delete batch flush failed: " +
+                                           flushRes.error().message);
+                }
+            }
         }
     };
 
