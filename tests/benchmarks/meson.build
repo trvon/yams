@@ -230,6 +230,21 @@ tree_diff_bench = executable('tree_diff_benchmarks', files('tree_diff_benchmarks
 
 alias_target('bench_tree_diff', tree_diff_bench)
 
+tree_build_bench = executable('tree_build_bench', files('tree_build_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_benchmarks'),
+    dependency('yams_metadata'),
+    dependency('yams_storage_engine'),
+    dependency('nlohmann_json'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_tree_build', tree_build_bench)
+
 ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp'),
   include_directories: incs,
   dependencies: [
