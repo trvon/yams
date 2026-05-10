@@ -2,6 +2,8 @@
 #include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/metadata/versioning_util.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 
@@ -758,16 +760,90 @@ public:
 
                 // Path-series versioning (best-effort)
                 try {
-                    auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
-                    if (priorDoc && priorDoc.value().has_value()) {
-                        auto& prior = priorDoc.value().value();
-                        if (prior.sha256Hash != info.sha256Hash) {
-                            metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
-                                                                docId, prior);
+                    auto* writeCoord = (ctx_.service_manager)
+                                           ? ctx_.service_manager->getWriteCoordinator()
+                                           : nullptr;
+                    if (writeCoord) {
+                        int64_t maxVersion = 0;
+                        std::optional<int64_t> prevLatestId;
+                        auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                        if (priorDoc && priorDoc.value().has_value()) {
+                            auto& prior = priorDoc.value().value();
+                            if (prior.sha256Hash != info.sha256Hash) {
+                                prevLatestId = prior.id;
+                                auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
+                                if (verRes && verRes.value().has_value()) {
+                                    try {
+                                        maxVersion = verRes.value().value().asInteger();
+                                    } catch (...) {
+                                    }
+                                }
+                            }
                         }
+                        if (!prevLatestId.has_value()) {
+                            auto prevListRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo,
+                                                                                 info.filePath);
+                            if (prevListRes) {
+                                for (const auto& d : prevListRes.value()) {
+                                    if (d.id == docId)
+                                        continue;
+                                    auto latestRes =
+                                        ctx_.metadataRepo->getMetadata(d.id, "is_latest");
+                                    if (latestRes && latestRes.value().has_value() &&
+                                        latestRes.value().value().asBoolean()) {
+                                        prevLatestId = d.id;
+                                    }
+                                    auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
+                                    if (verRes && verRes.value().has_value()) {
+                                        try {
+                                            int64_t v = verRes.value().value().asInteger();
+                                            if (v > maxVersion)
+                                                maxVersion = v;
+                                        } catch (...) {
+                                        }
+                                    }
+                                    if (prevLatestId.has_value())
+                                        break;
+                                }
+                            }
+                        }
+
+                        int64_t newVersion = prevLatestId.has_value() ? maxVersion + 1 : 1;
+
+                        auto wb = std::make_unique<daemon::WriteBatch>();
+                        wb->source = "doc_svc/versioning";
+
+                        if (prevLatestId.has_value()) {
+                            wb->ops.emplace_back(daemon::SetMetadataBatchOp{
+                                {{*prevLatestId, "is_latest", metadata::MetadataValue(false)}}});
+
+                            metadata::DocumentRelationship rel;
+                            rel.parentId = *prevLatestId;
+                            rel.childId = docId;
+                            rel.relationshipType = metadata::RelationshipType::VersionOf;
+                            rel.createdTime = std::chrono::floor<std::chrono::seconds>(
+                                std::chrono::system_clock::now());
+                            wb->ops.emplace_back(daemon::InsertRelationshipOp{std::move(rel)});
+                        }
+
+                        wb->ops.emplace_back(daemon::SetMetadataBatchOp{
+                            {{docId, "version", metadata::MetadataValue(newVersion)},
+                             {docId, "is_latest", metadata::MetadataValue(true)},
+                             {docId, "series_key", metadata::MetadataValue(info.filePath)}}});
+
+                        writeCoord->enqueue(std::move(wb));
                     } else {
-                        metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
-                                                            docId, std::nullopt);
+                        auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                        if (priorDoc && priorDoc.value().has_value()) {
+                            auto& prior = priorDoc.value().value();
+                            if (prior.sha256Hash != info.sha256Hash) {
+                                metadata::applyPathSeriesVersioning(*ctx_.metadataRepo,
+                                                                    info.filePath, docId, prior);
+                            }
+                        } else {
+                            metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
+                                                                docId, std::nullopt);
+                        }
                     }
                 } catch (...) {
                 }
@@ -788,38 +864,99 @@ public:
                 // embedded/mobile graph queries can resolve the stored document immediately.
                 if (ctx_.kgStore) {
                     try {
-                        auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
-                        if (!blobNodeResult) {
-                            spdlog::debug("Failed to ensure KG blob node for {}: {}",
-                                          info.sha256Hash.substr(0, 8),
-                                          blobNodeResult.error().message);
-                        } else {
+                        auto* writeCoord = (ctx_.service_manager)
+                                               ? ctx_.service_manager->getWriteCoordinator()
+                                               : nullptr;
+                        if (writeCoord) {
+                            std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
+                            std::string docNodeKey = std::string("doc:") + info.sha256Hash;
+                            std::string snapshotPathKey =
+                                std::string("path:") + snapshotId + ":" + info.filePath;
+                            std::string logicalPathKey =
+                                std::string("path:logical:") + info.filePath;
+
+                            metadata::KGNode blobNode;
+                            blobNode.nodeKey = blobNodeKey;
+                            blobNode.label = std::string(info.sha256Hash).substr(0, 16) + "...";
+                            blobNode.type = "blob";
+
                             metadata::KGNode docNode;
-                            docNode.nodeKey = "doc:" + info.sha256Hash;
+                            docNode.nodeKey = docNodeKey;
                             docNode.label = info.filePath;
                             docNode.type = "document";
-                            auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
-                            if (!docNodeIds) {
-                                spdlog::debug("Failed to upsert KG doc node for {}: {}",
+
+                            metadata::KGNode snapshotPathNode;
+                            snapshotPathNode.nodeKey = snapshotPathKey;
+                            snapshotPathNode.label = info.filePath;
+                            snapshotPathNode.type = "path";
+                            snapshotPathNode.properties =
+                                std::string("{\"snapshot_id\":\"") + snapshotId + "\",\"path\":\"" +
+                                info.filePath + "\",\"is_directory\":false}";
+
+                            metadata::KGNode logicalPathNode;
+                            logicalPathNode.nodeKey = logicalPathKey;
+                            logicalPathNode.label = info.filePath;
+                            logicalPathNode.type = "path";
+                            logicalPathNode.properties =
+                                std::string("{\"path\":\"") + info.filePath +
+                                "\",\"is_directory\":false,\"logical\":true}";
+
+                            auto wb = std::make_unique<daemon::WriteBatch>();
+                            wb->source = "doc_svc/kg_sync";
+                            wb->ops.emplace_back(daemon::UpsertNodesOp{
+                                {std::move(blobNode), std::move(docNode),
+                                 std::move(snapshotPathNode), std::move(logicalPathNode)}});
+
+                            daemon::DeferredEdgeOp pathVerEdge;
+                            pathVerEdge.srcNodeKey = logicalPathKey;
+                            pathVerEdge.dstNodeKey = snapshotPathKey;
+                            pathVerEdge.relation = "path_version";
+
+                            daemon::DeferredEdgeOp hasVerEdge;
+                            hasVerEdge.srcNodeKey = snapshotPathKey;
+                            hasVerEdge.dstNodeKey = blobNodeKey;
+                            hasVerEdge.relation = "has_version";
+                            hasVerEdge.properties = "{\"diff_id\":0}";
+
+                            wb->ops.emplace_back(daemon::AddDeferredEdgesOp{
+                                {std::move(pathVerEdge), std::move(hasVerEdge)}});
+
+                            writeCoord->enqueue(std::move(wb));
+                        } else {
+                            auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
+                            if (!blobNodeResult) {
+                                spdlog::debug("Failed to ensure KG blob node for {}: {}",
                                               info.sha256Hash.substr(0, 8),
-                                              docNodeIds.error().message);
-                            }
-
-                            metadata::PathNodeDescriptor pathDesc;
-                            pathDesc.snapshotId = snapshotId;
-                            pathDesc.path = info.filePath;
-                            pathDesc.isDirectory = false;
-
-                            auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
-                            if (!pathNodeResult) {
-                                spdlog::debug("Failed to ensure KG path node for {}: {}",
-                                              info.filePath, pathNodeResult.error().message);
+                                              blobNodeResult.error().message);
                             } else {
-                                auto linkResult = ctx_.kgStore->linkPathVersion(
-                                    pathNodeResult.value(), blobNodeResult.value(), 0);
-                                if (!linkResult) {
-                                    spdlog::debug("Failed to link KG path version for {}: {}",
-                                                  info.filePath, linkResult.error().message);
+                                metadata::KGNode docNode;
+                                docNode.nodeKey = "doc:" + info.sha256Hash;
+                                docNode.label = info.filePath;
+                                docNode.type = "document";
+                                auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
+                                if (!docNodeIds) {
+                                    spdlog::debug("Failed to upsert KG doc node for {}: {}",
+                                                  info.sha256Hash.substr(0, 8),
+                                                  docNodeIds.error().message);
+                                }
+
+                                metadata::PathNodeDescriptor pathDesc;
+                                pathDesc.snapshotId = snapshotId;
+                                pathDesc.path = info.filePath;
+                                pathDesc.isDirectory = false;
+
+                                auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+                                if (!pathNodeResult) {
+                                    spdlog::debug("Failed to ensure KG path node for {}: {}",
+                                                  info.filePath, pathNodeResult.error().message);
+                                } else {
+                                    auto linkResult = ctx_.kgStore->linkPathVersion(
+                                        pathNodeResult.value(), blobNodeResult.value(), 0);
+                                    if (!linkResult) {
+                                        spdlog::debug("Failed to link KG path version for "
+                                                      "{}: {}",
+                                                      info.filePath, linkResult.error().message);
+                                    }
                                 }
                             }
                         }
