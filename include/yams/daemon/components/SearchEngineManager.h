@@ -74,7 +74,6 @@ public:
      * @param vectorDatabase Vector database (required for SearchEngine)
      * @param embeddingGen Optional embedding generator (for vector search)
      * @param reason Human-readable reason for build (e.g., "user_initiated", "auto_repair")
-     * @param timeoutMs Build timeout in milliseconds
      * @param workerExecutor Executor for blocking build operations
      * @return Awaitable that resolves to Result containing engine pointer or error
      */
@@ -83,8 +82,7 @@ public:
                 std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                 std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
-                const std::string& reason, int timeoutMs,
-                const boost::asio::any_io_executor& workerExecutor,
+                const std::string& reason, const boost::asio::any_io_executor& workerExecutor,
                 bool enableSimeonLexicalBuild = true);
 
     /**

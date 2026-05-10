@@ -9,9 +9,11 @@
 #include <spdlog/spdlog.h>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <yams/daemon/components/GradientLimiter.h>
@@ -123,6 +125,12 @@ template <typename Task> struct PressureLimitedPollerConfig {
     std::function<bool()> isCapableFn;
 
     bool enableCpuThrottling = true;
+
+    // Event-driven wake: the enqueuer cancels this timer to wake the poller.
+    // The timer is always armed with a 10ms safety-net expiry so that even if
+    // a cancel races past, the poller resumes within 10ms worst case.
+    // When nullptr, falls back to legacy adaptive-backoff timer.
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer;
 };
 
 /// Generic pressure-limited poller coroutine.
@@ -338,7 +346,25 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 continue;
             }
 
-            // Adaptive backoff when idle
+            // Event-driven idle sleep: the enqueuer cancels wakeTimer to
+            // resume this coroutine immediately.  The 10ms expiry is a
+            // safety net that handles the race where cancel() fires before
+            // async_wait is armed — worst case poller resumes in 10ms.
+            if (cfg.wakeTimer) {
+                cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
+                try {
+                    co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() != boost::asio::error::operation_aborted) {
+                        spdlog::warn("[PostIngestQueue] {} wake timer error: {}", cfg.stageName,
+                                     e.what());
+                    }
+                }
+                idleDelay = kMinIdleDelay;
+                continue;
+            }
+
+            // Adaptive backoff when idle (legacy path, no wake timer)
             const auto maxIdleDelay = detail::pollerMaxIdleDelay();
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);

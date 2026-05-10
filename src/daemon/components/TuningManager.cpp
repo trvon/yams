@@ -820,13 +820,21 @@ bool TuningManager::tick_once() {
 
             uint32_t kgFloor = 0;
             if (kgQueued >= 32) {
-                kgFloor = 2;
-            }
-            if (kgQueued >= 128) {
                 kgFloor = 4;
             }
-            if (kgQueued >= 512) {
+            if (kgQueued >= 128) {
                 kgFloor = 6;
+            }
+            if (kgQueued >= 512) {
+                kgFloor = 8;
+            }
+
+            uint32_t titleFloor = 0;
+            if (titleQueued >= 16) {
+                titleFloor = 2;
+            }
+            if (titleQueued >= 64) {
+                titleFloor = 4;
             }
 
             // Override with gradient limiter values if enabled
@@ -945,7 +953,8 @@ bool TuningManager::tick_once() {
                     (stageAllowed[1] && !allowZeroTargets) ? std::max(kgFloor, 1u) : 0u;
                 const uint32_t minSymbol = (stageAllowed[2] && !allowZeroTargets) ? 1u : 0u;
                 const uint32_t minEntity = (stageAllowed[3] && !allowZeroTargets) ? 1u : 0u;
-                const uint32_t minTitle = (stageAllowed[4] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minTitle =
+                    (stageAllowed[4] && !allowZeroTargets) ? std::max(titleFloor, 1u) : 0u;
                 const uint32_t minEmbed =
                     (stageAllowed[5] && !allowZeroTargets) ? std::max(embedFloor, 1u) : 0u;
 

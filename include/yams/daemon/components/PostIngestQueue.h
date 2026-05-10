@@ -19,6 +19,7 @@
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -200,6 +201,8 @@ public:
         bool shouldDispatchTitle = false;
         bool shouldDispatchEmbed = true;
         std::string titleTextSnippet; // First N chars for async GLiNER title extraction
+        std::vector<std::string> fallbackEntities; // ScientificAdapter entities for bulk write
+        std::vector<std::string> fallbackAliases;  // ScientificAdapter aliases for bulk write
     };
 
     /// Result of failed text extraction, requires status update.
@@ -541,6 +544,15 @@ private:
     std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
+
+    // Event-driven wake timers: the enqueuer cancels the timer to immediately
+    // wake the corresponding poller coroutine.  The timer is armed with a 10ms
+    // safety-net expiry that handles cancel() race windows.
+    std::shared_ptr<boost::asio::steady_timer> extractionWakeTimer_;
+    std::shared_ptr<boost::asio::steady_timer> kgWakeTimer_;
+    std::shared_ptr<boost::asio::steady_timer> symbolWakeTimer_;
+    std::shared_ptr<boost::asio::steady_timer> entityWakeTimer_;
+    std::shared_ptr<boost::asio::steady_timer> titleWakeTimer_;
 
     /// Initialize cached channel pointers from InternalEventBus
     void initializeChannels();

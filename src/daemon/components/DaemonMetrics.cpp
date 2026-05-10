@@ -1265,6 +1265,11 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             out.readinessStates[std::string(readiness::kTopologyRebuildRunning)] =
                 topo.rebuildRunning;
         }
+        if (services_) {
+            const auto searchSnapshot = services_->getSearchEngineFsmSnapshot();
+            const bool searchReady = searchSnapshot.state == SearchEngineState::Ready;
+            out.readinessStates[std::string(readiness::kSearchEngine)] = searchReady;
+        }
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);

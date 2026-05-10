@@ -124,7 +124,21 @@ public:
     KGEntityCountSnapshot getEntityCountSnapshot() const override {
         return {static_cast<std::int64_t>(entityCount_.load(std::memory_order_relaxed)),
                 static_cast<std::int64_t>(nativeEntityCount_.load(std::memory_order_relaxed)),
-                static_cast<std::int64_t>(nerEntityCount_.load(std::memory_order_relaxed))};
+                static_cast<std::int64_t>(nerEntityCount_.load(std::memory_order_relaxed)),
+                static_cast<std::int64_t>(edgeCount_.load(std::memory_order_relaxed)),
+                static_cast<std::int64_t>(aliasCount_.load(std::memory_order_relaxed))};
+    }
+
+    void updateEnqueueCounts(std::int64_t entities, std::int64_t edges,
+                             std::int64_t aliases) override {
+        entityCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(entities, 0)),
+                               std::memory_order_relaxed);
+        nerEntityCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(entities, 0)),
+                                  std::memory_order_relaxed);
+        edgeCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(edges, 0)),
+                             std::memory_order_relaxed);
+        aliasCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(aliases, 0)),
+                              std::memory_order_relaxed);
     }
 
     // Nodes
@@ -2617,7 +2631,8 @@ private:
     }
 
     void applyEntityCountDelta(std::int64_t totalDelta, std::int64_t nativeDelta,
-                               std::int64_t nerDelta) {
+                               std::int64_t nerDelta, std::int64_t edgeDelta = 0,
+                               std::int64_t aliasDelta = 0) {
         auto apply = [](std::atomic<std::uint64_t>& counter, std::int64_t delta) {
             if (delta >= 0) {
                 counter.fetch_add(static_cast<std::uint64_t>(delta), std::memory_order_relaxed);
@@ -2636,6 +2651,8 @@ private:
         apply(entityCount_, totalDelta);
         apply(nativeEntityCount_, nativeDelta);
         apply(nerEntityCount_, nerDelta);
+        apply(edgeCount_, edgeDelta);
+        apply(aliasCount_, aliasDelta);
     }
 
     void initializeEntityCountSnapshot() {
@@ -2653,14 +2670,27 @@ private:
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
             auto stepResult = stmt.step();
-            if (!stepResult) {
+            if (!stepResult)
                 return stepResult.error();
-            }
             const bool hasRow = stepResult.value();
-            if (!hasRow) {
+            if (!hasRow)
                 return KGEntityCountSnapshot{};
+
+            KGEntityCountSnapshot snap{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+
+            // Edge count
+            if (auto eStmtR = db.prepare("SELECT COUNT(*) FROM kg_edges")) {
+                auto eStmt = std::move(eStmtR).value();
+                if (auto eStep = eStmt.step(); eStep && eStep.value())
+                    snap.edgeCount = eStmt.getInt64(0);
             }
-            return KGEntityCountSnapshot{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+            // Alias count
+            if (auto aStmtR = db.prepare("SELECT COUNT(*) FROM kg_aliases")) {
+                auto aStmt = std::move(aStmtR).value();
+                if (auto aStep = aStmt.step(); aStep && aStep.value())
+                    snap.aliasCount = aStmt.getInt64(0);
+            }
+            return snap;
         });
         if (result) {
             entityCount_.store(
@@ -2672,6 +2702,12 @@ private:
             nerEntityCount_.store(static_cast<std::uint64_t>(
                                       std::max<std::int64_t>(result.value().nerEntityCount, 0)),
                                   std::memory_order_release);
+            edgeCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().edgeCount, 0)),
+                std::memory_order_release);
+            aliasCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().aliasCount, 0)),
+                std::memory_order_release);
         }
     }
 
@@ -2684,6 +2720,8 @@ private:
     std::atomic<std::uint64_t> entityCount_{0};
     std::atomic<std::uint64_t> nativeEntityCount_{0};
     std::atomic<std::uint64_t> nerEntityCount_{0};
+    std::atomic<std::uint64_t> edgeCount_{0};
+    std::atomic<std::uint64_t> aliasCount_{0};
 };
 
 // -----------------------------------------------------------------------------
@@ -2841,8 +2879,6 @@ public:
         }
         Database& db = **conn_;
 
-        // Upsert via the unique index `idx_kg_edges_uq` so graph maintenance can
-        // refresh stale derived-edge scores/properties without duplicating rows.
         auto stmtR = db.prepareCached(
             "INSERT INTO kg_edges "
             "(src_node_id, dst_node_id, relation, weight, created_time, properties) "
@@ -2859,6 +2895,7 @@ public:
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
+        std::int64_t before = db.changes();
         for (const auto& e : edges) {
             auto br = stmt.clearBindings();
             if (!br)
@@ -2883,7 +2920,6 @@ public:
                                           : stmt.bind(6, nullptr);
             if (!br)
                 return br.error();
-
             auto ex = stmt.execute();
             if (!ex)
                 return ex.error();
@@ -2891,6 +2927,7 @@ public:
             if (!rr)
                 return rr;
         }
+        edgeCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
         return Result<void>();
     }
 
@@ -2911,6 +2948,7 @@ public:
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
+        std::int64_t before = db.changes();
         for (const auto& a : aliases) {
             auto br = stmt.clearBindings();
             if (!br)
@@ -2927,7 +2965,6 @@ public:
             br = stmt.bind(4, static_cast<double>(a.confidence));
             if (!br)
                 return br;
-
             auto er = stmt.execute();
             if (!er)
                 return er.error();
@@ -2935,6 +2972,8 @@ public:
             if (!rr)
                 return rr;
         }
+        aliasCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
+        return Result<void>();
         return Result<void>();
     }
 
@@ -3268,7 +3307,8 @@ public:
             if (result) {
                 if (owner_) {
                     owner_->applyEntityCountDelta(entityCountDelta_, nativeEntityCountDelta_,
-                                                  nerEntityCountDelta_);
+                                                  nerEntityCountDelta_, edgeCountDelta_,
+                                                  aliasCountDelta_);
                 }
                 committed_ = true;
                 if (attempt > 0) {
@@ -3309,6 +3349,8 @@ private:
     std::int64_t entityCountDelta_{0};
     std::int64_t nativeEntityCountDelta_{0};
     std::int64_t nerEntityCountDelta_{0};
+    std::int64_t edgeCountDelta_{0};
+    std::int64_t aliasCountDelta_{0};
 };
 
 // Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)

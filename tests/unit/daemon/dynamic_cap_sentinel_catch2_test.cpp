@@ -143,13 +143,14 @@ TEST_CASE("DynamicCap(0) on all stages yields total concurrency of zero",
     TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
     TuneAdvisor::endDynamicCapWrite();
 
-    const uint32_t total = TuneAdvisor::postExtractionConcurrent() +
-                           TuneAdvisor::postKgConcurrent() + TuneAdvisor::postSymbolConcurrent() +
-                           TuneAdvisor::postEntityConcurrent() +
-                           TuneAdvisor::postTitleConcurrent() + TuneAdvisor::postEmbedConcurrent();
+    const uint32_t ext = TuneAdvisor::postExtractionConcurrent();
+    const uint32_t kg = TuneAdvisor::postKgConcurrent();
+    const uint32_t sym = TuneAdvisor::postSymbolConcurrent();
+    const uint32_t ent = TuneAdvisor::postEntityConcurrent();
+    const uint32_t tit = TuneAdvisor::postTitleConcurrent();
+    const uint32_t emb = TuneAdvisor::postEmbedConcurrent();
+    const uint32_t total = ext + kg + sym + ent + tit + emb;
 
-    // BUG: current code ignores DynamicCap(0) → total >= 6
-    // FIXED: total == 0
     CHECK(total == 0);
 }
 

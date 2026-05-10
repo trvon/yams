@@ -158,6 +158,16 @@ void DatabaseManager::shutdown() {
         }
     }
 
+    if (database_ && database_->isOpen()) {
+        auto checkpointResult = database_->execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!checkpointResult) {
+            spdlog::warn("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) failed: {}",
+                         checkpointResult.error().message);
+        } else {
+            spdlog::info("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) completed");
+        }
+    }
+
     if (database_) {
         try {
             database_->close();

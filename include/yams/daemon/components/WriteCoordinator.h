@@ -143,6 +143,9 @@ struct UpsertSymbolExtractionStateOp {
     std::string documentHash;
     metadata::SymbolExtractionState state;
 };
+struct InsertRelationshipOp {
+    metadata::DocumentRelationship relationship;
+};
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
@@ -151,7 +154,8 @@ using WriteOp =
                  DeleteEdgesByRelationOp, DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp,
                  InsertDocumentOp, UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
-                 UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp>;
+                 UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp,
+                 InsertRelationshipOp>;
 
 struct WriteBatch {
     std::string source;
@@ -224,6 +228,7 @@ public:
         std::uint64_t extractionStatusesUpdated = 0;
         std::uint64_t embeddingStatusesUpdated = 0;
         std::uint64_t symbolExtractionStatesUpdated = 0;
+        std::uint64_t relationshipsInserted = 0;
         std::uint64_t nodesUpserted = 0;
         std::uint64_t nodesDeleted = 0;
         std::uint64_t edgesAdded = 0;
@@ -297,6 +302,7 @@ private:
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
     Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
+    Result<void> applyMetadataOp(InsertRelationshipOp& op);
 
     void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,

@@ -63,7 +63,6 @@ test_deps = [
   dependency('yams_detection'),
   dependency('yams_content'),
   dependency('yams_downloader'),
-  dependency('yams_indexing'),
   dependency('yams_vector'),
   dependency('yams_search'),
   dependency('yams_api'),
@@ -689,6 +688,15 @@ if catch2_dep.found()
 
   catch2_db_recovery_exe = executable('catch2_db_recovery',
     files('unit/daemon/db_recovery_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_db_salvage_exe = executable('catch2_db_salvage',
+    files('unit/daemon/db_salvage_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1458,12 +1466,11 @@ if catch2_dep.found()
     install: false,
   )
 
-#Versioning Test Suites(Catch2) - document versioning, indexer
-#Migrated from GTest as part of yams - 3s4 / yams - 1jm
+#Versioning Test Suites(Catch2) - versioning utility
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_versioning_submodule_exe = executable('catch2_versioning_submodule',
     files(
-      'unit/versioning_document_indexer_catch2_test.cpp',
+      'unit/metadata/versioning_util_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2692,7 +2699,13 @@ if catch2_dep.found()
   test('db_recovery', catch2_db_recovery_exe,
     suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 30
+  )
+
+  test('db_salvage', catch2_db_salvage_exe,
+    suite: ['catch2', 'unit', 'daemon', 'db_salvage'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('storage_preflight', catch2_storage_preflight_exe,

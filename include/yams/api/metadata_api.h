@@ -5,7 +5,6 @@
 #include <memory>
 #include <yams/api/metadata_request.h>
 #include <yams/api/metadata_response.h>
-#include <yams/indexing/document_indexer.h>
 #include <yams/metadata/metadata_repository.h>
 
 namespace yams::api {
@@ -51,7 +50,6 @@ public:
      * @brief Constructor
      */
     MetadataApi(std::shared_ptr<metadata::MetadataRepository> repository,
-                std::shared_ptr<indexing::IDocumentIndexer> indexer = nullptr,
                 const MetadataApiConfig& config = {});
 
     virtual ~MetadataApi() = default;
@@ -186,7 +184,6 @@ public:
 
 private:
     std::shared_ptr<metadata::MetadataRepository> repository_;
-    std::shared_ptr<indexing::IDocumentIndexer> indexer_;
     MetadataApiConfig config_;
     mutable ApiStatistics stats_;
 
@@ -278,18 +275,11 @@ public:
     create(std::shared_ptr<metadata::MetadataRepository> repository);
 
     /**
-     * @brief Create metadata API with indexer
-     */
-    static std::unique_ptr<MetadataApi>
-    create(std::shared_ptr<metadata::MetadataRepository> repository,
-           std::shared_ptr<indexing::IDocumentIndexer> indexer);
-
-    /**
      * @brief Create metadata API with custom config
      */
     static std::unique_ptr<MetadataApi>
     create(std::shared_ptr<metadata::MetadataRepository> repository,
-           std::shared_ptr<indexing::IDocumentIndexer> indexer, const MetadataApiConfig& config);
+           const MetadataApiConfig& config);
 };
 
 } // namespace yams::api

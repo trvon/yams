@@ -180,6 +180,8 @@ struct KGEntityCountSnapshot {
     std::int64_t totalCount{0};
     std::int64_t nativeSymbolCount{0};
     std::int64_t nerEntityCount{0};
+    std::int64_t edgeCount{0};
+    std::int64_t aliasCount{0};
 };
 
 /**
@@ -218,6 +220,12 @@ public:
 
     virtual Result<std::unique_ptr<WriteBatch>> beginWriteBatch() = 0;
     virtual KGEntityCountSnapshot getEntityCountSnapshot() const = 0;
+
+    // Called by the ingest pipeline when entity/edge/alias write batches
+    // are enqueued. Updates atomics immediately so online overlay stats
+    // reflect dispatched work before the WriteCoordinator commits.
+    virtual void updateEnqueueCounts(std::int64_t entities, std::int64_t edges,
+                                     std::int64_t aliases) {}
 
     // -----------------------------------------------------------------------------
     // Nodes

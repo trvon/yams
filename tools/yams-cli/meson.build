@@ -22,7 +22,6 @@ yams_cli_exe_deps = [
   dependency('yams_api'),
   dependency('yams_search'),
   dependency('yams_vector'),
-  dependency('yams_indexing'),
   dependency('yams_content'),
   dependency('yams_downloader'),
   dependency('yams_metadata'),

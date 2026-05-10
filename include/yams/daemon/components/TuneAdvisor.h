@@ -1125,6 +1125,18 @@ public:
     static void setBackpressureReadPauseMs(uint32_t ms) {
         backpressureReadPauseMsOverride_.store(ms, std::memory_order_relaxed);
     }
+    // WriteCoordinator batch cap per writer loop iteration.
+    // Profile-scaled: Efficient=4, Balanced=6, Aggressive=16.
+    // Higher values increase write throughput at the cost of per-iteration latency.
+    static uint32_t writeCoordinatorBatchCap() {
+        uint32_t ov = writeCoordinatorBatchCapOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        static constexpr uint32_t kBase = 4;
+        static constexpr uint32_t kRange = 12;
+        return kBase + static_cast<uint32_t>(kRange * profileScale());
+    }
+
     // Worker pool poll/sleep cadence (ms) for run loop. Default 150.
     static uint32_t workerPollMs() {
         uint32_t ov = workerPollMsOverride_.load(std::memory_order_relaxed);
@@ -2628,6 +2640,7 @@ private:
 
     // Overrides for config-driven tuning (0 or negative = unset)
     static inline std::atomic<uint32_t> backpressureReadPauseMsOverride_{0};
+    static inline std::atomic<uint32_t> writeCoordinatorBatchCapOverride_{0};
     static inline std::atomic<uint32_t> workerPollMsOverride_{0};
     static inline std::atomic<bool> workerPollMsPinned_{false};
     static inline std::atomic<double> idleCpuPctOverride_{-1.0};

@@ -63,6 +63,7 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/db_recovery.h>
+#include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -1648,16 +1649,39 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         }
                     }
 
-                    int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
                         getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-                        reason, build_timeout, getWorkerExecutor(),
+                        reason, getWorkerExecutor(),
                         !config_.instrumentation.suppressSimeonLexicalBuild);
 
                     if (result.has_value()) {
                         state_.readiness.searchEngineReady.store(true);
+                        state_.readiness.searchProgress = 100;
+                        try {
+                            lifecycleFsm_.setSubsystemDegraded("search", false);
+                        } catch (...) {
+                        }
+                        if (auto metadataRepo = getMetadataRepo()) {
+                            auto countRes = metadataRepo->getDocumentCount();
+                            if (countRes) {
+                                if (searchComponent_) {
+                                    searchComponent_->recordSuccessfulBuild(countRes.value());
+                                } else {
+                                    state_.readiness.searchEngineDocCount.store(countRes.value());
+                                }
+                            }
+                        }
+                        writeBootstrapStatusFile(config_, state_, this);
                         spdlog::info("[ServiceManager] FSM-triggered rebuild succeeded");
                     } else {
+                        state_.readiness.searchEngineReady.store(false);
+                        state_.readiness.searchProgress = 100;
+                        try {
+                            lifecycleFsm_.setSubsystemDegraded("search", true,
+                                                               result.error().message);
+                        } catch (...) {
+                        }
+                        writeBootstrapStatusFile(config_, state_, this);
                         spdlog::error("[ServiceManager] FSM-triggered rebuild failed: {}",
                                       result.error().message);
                     }
@@ -1820,6 +1844,45 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
+    // Phase: Salvage document records from corrupt DB after recovery.
+    // When the daemon startup detects a corrupt DB, it quarantines the old file
+    // and opens a fresh empty DB. After migrations, we attempt to salvage
+    // document records from the most recent quarantined corrupt DB so that
+    // derived indexes can be rebuilt rather than lost entirely.
+    {
+        std::string recoveredFrom;
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            recoveredFrom = state_.readiness.databaseRecoveredFrom;
+        }
+        if (!recoveredFrom.empty()) {
+            spdlog::info("[ServiceManager] DB was recovered from corruption; "
+                         "attempting to salvage document records");
+            auto sentinel = readLatestRecoverySentinel(dbPath);
+            if (sentinel && !sentinel->quarantinedPath.empty() &&
+                fs::exists(sentinel->quarantinedPath)) {
+                auto salvageResult = salvageFromCorruptDb(sentinel->quarantinedPath, dbPath);
+                if (salvageResult) {
+                    auto& salvaged = salvageResult.value();
+                    spdlog::info(
+                        "[ServiceManager] Salvaged {} document(s) from corrupt DB ({} failed)",
+                        salvaged.documentsSalvaged, salvaged.documentsFailed);
+                    {
+                        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                        state_.readiness.databaseRecoveredFrom = "salvaged-" + sentinel->timestamp;
+                        state_.readiness.databaseSalvaged = true;
+                    }
+                } else {
+                    spdlog::warn("[ServiceManager] Salvage from corrupt DB failed: {}",
+                                 salvageResult.error().message);
+                }
+            } else {
+                spdlog::warn("[ServiceManager] Recovery sentinel missing or corrupt DB not found; "
+                             "skipping salvage");
+            }
+        }
+    }
+
     // Phase: Connection pool + repo (owned by DatabaseManager)
     if (db_ok && databaseManager_) {
         databaseManager_->setDatabase(database_);
@@ -1929,7 +1992,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         auto newPostIngest = std::make_shared<PostIngestQueue>(
             getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
             loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
-        newPostIngest->start();
 
         try {
             if (config_.tuning.postIngestCapacity > 0)
@@ -1985,74 +2047,79 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
-    // Initialize EmbeddingService for async embedding generation
-    try {
-        using TA = yams::daemon::TuneAdvisor;
-        uint32_t taThreads = 0;
+    // Skip EmbeddingService init when vectors are disabled (benchmark/compat mode)
+    const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS"));
+    if (!vectorsDisabled) {
+        // Initialize EmbeddingService for async embedding generation
         try {
-            taThreads = TA::postIngestThreads();
-        } catch (...) {
-        }
-        (void)taThreads; // Retrieved for future use in embedding service configuration
-        auto embeddingService = std::make_shared<EmbeddingService>(
-            getContentStore(), getMetadataRepo(), workCoordinator_.get());
+            using TA = yams::daemon::TuneAdvisor;
+            uint32_t taThreads = 0;
+            try {
+                taThreads = TA::postIngestThreads();
+            } catch (...) {
+            }
+            (void)taThreads; // Retrieved for future use in embedding service configuration
+            auto embeddingService = std::make_shared<EmbeddingService>(
+                getContentStore(), getMetadataRepo(), workCoordinator_.get());
 
-        auto initRes = embeddingService->initialize();
-        if (initRes) {
-            auto weakSelf = weak_from_this();
-            embeddingService->setProviders(
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->resolvePreferredModel() : std::string{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->getVectorDatabase()
-                                : std::shared_ptr<yams::vector::VectorDatabase>{};
-                },
-                [weakSelf]() {
-                    auto self = weakSelf.lock();
-                    return self ? self->getKgStore()
-                                : std::shared_ptr<metadata::KnowledgeGraphStore>{};
-                },
-                [weakSelf](const std::string& model,
-                           std::function<void(const ModelLoadEvent&)> progress) {
-                    auto self = weakSelf.lock();
-                    if (!self) {
-                        return Result<std::string>(
-                            Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
-                    }
-                    return self->ensureEmbeddingModelReadySync(model, std::move(progress),
-                                                               /*timeoutMs=*/0,
-                                                               /*keepHot=*/true, /*warmup=*/true);
-                });
-            embeddingService->setTopologyRebuildRequester(
-                [weakSelf](const std::vector<std::string>& hashes) {
-                    if (auto self = weakSelf.lock()) {
-                        self->requestTopologyRebuild("embedding_batch_complete", hashes);
-                    }
-                });
-            embeddingService->start();
-            std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
+            auto initRes = embeddingService->initialize();
+            if (initRes) {
+                auto weakSelf = weak_from_this();
+                embeddingService->setProviders(
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->loadModelProvider() : std::shared_ptr<IModelProvider>{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->resolvePreferredModel() : std::string{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->getVectorDatabase()
+                                    : std::shared_ptr<yams::vector::VectorDatabase>{};
+                    },
+                    [weakSelf]() {
+                        auto self = weakSelf.lock();
+                        return self ? self->getKgStore()
+                                    : std::shared_ptr<metadata::KnowledgeGraphStore>{};
+                    },
+                    [weakSelf](const std::string& model,
+                               std::function<void(const ModelLoadEvent&)> progress) {
+                        auto self = weakSelf.lock();
+                        if (!self) {
+                            return Result<std::string>(
+                                Error{ErrorCode::InvalidState, "ServiceManager unavailable"});
+                        }
+                        return self->ensureEmbeddingModelReadySync(model, std::move(progress),
+                                                                   /*timeoutMs=*/0,
+                                                                   /*keepHot=*/true,
+                                                                   /*warmup=*/true);
+                    });
+                embeddingService->setTopologyRebuildRequester(
+                    [weakSelf](const std::vector<std::string>& hashes) {
+                        if (auto self = weakSelf.lock()) {
+                            self->requestTopologyRebuild("embedding_batch_complete", hashes);
+                        }
+                    });
+                embeddingService->start();
+                std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
+                                           std::memory_order_release);
+                spdlog::info("EmbeddingService initialized");
+            } else {
+                spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
+                std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
+                                           std::memory_order_release);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("EmbeddingService init failed: {}", e.what());
+            std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
                                        std::memory_order_release);
-            spdlog::info("EmbeddingService initialized");
-        } else {
-            spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
+        } catch (...) {
+            spdlog::warn("EmbeddingService init failed (unknown)");
             std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
                                        std::memory_order_release);
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("EmbeddingService init failed: {}", e.what());
-        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
-                                   std::memory_order_release);
-    } catch (...) {
-        spdlog::warn("EmbeddingService init failed (unknown)");
-        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
-                                   std::memory_order_release);
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
@@ -2114,7 +2181,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::info("ServiceManager: embeddingPreloadOnStartup={}",
                      embeddingLifecycle_.preloadOnStartup());
 
-        if (enableAutoload) {
+        if (enableAutoload && !vectorsDisabled) {
             auto loadResult = co_await init::await_step(
                 "plugin_autoload_now",
                 [&]() -> boost::asio::awaitable<Result<size_t>> { return autoloadPluginsNow(); });
@@ -2192,6 +2259,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::warn("Plugin autoload failed: {}", e.what());
     }
     spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
+
+    // Start post-ingest queue pollers now that all extractors/providers are wired.
+    // This was deferred from PIQ construction so that plugin-based content extractors
+    // (zyp, etc.) are available before the first document is processed.
+    {
+        auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+        if (piq) {
+            piq->start();
+        }
+    }
     // Update pluginsReady flag after actual loading completes
     try {
         const auto ps = getPluginHostFsmSnapshot();
@@ -2202,7 +2279,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     refreshPluginStatusSnapshot();
 
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
-    {
+    if (!vectorsDisabled) {
         auto vdbRes = vectorSystemManager_ ? vectorSystemManager_->initializeOnce(dataDir)
                                            : Result<bool>(false);
         if (!vdbRes) {
@@ -2336,8 +2413,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             progress = 70;
         state_.readiness.searchProgress = progress;
         writeBootstrapStatusFile(config_, state_, this);
-        int build_timeout = read_timeout_ms("YAMS_SEARCH_BUILD_TIMEOUT_MS", 5000, 250);
-
         // Determine vector readiness: honor env disables and presence of vector infra
         const bool vectorsDisabled =
             ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
@@ -2414,7 +2489,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial", build_timeout,
+            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial",
             getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (buildResult.has_value()) {
@@ -2933,10 +3008,9 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             }
         }
 
-        int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
             getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen),
-            "rebuild_enabled", build_timeout, getWorkerExecutor(),
+            "rebuild_enabled", getWorkerExecutor(),
             !config_.instrumentation.suppressSimeonLexicalBuild);
 
         if (rebuildResult.has_value()) {
@@ -3025,8 +3099,6 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
         }
         if (!buildingAlready) {
             spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
-            int build_timeout = 15000; // Generous timeout for rebuild
-
             // Get embedding generator from model provider if available
             std::shared_ptr<vector::EmbeddingGenerator> embGen;
             auto modelProvider = loadModelProvider();
@@ -3043,8 +3115,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
                 getMetadataRepo(), getKgStore(), getVectorDatabase(), std::move(embGen), "rebuild",
-                build_timeout, getWorkerExecutor(),
-                !config_.instrumentation.suppressSimeonLexicalBuild);
+                getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
 
             if (rebuildResult.has_value()) {
                 const auto& rebuilt = rebuildResult.value();
@@ -3448,7 +3519,10 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
-                break;
+                self->topologyRebuildPending_.store(true, std::memory_order_release);
+                self->topologyRebuildInProgress_.store(false, std::memory_order_release);
+                self->requestTopologyRebuild(reason);
+                return;
             }
 
             auto rebuildHashes = self->topologyManager_.drainDirtyHashes();

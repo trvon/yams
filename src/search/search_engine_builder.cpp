@@ -149,41 +149,49 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.semanticRescueMinVectorScore,
             SearchEngineConfig::conceptExtractionBackendToString(cfg.conceptExtractionBackend));
     } else if (options.autoTune && metadataRepo_) {
-        // Get corpus statistics from metadata repository
-        auto statsResult = metadataRepo_->getCorpusStats();
-        if (statsResult.has_value()) {
-            // Create tuner and get optimized config
-            runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
-            cfg = runtimeTuner->getConfig();
-
-            // Preserve user-specified options that shouldn't be overridden by tuner
-            cfg.maxResults = options.config.maxResults;
-            cfg.enableParallelExecution = options.config.enableParallelExecution;
-            cfg.includeDebugInfo = options.config.includeDebugInfo;
-            {
-                const auto& tp = runtimeTuner->getParams();
-                spdlog::info(
-                    "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
-                    "(zoom={}, k={}, "
-                    "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], kg={:.2f}[{}], "
-                    "fusion={}, semantic_rescue={}[{}]@{:.4f})",
-                    tuningStateToString(runtimeTuner->currentState()),
-                    statsResult.value().usedOnlineOverlay,
-                    statsResult.value().reconciledComputedAtMs,
-                    SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                    runtimeTuner->getRrfK(), tp.weights.text.value,
-                    tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
-                    tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
-                    tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
-                    tuningLayerToString(tp.weights.kg.source),
-                    SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                    tp.semanticRescueSlots.value,
-                    tuningLayerToString(tp.semanticRescueSlots.source),
-                    cfg.semanticRescueMinVectorScore);
-            }
+        const auto cachedDocCount = metadataRepo_->getCachedDocumentCount();
+        if (cachedDocCount > 0) {
+            spdlog::info(
+                "SearchTuner: skipping corpus stats on build critical path (docs={}), using "
+                "default tuned config until background warmup populates exact stats",
+                cachedDocCount);
         } else {
-            spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
-                         statsResult.error().message);
+            auto statsResult = metadataRepo_->getCorpusStats();
+            if (statsResult.has_value()) {
+                // Create tuner and get optimized config
+                runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
+                cfg = runtimeTuner->getConfig();
+
+                // Preserve user-specified options that shouldn't be overridden by tuner
+                cfg.maxResults = options.config.maxResults;
+                cfg.enableParallelExecution = options.config.enableParallelExecution;
+                cfg.includeDebugInfo = options.config.includeDebugInfo;
+                {
+                    const auto& tp = runtimeTuner->getParams();
+                    spdlog::info(
+                        "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                        "(zoom={}, k={}, "
+                        "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
+                        "kg={:.2f}[{}], "
+                        "fusion={}, semantic_rescue={}[{}]@{:.4f})",
+                        tuningStateToString(runtimeTuner->currentState()),
+                        statsResult.value().usedOnlineOverlay,
+                        statsResult.value().reconciledComputedAtMs,
+                        SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                        runtimeTuner->getRrfK(), tp.weights.text.value,
+                        tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
+                        tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
+                        tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
+                        tuningLayerToString(tp.weights.kg.source),
+                        SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                        tp.semanticRescueSlots.value,
+                        tuningLayerToString(tp.semanticRescueSlots.source),
+                        cfg.semanticRescueMinVectorScore);
+                }
+            } else {
+                spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
+                             statsResult.error().message);
+            }
         }
     }
 

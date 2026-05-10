@@ -255,7 +255,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, UpdateExtractionStatusOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
-                                  std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
+                                  std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
+                                  std::is_same_v<T, InsertRelationshipOp>) {
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
@@ -296,7 +297,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, UpdateExtractionStatusOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
-                                      std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
+                                      std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
+                                      std::is_same_v<T, InsertRelationshipOp>) {
                             return;
                         } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
@@ -454,6 +456,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             concrete.hashes.clear();
                             return;
                         } else if constexpr (std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
+                            r = applyMetadataOp(concrete);
+                            if (!r &&
+                                r.error().message.find("database is locked") != std::string::npos) {
+                                return;
+                            }
+                        } else if constexpr (std::is_same_v<T, InsertRelationshipOp>) {
                             r = applyMetadataOp(concrete);
                         } else {
                             return;
@@ -906,6 +914,19 @@ Result<void> WriteCoordinator::applyMetadataOp(UpsertSymbolExtractionStateOp& op
         stats_.symbolExtractionStatesUpdated++;
     }
     return r;
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(InsertRelationshipOp& op) {
+    if (!meta_)
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    auto r = meta_->insertRelationship(op.relationship);
+    if (!r)
+        return r.error();
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.relationshipsInserted++;
+    }
+    return Result<void>();
 }
 
 } // namespace yams::daemon

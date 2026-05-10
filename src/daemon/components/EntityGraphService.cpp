@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
+#include <mutex>
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -33,6 +34,29 @@
 namespace yams::daemon {
 
 namespace {
+
+// Lazy-init cache for languages where the symbol extractor returns rc=-2.
+// Uses C++11 magic statics — thread-safe init on first access, destructed
+// at process exit (after all daemon threads have stopped).
+struct UnsupportedLangCache {
+    std::mutex mutex;
+    std::unordered_set<std::string> langs;
+    static UnsupportedLangCache& instance() {
+        static UnsupportedLangCache cache;
+        return cache;
+    }
+};
+
+bool isKnownUnsupportedLanguage(std::string_view language) {
+    auto& cache = UnsupportedLangCache::instance();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    return cache.langs.contains(std::string(language));
+}
+void markLanguageUnsupported(std::string_view language) {
+    auto& cache = UnsupportedLangCache::instance();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    cache.langs.insert(std::string(language));
+}
 
 std::string normalizeGraphPath(const std::string& path) {
     if (path.empty()) {
@@ -276,13 +300,24 @@ bool EntityGraphService::process(Job& job) {
     // Get extractor ID for versioned state tracking
     std::string extractorId = extractorAdapter ? extractorAdapter->getExtractorId() : "unknown";
 
+    if (isKnownUnsupportedLanguage(job.language)) {
+        return true;
+    }
+
     yams_symbol_extraction_result_v1* result = nullptr;
     int rc = table->extract_symbols(table->self, job.contentUtf8.data(), job.contentUtf8.size(),
                                     job.filePath.c_str(), job.language.c_str(), &result);
     if (rc != 0 || !result) {
-        spdlog::warn("EntityGraphService: extract_symbols failed rc={} for {}", rc, job.filePath);
-        // Record failed extraction state
-        if (!job.documentHash.empty()) {
+        if (rc == -2) {
+            markLanguageUnsupported(job.language);
+            spdlog::debug(
+                "EntityGraphService: symbol extractor unsupported (rc=-2) lang={} file={}",
+                job.language, job.filePath);
+        } else {
+            spdlog::warn("EntityGraphService: extract_symbols failed rc={} for {}", rc,
+                         job.filePath);
+        }
+        if (!job.documentHash.empty() && rc != -2) {
             metadata::SymbolExtractionState state;
             state.extractorId = extractorId;
             state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(

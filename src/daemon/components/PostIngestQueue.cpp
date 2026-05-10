@@ -39,7 +39,6 @@
 
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/extraction/title_util.h>
-#include <simeon/corpus_adapter.hpp>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -81,36 +80,19 @@ bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normal
 }
 
 bool isHighValueGraphType(std::string_view normalizedType) {
-    // Use simeon ScientificAdapter for suffix-based biomedical detection.
-    // Covers 40+ biomedical suffixes (vs. 11 hardcoded types previously).
-    // Falls back to known type names for direct matches.
-    if (normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
-        normalizedType == "disease" || normalizedType == "chemical" || normalizedType == "drug" ||
-        normalizedType == "pathway" || normalizedType == "biological_process" ||
-        normalizedType == "biomarker" || normalizedType == "anatomy" ||
-        normalizedType == "organism") {
-        return true;
-    }
-    return simeon::ScientificAdapter::is_biomedical_suffix(normalizedType);
+    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
+           normalizedType == "disease" || normalizedType == "chemical" ||
+           normalizedType == "drug" || normalizedType == "pathway" ||
+           normalizedType == "biological_process" || normalizedType == "biomarker" ||
+           normalizedType == "anatomy" || normalizedType == "organism";
 }
-
-// Check if GLiNER title extraction is disabled via environment variable
-// Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
-inline bool isGlinerTitleExtractionDisabled() {
-    static const bool disabled = []() {
-        const char* env = std::getenv("YAMS_DISABLE_GLINER_TITLES");
-        return env && std::string(env) == "1";
-    }();
-    return disabled;
-}
-
-// Enrichment utilities shared with post_ingest_enrichment.cpp
 
 bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
     const std::string normEntity = normalizeEntityTextForKey(entityText);
     const std::string normTitle = normalizeEntityTextForKey(titleText);
-    if (normEntity.empty() || normTitle.empty())
+    if (normEntity.empty() || normTitle.empty()) {
         return false;
+    }
     return normTitle.find(normEntity) != std::string::npos ||
            (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
 }
@@ -125,109 +107,101 @@ std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnipp
                                                       std::string_view titleText,
                                                       std::size_t maxSegments = 3) {
     std::vector<TextSegmentWindow> segments;
-    if (textSnippet.empty() || maxSegments == 0)
+    if (textSnippet.empty() || maxSegments == 0) {
         return segments;
-    auto docSections = yams::extraction::util::detectDocumentSections(textSnippet);
-    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
-        if (segEnd <= segStart)
-            return;
-        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
-        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
-        if (cleaned.size() < 24)
-            return;
-        segments.push_back({std::move(cleaned), segStart, segEnd});
-    };
-    if (!docSections.sections.empty() && docSections.sections.size() >= 2) {
-        std::size_t totalSecs = docSections.sections.size();
-        std::size_t perSec = std::max<std::size_t>(1u, maxSegments / totalSecs);
-        std::size_t remainder = maxSegments % totalSecs;
-        for (std::size_t si = 0; si < totalSecs && segments.size() < maxSegments; ++si) {
-            const auto& sec = docSections.sections[si];
-            std::size_t secBudget = perSec + (si < remainder ? 1 : 0);
-            if (secBudget == 0)
-                continue;
-            std::string_view secText =
-                textSnippet.substr(sec.startOffset, sec.endOffset - sec.startOffset);
-            std::size_t sentenceStart = 0, sentenceCount = 0, secSegments = 0;
-            for (std::size_t i = 0; i < secText.size() && secSegments < secBudget; ++i) {
-                const char c = secText[i];
-                bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-                if (boundary)
-                    ++sentenceCount;
-                if (!boundary)
-                    continue;
-                if (sentenceCount >= 2 || c == '\n') {
-                    flushSegment(sec.startOffset + sentenceStart, sec.startOffset + i + 1);
-                    sentenceStart = i + 1;
-                    sentenceCount = 0;
-                    ++secSegments;
-                }
+    }
+
+    std::size_t start = 0;
+    if (!titleText.empty()) {
+        const std::string normTitle = normalizeEntityTextForKey(titleText);
+        const auto newline = textSnippet.find('\n');
+        if (newline != std::string_view::npos) {
+            const std::string firstLine = normalizeEntityTextForKey(textSnippet.substr(0, newline));
+            if (!firstLine.empty() && firstLine == normTitle) {
+                start = newline + 1;
             }
-            if (secSegments < secBudget && sentenceStart < secText.size())
-                flushSegment(sec.startOffset + sentenceStart, sec.endOffset);
         }
     }
-    if (segments.empty()) {
-        std::size_t start = 0;
-        if (!titleText.empty()) {
-            const std::string normTitle = normalizeEntityTextForKey(titleText);
-            const auto newline = textSnippet.find('\n');
-            if (newline != std::string_view::npos) {
-                if (normalizeEntityTextForKey(textSnippet.substr(0, newline)) == normTitle)
-                    start = newline + 1;
-            }
+
+    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
+        if (segEnd <= segStart) {
+            return;
         }
-        std::size_t sentenceStart = start, sentenceCount = 0;
-        for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
-            const char c = textSnippet[i];
-            bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-            if (!boundary)
-                continue;
-            ++sentenceCount;
-            if (sentenceCount >= 2 || c == '\n') {
-                flushSegment(sentenceStart, i + 1);
-                sentenceStart = i + 1;
-                sentenceCount = 0;
-            }
+        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
+        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
+        if (cleaned.size() < 24) {
+            return;
         }
-        if (segments.size() < maxSegments)
-            flushSegment(sentenceStart, textSnippet.size());
+        segments.push_back({std::move(cleaned), segStart, segEnd});
+    };
+
+    std::size_t sentenceStart = start;
+    std::size_t sentenceCount = 0;
+    for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
+        const char c = textSnippet[i];
+        const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
+        if (!boundary) {
+            continue;
+        }
+        ++sentenceCount;
+        if (sentenceCount >= 2 || c == '\n') {
+            flushSegment(sentenceStart, i + 1);
+            sentenceStart = i + 1;
+            sentenceCount = 0;
+        }
+    }
+    if (segments.size() < maxSegments) {
+        flushSegment(sentenceStart, textSnippet.size());
     }
     return segments;
 }
 
 std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
-    bool lhsBio = isHighValueGraphType(lhsType);
-    bool rhsBio = isHighValueGraphType(rhsType);
-    if (lhsBio && rhsBio)
+    const bool lhsBio = isHighValueGraphType(lhsType);
+    const bool rhsBio = isHighValueGraphType(rhsType);
+    if (lhsBio && rhsBio) {
         return "co_occurs_biomedical";
-    if ((lhsType == "protein" && rhsType == "cell") || (lhsType == "cell" && rhsType == "protein"))
+    }
+    if ((lhsType == "protein" && rhsType == "cell") ||
+        (lhsType == "cell" && rhsType == "protein")) {
         return "protein_cell_association";
+    }
     if ((lhsType == "protein" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "protein"))
+        (lhsType == "disease" && rhsType == "protein")) {
         return "protein_disease_association";
-    if ((lhsType == "drug" && rhsType == "disease") || (lhsType == "disease" && rhsType == "drug"))
+    }
+    if ((lhsType == "drug" && rhsType == "disease") ||
+        (lhsType == "disease" && rhsType == "drug")) {
         return "drug_disease_association";
+    }
     return "co_mentioned_with";
 }
 
 bool isUsefulNlEntity(const search::QueryConcept& qc) {
-    if (qc.text.empty() || qc.confidence < kMinNlEntityConfidence)
+    if (qc.text.empty() || qc.confidence < kMinNlEntityConfidence) {
         return false;
-    if (qc.text.size() > 160)
+    }
+
+    if (qc.text.size() > 160) {
         return false;
+    }
+
     bool hasAlphaNum = false;
-    for (unsigned char c : qc.text)
+    for (unsigned char c : qc.text) {
         if (std::isalnum(c)) {
             hasAlphaNum = true;
             break;
         }
-    if (!hasAlphaNum)
+    }
+    if (!hasAlphaNum) {
         return false;
-    auto nt = normalizeEntityTextForKey(qc.text);
-    auto ntype = canonicalizeNlEntityType(qc.type, qc.text);
-    if (isLowValueNlEntity(nt, ntype))
+    }
+
+    const std::string normalizedText = normalizeEntityTextForKey(qc.text);
+    const std::string normalizedType = canonicalizeNlEntityType(qc.type, qc.text);
+    if (isLowValueNlEntity(normalizedText, normalizedType)) {
         return false;
+    }
     return true;
 }
 
@@ -243,22 +217,49 @@ std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
     std::vector<NlAliasVariant> variants;
     std::unordered_set<std::string> seen;
     const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
-    auto addVariant = [&](const std::string& value, float cs, std::string st) {
-        std::string n = normalizeEntityTextForKey(value);
-        if (n.size() < 2 || !seen.insert(n).second)
+
+    auto addVariant = [&](const std::string& value, float confScale, std::string sourceTag) {
+        std::string normalized = normalizeEntityTextForKey(value);
+        if (normalized.size() < 2) {
             return;
-        float c = std::clamp(baseConfidence * cs, 0.05f, 1.0f);
-        variants.push_back({std::move(n), c, std::move(st)});
+        }
+        if (!seen.insert(normalized).second) {
+            return;
+        }
+        float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
+        variants.push_back(NlAliasVariant{std::move(normalized), conf, std::move(sourceTag)});
     };
-    auto addGen = [&](const std::string& v, float ps, float ss, std::string pS, std::string sS) {
-        auto g = yams::search::generateSurfaceVariants(v, kind, 8);
-        for (size_t i = 0; i < g.size() && variants.size() < 8; ++i)
-            addVariant(g[i], i == 0 ? ps : ss, i == 0 ? pS : sS);
+
+    auto addGeneratedVariants = [&](const std::string& value, float primaryScale,
+                                    float secondaryScale, std::string primarySource,
+                                    std::string secondarySource) {
+        auto generated = yams::search::generateSurfaceVariants(value, kind, 8);
+        for (size_t i = 0; i < generated.size() && variants.size() < 8; ++i) {
+            addVariant(generated[i], i == 0 ? primaryScale : secondaryScale,
+                       i == 0 ? primarySource : secondarySource);
+        }
     };
-    addGen(entityText, 1.0f, 0.72f, "surface", "variant");
-    if (!entityType.empty())
-        addGen(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified", "type_qualified");
+
+    // Primary alias: full normalized entity text.
+    addGeneratedVariants(entityText, 1.0f, 0.72f, "surface", "variant");
+
+    // Type-qualified alias helps disambiguation for collisions.
+    if (!entityType.empty()) {
+        addGeneratedVariants(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified",
+                             "type_qualified");
+    }
+
     return variants;
+}
+
+// Check if GLiNER title extraction is disabled via environment variable
+// Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
+inline bool isGlinerTitleExtractionDisabled() {
+    static const bool disabled = []() {
+        const char* env = std::getenv("YAMS_DISABLE_GLINER_TITLES");
+        return env && std::string(env) == "1";
+    }();
+    return disabled;
 }
 
 } // namespace
@@ -311,6 +312,16 @@ PostIngestQueue::~PostIngestQueue() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
     std::unique_lock<std::mutex> lock(lifecycleMutex_);
     lifecycleCv_.wait_until(lock, deadline, [this]() { return totalInFlight() == 0; });
+
+    // Detach wake timers to prevent use-after-free in steady_timer destructor.
+    // The timers hold references to io_context service objects that may be
+    // destroyed before PostIngestQueue member destructors run during shutdown.
+    if (extractionWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
+    }
+    if (kgWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
+    }
 }
 
 void PostIngestQueue::start() {
@@ -670,6 +681,13 @@ void PostIngestQueue::checkDrainAndSignal() {
         // Only signal if we were previously active (had work)
         bool expected = true;
         if (wasActive_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+            // Flush pending WriteCoordinator batches before signaling.
+            // Ensures entity/edge/alias writes are committed before the
+            // search engine rebuild reads corpus stats.
+            if (writeCoordinator_) {
+                writeCoordinator_->flush(std::chrono::seconds(30));
+            }
+
             // Queue just became drained - signal corpus stats stale
             if (meta_) {
                 meta_->signalCorpusStatsStale();
@@ -702,6 +720,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     if (rpcChannel) {
         spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cached)");
     }
+
+    extractionWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
     cfg.stageName = "extraction";
@@ -754,6 +775,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     // CPU throttle adds 2-25ms delays after every productive batch, compounding
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;
+    cfg.wakeTimer = extractionWakeTimer_;
 
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
@@ -764,15 +786,14 @@ void PostIngestQueue::enqueue(Task t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
-    task.documentId = t.documentId;
-    task.filePath = std::move(t.filePath);
-    task.noEmbeddings = t.noEmbeddings;
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     uint32_t waits = 0;
     while (!stop_.load(std::memory_order_acquire)) {
         if (channel->push_wait(task, kEnqueueTimeout)) {
             TuningManager::notifyWakeup();
+            if (extractionWakeTimer_)
+                extractionWakeTimer_->cancel();
             return;
         }
         ++waits;
@@ -796,9 +817,6 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         InternalEventBus::PostIngestTask task;
         task.hash = std::move(t.hash);
         task.mime = std::move(t.mime);
-        task.documentId = t.documentId;
-        task.filePath = std::move(t.filePath);
-        task.noEmbeddings = t.noEmbeddings;
         busTasks.push_back(std::move(task));
     }
 
@@ -845,9 +863,6 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
     task.mime = t.mime;
-    task.documentId = t.documentId;
-    task.filePath = t.filePath;
-    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(task);
     if (pushed) {
@@ -874,9 +889,6 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
-    task.documentId = t.documentId;
-    task.filePath = std::move(t.filePath);
-    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(std::move(task));
     if (pushed) {
@@ -986,6 +998,27 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.priorContentExtracted = info.contentExtracted;
     prepared.priorExtractionStatus = info.extractionStatus;
 
+    // For known code file extensions, skip NLP-centric enrichment that does not
+    // apply to source code (GLiNER title extraction, binary entity providers).
+    // KG registration, text extraction, and embeddings all stay enabled so the
+    // file remains fully searchable via both keyword and vector paths.
+    static const std::unordered_set<std::string> kCodeExtensions = {
+        "cpp",   "c",     "cc",  "cxx", "h",     "hpp",  "hh",    "hxx",   "rs",   "go",
+        "py",    "js",    "ts",  "tsx", "jsx",   "java", "swift", "kt",    "kts",  "rb",
+        "cs",    "scala", "m",   "mm",  "lua",   "zig",  "hs",    "elm",   "dart", "nim",
+        "r",     "cob",   "pas", "bas", "asm",   "s",    "S",     "cmake", "make", "mk",
+        "bazel", "bzl",   "gn",  "gni", "proto", "idl",  "def",   "inc",   "inl",  "tcc",
+    };
+    bool isCodeFile = false;
+    {
+        std::string checkExt = prepared.extension;
+        if (!checkExt.empty() && checkExt[0] == '.') {
+            checkExt = checkExt.substr(1);
+        }
+        std::transform(checkExt.begin(), checkExt.end(), checkExt.begin(), ::tolower);
+        isCodeFile = kCodeExtensions.count(checkExt) > 0;
+    }
+
     // Respect per-document opt-out (set by StoreDocumentRequest.noEmbeddings).
     // DocumentService persists this as a real tag key "tag:no_embeddings".
     try {
@@ -1019,7 +1052,7 @@ PostIngestQueue::prepareMetadataEntry(
     // produces NL entities and stores them in the KG — no need to dispatch
     // a separate entity extraction job for the same text.
     prepared.shouldDispatchEntity =
-        extensionSupportsEntityProviders(entityProviders, prepared.extension);
+        isCodeFile ? false : extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
     // Extract document text
     const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
@@ -1060,68 +1093,14 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
                                  prepared.extension);
 
-    // IMRAD-aware abstract extraction for field-weighted FTS5 indexing
-    auto sections = yams::extraction::util::detectDocumentSections(prepared.extractedText);
-    if (!sections.abstract.empty()) {
-        prepared.abstract = std::move(sections.abstract);
-    }
-
-    // Title+NL extraction: single GLiNER call for both title and NL entities
-    if (hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
+    // Title+NL extraction: single GLiNER call for both title and NL entities.
+    // Skip for code files — GLiNER does not extract meaningful titles from
+    // source code, and the deriveTitle heuristic already produces good results.
+    if (!isCodeFile && hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
                                         : prepared.extractedText;
-    } else if (!prepared.extractedText.empty() && writeCoordinator_ && kg_) {
-        // Training-free entity extraction fallback (no ONNX/GLiNER needed).
-        // Uses ScientificAdapter suffix/pattern detection for entity discovery.
-        auto entities =
-            simeon::ScientificAdapter::extract_entities(prepared.extractedText, /*max=*/24);
-        if (!entities.empty()) {
-            auto batch = std::make_unique<DeferredKGBatch>();
-            batch->nodes.reserve(entities.size());
-            batch->aliases.reserve(entities.size());
-            std::string normPath = normalizeGraphPath(prepared.filePath);
-            batch->sourceFile = normPath.empty() ? prepared.filePath : normPath;
-            batch->documentIdToDelete = prepared.documentId;
-
-            for (const auto& entity : entities) {
-                std::string nodeKey = "nl_entity:scientific:" + normalizeEntityTextForKey(entity);
-                metadata::KGNode node;
-                node.nodeKey = nodeKey;
-                node.label = entity;
-                node.type = "scientific_entity";
-                nlohmann::json props;
-                props["entity_text"] = entity;
-                props["entity_type"] = "scientific_entity";
-                props["confidence"] = 0.55f;
-                props["first_seen_file"] = common::sanitizeUtf8(prepared.filePath);
-                if (!prepared.hash.empty())
-                    props["first_seen_hash"] = prepared.hash;
-                node.properties = props.dump();
-                batch->nodes.push_back(std::move(node));
-
-                metadata::KGAlias alias;
-                alias.alias = normalizeEntityTextForKey(entity);
-                alias.source = "scientific_adapter|" + nodeKey;
-                alias.confidence = 0.55f;
-                batch->aliases.push_back(std::move(alias));
-
-                DeferredDocEntity docEnt;
-                docEnt.documentId = prepared.documentId;
-                docEnt.entityText = entity;
-                docEnt.nodeKey = nodeKey;
-                docEnt.confidence = 0.55f;
-                docEnt.extractor = "scientific_adapter";
-                batch->deferredDocEntities.push_back(std::move(docEnt));
-            }
-
-            auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
-                                                        "PostIngestQueue::scientificAdapter/" +
-                                                            prepared.hash.substr(0, 12));
-            writeCoordinator_->enqueue(std::move(wb));
-            deferredDocEntitiesQueued_.fetch_add(entities.size(), std::memory_order_relaxed);
-        }
     }
 
     return prepared;
@@ -1159,14 +1138,6 @@ std::string PostIngestQueue::deriveTitle(const std::string& text, const std::str
     auto codeTitle = yams::extraction::util::extractCodeSignature(text);
     if (!codeTitle.empty()) {
         return codeTitle;
-    }
-
-    // === IMRAD: language-agnostic structural section detection ===
-    // Detects title/abstract/body boundaries using structural heuristics
-    // (short standalone lines, numbering, ALL_CAPS) — no word matching.
-    auto sections = yams::extraction::util::detectDocumentSections(text);
-    if (!sections.title.empty()) {
-        return sections.title;
     }
 
     // NOTE: GLiNER inference moved to async title extraction pipeline (titlePoller)
@@ -1262,6 +1233,8 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     if (channel->try_push(std::move(job))) {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
+        if (kgWakeTimer_)
+            kgWakeTimer_->cancel();
         return;
     }
 
@@ -1278,15 +1251,18 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     } else {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
+        if (kgWakeTimer_)
+            kgWakeTimer_->cancel();
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto channel = kgChannel_;
+    kgWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
-    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[1];
     cfg.pauseFlag = &stagePaused_[1];
@@ -1312,15 +1288,17 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         processKnowledgeGraphBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = kgWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     auto channel = symbolChannel_;
+    symbolWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
-    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[2];
     cfg.pauseFlag = &stagePaused_[2];
@@ -1348,6 +1326,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         processSymbolExtractionBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = symbolWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1425,9 +1404,6 @@ void PostIngestQueue::processSymbolExtractionBatch(
 void PostIngestQueue::dispatchToSymbolChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    if (maxSymbolConcurrent() == 0) {
-        return;
-    }
     auto channel = symbolChannel_;
 
     InternalEventBus::SymbolExtractionJob job;
@@ -1445,6 +1421,8 @@ void PostIngestQueue::dispatchToSymbolChannel(
                      filePath, hash.substr(0, 12), language);
         InternalEventBus::instance().incSymbolQueued();
         TuningManager::notifyWakeup();
+        if (symbolWakeTimer_)
+            symbolWakeTimer_->cancel();
     }
 }
 
@@ -1509,9 +1487,6 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    if (maxEntityConcurrent() == 0) {
-        return;
-    }
     auto channel = entityChannel_;
 
     InternalEventBus::EntityExtractionJob job;
@@ -1527,6 +1502,8 @@ void PostIngestQueue::dispatchToEntityChannel(
     } else {
         InternalEventBus::instance().incEntityQueued();
         TuningManager::notifyWakeup();
+        if (entityWakeTimer_)
+            entityWakeTimer_->cancel();
 
         // Throttled dispatch logging: per-document is too spammy for 5k+ docs.
         const auto nth = entityDispatched_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1539,10 +1516,11 @@ void PostIngestQueue::dispatchToEntityChannel(
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     auto channel = entityChannel_;
+    entityWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
-    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[3];
     cfg.pauseFlag = &stagePaused_[3];
@@ -1570,6 +1548,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         processEntityExtractionBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = entityWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1862,44 +1841,42 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.language = language;
     job.mimeType = mimeType;
 
+    // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
+    // TuningManager tick) without changing steady-state drop behavior.
     auto jobCopy = job;
-    if (!channel->try_push(std::move(job))) {
+    bool pushed = channel->try_push(std::move(job));
+    if (!pushed) {
         TuningManager::notifyWakeup();
-        auto capturedJob =
-            std::make_shared<InternalEventBus::TitleExtractionJob>(std::move(jobCopy));
-        auto capturedHash = hash;
-        boost::asio::post(coordinator_->getExecutor(), [capturedJob, capturedHash]() mutable {
-            int remainingRetries = 8;
-            while (remainingRetries-- > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(4));
-                auto ch =
-                    InternalEventBus::instance().get_channel<InternalEventBus::TitleExtractionJob>(
-                        "title_extraction");
-                if (ch && ch->try_push(std::move(*capturedJob))) {
-                    InternalEventBus::instance().incTitleQueued();
-                    TuningManager::notifyWakeup();
-                    return;
-                }
-            }
-            spdlog::debug("[PostIngestQueue] Title channel full after async retry, "
-                          "dropping async title for {}",
-                          capturedHash.substr(0, 12));
-            InternalEventBus::instance().incTitleDropped();
-        });
+        constexpr int kMaxRetries = 8;
+        constexpr std::chrono::milliseconds kBackoff{4};
+        for (int attempt = 0; attempt < kMaxRetries && !pushed; ++attempt) {
+            std::this_thread::sleep_for(kBackoff);
+            auto retryJob = jobCopy;
+            pushed = channel->try_push(std::move(retryJob));
+        }
+    }
+    if (!pushed) {
+        spdlog::debug(
+            "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
+            hash.substr(0, 12));
+        InternalEventBus::instance().incTitleDropped();
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleQueued();
         TuningManager::notifyWakeup();
+        if (titleWakeTimer_)
+            titleWakeTimer_->cancel();
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     auto channel = titleChannel_;
+    titleWakeTimer_ =
+        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
 
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";
-    cfg.enableCpuThrottling = false;
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[4];
     cfg.pauseFlag = &stagePaused_[4];
@@ -2818,7 +2795,6 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
             entry.language = prepared.language;
-            entry.abstract = prepared.abstract;
             entry.priorStateKnown = true;
             entry.priorContentExtracted = prepared.priorContentExtracted;
             entry.priorExtractionStatus = prepared.priorExtractionStatus;
@@ -2956,38 +2932,34 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.skipExisting = true;
         job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
-        if (!embedQ->try_push(std::move(job))) {
-            auto capturedJob = std::make_shared<InternalEventBus::EmbedJob>(std::move(job));
-            auto capturedBatchSz = batchSize;
-            boost::asio::post(coordinator_->getExecutor(), [capturedJob,
-                                                            capturedBatchSz]() mutable {
-                int remainingRetries = 8;
-                while (remainingRetries-- > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    auto ch = InternalEventBus::instance().get_channel<InternalEventBus::EmbedJob>(
-                        "embed_jobs");
-                    if (ch && ch->try_push(std::move(*capturedJob))) {
-                        InternalEventBus::instance().incEmbedQueued(capturedBatchSz);
-                        TuningManager::notifyWakeup();
-                        return;
-                    }
+        constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
+        uint32_t waits = 0;
+        while (!stop_.load(std::memory_order_acquire)) {
+            if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
+                InternalEventBus::instance().incEmbedQueued(batchSize);
+                embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
+                embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
+                embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
+                embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
+                TuningManager::notifyWakeup();
+                if (preparedDocsCount > 0) {
+                    InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
+                                                                        preparedChunksCount);
                 }
-                InternalEventBus::instance().incEmbedDropped(capturedBatchSz);
-            });
-        } else {
-            InternalEventBus::instance().incEmbedQueued(batchSize);
-            embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
-            embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
-            embedPreparedDocsEmitted_.fetch_add(preparedDocsCount, std::memory_order_relaxed);
-            embedHashOnlyDocsEmitted_.fetch_add(hashOnlyDocsCount, std::memory_order_relaxed);
-            TuningManager::notifyWakeup();
-            if (preparedDocsCount > 0) {
-                InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
-                                                                    preparedChunksCount);
+                if (hashOnlyDocsCount > 0) {
+                    InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);
+                }
+                break;
             }
-            if (hashOnlyDocsCount > 0) {
-                InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);
+            ++waits;
+            if ((waits % 20u) == 1u) {
+                spdlog::warn(
+                    "[PostIngestQueue] embed enqueue waiting on full channel (batch={}, waits={})",
+                    batchSize, waits);
             }
+        }
+        if (stop_.load(std::memory_order_acquire)) {
+            InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();
         embedHashBatch.clear();
@@ -3119,38 +3091,47 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     auto stageCfg = snapshotStageConfig();
     auto prepareTask = [this, &stageCfg](const InternalEventBus::PostIngestTask& task)
         -> std::variant<PreparedMetadataEntry, ExtractionFailure> {
-        std::optional<metadata::DocumentInfo> infoOpt;
-        if (task.documentId >= 0 && !task.filePath.empty()) {
-            metadata::DocumentInfo info;
-            info.id = task.documentId;
-            info.filePath = task.filePath;
-            info.fileName = task.fileName.empty()
-                                ? std::filesystem::path(task.filePath).filename().string()
-                                : task.fileName;
-            info.fileExtension = std::filesystem::path(info.fileName).extension().string();
-            info.sha256Hash = task.hash;
-            info.mimeType = task.mime;
-            info.extractionStatus = metadata::ExtractionStatus::Pending;
-            infoOpt = std::move(info);
-        } else {
-            infoOpt = getCachedDocumentInfo(task.hash);
-        }
+        auto infoOpt = getCachedDocumentInfo(task.hash);
         if (!infoOpt) {
             return ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"};
         }
 
-        std::optional<std::vector<std::string>> tagsOpt;
-        if (task.documentId >= 0 && task.noEmbeddings) {
-            tagsOpt = std::vector<std::string>{"no_embeddings"};
-        } else {
-            tagsOpt = getCachedDocumentTags(infoOpt->id);
-        }
+        auto tagsOpt = getCachedDocumentTags(infoOpt->id);
         const std::vector<std::string> emptyTags;
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
         return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
     };
+
+    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
+    // ready yet, process directly without WriteCoordinator batching so that
+    // standalone tests and early-init phases can still complete task processing.
+    if (!writeCoordinator_) {
+        std::vector<PreparedMetadataEntry> allSuccesses;
+        std::vector<ExtractionFailure> allFailures;
+        allSuccesses.reserve(tasks.size());
+        allFailures.reserve(tasks.size() / 10);
+
+        const auto prepareStart = std::chrono::steady_clock::now();
+        for (const auto& task : tasks) {
+            auto result = prepareTask(task);
+            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
+                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
+            } else {
+                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
+            }
+        }
+        recordTiming("prepare_metadata", prepareStart);
+
+        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        commitBatchResults(allSuccesses, allFailures);
+        dispatchSuccesses(allSuccesses);
+        return;
+    }
 
     // Get current concurrency limits from TuneAdvisor
     const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
@@ -3176,13 +3157,8 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
         extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
         extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-
-        auto executor = coordinator_->getExecutor();
-        boost::asio::post(executor, [this, allSuccesses = std::move(allSuccesses),
-                                     allFailures = std::move(allFailures)]() mutable {
-            commitBatchResults(allSuccesses, allFailures);
-            dispatchSuccesses(allSuccesses);
-        });
+        commitBatchResults(allSuccesses, allFailures);
+        dispatchSuccesses(allSuccesses);
         return;
     }
 
@@ -3243,12 +3219,8 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
     extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
     extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-
-    boost::asio::post(executor, [this, allSuccesses = std::move(allSuccesses),
-                                 allFailures = std::move(allFailures)]() mutable {
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
-    });
+    commitBatchResults(allSuccesses, allFailures);
+    dispatchSuccesses(allSuccesses);
 }
 
 } // namespace yams::daemon

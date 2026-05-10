@@ -710,7 +710,6 @@ else
   if get_option('build-plugins')
     subdir('src/plugins')
   endif
-  subdir('src/indexing')
   subdir('src/daemon/client')
   subdir('src/embedding_simeon')
   subdir('src/vector')

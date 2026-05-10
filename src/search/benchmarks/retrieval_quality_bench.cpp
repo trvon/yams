@@ -5518,6 +5518,7 @@ struct BenchFixture {
             // when that tree lacks the Glint plugin.
             std::string glinerModelPath = discoverGlinerModelPath();
             const bool needsGlintPlugin = !glinerModelPath.empty();
+            const bool needsOnnxPlugin = !embedBackendSimeon;
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
@@ -5553,7 +5554,7 @@ struct BenchFixture {
                          {nosanPluginDir, nosanOnnxPlugin, nosanGlintPlugin},
                          {defaultPluginDir, defaultOnnxPlugin, defaultGlintPlugin}}};
                     for (const auto& candidate : candidates) {
-                        if (!fs::exists(candidate.onnxPlugin)) {
+                        if (needsOnnxPlugin && !fs::exists(candidate.onnxPlugin)) {
                             continue;
                         }
                         if (needsGlintPlugin && !fs::exists(candidate.glintPlugin)) {
@@ -5567,7 +5568,7 @@ struct BenchFixture {
                 if (auto preferredPluginDir = choosePreferredPluginDir();
                     preferredPluginDir.has_value()) {
                     harnessOptions.pluginDir = *preferredPluginDir;
-                } else if (fs::exists(installedOnnxPlugin) &&
+                } else if (needsOnnxPlugin && fs::exists(installedOnnxPlugin) &&
                            (!needsGlintPlugin || fs::exists(installedGlintPlugin))) {
                     const fs::path stagedPluginDir =
                         fs::temp_directory_path() / "yams_retrieval_bench_plugins";
@@ -5624,12 +5625,22 @@ struct BenchFixture {
                                          stagedPluginDir.string());
                         }
                     }
-                } else if (needsGlintPlugin) {
+                } else if (needsOnnxPlugin && needsGlintPlugin) {
                     throw std::runtime_error(
                         "Glint plugin required for benchmark entity extraction but no plugin root "
                         "contains both ONNX and Glint plugins. Build with -Dplugin-glint=true or "
                         "set YAMS_PLUGIN_DIR to a directory containing libyams_onnx_plugin.dylib "
                         "and yams_glint.dylib.");
+                } else if (needsGlintPlugin) {
+                    // Glint-only (simeon backend): find any dir with Glint
+                    if (fs::exists(localGlintPlugin))
+                        harnessOptions.pluginDir = localPluginDir;
+                    else if (fs::exists(nosanGlintPlugin))
+                        harnessOptions.pluginDir = nosanPluginDir;
+                    else if (fs::exists(defaultGlintPlugin))
+                        harnessOptions.pluginDir = defaultPluginDir;
+                    else
+                        spdlog::warn("[Bench] Glint plugin not found; entity extraction disabled");
                 } else if (fs::exists(localPluginDir)) {
                     harnessOptions.pluginDir = localPluginDir;
                 } else if (fs::exists(nosanPluginDir)) {
@@ -5639,7 +5650,14 @@ struct BenchFixture {
                 }
             }
 
-            if (true) {
+            if (embedBackendSimeon) {
+                // Simeon backend handles embeddings in-process — only configure
+                // ONNX reranker. Skip preferred_model to avoid model download.
+                json onnxConfig;
+                onnxConfig["reranker_model"] = "bge-reranker-base";
+                harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
+                spdlog::info("Configured ONNX plugin: reranker=bge-reranker-base (simeon backend)");
+            } else {
                 json onnxPluginConfig;
                 onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
                 onnxPluginConfig["reranker_model"] = "bge-reranker-base";
