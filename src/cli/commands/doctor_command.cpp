@@ -35,6 +35,12 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
+#include <yams/cli/doctor/checks/db_integrity.h>
+#include <yams/cli/doctor/checks/dim_consistency.h>
+#include <yams/cli/doctor/checks/model_check.h>
+#include <yams/cli/doctor/checks/vec0_check.h>
+#include <yams/cli/doctor/doctor_context.h>
+
 #include "yams/cli/prompt_util.h"
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
@@ -2800,11 +2806,13 @@ private:
             checkInstalledModels(cli_);
             checkVec0Module(); // Check vec0 module even when daemon is down
             checkEmbeddingDimMismatch(cachedStatus);
+            checkDbIntegrity(cachedStatus);
             return;
         }
         checkInstalledModels(cli_);
         checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
+        checkDbIntegrity(cachedStatus);
         renderDoctorR2Credentials(recs);
         renderDoctorEmbeddingRuntime(cachedStatus);
 
@@ -2821,349 +2829,32 @@ private:
     }
 
     static void checkInstalledModels(YamsCLI* cli) {
-        namespace fs = std::filesystem;
-        const char* home = std::getenv("HOME");
-        if (!home)
-            return;
-
-        // Check for models in OLD location (pre-unification)
-        fs::path old_base = fs::path(home) / ".yams" / "models";
-
-        // Check for models in NEW unified location
-        fs::path new_base =
-            cli ? cli->getDataPath() / "models" : yams::config::get_data_dir() / "models";
-
-        std::error_code ec;
-
-        // Check if old location has models
-        size_t old_model_count = 0;
-        if (fs::exists(old_base, ec) && fs::is_directory(old_base, ec)) {
-            for (const auto& entry : fs::directory_iterator(old_base, ec)) {
-                if (entry.is_directory() && fs::exists(entry.path() / "model.onnx", ec)) {
-                    old_model_count++;
-                }
-            }
-        }
-
-        // Warn about old location if models found there
-        if (old_model_count > 0) {
-            std::cout << "\n";
-            std::cout << "  "
-                      << ui::status_warning("Found " + std::to_string(old_model_count) +
-                                            " model(s) in OLD location: " + old_base.string())
-                      << "\n";
-            std::cout << "  "
-                      << ui::status_warning("Models should be in unified storage: " +
-                                            new_base.string())
-                      << "\n";
-            std::cout << "\nMigration command:\n";
-            std::cout << "  mkdir -p " << new_base.string() << "\n";
-            std::cout << "  mv " << old_base.string() << "/* " << new_base.string() << "/\n";
-            std::cout << "  yams daemon restart\n\n";
-        }
-
-        // Use the new unified location for checking models
-        fs::path base = new_base;
-
-        if (!fs::exists(base, ec) || !fs::is_directory(base, ec))
-            return;
-
-        std::vector<std::string> warnings; // Text warnings collected for the current output path.
-        struct ModelRec {
-            std::string name;
-            int dim; // 384/768 or -1 for unknown
-        };
-        std::vector<ModelRec> models;
-        // Also build structured recommendations (printed later if any)
-        yams::cli::RecommendationBuilder recBuilder;
-        for (const auto& entry : fs::directory_iterator(base, ec)) {
-            if (!entry.is_directory())
-                continue;
-            const auto& dir = entry.path();
-            const auto name = dir.filename().string();
-
-            const bool hasOnnx = fs::exists(dir / "model.onnx", ec);
-            const bool hasConfig = fs::exists(dir / "config.json", ec) ||
-                                   fs::exists(dir / "sentence_bert_config.json", ec);
-            const bool hasTokenizer = fs::exists(dir / "tokenizer.json", ec);
-
-            if (!hasOnnx)
-                continue; // ignore non-model dirs
-
-            // Record model with dimension from config files or name heuristic
-            int dim = -1;
-            // Try config files first (most accurate)
-            if (auto cfgDim = vecutil::getModelDimensionFromMetadata(base.parent_path(), name)) {
-                dim = static_cast<int>(*cfgDim);
-            } else if (auto heurDim = vecutil::getModelDimensionHeuristic(name)) {
-                dim = static_cast<int>(*heurDim);
-            }
-            models.push_back({name, dim});
-
-            // General guidance: config helps provider infer dim/seq/pooling
-            if (!hasConfig) {
-                warnings.emplace_back(
-                    "  - " + name +
-                    ": missing config.json — run 'yams model download --apply-config " + name +
-                    " --force'");
-                recBuilder.warning(
-                    "DOCTOR_MODEL_MISSING_CONFIG",
-                    name + ": missing config.json; run 'yams model download --apply-config " +
-                        name + " --force'",
-                    "Model may have default/incorrect embedding dim inference");
-            }
-
-            // Nomic-specific guidance: tokenizer.json is needed for best compatibility
-            if (name.find("nomic") != std::string::npos && !hasTokenizer) {
-                warnings.emplace_back(
-                    "  - " + name +
-                    ": missing tokenizer.json — run 'yams model download --apply-config " + name +
-                    " --force'");
-                recBuilder.info(
-                    "DOCTOR_MODEL_MISSING_TOKENIZER",
-                    name + ": missing tokenizer.json; download to ensure consistent tokenization",
-                    "Tokenizer improves text splitting and pooling accuracy");
-            }
-        }
-
-        // Print installed models with inferred dimensions
-        if (!models.empty()) {
-            std::cout << "\nModels (installed)\n-------------------\n";
-            for (const auto& m : models) {
-                if (m.dim > 0)
-                    std::cout << "- " << m.name << ": dim=" << m.dim << " (heuristic)\n";
-                else
-                    std::cout << "- " << m.name << ": dim=unknown\n";
-            }
-        }
-        if (!warnings.empty()) {
-            std::cout
-                << "\nSome models are missing companion files required for robust inference.\n";
-            for (const auto& w : warnings)
-                std::cout << w << "\n";
-            std::cout << "\nTip: You can also supply --hf <org/name> when downloading if the name "
-                         "isn't recognized.\n";
-            if (!recBuilder.empty()) {
-                std::cout << "\nRecommendations (models):\n";
-                yams::cli::printRecommendationsText(recBuilder, std::cout);
-            }
-        }
+        doctor::DoctorContext ctx(cli);
+        doctor::ModelCheck check;
+        auto result = check.execute(ctx);
+        doctor::ModelCheck::render(std::cout, result);
     }
 
     // Check if vec0 module is available and vector DB schema is valid
     void checkVec0Module() {
-        namespace fs = std::filesystem;
-        printHeader("Vector DB Schema (vec0 module)");
-
-        fs::path dbPath =
-            cli_ ? cli_->getDataPath() / "vectors.db" : yams::config::get_data_dir() / "vectors.db";
-
-        if (!fs::exists(dbPath)) {
-            std::cout << "  "
-                      << ui::status_warning("Vector database does not exist yet: " +
-                                            dbPath.string())
-                      << "\n";
-            std::cout << "  → Database will be created automatically when daemon starts.\n";
-            return;
-        }
-
-        sqlite3* db = nullptr;
-        int rc = sqlite3_open(dbPath.string().c_str(), &db);
-        if (rc != SQLITE_OK) {
-            std::cout << "  "
-                      << ui::status_error("Failed to open vector database: " +
-                                          std::string(sqlite3_errmsg(db)))
-                      << "\n";
-            if (db)
-                sqlite3_close(db);
-            return;
-        }
-
-        char* error_msg = nullptr;
-        rc = sqlite3_vec_init(db, &error_msg, nullptr);
-        if (rc != SQLITE_OK) {
-            std::cout << "  "
-                      << ui::status_error("Failed to initialize vec0 module: " +
-                                          std::string(error_msg ? error_msg : "unknown"))
-                      << "\n";
-            if (error_msg)
-                sqlite3_free(error_msg);
-            sqlite3_close(db);
-            return;
-        }
-
-        const char* vec0_check = "SELECT 1 FROM pragma_module_list WHERE name='vec0'";
-        sqlite3_stmt* stmt = nullptr;
-        bool vec0_available = false;
-
-        if (sqlite3_prepare_v2(db, vec0_check, -1, &stmt, nullptr) == SQLITE_OK) {
-            vec0_available = (sqlite3_step(stmt) == SQLITE_ROW);
-            sqlite3_finalize(stmt);
-        }
-
-        if (!vec0_available) {
-            std::cout << "  " << ui::status_error("vec0 module failed to load") << "\n";
-            sqlite3_close(db);
-            return;
-        }
-
-        std::cout << "  " << ui::status_ok("vec0 module is available") << "\n";
-
-        // Test 2: Check if doc_embeddings table uses vec0 virtual table
-        const char* schema_check =
-            "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' AND type='table'";
-        std::string schema_ddl;
-
-        if (sqlite3_prepare_v2(db, schema_check, -1, &stmt, nullptr) == SQLITE_OK) {
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                const unsigned char* txt = sqlite3_column_text(stmt, 0);
-                if (txt)
-                    schema_ddl = reinterpret_cast<const char*>(txt);
-            }
-            sqlite3_finalize(stmt);
-        }
-
-        if (schema_ddl.empty()) {
-            std::cout << "  " << ui::status_warning("doc_embeddings table does not exist yet")
-                      << "\n";
-            std::cout << "  → Table will be created automatically when daemon starts.\n";
-        } else if (schema_ddl.find("USING vec0") == std::string::npos) {
-            std::cout << "  "
-                      << ui::status_error("doc_embeddings table not using vec0 virtual table")
-                      << "\n";
-            std::cout << "\nSchema: " << schema_ddl.substr(0, 100) << "...\n\n";
-            std::cout << "This table was created without the vec0 module.\n";
-            std::cout << "Vector search will not work correctly.\n\n";
-            std::cout << "Fix options:\n";
-            std::cout << "  1. Recreate the vector tables:\n";
-            std::cout << "     yams doctor --recreate-vectors --stop-daemon\n\n";
-        } else {
-            std::cout << "  "
-                      << ui::status_ok("doc_embeddings table correctly uses vec0 virtual table")
-                      << "\n";
-
-            // Extract dimension from schema
-            auto pos = schema_ddl.find("float[");
-            if (pos != std::string::npos) {
-                auto end = schema_ddl.find(']', pos);
-                if (end != std::string::npos) {
-                    std::string dim_str = schema_ddl.substr(pos + 6, end - (pos + 6));
-                    std::cout << "  Schema dimension: " << dim_str << "\n";
-                }
-            }
-        }
-
-        sqlite3_close(db);
+        doctor::DoctorContext ctx(cli_);
+        doctor::Vec0Check check;
+        auto result = check.execute(ctx);
+        doctor::Vec0Check::render(std::cout, result);
     }
 
     void checkEmbeddingDimMismatch(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
-        printHeader("Vectors Database");
+        doctor::DoctorContext ctx(cli_);
+        doctor::DimConsistencyCheck check;
+        auto result = check.execute(ctx, cachedStatus ? &cachedStatus.value() : nullptr);
+        doctor::DimConsistencyCheck::render(std::cout, result);
+    }
 
-        // Use cached status if available, otherwise fetch
-        daemon::StatusResponse status;
-        if (cachedStatus) {
-            status = cachedStatus.value();
-        } else {
-            try {
-                yams::daemon::ClientConfig cfg;
-                if (cli_ && cli_->hasExplicitDataDir()) {
-                    cfg.dataDir = cli_->getDataPath();
-                }
-                cfg.requestTimeout = std::chrono::seconds(5);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                if (!leaseRes) {
-                    std::cout << "  "
-                              << ui::status_error("Daemon unavailable: " + leaseRes.error().message)
-                              << "\n";
-                    return;
-                }
-                auto leaseHandle = std::move(leaseRes.value());
-                auto& client = **leaseHandle;
-                auto statusRes =
-                    yams::cli::run_result(client.status(), std::chrono::seconds(5), getExecutor());
-                if (!statusRes) {
-                    std::cout << "  "
-                              << ui::status_error("Failed to get daemon status: " +
-                                                  statusRes.error().message)
-                              << "\n";
-                    return;
-                }
-                status = statusRes.value();
-            } catch (const std::exception& e) {
-                std::cout << "  "
-                          << ui::status_error(std::string("Failed to get daemon status: ") +
-                                              e.what())
-                          << "\n";
-                return;
-            }
-        }
-
-        bool dbReady = status.vectorDbReady;
-        if (auto it = status.readinessStates.find("vector_db");
-            it != status.readinessStates.end()) {
-            dbReady = it->second;
-        }
-        size_t dbDim = status.vectorDbDim;
-
-        // Avoid polling in CLI; rely on current daemon status only
-
-        if (!dbReady) {
-            // No direct DB/FS probing here — rely solely on daemon-reported status
-
-            std::cout << "Vector database is not ready according to the daemon." << std::endl;
-            // Provide actionable guidance
-            std::cout << "\nTo initialize or rebuild vector DB:" << "\n"
-                      << "  1. (Optional) Remove corrupt or old DB: rm "
-                      << (cli_ ? (cli_->getDataPath() / "vectors.db").string()
-                               : "~/.local/share/yams/vectors.db")
-                      << " (only if you want a fresh index)\n"
-                      << "  2. Ensure desired model is installed: yams model download <model-name>"
-                      << "\n"
-                      << "  3. Set preferred model (env or config): yams config embeddings model "
-                         "<model-name>"
-                      << "\n"
-                      << "  4. (Optional) Set embedding dim: yams config set "
-                         "embeddings.embedding_dim <dim>"
-                      << "\n"
-                      << "  5. Restart daemon: yams daemon restart" << "\n"
-                      << "  6. Trigger rebuild by adding docs or running a search." << "\n";
-            std::cout << "\nInstalled models with heuristics (run 'yams doctor' above for details)."
-                      << std::endl;
-            return;
-        }
-
-        auto resolved = resolveEmbeddingDim();
-        size_t targetDim = resolved.first;
-        std::string targetSrc = resolved.second;
-        if (targetDim == 0 && status.embeddingAvailable && status.embeddingDim > 0) {
-            targetDim = status.embeddingDim;
-            targetSrc = "daemon_provider";
-        }
-
-        if (targetDim == 0) {
-            std::cout << "DB dimension: " << dbDim
-                      << ". Unable to resolve target embedding dimension from config or models."
-                      << std::endl;
-            return;
-        }
-
-        std::cout << "DB dimension: " << dbDim << ", Target ('" << targetSrc
-                  << "') dimension: " << targetDim << std::endl;
-
-        if (dbDim != targetDim) {
-            std::cout << "\n⚠ Embedding dimension mismatch detected.\n";
-            std::cout << "- Stored vectors are " << dbDim << "-d but target requires " << targetDim
-                      << "-d.\n";
-            std::cout << "- This will cause vector search to fail or return incorrect results.\n";
-            std::cout << "\nTo fix this, you can either:\n";
-            std::cout << "  1. Change your model/config to match the database (" << dbDim
-                      << "-d).\n";
-            std::cout << "  2. Recreate the vector database with the new dimension (" << targetDim
-                      << "-d).\n";
-            std::cout << "     (This will require re-running 'yams repair --embeddings')\n";
-        } else {
-            std::cout << ui::status_ok("Embedding dimension matches model.") << "\n";
-        }
+    void checkDbIntegrity(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
+        doctor::DoctorContext ctx(cli_);
+        doctor::DbIntegrityCheck check;
+        auto result = check.execute(ctx);
+        doctor::DbIntegrityCheck::render(std::cout, result);
     }
 
     YamsCLI* cli_{nullptr};
@@ -4809,18 +4500,12 @@ void DoctorCommand::runVectorsFix() {
         }
     }
 
-    // Determine model dimension from name heuristics
-    auto getModelDim = [](const std::string& name) -> std::optional<size_t> {
-        if (name.find("MiniLM") != std::string::npos || name.find("minilm") != std::string::npos) {
-            return 384;
-        } else if (name.find("nomic") != std::string::npos ||
-                   name.find("mpnet") != std::string::npos ||
-                   name.find("bge") != std::string::npos) {
-            return 768;
-        } else if (name.find("e5-large") != std::string::npos) {
-            return 1024;
-        }
-        return std::nullopt;
+    // Determine model dimension: metadata first, then name heuristics (A2)
+    auto getModelDim = [&](const std::string& name) -> std::optional<size_t> {
+        auto dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
+        if (auto metaDim = vecutil::getModelDimensionFromMetadata(dataPath, name))
+            return *metaDim;
+        return vecutil::getModelDimensionHeuristic(name);
     };
 
     if (!modelName.empty()) {
@@ -4924,49 +4609,20 @@ void DoctorCommand::runVectorsFix() {
         std::cout << "Updating config to use " << matchingModel << "...\n";
     }
 
-    // Update config file
+    // Update config file using proper dimension+model config APIs (A3)
     bool configUpdated = false;
     try {
-        std::vector<std::string> lines;
-        bool foundModelLine = false;
-        bool foundDimLine = false;
+        auto dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
 
-        if (fs::exists(configPath)) {
-            std::ifstream in(configPath);
-            std::string line;
-            while (std::getline(in, line)) {
-                // Replace preferred_model line
-                if (line.find("preferred_model") != std::string::npos ||
-                    line.find("model_name") != std::string::npos) {
-                    lines.push_back("preferred_model = \"" + matchingModel + "\"");
-                    foundModelLine = true;
-                }
-                // Replace embedding_dim lines
-                else if (line.find("embedding_dim") != std::string::npos) {
-                    lines.push_back("embeddings.embedding_dim = " + std::to_string(*dbDim));
-                    foundDimLine = true;
-                } else {
-                    lines.push_back(line);
-                }
-            }
+        // Write all three dimension keys consistently
+        writeOrReplaceConfigDims(configPath, *dbDim);
+
+        // Write model preference
+        if (!matchingModel.empty()) {
+            yams::config::write_config_value(
+                configPath, "embeddings." + std::string("preferred_model"), matchingModel);
         }
 
-        // Add missing entries
-        if (!foundModelLine) {
-            lines.push_back("");
-            lines.push_back("# Model preference (set by yams doctor --vectors)");
-            lines.push_back("preferred_model = \"" + matchingModel + "\"");
-        }
-        if (!foundDimLine) {
-            lines.push_back("embeddings.embedding_dim = " + std::to_string(*dbDim));
-        }
-
-        // Write config
-        yams::common::ensureDirectories(configPath.parent_path());
-        std::ofstream out(configPath, std::ios::trunc);
-        for (const auto& l : lines) {
-            out << l << "\n";
-        }
         configUpdated = true;
     } catch (const std::exception& e) {
         if (useJson) {
@@ -4991,8 +4647,10 @@ void DoctorCommand::runVectorsFix() {
                       << configPath.string() << "\"}\n";
         } else {
             std::cout << "\n" << ui::status_ok("Config updated: " + configPath.string()) << "\n";
-            std::cout << "  preferred_model = \"" << matchingModel << "\"\n";
-            std::cout << "  embeddings.embedding_dim = " << *dbDim << "\n\n";
+            std::cout << "  embeddings.preferred_model = \"" << matchingModel << "\"\n";
+            std::cout << "  embeddings.embedding_dim = " << *dbDim << "\n";
+            std::cout << "  vector_database.embedding_dim = " << *dbDim << "\n";
+            std::cout << "  vector_index.dimension = " << *dbDim << "\n\n";
             std::cout << "Restart daemon to apply: yams daemon restart\n";
         }
     }

@@ -1,6 +1,7 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
+#include <yams/daemon/components/db_salvage.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -435,7 +436,8 @@ void RepairService::stop() {
     }
     {
         std::unique_lock<std::mutex> lk(activeRepairMutex_);
-        activeRepairCv_.wait(lk, [this] { return activeRepairExecutions_ == 0; });
+        activeRepairCv_.wait_for(lk, std::chrono::milliseconds(5000),
+                                 [this] { return activeRepairExecutions_ == 0; });
     }
     spdlog::debug("RepairService stopped");
 }
@@ -1737,6 +1739,38 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
         return result;
     }
 
+    // Phase 1: Salvage documents from corrupt metadata DBs before scanning
+    // for orphans. Recovered documents may have valid CAS blocks, and we need
+    // them in the DB before the orphan scan can verify CAS eligibility.
+    size_t salvagedCount = 0;
+    if (!dryRun) {
+        namespace fs = std::filesystem;
+        fs::path dbPath = cfg_.dataDir / "yams.db";
+        if (fs::exists(dbPath)) {
+            SalvageProgressFn salvageProgress;
+            if (progress) {
+                salvageProgress = [&progress](const std::string& phase, const std::string& message,
+                                              uint64_t proc, uint64_t total) {
+                    RepairEvent ev;
+                    ev.phase = phase;
+                    ev.operation = "orphans";
+                    ev.processed = proc;
+                    ev.total = total;
+                    ev.message = message;
+                    progress(ev);
+                };
+            }
+            auto salvaged = salvageFromAllCorruptDbs(cfg_.dataDir, dbPath, salvageProgress);
+            salvagedCount = salvaged.combined.documentsSalvaged;
+            if (salvagedCount > 0) {
+                spdlog::info("[RepairService] Salvage recovered {} document(s) "
+                             "from {} corrupt DB(s)",
+                             salvagedCount, salvaged.salvagedPaths.size());
+            }
+        }
+    }
+
+    // Phase 2: Scan for orphaned metadata entries (docs without CAS blocks)
     auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
     if (!docsResult) {
         result.message = "Failed to query: " + docsResult.error().message;
@@ -1778,6 +1812,10 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     }
 
     result.message = "Cleaned " + std::to_string(result.succeeded) + " orphans";
+    if (salvagedCount > 0) {
+        result.message +=
+            ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";
+    }
     return result;
 }
 

@@ -224,44 +224,81 @@ bool CheckpointManager::checkpointWal() {
         return true;
     }
 
-    // Path 1b: watermark-triggered TRUNCATE. When yams.db-wal grows beyond
-    // kTruncateWatermarkBytes, switch from PASSIVE to TRUNCATE so the WAL
-    // returns to zero bytes on next checkpoint. Without this, large-corpus
-    // ingest (e.g. 65k+ docs in a single session) can grow the WAL into
-    // tens of GB — query latency collapses because every FTS5 match
-    // traverses the unflushed WAL. PASSIVE can't reclaim pages held by
-    // writers, so at that point TRUNCATE's brief exclusive lock is the
-    // lesser evil.
+    // When the WAL grows beyond the watermark, skip PASSIVE entirely and go
+    // straight to TRUNCATE with retries. PASSIVE cannot shrink the WAL when
+    // readers hold shared locks — it will silently checkpoint zero pages.
     constexpr std::uint64_t kTruncateWatermarkBytes = 256ULL * 1024ULL * 1024ULL; // 256 MiB
-    bool wantsTruncate = false;
-    if (!config_.data_dir.empty()) {
+
+    auto walSizeBytes = [&]() -> std::optional<uint64_t> {
+        if (config_.data_dir.empty())
+            return std::nullopt;
         std::error_code ec;
-        const auto walPath = config_.data_dir / "yams.db-wal";
-        const auto walSize = std::filesystem::file_size(walPath, ec);
-        if (!ec && walSize >= kTruncateWatermarkBytes) {
-            wantsTruncate = true;
-            spdlog::info("[CheckpointManager] yams.db-wal is {} MB (>= 1 GiB watermark), "
-                         "escalating to TRUNCATE checkpoint",
-                         walSize / (1024ULL * 1024ULL));
-        }
+        auto sz = std::filesystem::file_size(config_.data_dir / "yams.db-wal", ec);
+        return ec ? std::nullopt : std::optional<uint64_t>(sz);
+    };
+
+    bool wantsTruncate = false;
+    auto preSize = walSizeBytes();
+    if (preSize && *preSize >= kTruncateWatermarkBytes) {
+        wantsTruncate = true;
+        spdlog::info("[CheckpointManager] yams.db-wal is {} MB (>= {} MiB watermark), "
+                     "escalating to TRUNCATE checkpoint",
+                     *preSize / (1024ULL * 1024ULL), kTruncateWatermarkBytes / (1024ULL * 1024ULL));
     }
 
+    if (wantsTruncate) {
+        // ── TRUNCATE with retry (exclusive-lock contention is common under load) ──
+        constexpr int kMaxRetries = 3;
+        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+            if (attempt > 0) {
+                const int delayMs = (attempt == 1 ? 100 : (attempt == 2 ? 500 : 2000));
+                spdlog::info("[CheckpointManager] TRUNCATE retry {}/{} after {}ms", attempt + 1,
+                             kMaxRetries, delayMs);
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            }
+            try {
+                auto result = deps_.metadataRepository->checkpointWalTruncate();
+                if (result) {
+                    stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
+                    auto postSize = walSizeBytes();
+                    spdlog::info("[CheckpointManager] WAL checkpoint (TRUNCATE) completed  "
+                                 "{} MB -> {} MB",
+                                 preSize ? std::to_string(*preSize / (1024 * 1024)) : "?",
+                                 postSize ? std::to_string(*postSize / (1024 * 1024)) : "?");
+                    return true;
+                }
+                spdlog::warn("[CheckpointManager] TRUNCATE attempt {} failed: {}", attempt + 1,
+                             result.error().message);
+            } catch (const std::exception& e) {
+                spdlog::warn("[CheckpointManager] TRUNCATE attempt {} exception: {}", attempt + 1,
+                             e.what());
+            }
+        }
+        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
+        spdlog::warn("[CheckpointManager] TRUNCATE failed after {} retries — WAL at {} MB",
+                     kMaxRetries, preSize ? std::to_string(*preSize / (1024 * 1024)) : "?");
+        return false;
+    }
+
+    // ── Routine PASSIVE checkpoint ──
     try {
-        auto result = wantsTruncate ? deps_.metadataRepository->checkpointWalTruncate()
-                                    : deps_.metadataRepository->checkpointWal();
+        auto result = deps_.metadataRepository->checkpointWal();
         if (result) {
             stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
-            // Info level for TRUNCATE so the watermark-trigger path is
-            // visible in bench logs; debug for routine PASSIVE to keep
-            // normal-operation logs quiet.
-            if (wantsTruncate) {
-                spdlog::info("[CheckpointManager] WAL checkpoint (TRUNCATE) completed");
-            } else {
-                spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            // Post-PASSIVE re-check: if WAL grew past the watermark between
+            // the pre-check and now, schedule TRUNCATE for the next cycle by
+            // leaving it alone (it'll be caught above on next interval).
+            auto postSize = walSizeBytes();
+            if (postSize && *postSize >= kTruncateWatermarkBytes) {
+                spdlog::info("[CheckpointManager] WAL at {} MB after PASSIVE — "
+                             "will TRUNCATE on next cycle",
+                             *postSize / (1024ULL * 1024ULL));
             }
             return true;
         }
-        spdlog::warn("[CheckpointManager] WAL checkpoint failed: {}", result.error().message);
+        spdlog::warn("[CheckpointManager] WAL checkpoint (PASSIVE) failed: {}",
+                     result.error().message);
     } catch (const std::exception& e) {
         spdlog::warn("[CheckpointManager] WAL checkpoint exception: {}", e.what());
         stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);

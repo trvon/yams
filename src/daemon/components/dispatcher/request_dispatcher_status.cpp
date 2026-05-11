@@ -86,6 +86,17 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.dataDir = snap.dataDir;
     res.metadataDbPath = snap.metadataDbPath;
     res.vectorDbPath = snap.vectorDbPath;
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        auto metaWalSz = fs::file_size(fs::path(res.dataDir) / "yams.db-wal", ec);
+        if (!ec)
+            res.metadataWalBytes = static_cast<uint64_t>(metaWalSz);
+        ec.clear();
+        auto vecWalSz = fs::file_size(fs::path(res.dataDir) / "vectors.db-wal", ec);
+        if (!ec)
+            res.vectorWalBytes = static_cast<uint64_t>(vecWalSz);
+    }
     res.searchMetrics.active = snap.searchActive;
     res.searchMetrics.queued = snap.searchQueued;
     res.searchMetrics.executed = snap.searchExecuted;
@@ -390,6 +401,17 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         res.dataDir = snap.dataDir;
         res.contentStoreRoot = snap.contentStoreRoot;
         res.contentStoreError = snap.contentStoreError;
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            auto metaWalSz = fs::file_size(fs::path(res.dataDir) / "yams.db-wal", ec);
+            if (!ec)
+                res.metadataWalBytes = static_cast<uint64_t>(metaWalSz);
+            ec.clear();
+            auto vecWalSz = fs::file_size(fs::path(res.dataDir) / "vectors.db-wal", ec);
+            if (!ec)
+                res.vectorWalBytes = static_cast<uint64_t>(vecWalSz);
+        }
         res.searchTuningState = snap.searchTuningState;
         res.searchTuningReason = snap.searchTuningReason;
         res.searchTuningParams = snap.searchTuningParams;

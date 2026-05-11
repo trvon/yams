@@ -5199,13 +5199,25 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
 
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
-        // Use PASSIVE checkpoint instead of TRUNCATE. TRUNCATE requires exclusive access
-        // and blocks all readers/writers for the entire duration, causing pipeline stalls.
-        // PASSIVE checkpoints only pages that are not currently in use by any reader,
-        // allowing concurrent queries to continue uninterrupted.
-        auto result = db.execute("PRAGMA wal_checkpoint(PASSIVE)");
-        if (!result) {
-            return result;
+        // Use PASSIVE checkpoint — non-blocking, only checkpoints pages not
+        // held by active readers. When readers hold pages open, PASSIVE silently
+        // checkpoints zero frames; we read the return counts and log a warning
+        // so the periodic CheckpointManager can escalate to TRUNCATE.
+        int nLog = 0;
+        int nCkpt = 0;
+        int rc = sqlite3_wal_checkpoint_v2(db.rawHandle(), nullptr, SQLITE_CHECKPOINT_PASSIVE,
+                                           &nLog, &nCkpt);
+        if (rc != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError, std::string("wal_checkpoint(PASSIVE) failed: ") +
+                                                       sqlite3_errmsg(db.rawHandle())};
+        }
+
+        if (nCkpt == 0 && nLog > 0) {
+            spdlog::warn("[MetadataRepo] PASSIVE checkpoint checked 0 of {} WAL frames "
+                         "(readers holding locks — TRUNCATE needed)",
+                         nLog);
+        } else if (nCkpt > 0) {
+            spdlog::debug("[MetadataRepo] PASSIVE checkpoint: {}/{} frames", nCkpt, nLog);
         }
 
         return db.execute("PRAGMA optimize");
