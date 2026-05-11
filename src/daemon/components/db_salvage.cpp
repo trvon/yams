@@ -253,6 +253,9 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
         return Error{ErrorCode::InvalidArgument, "corrupt or fresh DB path is empty"};
     }
 
+    spdlog::info("[db_salvage] Opening corrupt DB: {}", corruptPath.string());
+    spdlog::info("[db_salvage] Target fresh DB: {}", freshPath.string());
+
     if (!fs::exists(corruptPath)) {
         result.diagnostics.push_back("corrupt DB not found: " + corruptPath.string());
         spdlog::warn("[db_salvage] Corrupt DB not found: {}", corruptPath.string());
@@ -269,10 +272,25 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
         int rc = sqlite3_open_v2(corruptPath.string().c_str(), &corruptDb, SQLITE_OPEN_READONLY,
                                  nullptr);
         if (rc == SQLITE_OK) {
+            spdlog::info("[db_salvage] Corrupt DB opened successfully for diagnostics");
             runIntegrityCheck(corruptDb, result.diagnostics);
+            // Count documents in the corrupt DB
+            sqlite3_stmt* countStmt = nullptr;
+            if (sqlite3_prepare_v2(corruptDb, "SELECT COUNT(*) FROM documents", -1, &countStmt,
+                                   nullptr) == SQLITE_OK) {
+                if (sqlite3_step(countStmt) == SQLITE_ROW) {
+                    int docCount = sqlite3_column_int(countStmt, 0);
+                    spdlog::info("[db_salvage] Corrupt DB contains {} document(s)", docCount);
+                }
+                sqlite3_finalize(countStmt);
+            }
             sqlite3_close(corruptDb);
         } else {
-            result.diagnostics.push_back("Cannot open corrupt DB for diagnostics");
+            result.diagnostics.push_back("Cannot open corrupt DB for diagnostics: " +
+                                         std::string(sqlite3_errmsg(corruptDb)));
+            spdlog::warn("[db_salvage] Cannot open corrupt DB: {}", sqlite3_errmsg(corruptDb));
+            if (corruptDb)
+                sqlite3_close(corruptDb);
         }
     }
 
@@ -290,12 +308,16 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
     execRaw(freshDb, "PRAGMA foreign_keys = OFF");
     execRaw(freshDb, "PRAGMA journal_mode = OFF");
 
+    spdlog::info("[db_salvage] Attempting ATTACH-based copy");
     auto attachResult = copyDocumentsViaAttach(freshDb, corruptPath, result);
 
     if (!attachResult) {
-        spdlog::info("[db_salvage] ATTACH copy failed, falling back to row-by-row");
+        spdlog::warn("[db_salvage] ATTACH copy failed: {}, falling back to row-by-row",
+                     attachResult.error().message);
         auto rowResult = copyDocumentsRowByRow(corruptPath, freshDb, result);
         if (!rowResult) {
+            spdlog::error("[db_salvage] Row-by-row fallback also failed: {}",
+                          rowResult.error().message);
             execRaw(freshDb, "PRAGMA foreign_keys = ON");
             sqlite3_close(freshDb);
             return rowResult.error();

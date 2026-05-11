@@ -304,6 +304,7 @@ namespace yams::daemon::dbphase {
 // daemon writers and CLI/MCP readers cannot drift.
 constexpr std::string_view kOpening = "opening";
 constexpr std::string_view kRecovering = "recovering";
+constexpr std::string_view kSalvaging = "salvaging";
 constexpr std::string_view kMigrating = "migrating";
 constexpr std::string_view kReady = "ready";
 

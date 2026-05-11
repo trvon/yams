@@ -1858,6 +1858,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (!recoveredFrom.empty()) {
             spdlog::info("[ServiceManager] DB was recovered from corruption; "
                          "attempting to salvage document records");
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
+                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+            }
             auto sentinel = readLatestRecoverySentinel(dbPath);
             if (sentinel && !sentinel->quarantinedPath.empty() &&
                 fs::exists(sentinel->quarantinedPath)) {
@@ -1879,6 +1884,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } else {
                 spdlog::warn("[ServiceManager] Recovery sentinel missing or corrupt DB not found; "
                              "skipping salvage");
+            }
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databasePhase = std::string(dbphase::kReady);
+                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
             }
         }
     }
