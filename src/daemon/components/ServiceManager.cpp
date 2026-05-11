@@ -1844,22 +1844,24 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
-    // Phase: Quick-check corrupt DBs for documents needing recovery.
-    // We always scan the data directory for quarantined corrupt DBs but
-    // only block startup to salvage if a corrupt DB has MORE documents
-    // than the current fresh DB (e.g., after a corruption+recreate cycle).
-    // Otherwise startup is fast and the user can run explicit salvage
-    // via 'yams repair --orphans'.
-    {
-        std::string recoveredFrom;
-        {
-            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-            recoveredFrom = state_.readiness.databaseRecoveredFrom;
+    // Phase: Connection pool + repo (owned by DatabaseManager)
+    if (db_ok && databaseManager_) {
+        databaseManager_->setDatabase(database_);
+        bool poolsOk = databaseManager_->initializePools(dbPath);
+        if (!poolsOk) {
+            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
+        writeBootstrapStatusFile(config_, state_, this);
+    }
+    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
+
+    // Phase: Quick-check corrupt DBs for documents needing recovery.
+    // Runs AFTER pool init so 'yams daemon status' can see the salvaging
+    // database phase via the metrics/pool system.
+    {
         auto dataDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
         int64_t currentDocCount = countDocumentsInDb(dbPath);
 
-        // Quick-scan all corrupt DBs for document counts (fast: SELECT COUNT only)
         bool needsSalvage = false;
         int64_t maxCorruptCount = 0;
         const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
@@ -1919,17 +1921,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                          "less than current DB; skipping salvage");
         }
     }
-
-    // Phase: Connection pool + repo (owned by DatabaseManager)
-    if (db_ok && databaseManager_) {
-        databaseManager_->setDatabase(database_);
-        bool poolsOk = databaseManager_->initializePools(dbPath);
-        if (!poolsOk) {
-            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
-        }
-        writeBootstrapStatusFile(config_, state_, this);
-    }
-    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
     // Phase: mark vectors ready (vector backend initialization is opportunistic)
     try {
