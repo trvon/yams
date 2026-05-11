@@ -52,7 +52,7 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     }
 }
 
-bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch> batch) {
+bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
     if (!batch)
         return false;
     std::lock_guard<std::mutex> lock(queueMutex_);

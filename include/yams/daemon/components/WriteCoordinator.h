@@ -256,7 +256,7 @@ public:
 
     void enqueue(std::unique_ptr<WriteBatch> batch);
 
-    bool tryEnqueue(std::unique_ptr<WriteBatch> batch);
+    bool tryEnqueue(std::unique_ptr<WriteBatch>& batch);
 
     Result<void> flush(std::chrono::milliseconds timeout = std::chrono::seconds(60));
 
