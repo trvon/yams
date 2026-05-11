@@ -45,7 +45,7 @@ def _tool_on_path_satisfies(name: str, minimum: tuple[int, int, int]) -> bool:
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.14.1"  # x-release-please-version
+    version = "0.15.0"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
