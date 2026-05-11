@@ -245,8 +245,8 @@ Result<void> runIntegrityCheck(sqlite3* db, std::vector<std::string>& diagnostic
 
 } // namespace
 
-Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
-                                             const fs::path& freshPath) {
+Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath, const fs::path& freshPath,
+                                             SalvageProgressFn progress) {
     DbSalvageResult result;
 
     if (corruptPath.empty() || freshPath.empty()) {
@@ -309,6 +309,8 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
     execRaw(freshDb, "PRAGMA journal_mode = OFF");
 
     spdlog::info("[db_salvage] Attempting ATTACH-based copy");
+    if (progress)
+        progress("repairing", "Copying documents via ATTACH...", 0, 0);
     auto attachResult = copyDocumentsViaAttach(freshDb, corruptPath, result);
 
     if (!attachResult) {
@@ -329,6 +331,142 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath,
 
     spdlog::info("[db_salvage] Salvage complete: salvaged={} failed={}", result.documentsSalvaged,
                  result.documentsFailed);
+    if (progress)
+        progress("completed",
+                 std::to_string(result.documentsSalvaged) + " saved, " +
+                     std::to_string(result.documentsFailed) + " failed",
+                 result.documentsSalvaged, result.documentsSalvaged + result.documentsFailed);
+
+    return result;
+}
+
+int64_t countDocumentsInDb(const fs::path& dbPath) {
+    sqlite3* db = nullptr;
+
+    // Try ReadOnly first. If the WAL is locked from an unclean shutdown,
+    // this will fail. Fall back to ReadWrite which lets SQLite replay/recover
+    // the WAL before reading.
+    int rc = sqlite3_open_v2(dbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+            db = nullptr;
+        }
+        spdlog::debug("[db_salvage] ReadOnly open failed for '{}', trying ReadWrite recovery",
+                      dbPath.filename().string());
+        rc = sqlite3_open_v2(dbPath.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr);
+        if (rc != SQLITE_OK) {
+            if (db)
+                sqlite3_close(db);
+            spdlog::warn("[db_salvage] Cannot open corrupt DB '{}': {}", dbPath.filename().string(),
+                         rc);
+            return -1;
+        }
+        // WAL recovery on ReadWrite open: checkpoint and close, then
+        // re-open ReadOnly for the actual count query.
+        sqlite3_busy_timeout(db, 10000);
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+        db = nullptr;
+        rc = sqlite3_open_v2(dbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+        if (rc != SQLITE_OK) {
+            if (db)
+                sqlite3_close(db);
+            return -1;
+        }
+    }
+    sqlite3_busy_timeout(db, 5000);
+    sqlite3_stmt* stmt = nullptr;
+    int64_t count = -1;
+    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM documents", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        spdlog::warn("[db_salvage] Cannot query documents in '{}': {}", dbPath.filename().string(),
+                     sqlite3_errmsg(db));
+    } else if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = sqlite3_column_int64(stmt, 0);
+    }
+    if (stmt)
+        sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return count;
+}
+
+AggregateSalvageResult salvageFromAllCorruptDbs(const fs::path& dataDir, const fs::path& freshPath,
+                                                SalvageProgressFn progress) {
+    AggregateSalvageResult result;
+
+    const std::string dbStem = "yams.db";
+    const std::string corruptPrefix = dbStem + ".corrupt-";
+
+    std::vector<fs::path> corruptDbs;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const auto& name = entry.path().filename().string();
+        if (name.rfind(corruptPrefix, 0) == 0) {
+            // Skip WAL and SHM sibling files
+            if (name.size() >= 4 && (name.substr(name.size() - 4) == "-wal" ||
+                                     name.substr(name.size() - 4) == "-shm")) {
+                continue;
+            }
+            corruptDbs.push_back(entry.path());
+        }
+    }
+
+    // Sort by modification time, newest first
+    std::sort(corruptDbs.begin(), corruptDbs.end(), [](const fs::path& a, const fs::path& b) {
+        std::error_code ea, eb;
+        auto ta = fs::last_write_time(a, ea);
+        auto tb = fs::last_write_time(b, eb);
+        return ta > tb;
+    });
+
+    spdlog::info("[db_salvage] Found {} corrupt DB(s) in {}", corruptDbs.size(), dataDir.string());
+
+    size_t idx = 0;
+    for (const auto& corruptPath : corruptDbs) {
+        ++idx;
+        if (progress) {
+            progress("scanning",
+                     "Checking " + corruptPath.filename().string() + " (" + std::to_string(idx) +
+                         "/" + std::to_string(corruptDbs.size()) + ")",
+                     idx, corruptDbs.size());
+        }
+        int64_t docCount = countDocumentsInDb(corruptPath);
+        spdlog::info("[db_salvage] Corrupt DB '{}' contains {} document(s)",
+                     corruptPath.filename().string(), docCount);
+
+        if (docCount <= 0) {
+            spdlog::info("[db_salvage] Skipping empty corrupt DB: {}",
+                         corruptPath.filename().string());
+            continue;
+        }
+
+        if (progress) {
+            progress("repairing",
+                     "Salvaging " + std::to_string(docCount) + " documents from " +
+                         corruptPath.filename().string(),
+                     idx, corruptDbs.size());
+        }
+        auto salvageResult = salvageFromCorruptDb(corruptPath, freshPath, progress);
+        if (salvageResult) {
+            auto& sr = salvageResult.value();
+            result.combined.documentsSalvaged += sr.documentsSalvaged;
+            result.combined.documentsFailed += sr.documentsFailed;
+            result.salvagedPaths.push_back(corruptPath);
+            result.combined.diagnostics.insert(result.combined.diagnostics.end(),
+                                               sr.diagnostics.begin(), sr.diagnostics.end());
+        } else {
+            spdlog::warn("[db_salvage] Salvage from '{}' failed: {}",
+                         corruptPath.filename().string(), salvageResult.error().message);
+            result.combined.diagnostics.push_back("salvage failed for " +
+                                                  corruptPath.filename().string() + ": " +
+                                                  salvageResult.error().message);
+        }
+    }
 
     return result;
 }

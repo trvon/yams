@@ -1844,52 +1844,79 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
-    // Phase: Salvage document records from corrupt DB after recovery.
-    // When the daemon startup detects a corrupt DB, it quarantines the old file
-    // and opens a fresh empty DB. After migrations, we attempt to salvage
-    // document records from the most recent quarantined corrupt DB so that
-    // derived indexes can be rebuilt rather than lost entirely.
+    // Phase: Quick-check corrupt DBs for documents needing recovery.
+    // We always scan the data directory for quarantined corrupt DBs but
+    // only block startup to salvage if a corrupt DB has MORE documents
+    // than the current fresh DB (e.g., after a corruption+recreate cycle).
+    // Otherwise startup is fast and the user can run explicit salvage
+    // via 'yams repair --orphans'.
     {
         std::string recoveredFrom;
         {
             std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
             recoveredFrom = state_.readiness.databaseRecoveredFrom;
         }
-        if (!recoveredFrom.empty()) {
-            spdlog::info("[ServiceManager] DB was recovered from corruption; "
-                         "attempting to salvage document records");
+        auto dataDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+        int64_t currentDocCount = countDocumentsInDb(dbPath);
+
+        // Quick-scan all corrupt DBs for document counts (fast: SELECT COUNT only)
+        bool needsSalvage = false;
+        int64_t maxCorruptCount = 0;
+        const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
+        {
+            std::error_code ec;
+            for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                const auto& name = entry.path().filename().string();
+                if (name.rfind(corruptPrefix, 0) != 0)
+                    continue;
+                if (name.size() >= 4 && (name.substr(name.size() - 4) == "-wal" ||
+                                         name.substr(name.size() - 4) == "-shm"))
+                    continue;
+                int64_t count = countDocumentsInDb(entry.path());
+                spdlog::info("[ServiceManager] Corrupt DB '{}' has {} docs (current DB has {})",
+                             entry.path().filename().string(), count, currentDocCount);
+                if (count > currentDocCount) {
+                    needsSalvage = true;
+                    maxCorruptCount = std::max(maxCorruptCount, count);
+                }
+            }
+        }
+
+        if (needsSalvage) {
+            spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB "
+                         "({}); blocking startup to recover",
+                         maxCorruptCount - currentDocCount, currentDocCount);
             {
                 std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
                 state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
                 state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
             }
-            auto sentinel = readLatestRecoverySentinel(dbPath);
-            if (sentinel && !sentinel->quarantinedPath.empty() &&
-                fs::exists(sentinel->quarantinedPath)) {
-                auto salvageResult = salvageFromCorruptDb(sentinel->quarantinedPath, dbPath);
-                if (salvageResult) {
-                    auto& salvaged = salvageResult.value();
-                    spdlog::info(
-                        "[ServiceManager] Salvaged {} document(s) from corrupt DB ({} failed)",
-                        salvaged.documentsSalvaged, salvaged.documentsFailed);
-                    {
-                        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                        state_.readiness.databaseRecoveredFrom = "salvaged-" + sentinel->timestamp;
-                        state_.readiness.databaseSalvaged = true;
-                    }
-                } else {
-                    spdlog::warn("[ServiceManager] Salvage from corrupt DB failed: {}",
-                                 salvageResult.error().message);
+            auto aggregateResult = salvageFromAllCorruptDbs(dataDir, dbPath);
+            if (aggregateResult.combined.documentsSalvaged > 0) {
+                spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
+                             aggregateResult.combined.documentsSalvaged,
+                             aggregateResult.salvagedPaths.size());
+                {
+                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                    state_.readiness.databaseRecoveredFrom =
+                        "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
+                    state_.readiness.databaseSalvaged = true;
                 }
             } else {
-                spdlog::warn("[ServiceManager] Recovery sentinel missing or corrupt DB not found; "
-                             "skipping salvage");
+                spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
             }
             {
                 std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
                 state_.readiness.databasePhase = std::string(dbphase::kReady);
                 state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
             }
+        } else {
+            spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are "
+                         "less than current DB; skipping salvage");
         }
     }
 
@@ -2756,6 +2783,36 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     auto task = std::make_shared<std::packaged_task<bool()>>([this, dbPath]() {
         bool ok = false;
         try {
+            // Pre-open WAL recovery: if the WAL file exists from a prior unclean
+            // shutdown, open the database once in ReadWrite mode to let SQLite
+            // replay/rollback the WAL, then flush it. This prevents "database is
+            // locked" errors during the subsequent integrity check.
+            std::filesystem::path walPath(dbPath.string() + "-wal");
+            if (std::filesystem::exists(walPath) && std::filesystem::exists(dbPath)) {
+                spdlog::info("[ServiceManager] Detected stale WAL file; "
+                             "attempting recovery before integrity check");
+                auto walSize = std::filesystem::file_size(walPath);
+                {
+                    auto tempDb = std::make_unique<metadata::Database>();
+                    auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
+                    if (openR) {
+                        auto cpR = tempDb->execute("PRAGMA wal_checkpoint(TRUNCATE)");
+                        if (cpR) {
+                            spdlog::info("[ServiceManager] Recovered stale WAL ({} bytes), "
+                                         "checkpointed successfully",
+                                         walSize);
+                        } else {
+                            spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}",
+                                         cpR.error().message);
+                        }
+                        tempDb->close();
+                    } else {
+                        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}",
+                                     openR.error().message);
+                    }
+                }
+            }
+
             auto openOnce = [&]() -> bool {
                 auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
                 if (!r) {
