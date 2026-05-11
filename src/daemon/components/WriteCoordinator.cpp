@@ -244,9 +244,16 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     }
 
     const auto applyStart = std::chrono::steady_clock::now();
+
+    auto stopped = [this]() { return stop_.load(std::memory_order_acquire); };
+
     for (const auto& batch : batches) {
         if (!batch)
             continue;
+        if (stopped()) {
+            spdlog::info("[WriteCoordinator] applyBatches aborted (stop requested)");
+            return Result<void>();
+        }
         const auto waitMs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(applyStart - batch->enqueueTime)
                 .count());
@@ -285,7 +292,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     std::unordered_map<std::string, std::int64_t> nodeKeyToId;
     std::optional<Error> firstOpError;
 
-    if (hasKgOps && kg_) {
+    if (hasKgOps && kg_ && !stopped()) {
         auto batchResult = kg_->beginWriteBatch();
         if (!batchResult) {
             spdlog::error("[WriteCoordinator] beginWriteBatch failed: {}",
@@ -369,7 +376,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
-    if (hasMetaOps && meta_) {
+    if (hasMetaOps && meta_ && !stopped()) {
         struct RepairStatusGroup {
             std::string source;
             metadata::RepairStatus status;
@@ -499,9 +506,18 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                                std::chrono::steady_clock::now() - sourceStart)
                                                .count());
             recordMetaApply(batch->source, sourceOps, sourceApplyMs, sourceError);
+            if (stopped()) {
+                spdlog::info("[WriteCoordinator] applyBatches meta scan aborted (stop requested)");
+                return Result<void>();
+            }
         }
 
         for (auto& [source, entries] : metadataBySource) {
+            if (stopped()) {
+                spdlog::info(
+                    "[WriteCoordinator] applyBatches meta coalesce aborted (stop requested)");
+                return Result<void>();
+            }
             const auto sourceStart = std::chrono::steady_clock::now();
             SetMetadataBatchOp op{std::move(entries)};
             auto r = applyMetadataOp(op);

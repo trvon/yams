@@ -1156,6 +1156,16 @@ void ServiceManager::shutdown() {
         blockingPool_.reset();
     }
 
+    // Phase 3.9.5: Stop the write coordinator before tearing down the work coordinator.
+    // Write batches that are still pending need workers to process them; shutting down
+    // the write coordinator now lets the drain complete while workers are alive, then
+    // any remaining I/O is rejected rather than blocking the io_context stop below.
+    spdlog::info("[ServiceManager] Phase 3.9.5: Stopping write coordinator");
+    if (writeCoordinator_) {
+        writeCoordinator_->shutdown();
+        writeCoordinator_.reset();
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -1256,11 +1266,8 @@ void ServiceManager::shutdown() {
         }
     }
 
-    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down write coordinator");
-    if (writeCoordinator_) {
-        writeCoordinator_->shutdown();
-        writeCoordinator_.reset();
-    }
+    // Write coordinator already shut down in Phase 3.9.5 (before io_context stop)
+    spdlog::info("[ServiceManager] Phase 6.3.6: Write coordinator already shut down");
 
     // No vector index to save - using VectorDatabase directly
     spdlog::info("[ServiceManager] Phase 6.4: Vector search uses VectorDatabase directly");
@@ -1859,7 +1866,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Runs AFTER pool init so 'yams daemon status' can see the salvaging
     // database phase via the metrics/pool system.
     {
-        auto dataDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+        auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
         int64_t currentDocCount = countDocumentsInDb(dbPath);
 
         bool needsSalvage = false;
@@ -1867,7 +1874,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
         {
             std::error_code ec;
-            for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+            for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
                 if (ec) {
                     ec.clear();
                     continue;
@@ -1897,7 +1904,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
                 state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
             }
-            auto aggregateResult = salvageFromAllCorruptDbs(dataDir, dbPath);
+            auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
             if (aggregateResult.combined.documentsSalvaged > 0) {
                 spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
                              aggregateResult.combined.documentsSalvaged,

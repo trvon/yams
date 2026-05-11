@@ -272,23 +272,12 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath, const 
         int rc = sqlite3_open_v2(corruptPath.string().c_str(), &corruptDb, SQLITE_OPEN_READONLY,
                                  nullptr);
         if (rc == SQLITE_OK) {
-            spdlog::info("[db_salvage] Corrupt DB opened successfully for diagnostics");
+            spdlog::info("[db_salvage] Corrupt DB opened successfully");
             runIntegrityCheck(corruptDb, result.diagnostics);
-            // Count documents in the corrupt DB
-            sqlite3_stmt* countStmt = nullptr;
-            if (sqlite3_prepare_v2(corruptDb, "SELECT COUNT(*) FROM documents", -1, &countStmt,
-                                   nullptr) == SQLITE_OK) {
-                if (sqlite3_step(countStmt) == SQLITE_ROW) {
-                    int docCount = sqlite3_column_int(countStmt, 0);
-                    spdlog::info("[db_salvage] Corrupt DB contains {} document(s)", docCount);
-                }
-                sqlite3_finalize(countStmt);
-            }
             sqlite3_close(corruptDb);
         } else {
             result.diagnostics.push_back("Cannot open corrupt DB for diagnostics: " +
                                          std::string(sqlite3_errmsg(corruptDb)));
-            spdlog::warn("[db_salvage] Cannot open corrupt DB: {}", sqlite3_errmsg(corruptDb));
             if (corruptDb)
                 sqlite3_close(corruptDb);
         }
