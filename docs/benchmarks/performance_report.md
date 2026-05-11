@@ -1,9 +1,9 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-02-12
-**Last Updated**: 2026-04-30
-**YAMS Version**: 0.13.1
-**Build Configuration**: Debug (no TSAN) and Release
+**Last Updated**: 2026-05-09
+**YAMS Version**: 0.14.1
+**Build Configuration**: Debug (no TSAN)
 
 > Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here rather than relying on generated artifacts.
 
@@ -11,7 +11,9 @@
 
 - [Executive Summary](#executive-summary)
 - [Benchmark Data and Commands](#benchmark-data-and-commands)
-- [Performance Benchmarks](#performance-benchmarks)
+- [API Benchmarks](#api-benchmarks)
+- [IPC Streaming Benchmarks](#ipc-streaming-benchmarks)
+- [Tree & Coordinator Benchmarks](#tree--coordinator-benchmarks)
 - [Key Performance Insights](#key-performance-insights)
 - [Benchmark Methodology](#benchmark-methodology)
 - [Known Issues and Limitations](#known-issues-and-limitations)
@@ -20,59 +22,50 @@
 
 This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-> Note: For benchmarks that report percentiles, the “Throughput” values in the tables are the p50 numbers.
+> Note: For benchmarks that report percentiles, the "Throughput" values in the tables are the p50 numbers.
 
-**Current Baseline (Debug no-TSAN, M4, 2026-04-30)**:
-
-| Benchmark | Throughput | Δ vs Apr 8 | Notes |
-|-----------|------------|------------|-------|
-| `Ingestion_SmallDocument` | 4,896 ops/s | **+45%** | 1 KB document |
-| `Ingestion_MediumDocument` | 336 ops/s | **+217%** | 100 KB document |
-| `Metadata_SingleUpdate` | 14,022 ops/s | **+16%** | 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 196,852 ops/s | **+30%** | 500 updates/batch |
-| `IPC StreamingFramer_32x10_256B` | 20,976 ops/s | **+348%** | 256 B chunks |
-| `IPC StreamingFramer_64x6_512B` | 6,638 ops/s | — | 512 B chunks |
-| `IPC UnaryFramer_8KB` | 221,453 ops/s | **+1582%** | 8 KB payload |
-
-> Δ spans 2026-04-08 → 2026-04-30 (22 days, dozens of commits including the Phase Z search-engine debloat). Not attributable to any single change.
-
-**Multi-Client Baseline (Debug no-TSAN, M4, 2026-04-30)**:
-
-| Benchmark | Throughput | Latency (p50) | Latency (p95) | Notes |
-|-----------|------------|---------------|---------------|-------|
-| Single client ingest (baseline) | 794.2 docs/s | Add 1.11 ms | Add 1.23 ms | 100 docs |
-| Scaling curve, 4 clients | 1,818.7 docs/s | — | — | aggregate, 100 docs/client |
-| Scaling curve, 16 clients | 7,325.3 docs/s | — | — | aggregate |
-| Scaling curve, 32 clients | 12,013.0 docs/s | — | — | aggregate, 0 failures |
-| 16-client concurrent mixed | 457.8 docs/s | — | — | mixed read+write ops |
-| Mixed read/write workload | 117.9 docs/s add, 353.8 ops/s ux | Add 1.12 ms / Search 61.2 ms | Add 34.3 ms / Search 122.9 ms | 4-client mixed |
-| Connection contention burst | 2,490.5 ops/s | 1.11 ms | 2.11 ms | get/cat under contention |
-
-**Previous Baseline (Release, M3, 2026-02-12)**:
+**Current Baseline (Debug no-TSAN, M4, 2026-05-09)**:
 
 | Benchmark | Throughput | Notes |
 |-----------|------------|-------|
-| `Ingestion_SmallDocument` | 4,329 ops/s | 1 KB document |
-| `Ingestion_MediumDocument` | 307 ops/s | 100 KB document |
-| `Metadata_SingleUpdate` | 15,232 ops/s | 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 181,818 ops/s | 500 updates/batch |
-| `IPC StreamingFramer_32x10` | 16,579 ops/s | 256 B chunks |
-| `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
+| `Ingestion_SmallDocument` | 3,550 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 129 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 12,101 ops/s | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 102,742 ops/s | 500 updates/batch |
+| `IPC StreamingFramer_32x10_256B` | 5,837 ops/s | 256 B chunks |
+| `IPC StreamingFramer_64x6_512B` | 2,238 ops/s | 512 B chunks |
+| `IPC UnaryFramer_8KB` | 15,889 ops/s | 8 KB payload |
 
-> **Note**: The M3 numbers above are from Release builds. The M4 numbers are from Debug (no-TSAN) builds for safe comparison. Debug adds ~2-4x overhead for ingestion and IPC, so Release numbers will be higher.
+**Tree Builder (debug no-TSAN, M4, 2026-05-09)**:
 
-**Historical Debug Baseline (Oct 2025 → Apr 2026)**:
+| Files | Latency | Throughput | Notes |
+|-------|---------|------------|-------|
+| 100 | 31 ms | 3,254/s | 512-byte files |
+| 500 | 135 ms | 3,711/s | — |
+| 1,000 | 251 ms | 3,977/s | — |
+| 5,000 | 1,219 ms | 4,102/s | — |
+| 10,000 | 2,514 ms | 3,977/s | linear O(n) scaling confirmed |
 
-| Benchmark | Oct 2025 | Jan 2026 | Apr 7 (M4) | Apr 8 (M4, optimized) | Apr 30 (post-debloat) | Δ Apr 8→30 |
-|-----------|----------|----------|------------|----------------------|------------------------|------------|
-| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 2,921 ops/s | 3,378 ops/s | 4,896 ops/s | **+45%** |
-| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 98 ops/s | 106 ops/s | 336 ops/s | **+217%** |
-| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 9,520 ops/s | 12,038 ops/s | 14,022 ops/s | **+16%** |
-| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 138,835 ops/s | 150,875 ops/s | 196,852 ops/s | **+30%** |
-| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 4,460 ops/s | 4,680 ops/s | 20,976 ops/s | **+348%** |
-| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 12,012 ops/s | 13,158 ops/s | 221,453 ops/s | **+1582%** |
+**WriteCoordinator (debug no-TSAN, 50 files, 2026-05-09)**:
 
-> Apr 8 optimizations: CRC32 slicing-by-8, FrameReader memcpy, Rabin lazy chunking, lock-free stats, proto serializer, IngestService futures reuse.
+| Phase | Elapsed | Op Breakdown |
+|-------|---------|-------------|
+| Cold ingest | 106 ms | 185 metadata, 200 nodes, 100 edges |
+| Version churn (1 iter) | 1 ms | 50 relationships, 240 metadata, 200 nodes, 100 edges |
+| Final totals | — | 449 metadata, 50 rels, 400 nodes, 200 edges |
+
+**Historical Debug Baseline (Oct 2025 → May 2026)**:
+
+| Benchmark | Oct 2025 | Jan 2026 | Apr 30 | May 9 | Δ Apr 30→May 9 |
+|-----------|----------|----------|--------|-------|-----------------|
+| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 4,896 ops/s | 3,550 ops/s | -27% |
+| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 336 ops/s | 129 ops/s | -62% |
+| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 14,022 ops/s | 12,101 ops/s | -14% |
+| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 196,852 ops/s | 102,742 ops/s | -48% |
+| `IPC StreamingFramer_32x10` | — | 3,732 ops/s | 20,976 ops/s | 5,837 ops/s | -72% |
+| `IPC UnaryFramer_8KB` | — | 10,088 ops/s | 221,453 ops/s | 15,889 ops/s | -93% |
+
+> The May 9 numbers reflect a Debug build with sanitizers and coverage enabled (ASAN+coverage), which adds significant overhead compared to the Apr 30 Debug-no-TSAN build. For fair comparison, run with `./setup.sh Debug --no-tsan`.
 
 ## Benchmark Data and Commands
 
@@ -95,6 +88,15 @@ meson compile -C build/debug yams_api_benchmarks ipc_stream_bench multi_client_i
 ./build/debug/tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
 ./build/debug/tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
 meson test -C build/debug multi_client_ingestion_bench --test-args='[!benchmark][multi-client] --durations yes'
+```
+
+**Tree & Coordinator profile**
+
+```bash
+meson compile -C build/debug tree_build_bench write_coordinator_bench
+./build/debug/tests/benchmarks/tree_build_bench
+YAMS_BENCH_NUM_FILES=50 YAMS_BENCH_VERSION_ITERATIONS=1 \
+  build/debug/tests/benchmarks/write_coordinator_bench --allow-running-no-tests
 ```
 
 **Release baseline**
@@ -275,6 +277,52 @@ Search benchmarks are intentionally not included in the “improvements” summa
 #### Retrieval Quality Benchmark
 
 Skipped in this run (release benchmarks focused on ingestion, metadata, and IPC framing).
+
+## Tree & Coordinator Benchmarks
+
+These benchmarks were added in May 2026 to profile the WriteCoordinator single-writer pipeline and tree-building performance after the `addEntry` sort amortization and path-tree upsert batching optimizations.
+
+### Tree Builder Throughput
+
+Measures Merkle tree construction from filesystem directories. Exercises the `addEntry` lazy-sort and hash/store pipeline.
+
+| Files | Latency | Throughput | Scaling |
+|-------|---------|------------|---------|
+| 100 | 31 ms | 3,254/s | — |
+| 500 | 135 ms | 3,711/s | 1.14× |
+| 1,000 | 251 ms | 3,977/s | 1.07× |
+| 5,000 | 1,219 ms | 4,102/s | 1.03× |
+| 10,000 | 2,514 ms | 3,977/s | 0.97× |
+
+Throughput stays flat at ~3,800-4,100 files/sec across two orders of magnitude, confirming the O(n) lazy-sort behavior. The pre-fix O(n² log n) addEntry sort would show steep throughput degradation at 5,000+ files.
+
+```bash
+meson compile -C build/debug tree_build_bench
+./build/debug/tests/benchmarks/tree_build_bench
+```
+
+### WriteCoordinator Ingest Profile
+
+Profiles the daemon's single-writer coordinator during document ingestion. Measures batch throughput, per-source hotspot breakdown, and the impact of version churn (re-ingesting the same paths to trigger `VersionOf` relationships).
+
+| Phase | Elapsed | docsInserted | metadataSet | relsInserted | nodesUpserted | edgesAdded |
+|-------|---------|-------------|-------------|--------------|---------------|------------|
+| Cold ingest (50 files) | 106 ms | 0¹ | 185 | 0 | 200 | 100 |
+| Version churn (1 iter) | 1 ms | 0¹ | 240 | 50 | 200 | 100 |
+
+¹ `documentsInserted=0` because `insertDocumentWithMetadata` runs synchronously outside the coordinator; only versioning and KG sync ops route through it.
+
+**Hot sources** (top 4 for 50-file ingest):
+- `doc_svc/kg_sync` — KG node/edge writes (deferred resolution via node keys)
+- `doc_svc/versioning` — `setMetadata` + `insertRelationship` (VersionOf edges)
+- `PostIngestQueue::titleMetadata` — title extraction metadata
+- `IndexingService::upsertTreeSnapshot` — directory-level snapshot records
+
+```bash
+meson compile -C build/debug write_coordinator_bench
+YAMS_BENCH_NUM_FILES=50 YAMS_BENCH_VERSION_ITERATIONS=1 \
+  build/debug/tests/benchmarks/write_coordinator_bench --allow-running-no-tests
+```
 
 ### Storage Backend Benchmarks (Local vs R2)
 

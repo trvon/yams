@@ -30,7 +30,12 @@ Result<void> execRaw(sqlite3* db, const char* sql) {
 }
 
 Result<void> attachCorruptDb(sqlite3* freshDb, const fs::path& corruptPath) {
-    std::string attachSql = "ATTACH DATABASE '" + corruptPath.string() + "' AS corrupt";
+    std::string path = corruptPath.string();
+    // Escape single-quote characters for SQLite string literal.
+    for (size_t pos = path.find('\''); pos != std::string::npos; pos = path.find('\'', pos + 2)) {
+        path.insert(pos, "'");
+    }
+    std::string attachSql = "ATTACH DATABASE '" + path + "' AS corrupt";
     return execRaw(freshDb, attachSql.c_str());
 }
 

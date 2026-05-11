@@ -1,5 +1,6 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/daemon/components/MetadataWriteFacade.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -1522,6 +1523,9 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
         co_return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     auto stuckDocs = detectStuckDocuments(req.maxRetries);
     result.processed = stuckDocs.size();
 
@@ -1574,9 +1578,8 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
                 (void)meta->updateDocument(doc);
             }
 
-            (void)meta->updateDocumentExtractionStatus(s.docId, false,
-                                                       metadata::ExtractionStatus::Pending,
-                                                       "RepairService: recovery attempt");
+            metaFacade.updateExtractionStatus(s.docId, false, metadata::ExtractionStatus::Pending,
+                                              "RepairService: recovery attempt");
             submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
                                      metadata::RepairStatus::Pending,
                                      "RepairService::recovery/single");
@@ -1599,6 +1602,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             progress(ev);
         }
     }
+    metaFacade.flush();
 
     result.message = "Recovered " + std::to_string(result.succeeded) + " stuck documents";
     if (result.failed > 0) {
@@ -1618,6 +1622,9 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         result.message = "Metadata repository not available";
         return result;
     }
+
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto stuckDocs = detectStuckDocuments(req.maxRetries);
     result.processed = stuckDocs.size();
@@ -1678,9 +1685,8 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             }
 
             // Reset extraction status to Pending
-            (void)meta->updateDocumentExtractionStatus(s.docId, false,
-                                                       metadata::ExtractionStatus::Pending,
-                                                       "RepairService: recovery attempt");
+            metaFacade.updateExtractionStatus(s.docId, false, metadata::ExtractionStatus::Pending,
+                                              "RepairService: recovery attempt");
 
             submitRepairStatusUpdate(ctx_, meta, std::vector<std::string>{s.hash},
                                      metadata::RepairStatus::Pending,
@@ -1711,6 +1717,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         result.message += " (" + std::to_string(result.failed) +
                           " could not be enqueued — re-run repair to retry)";
     }
+    metaFacade.flush();
     return result;
 }
 
@@ -1785,6 +1792,9 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
@@ -1856,7 +1866,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     if (oldWasText && !newIsText) {
                         (void)meta->deleteContent(id);
                         (void)meta->removeFromIndex(id);
-                        (void)meta->updateDocumentExtractionStatus(
+                        metaFacade.updateExtractionStatus(
                             id, false, metadata::ExtractionStatus::Pending,
                             "MIME repaired; stale text content cleared");
                     }
@@ -1886,6 +1896,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
     } else {
         result.message = "Repaired " + std::to_string(result.succeeded) + " MIME types";
     }
+    metaFacade.flush();
     return result;
 }
 
@@ -1899,6 +1910,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         result.message = "Metadata not available";
         return result;
     }
+
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
     if (!docsResult) {
@@ -1960,19 +1974,20 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         }
 
         try {
-            meta->setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
-            meta->setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
+            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
+            metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
             auto host = extract_host(sourceUrl);
             auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
-                meta->setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
+                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
-                meta->setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
+                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
         } catch (...) {
         }
     }
 
     result.message = "Updated " + std::to_string(result.succeeded) + " download documents";
+    metaFacade.flush();
     return result;
 }
 
@@ -2286,6 +2301,14 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
     auto scanType = [&](const std::string& type, const std::string& prefix, bool deleteByHash) {
         constexpr std::size_t kBatchSize = 500;
         std::size_t offset = 0;
+        std::unique_ptr<WriteBatch> orphanDeleteBatch;
+        {
+            auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+            if (coord) {
+                orphanDeleteBatch = std::make_unique<WriteBatch>();
+                orphanDeleteBatch->source = "RepairService::orphanKgNodeDelete";
+            }
+        }
         while (true) {
             auto nodesRes = kgStore->findNodesByType(type, kBatchSize, offset);
             if (!nodesRes) {
@@ -2322,32 +2345,38 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                         ++stats.skipped;
                         continue;
                     }
-                    auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
-                    if (!coord) {
-                        ++stats.errors;
-                        stats.issues.push_back(
-                            "WriteCoordinator unavailable for orphan KG node delete");
-                        continue;
-                    }
-                    auto wb = std::make_unique<WriteBatch>();
-                    wb->source = "RepairService::orphanKgNodeDelete";
-                    if (deleteByHash) {
-                        wb->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
-                        // The exact number is tracked by WriteCoordinator stats; keep local repair
-                        // progress as attempted-orphan groups to avoid direct writes.
-                        ++stats.nodesDeleted;
+                    if (orphanDeleteBatch) {
+                        if (deleteByHash) {
+                            orphanDeleteBatch->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
+                        } else {
+                            orphanDeleteBatch->ops.emplace_back(DeleteNodeByIdOp{node.id});
+                        }
                     } else {
-                        wb->ops.emplace_back(DeleteNodeByIdOp{node.id});
-                        ++stats.nodesDeleted;
+                        auto* coord =
+                            ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+                        if (!coord) {
+                            ++stats.errors;
+                            stats.issues.push_back(
+                                "WriteCoordinator unavailable for orphan KG node delete");
+                            continue;
+                        }
+                        auto wb = std::make_unique<WriteBatch>();
+                        wb->source = "RepairService::orphanKgNodeDelete";
+                        if (deleteByHash) {
+                            wb->ops.emplace_back(DeleteNodesForDocumentHashOp{hash});
+                        } else {
+                            wb->ops.emplace_back(DeleteNodeByIdOp{node.id});
+                        }
+                        coord->enqueue(std::move(wb));
+                        auto flushRes = coord->flush();
+                        if (!flushRes) {
+                            ++stats.errors;
+                            stats.issues.push_back("orphan KG node delete flush failed for " +
+                                                   node.nodeKey + ": " + flushRes.error().message);
+                            continue;
+                        }
                     }
-                    coord->enqueue(std::move(wb));
-                    auto flushRes = coord->flush();
-                    if (!flushRes) {
-                        ++stats.errors;
-                        stats.issues.push_back("orphan KG node delete flush failed for " +
-                                               node.nodeKey + ": " + flushRes.error().message);
-                        continue;
-                    }
+                    ++stats.nodesDeleted;
                     ++deletedNodesInBatch;
                 }
 
@@ -2368,6 +2397,20 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 }
             }
             offset += nodes.size();
+        }
+
+        // Flush accumulated orphan node deletes as a single batch.
+        if (orphanDeleteBatch && !orphanDeleteBatch->ops.empty()) {
+            auto* coord = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+            if (coord) {
+                coord->enqueue(std::move(orphanDeleteBatch));
+                auto flushRes = coord->flush();
+                if (!flushRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("orphan KG node delete batch flush failed: " +
+                                           flushRes.error().message);
+                }
+            }
         }
     };
 
@@ -2650,6 +2693,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         return result;
     }
 
+    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
     static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
     const auto& customExtractors =
         ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
@@ -2735,9 +2781,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                     auto contentRes = meta->getContent(d.id);
                     successHasContent = contentRes && contentRes.value().has_value();
                     if (!successHasContent) {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Pending,
-                            "Missing content row; reset by repair");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Pending,
+                                                          "Missing content row; reset by repair");
                         extractionStatus = metadata::ExtractionStatus::Pending;
                     }
                 }
@@ -2771,9 +2817,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                     auto extractedOpt = yams::extraction::util::extractDocumentText(
                         store, d.sha256Hash, effectiveMime, extension, customExtractors);
                     if (extractedOpt && !extractedOpt->empty()) {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Pending,
-                            "repair fts5 processing");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Pending,
+                                                          "repair fts5 processing");
 
                         metadata::DocumentContent content;
                         content.documentId = d.id;
@@ -2796,27 +2842,27 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                                                              effectiveMime);
 
                         if (ir && contentResult) {
-                            (void)meta->updateDocumentExtractionStatus(
-                                d.id, true, metadata::ExtractionStatus::Success);
+                            metaFacade.updateExtractionStatus(
+                                d.id, true, metadata::ExtractionStatus::Success, "");
                             result.succeeded++;
                         } else {
                             static const std::string kUnknownFailure = "unknown";
                             const std::string& failMsg =
                                 !contentResult ? contentResult.error().message
                                                : (!ir ? ir.error().message : kUnknownFailure);
-                            (void)meta->updateDocumentExtractionStatus(
+                            metaFacade.updateExtractionStatus(
                                 d.id, false, metadata::ExtractionStatus::Failed, failMsg);
                             result.failed++;
                         }
                     } else {
-                        (void)meta->updateDocumentExtractionStatus(
-                            d.id, false, metadata::ExtractionStatus::Skipped,
-                            "No extractable text");
+                        metaFacade.updateExtractionStatus(d.id, false,
+                                                          metadata::ExtractionStatus::Skipped,
+                                                          "No extractable text");
                         result.skipped++;
                     }
                 } catch (const std::exception& e) {
-                    (void)meta->updateDocumentExtractionStatus(
-                        d.id, false, metadata::ExtractionStatus::Failed, e.what());
+                    metaFacade.updateExtractionStatus(d.id, false,
+                                                      metadata::ExtractionStatus::Failed, e.what());
                     result.failed++;
                 }
 
@@ -2849,6 +2895,7 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     result.message = "FTS5 rebuild: " + std::to_string(result.succeeded) + " ok, " +
                      std::to_string(result.failed) + " failed, " + std::to_string(result.skipped) +
                      " skipped";
+    metaFacade.flush();
     return result;
 }
 

@@ -10,7 +10,8 @@ Each page should answer three things:
 
 ## Benchmark Docs
 
-- [Performance Report](performance_report.md) - canonical ingestion, metadata, IPC, and multi-client baseline tables plus run commands.
+- [Performance Report](performance_report.md) - canonical ingestion, metadata, IPC, tree-builder, and write-coordinator baseline tables plus run commands.
+- [Tree & Coordinator Benchmarks](performance_report.md#tree--coordinator-benchmarks) - tree builder throughput and WriteCoordinator ingest profile.
 - [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics, retrieval-quality baselines, and the benchmark command.
 - [Storage Backends Benchmark](storage_backends.md) - local vs R2 CLI CRUD and multi-client benchmark results.
 - [Multi-Client Optimization Loop](multi_client_optimization_loop.md) - throughput/stability runbook plus summary and regression commands.

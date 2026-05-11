@@ -3,6 +3,7 @@
 #include <yams/core/uuid.h>
 #include <yams/metadata/versioning_util.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteBatchCoalescer.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
@@ -48,6 +49,20 @@
 #include <vector>
 
 namespace yams::app::services {
+
+namespace {
+
+daemon::WriteBatchCoalescer& getVersioningCoalescer() {
+    static daemon::WriteBatchCoalescer instance("doc_svc/versioning");
+    return instance;
+}
+
+daemon::WriteBatchCoalescer& getKgSyncCoalescer() {
+    static daemon::WriteBatchCoalescer instance("doc_svc/kg_sync");
+    return instance;
+}
+
+} // namespace
 
 namespace {
 
@@ -810,12 +825,11 @@ public:
 
                         int64_t newVersion = prevLatestId.has_value() ? maxVersion + 1 : 1;
 
-                        auto wb = std::make_unique<daemon::WriteBatch>();
-                        wb->source = "doc_svc/versioning";
-
+                        auto& vc = getVersioningCoalescer();
                         if (prevLatestId.has_value()) {
-                            wb->ops.emplace_back(daemon::SetMetadataBatchOp{
-                                {{*prevLatestId, "is_latest", metadata::MetadataValue(false)}}});
+                            vc.addOp(daemon::SetMetadataBatchOp{{{*prevLatestId, "is_latest",
+                                                                  metadata::MetadataValue(false)}}},
+                                     writeCoord);
 
                             metadata::DocumentRelationship rel;
                             rel.parentId = *prevLatestId;
@@ -823,15 +837,15 @@ public:
                             rel.relationshipType = metadata::RelationshipType::VersionOf;
                             rel.createdTime = std::chrono::floor<std::chrono::seconds>(
                                 std::chrono::system_clock::now());
-                            wb->ops.emplace_back(daemon::InsertRelationshipOp{std::move(rel)});
+                            vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, writeCoord);
                         }
 
-                        wb->ops.emplace_back(daemon::SetMetadataBatchOp{
-                            {{docId, "version", metadata::MetadataValue(newVersion)},
-                             {docId, "is_latest", metadata::MetadataValue(true)},
-                             {docId, "series_key", metadata::MetadataValue(info.filePath)}}});
-
-                        writeCoord->enqueue(std::move(wb));
+                        vc.addOp(
+                            daemon::SetMetadataBatchOp{
+                                {{docId, "version", metadata::MetadataValue(newVersion)},
+                                 {docId, "is_latest", metadata::MetadataValue(true)},
+                                 {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
+                            writeCoord);
                     } else {
                         auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                         if (priorDoc && priorDoc.value().has_value()) {
@@ -901,11 +915,11 @@ public:
                                 std::string("{\"path\":\"") + info.filePath +
                                 "\",\"is_directory\":false,\"logical\":true}";
 
-                            auto wb = std::make_unique<daemon::WriteBatch>();
-                            wb->source = "doc_svc/kg_sync";
-                            wb->ops.emplace_back(daemon::UpsertNodesOp{
-                                {std::move(blobNode), std::move(docNode),
-                                 std::move(snapshotPathNode), std::move(logicalPathNode)}});
+                            auto& kc = getKgSyncCoalescer();
+                            kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
+                                                            std::move(snapshotPathNode),
+                                                            std::move(logicalPathNode)}},
+                                     writeCoord);
 
                             daemon::DeferredEdgeOp pathVerEdge;
                             pathVerEdge.srcNodeKey = logicalPathKey;
@@ -918,10 +932,9 @@ public:
                             hasVerEdge.relation = "has_version";
                             hasVerEdge.properties = "{\"diff_id\":0}";
 
-                            wb->ops.emplace_back(daemon::AddDeferredEdgesOp{
-                                {std::move(pathVerEdge), std::move(hasVerEdge)}});
-
-                            writeCoord->enqueue(std::move(wb));
+                            kc.addOp(daemon::AddDeferredEdgesOp{{std::move(pathVerEdge),
+                                                                 std::move(hasVerEdge)}},
+                                     writeCoord);
                         } else {
                             auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                             if (!blobNodeResult) {

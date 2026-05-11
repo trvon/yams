@@ -2974,7 +2974,6 @@ public:
         }
         aliasCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
         return Result<void>();
-        return Result<void>();
     }
 
     Result<void> addDocEntities(const std::vector<DocEntity>& entities) override {
