@@ -2119,70 +2119,7 @@ private:
     }
 
     void renderDoctorLiveRepairProgress() {
-        try {
-            using namespace yams::daemon;
-            yams::daemon::ClientConfig cfg;
-            cfg.requestTimeout = std::chrono::milliseconds(1200);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes)
-                throw std::runtime_error(leaseRes.error().message);
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-
-            uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
-            bool printedHeader = false;
-            for (int i = 0; i < 8; ++i) {
-                GetStatsRequest req;
-                req.detailed = false;
-                req.showFileTypes = false;
-                auto r = yams::cli::run_result<GetStatsResponse>(client.getStats(req),
-                                                                 std::chrono::milliseconds(1300));
-                if (!r)
-                    break;
-
-                const auto& st = r.value();
-                auto getU64 = [&](const char* k) -> uint64_t {
-                    auto it = st.additionalStats.find(k);
-                    if (it == st.additionalStats.end())
-                        return 0;
-                    try {
-                        return static_cast<uint64_t>(std::stoull(it->second));
-                    } catch (...) {
-                        return 0;
-                    }
-                };
-
-                uint64_t gen = getU64("repair_embeddings_generated");
-                uint64_t fail = getU64("repair_failed_operations");
-                uint64_t q = getU64("repair_queue_depth");
-                if (q == 0 && gen == 0 && fail == 0) {
-                    break;
-                }
-
-                uint64_t batches = getU64("repair_batches_attempted");
-                if (!printedHeader) {
-                    std::cout << "\nEmbeddings Repair (live):\n";
-                    printedHeader = true;
-                }
-
-                std::cout << "  generated=" << gen << " failed=" << fail << " pending=" << q
-                          << " batches=" << batches << "\r" << std::flush;
-
-                if (gen == lastGen && fail == lastFail && q == lastQ && batches == lastBatches) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                } else {
-                    lastGen = gen;
-                    lastFail = fail;
-                    lastQ = q;
-                    lastBatches = batches;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                }
-            }
-
-            if (printedHeader)
-                std::cout << "\n";
-        } catch (...) {
-        }
+        doctor::DoctorDisplay::renderLiveRepairProgress(std::cout, cli_);
     }
 
     static std::vector<TrustedRootCheck>

@@ -1,10 +1,14 @@
 #include <yams/cli/doctor/rendering/display.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/recommendation_util.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <sstream>
+#include <thread>
 
 namespace yams::cli::doctor {
 
@@ -85,8 +89,70 @@ void DoctorDisplay::renderR2Credentials(std::ostream&, YamsCLI*, RecommendationB
     // Stub — depends on evaluateR2KeychainStatus which is still in the monolith
 }
 
-void DoctorDisplay::renderLiveRepairProgress(std::ostream&, YamsCLI*) {
-    // Stub — depends on daemon client acquisition which is still in the monolith
+void DoctorDisplay::renderLiveRepairProgress(std::ostream& os, YamsCLI*) {
+    try {
+        using namespace yams::daemon;
+        ClientConfig cfg;
+        cfg.requestTimeout = std::chrono::milliseconds(1200);
+        auto leaseRes = acquire_cli_daemon_client_shared(cfg);
+        if (!leaseRes)
+            return;
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        uint64_t lastGen = 0, lastFail = 0, lastQ = 0, lastBatches = 0;
+        bool printedHeader = false;
+        for (int i = 0; i < 8; ++i) {
+            GetStatsRequest req;
+            req.detailed = false;
+            req.showFileTypes = false;
+            auto r =
+                run_result<GetStatsResponse>(client.getStats(req), std::chrono::milliseconds(1300));
+            if (!r)
+                break;
+
+            const auto& st = r.value();
+            auto getU64 = [&](const char* k) -> uint64_t {
+                auto it = st.additionalStats.find(k);
+                if (it == st.additionalStats.end())
+                    return 0;
+                try {
+                    return static_cast<uint64_t>(std::stoull(it->second));
+                } catch (...) {
+                    return 0;
+                }
+            };
+
+            uint64_t gen = getU64("repair_embeddings_generated");
+            uint64_t fail = getU64("repair_failed_operations");
+            uint64_t q = getU64("repair_queue_depth");
+            if (q == 0 && gen == 0 && fail == 0)
+                break;
+
+            uint64_t batches = getU64("repair_batches_attempted");
+            if (!printedHeader) {
+                os << "\nEmbeddings Repair (live):\n";
+                printedHeader = true;
+            }
+
+            os << "  generated=" << gen << " failed=" << fail << " pending=" << q
+               << " batches=" << batches << "\r" << std::flush;
+
+            if (gen == lastGen && fail == lastFail && q == lastQ && batches == lastBatches)
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            else {
+                lastGen = gen;
+                lastFail = fail;
+                lastQ = q;
+                lastBatches = batches;
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
+        }
+
+        if (printedHeader)
+            os << "\n";
+    } catch (...) {
+    }
 }
 
 } // namespace yams::cli::doctor
