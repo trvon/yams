@@ -15,8 +15,14 @@ namespace {
 struct RefDbGuard {
     sqlite3* db_{nullptr};
     explicit RefDbGuard(const std::filesystem::path& dbPath) {
-        sqlite3_open_v2(dbPath.string().c_str(), &db_, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
-                        nullptr);
+        int rc = sqlite3_open_v2(dbPath.string().c_str(), &db_,
+                                 SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
+        if (rc != SQLITE_OK) {
+            if (db_) {
+                sqlite3_close(db_);
+                db_ = nullptr;
+            }
+        }
     }
     ~RefDbGuard() {
         if (db_)

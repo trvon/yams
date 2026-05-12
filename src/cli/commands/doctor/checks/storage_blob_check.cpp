@@ -27,54 +27,54 @@ StorageBlobCheck::Result StorageBlobCheck::execute(const DoctorContext& ctx) {
             if (entry.is_regular_file()) {
                 r.storageObjects++;
                 r.storageBytes += entry.file_size();
-                auto rel = fs::relative(entry.path(), objectsDir, ec);
-                if (!ec)
-                    objectHashes.insert(rel.string());
+                auto hashName = entry.path().filename().string();
+                objectHashes.insert(hashName);
             }
         }
     }
 
     // ── Count metadata documents and check blob existence ──
     bool dbAvailable = false;
-    try {
-        auto db = ctx.cli()->getDatabase();
-        dbAvailable = db && db->isOpen();
-        if (dbAvailable) {
-            // Count total documents
-            auto stCountR = db->prepare("SELECT COUNT(*) FROM documents");
-            if (stCountR) {
-                auto stCount = std::move(stCountR).value();
-                auto step = stCount.step();
-                if (step && step.value())
-                    r.metadataDocuments = static_cast<uint64_t>(stCount.getInt64(0));
-            }
+    if (ctx.cli())
+        try {
+            auto db = ctx.cli()->getDatabase();
+            dbAvailable = db && db->isOpen();
+            if (dbAvailable) {
+                // Count total documents
+                auto stCountR = db->prepare("SELECT COUNT(*) FROM documents");
+                if (stCountR) {
+                    auto stCount = std::move(stCountR).value();
+                    auto step = stCount.step();
+                    if (step && step.value())
+                        r.metadataDocuments = static_cast<uint64_t>(stCount.getInt64(0));
+                }
 
-            // Find documents whose sha256_hash has no corresponding CAS object
-            auto stDocsR = db->prepare(
-                "SELECT id, file_path, sha256_hash FROM documents WHERE sha256_hash IS NOT NULL "
-                "AND extraction_status != 'orphaned' ORDER BY id");
-            if (stDocsR) {
-                auto stDocs = std::move(stDocsR).value();
-                while (true) {
-                    auto step = stDocs.step();
-                    if (!step || !step.value())
-                        break;
+                // Find documents whose sha256_hash has no corresponding CAS object
+                auto stDocsR = db->prepare("SELECT id, file_path, sha256_hash FROM documents WHERE "
+                                           "sha256_hash IS NOT NULL "
+                                           "AND extraction_status != 'orphaned' ORDER BY id");
+                if (stDocsR) {
+                    auto stDocs = std::move(stDocsR).value();
+                    while (true) {
+                        auto step = stDocs.step();
+                        if (!step || !step.value())
+                            break;
 
-                    std::string hash = stDocs.getString(2);
-                    if (hash.empty())
-                        continue;
+                        std::string hash = stDocs.getString(2);
+                        if (hash.empty())
+                            continue;
 
-                    if (objectHashes.find(hash) == objectHashes.end()) {
-                        r.missingBlobs++;
-                        if (r.missingBlobDetails.size() < 50) {
-                            r.missingBlobDetails.push_back({hash, stDocs.getString(1), hash});
+                        if (objectHashes.find(hash) == objectHashes.end()) {
+                            r.missingBlobs++;
+                            if (r.missingBlobDetails.size() < 50) {
+                                r.missingBlobDetails.push_back({hash, stDocs.getString(1), hash});
+                            }
                         }
                     }
                 }
             }
+        } catch (...) {
         }
-    } catch (...) {
-    }
 
     // ── Detect orphaned storage objects (no corresponding metadata doc) ──
     // Only meaningful when DB is available; all objects are treated as

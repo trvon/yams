@@ -88,8 +88,9 @@ DbIntegrityCheck::Result DbIntegrityCheck::execute(const DoctorContext& ctx) {
             sqlite3* db = nullptr;
             if (sqlite3_open_v2(dbPath.string().c_str(), &db,
                                 SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
-                okFlag = true; // can't open — skip (not an integrity failure)
-                detail = "cannot open (skipped)";
+                okFlag = false;
+                r.ok = false;
+                detail = "cannot open";
                 if (db)
                     sqlite3_close(db);
                 return;
