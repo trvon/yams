@@ -179,4 +179,65 @@ void BenchmarkCommand::execute(std::ostream& os) {
     }
 }
 
+void BenchmarkCommand::printHistory(std::ostream& os, bool jsonOutput, size_t limit) const {
+    yams::search::BenchmarkHistoryStore store(yams::config::get_data_dir() /
+                                              "benchmark_history.json");
+    auto rowsResult = store.read(limit);
+    if (!rowsResult) {
+        os << "  " << yams::cli::ui::status_error("Failed to read benchmark history") << "\n";
+        return;
+    }
+    const auto& rows = rowsResult.value();
+
+    if (jsonOutput) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& row : rows)
+            out.push_back(row.toJson());
+        os << out.dump(2) << "\n";
+        return;
+    }
+
+    os << "\n" << yams::cli::ui::section_header("Benchmark History") << "\n\n";
+    os << "  " << yams::cli::ui::colorize("Path:", yams::cli::ui::Ansi::CYAN) << " "
+       << store.path().string() << "\n";
+    os << "  " << yams::cli::ui::colorize("Rows:", yams::cli::ui::Ansi::CYAN) << " " << rows.size()
+       << (rows.size() == limit ? " (truncated)" : "") << "\n\n";
+
+    if (rows.empty()) {
+        os << "  " << yams::cli::ui::status_ok("No history yet") << "\n";
+        return;
+    }
+
+    const char* headers[] = {"Timestamp", "Queries", "MRR", "R@K", "Mean ms", "Tuning", "Trend"};
+    os << "  ";
+    for (const auto* h : headers)
+        os << yams::cli::ui::colorize(h, yams::cli::ui::Ansi::BOLD) << "\t";
+    os << "\n";
+
+    std::optional<float> prevMrr;
+    for (const auto& row : rows) {
+        const auto& r = row.results;
+        std::string trend = "→";
+        const char* tc = yams::cli::ui::Ansi::DIM;
+        if (prevMrr) {
+            if (r.mrr > *prevMrr + 1e-4f) {
+                trend = "↑";
+                tc = yams::cli::ui::Ansi::GREEN;
+            } else if (r.mrr < *prevMrr - 1e-4f) {
+                trend = "↓";
+                tc = yams::cli::ui::Ansi::RED;
+            }
+        }
+        prevMrr = r.mrr;
+        char mrrBuf[16], recallBuf[16], latBuf[16];
+        std::snprintf(mrrBuf, sizeof(mrrBuf), "%.3f", r.mrr);
+        std::snprintf(recallBuf, sizeof(recallBuf), "%.3f", r.recallAtK);
+        std::snprintf(latBuf, sizeof(latBuf), "%.1f", r.latency.meanMs);
+        os << "  " << r.timestamp << "\t" << r.queriesRun << "\t" << mrrBuf << "\t" << recallBuf
+           << "\t" << latBuf << "\t" << (r.tuningState.value_or("-")) << "\t"
+           << yams::cli::ui::colorize(trend, tc) << "\n";
+    }
+    os << "\n";
+}
+
 } // namespace yams::cli::doctor

@@ -21,10 +21,12 @@ public:
         std::string compareBaseline;
         bool history{false};
         bool historyJson{false};
+        size_t historyLimit{20};
     };
 
     explicit BenchmarkCommand(YamsCLI* cli, Config config);
     void execute(std::ostream& os);
+    void printHistory(std::ostream& os, bool jsonOutput, size_t limit) const;
 
 private:
     YamsCLI* cli_{nullptr};

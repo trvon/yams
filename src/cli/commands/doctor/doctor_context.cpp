@@ -1,6 +1,7 @@
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -258,6 +259,169 @@ R2ConfigStatus DoctorContext::evaluateR2Config() {
     }
     status.detail = token.error().message;
     return status;
+}
+
+void DoctorContext::repairGraph(std::ostream& os, YamsCLI* cli) {
+    using namespace yams::cli::ui;
+
+    yams::daemon::ClientConfig cfg;
+    if (cli && cli->hasExplicitDataDir())
+        cfg.dataDir = cli->getDataPath();
+    cfg.requestTimeout = std::chrono::seconds(120);
+
+    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+    if (!leaseRes) {
+        os << status_error("Daemon unavailable") << "\n";
+        return;
+    }
+    auto leaseHandle = std::move(leaseRes.value());
+    auto& client = **leaseHandle;
+
+    yams::daemon::GraphRepairRequest req;
+    req.dryRun = false;
+    os << status_pending("Repairing knowledge graph") << "\n";
+    auto r = yams::cli::run_result(client.graphRepair(req), std::chrono::seconds(180));
+    if (!r) {
+        os << status_error("Graph repair failed") << "\n";
+        return;
+    }
+    const auto& resp = r.value();
+    os << (resp.errors == 0 ? status_ok("Graph repair completed")
+                            : status_warning("Graph repair completed with errors"))
+       << "\n\n";
+    os << "  " << colorize("Nodes created:", Ansi::CYAN) << " " << format_number(resp.nodesCreated)
+       << "\n";
+    os << "  " << colorize("Nodes updated:", Ansi::CYAN) << " " << format_number(resp.nodesUpdated)
+       << "\n";
+    os << "  " << colorize("Edges created:", Ansi::CYAN) << " " << format_number(resp.edgesCreated)
+       << "\n";
+    if (resp.errors > 0)
+        os << "  " << colorize("Errors:", Ansi::YELLOW) << " " << format_number(resp.errors)
+           << "\n";
+}
+
+void DoctorContext::validateGraph(std::ostream& os, YamsCLI* cli) {
+    using namespace yams::cli::ui;
+
+    yams::daemon::ClientConfig cfg;
+    if (cli && cli->hasExplicitDataDir())
+        cfg.dataDir = cli->getDataPath();
+    cfg.requestTimeout = std::chrono::seconds(60);
+
+    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+    if (!leaseRes) {
+        os << status_error("Daemon unavailable") << "\n";
+        return;
+    }
+    auto leaseHandle = std::move(leaseRes.value());
+    auto& client = **leaseHandle;
+
+    yams::daemon::GraphValidateRequest req;
+    os << status_pending("Validating knowledge graph") << "\n";
+    auto r = yams::cli::run_result(client.graphValidate(req), std::chrono::seconds(120));
+    if (!r) {
+        os << status_error("Graph validation failed") << "\n";
+        return;
+    }
+    const auto& resp = r.value();
+    bool hasIssues = !resp.issues.empty() || resp.orphanedNodes > 0 || resp.unreachableNodes > 0;
+    os << (hasIssues ? status_warning("Graph validation completed - issues detected")
+                     : status_ok("Graph validation completed - no issues found"))
+       << "\n\n";
+    os << "  " << colorize("Total nodes:", Ansi::CYAN) << " " << format_number(resp.totalNodes)
+       << "\n";
+    os << "  " << colorize("Total edges:", Ansi::CYAN) << " " << format_number(resp.totalEdges)
+       << "\n";
+    if (resp.orphanedNodes > 0)
+        os << "  " << colorize("Orphaned nodes:", Ansi::YELLOW) << " "
+           << format_number(resp.orphanedNodes) << "\n";
+    if (resp.unreachableNodes > 0)
+        os << "  " << colorize("Unreachable nodes:", Ansi::YELLOW) << " "
+           << format_number(resp.unreachableNodes) << "\n";
+    if (!resp.issues.empty()) {
+        os << "\n" << colorize("Issues:", Ansi::YELLOW) << "\n";
+        size_t n = std::min(resp.issues.size(), size_t(10));
+        for (size_t i = 0; i < n; ++i)
+            os << "  " << bullet(resp.issues[i]) << "\n";
+        if (resp.issues.size() > n)
+            os << "  "
+               << colorize("... and " + std::to_string(resp.issues.size() - n) + " more", Ansi::DIM)
+               << "\n";
+    }
+}
+
+void DoctorContext::applyTuningBaseline(std::ostream& os, bool apply) {
+    unsigned hc = std::thread::hardware_concurrency();
+    if (hc == 0)
+        hc = 4;
+    uint32_t ipcMax = std::min<unsigned>(64, hc * 2);
+    uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
+    std::map<std::string, std::string> suggestions{
+        {"tuning.backpressure_read_pause_ms", "10"},
+        {"tuning.worker_poll_ms", "75"},
+        {"tuning.idle_cpu_pct", "10.0"},
+        {"tuning.idle_mux_low_bytes", "4194304"},
+        {"tuning.idle_shrink_hold_ms", "5000"},
+        {"tuning.pool_cooldown_ms", "500"},
+        {"tuning.pool_scale_step", "1"},
+        {"tuning.pool_ipc_min", "1"},
+        {"tuning.pool_ipc_max", std::to_string(ipcMax)},
+        {"tuning.pool_io_min", "1"},
+        {"tuning.pool_io_max", std::to_string(ioMax)},
+    };
+    os << "Doctor tuning baseline (proposed):\n";
+    for (const auto& [k, v] : suggestions)
+        os << "  " << k << " = " << v << "\n";
+    if (apply) {
+        auto configPath = yams::config::get_config_path();
+        for (const auto& [k, v] : suggestions)
+            yams::config::write_config_value(configPath, k, v);
+        os << yams::cli::ui::status_ok("Applied tuning baseline to [tuning] in config.toml")
+           << "\n";
+    } else {
+        os << "Use 'yams doctor tuning --apply' to write these values.\n";
+    }
+}
+
+void DoctorContext::renderEmbeddingProgress(
+    std::ostream& os, bool tty, std::chrono::steady_clock::time_point& lastPrint,
+    const std::chrono::steady_clock::time_point& progressStarted, size_t current, size_t total,
+    const std::string& details) {
+    using namespace yams::cli::ui;
+    auto now = std::chrono::steady_clock::now();
+    if (!tty && (current % 200 != 0))
+        return;
+    if (tty && (now - lastPrint) < std::chrono::milliseconds(200))
+        return;
+    uint64_t elapsed_s = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(now - progressStarted).count());
+    std::string detail = details;
+    if (!detail.empty())
+        detail = truncate_to_width(detail, 60);
+    std::ostringstream oss;
+    oss << status_pending("Embeddings") << " ";
+    if (total > 0) {
+        double frac = (static_cast<double>(current) / static_cast<double>(total));
+        oss << progress_with_stats(frac, 18,
+                                   std::make_optional(std::make_pair(static_cast<uint64_t>(current),
+                                                                     static_cast<uint64_t>(total))),
+                                   "docs");
+    } else {
+        oss << colorize("working", Ansi::DIM);
+    }
+    oss << " " << colorize("elapsed " + format_duration(elapsed_s), Ansi::DIM);
+    if (!detail.empty())
+        oss << " " << colorize(detail, Ansi::DIM);
+    if (tty)
+        os << "\r\033[K" << oss.str() << std::flush;
+    else
+        os << "  " << oss.str() << "\n" << std::flush;
+    lastPrint = now;
+}
+
+void DoctorContext::finishEmbeddingProgress(std::ostream& os, bool tty) {
+    if (tty)
+        os << "\n";
 }
 
 } // namespace yams::cli::doctor
