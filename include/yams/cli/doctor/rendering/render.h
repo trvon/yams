@@ -8,9 +8,7 @@
 
 namespace yams::cli {
 class YamsCLI;
-namespace ui {
-struct RecommendationBuilder;
-} // namespace ui
+class RecommendationBuilder;
 } // namespace yams::cli
 
 namespace yams::cli::doctor {
@@ -33,7 +31,7 @@ struct DoctorRender {
 
     /// Build the JSON output for the full doctor report.
     static nlohmann::json buildDoctorJson(YamsCLI* cli, const CachedDaemonState& cachedState,
-                                          const ui::RecommendationBuilder* recs = nullptr);
+                                          const RecommendationBuilder* recs = nullptr);
 };
 
 } // namespace yams::cli::doctor

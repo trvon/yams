@@ -45,6 +45,7 @@ yams_cli_sources = [
   'commands/doctor/checks/orphan_summary.cpp',
   'commands/doctor/checks/embedding_health.cpp',
   'commands/doctor/checks/storage_blob_check.cpp',
+  'commands/doctor/checks/ref_count_check.cpp',
   'commands/doctor/rendering/render.cpp',
   'commands/doctor/rendering/display.cpp',
   'commands/doctor/repairs/vector_fix.cpp',

@@ -42,6 +42,7 @@
 #include <yams/cli/doctor/checks/vec0_check.h>
 #include <yams/cli/doctor/checks/embedding_health.h>
 #include <yams/cli/doctor/checks/storage_blob_check.h>
+#include <yams/cli/doctor/checks/ref_count_check.h>
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/doctor/rendering/display.h>
 #include <yams/cli/doctor/rendering/render.h>
@@ -453,11 +454,6 @@ public:
     }
 
 private:
-    std::optional<SemanticDedupeAnalysis>
-    analyzeSemanticDuplicates(metadata::MetadataRepository& metadataRepo,
-                              vector::VectorDatabase& vectorDb) const;
-    Result<void> persistSemanticDuplicateAnalysis(metadata::MetadataRepository& metadataRepo,
-                                                  const SemanticDedupeAnalysis& analysis) const;
     // ============ UI Helpers ============
     struct StepResult {
         std::string name;
@@ -636,11 +632,6 @@ private:
         check.execute(std::cout, cli_, cachedStatus);
     }
 
-    // Plugin utilities (delegating to extracted plugin_util)
-    static std::set<std::filesystem::path> readTrusted() {
-        return doctor::PluginTrust::readTrusted();
-    }
-
     static bool parseBoolValue(std::string value, bool fallback) {
         if (value.empty()) {
             return fallback;
@@ -650,55 +641,6 @@ private:
         return value == "1" || value == "true" || value == "yes" || value == "on";
     }
 
-    static bool resolveStrictPluginDirMode() {
-        return doctor::PluginTrust::resolveStrictPluginDirMode();
-    }
-
-    static std::vector<std::filesystem::path>
-    dedupeRoots(const std::vector<std::filesystem::path>& roots) {
-        return doctor::PluginTrust::dedupeRoots(roots);
-    }
-
-    static std::vector<std::filesystem::path> getDefaultPluginRoots(bool strictMode) {
-        return doctor::PluginTrust::getDefaultPluginRoots(strictMode);
-    }
-
-    std::optional<std::vector<std::filesystem::path>> fetchTrustedRootsFromDaemon() const {
-        using namespace yams::daemon;
-        try {
-            ClientConfig cfg;
-            if (cli_ && cli_->hasExplicitDataDir()) {
-                cfg.dataDir = cli_->getDataPath();
-            }
-            cfg.requestTimeout = std::chrono::milliseconds(5000);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-            if (!leaseRes) {
-                return std::nullopt;
-            }
-            auto leaseHandle = std::move(leaseRes.value());
-            auto& client = **leaseHandle;
-            PluginTrustListRequest req;
-            auto res = yams::cli::run_result<PluginTrustListResponse>(
-                client.call(req), std::chrono::milliseconds(5000));
-            if (!res) {
-                return std::nullopt;
-            }
-            std::vector<std::filesystem::path> out;
-            out.reserve(res.value().paths.size());
-            for (const auto& p : res.value().paths) {
-                out.emplace_back(p);
-            }
-            return out;
-        } catch (...) {
-            return std::nullopt;
-        }
-    }
-
-    struct TrustedRootCheck {
-        std::filesystem::path path;
-        std::vector<std::string> issues;
-    };
-
     using DoctorCachedState = doctor::CachedDaemonState;
 
     DoctorCachedState collectDoctorCachedState() const {
@@ -707,192 +649,32 @@ private:
 
     nlohmann::json buildDoctorJsonResult(const DoctorCachedState& cachedState,
                                          const yams::cli::RecommendationBuilder& recs) {
-        nlohmann::json jsonResult;
-        jsonResult["daemon"]["socket"] = cachedState.effectiveSocket;
-        jsonResult["daemon"]["running"] = cachedState.daemonUp;
-
-        if (cachedState.status) {
-            const auto& s = *cachedState.status;
-            jsonResult["daemon"]["ready"] = s.ready;
-            jsonResult["daemon"]["running"] = s.running;
-            jsonResult["daemon"]["version"] = s.version;
-            jsonResult["daemon"]["lifecycle_state"] = s.lifecycleState;
-            jsonResult["daemon"]["active_connections"] = s.activeConnections;
-            jsonResult["daemon"]["memory_mb"] = s.memoryUsageMb;
-            jsonResult["daemon"]["cpu_percent"] = s.cpuUsagePercent;
-
-            jsonResult["embedding"]["available"] = s.embeddingAvailable;
-            jsonResult["embedding"]["backend"] = s.embeddingBackend;
-            jsonResult["embedding"]["model"] = s.embeddingModel;
-            jsonResult["embedding"]["path"] = s.embeddingModelPath;
-            jsonResult["embedding"]["dimension"] = s.embeddingDim;
-            jsonResult["embedding"]["threads_intra"] = s.embeddingThreadsIntra;
-            jsonResult["embedding"]["threads_inter"] = s.embeddingThreadsInter;
-
-            for (const auto& [k, v] : s.readinessStates) {
-                jsonResult["readiness"][k] = v;
-            }
-
-            nlohmann::json pluginsJson = nlohmann::json::array();
-            for (const auto& p : s.providers) {
-                nlohmann::json pj;
-                pj["name"] = p.name;
-                pj["ready"] = p.ready;
-                pj["degraded"] = p.degraded;
-                pj["is_provider"] = p.isProvider;
-                pj["models_loaded"] = p.modelsLoaded;
-                if (!p.error.empty())
-                    pj["error"] = p.error;
-                pluginsJson.push_back(std::move(pj));
-            }
-            jsonResult["plugins"] = std::move(pluginsJson);
-        }
-
-        try {
-            auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
-            bool usedDaemonTrust = trustRootsFromDaemon.has_value();
-
-            std::vector<std::filesystem::path> trustedRoots;
-            if (trustRootsFromDaemon) {
-                trustedRoots = dedupeRoots(*trustRootsFromDaemon);
-            } else {
-                auto localTrusted = readTrusted();
-                trustedRoots.assign(localTrusted.begin(), localTrusted.end());
-            }
-
-            bool strictMode = resolveStrictPluginDirMode();
-            auto defaultRoots = getDefaultPluginRoots(strictMode);
-            auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
-
-            nlohmann::json trustJson;
-            trustJson["source"] = usedDaemonTrust ? "daemon" : "local";
-            trustJson["trust_file"] = yams::config::get_daemon_plugin_trust_file().string();
-            trustJson["legacy_trust_file"] = yams::config::get_legacy_plugin_trust_file().string();
-            trustJson["strict_mode"] = strictMode;
-
-            nlohmann::json rootsJson = nlohmann::json::array();
-            for (const auto& check : checks) {
-                nlohmann::json root;
-                root["path"] = check.path.string();
-                root["issues"] = check.issues;
-                root["problematic"] = std::any_of(
-                    check.issues.begin(), check.issues.end(), [](const std::string& issue) {
-                        return issue == "missing" || issue == "temporary-path" ||
-                               issue == "build-artifact-path";
-                    });
-                rootsJson.push_back(std::move(root));
-            }
-            trustJson["roots"] = std::move(rootsJson);
-            jsonResult["plugin_trust"] = std::move(trustJson);
-        } catch (...) {
-        }
-
-        namespace fs = std::filesystem;
-        fs::path modelsPath = cli_ ? cli_->getDataPath() / "models" : fs::path();
-        nlohmann::json modelsJson = nlohmann::json::array();
-        std::error_code ec;
-        if (!modelsPath.empty() && fs::exists(modelsPath, ec) && fs::is_directory(modelsPath, ec)) {
-            for (const auto& entry : fs::directory_iterator(modelsPath, ec)) {
-                if (!entry.is_directory())
-                    continue;
-                fs::path modelOnnx = entry.path() / "model.onnx";
-                if (fs::exists(modelOnnx, ec)) {
-                    nlohmann::json mj;
-                    mj["name"] = entry.path().filename().string();
-                    mj["has_config"] = fs::exists(entry.path() / "config.json", ec) ||
-                                       fs::exists(entry.path() / "sentence_bert_config.json", ec);
-                    mj["has_tokenizer"] = fs::exists(entry.path() / "tokenizer.json", ec);
-                    modelsJson.push_back(std::move(mj));
-                }
-            }
-        }
-        jsonResult["models"] = std::move(modelsJson);
-
-        fs::path vecDbPath = cli_ ? cli_->getDataPath() / "vectors.db" : fs::path();
-        jsonResult["vector_db"]["path"] = vecDbPath.string();
-        jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
-
-        try {
-            auto r2Status = evaluateR2KeychainStatus();
-            jsonResult["storage"]["r2"]["enabled"] = r2Status.enabled;
-            jsonResult["storage"]["r2"]["auth_mode"] = r2Status.authMode;
-            jsonResult["storage"]["r2"]["account_id"] = r2Status.accountId;
-            jsonResult["storage"]["r2"]["keychain_supported"] = r2Status.keychainSupported;
-            jsonResult["storage"]["r2"]["keychain_token_present"] = r2Status.tokenPresent;
-            if (!r2Status.detail.empty()) {
-                jsonResult["storage"]["r2"]["detail"] = r2Status.detail;
-            }
-        } catch (...) {
-        }
-
-        try {
-            auto db = cli_->getDatabase();
-            if (db && db->isOpen()) {
-                auto countTable = [&](const char* sql) -> long long {
-                    auto stR = db->prepare(sql);
-                    if (!stR)
-                        return -1;
-                    auto st = std::move(stR).value();
-                    auto step = st.step();
-                    if (step && step.value())
-                        return st.getInt64(0);
-                    return -1;
-                };
-                jsonResult["knowledge_graph"]["nodes"] =
-                    countTable("SELECT COUNT(1) FROM kg_nodes");
-                jsonResult["knowledge_graph"]["edges"] =
-                    countTable("SELECT COUNT(1) FROM kg_edges");
-                jsonResult["knowledge_graph"]["aliases"] =
-                    countTable("SELECT COUNT(1) FROM kg_aliases");
-                jsonResult["knowledge_graph"]["embeddings"] =
-                    countTable("SELECT COUNT(1) FROM kg_node_embeddings");
-                jsonResult["knowledge_graph"]["doc_entities"] =
-                    countTable("SELECT COUNT(1) FROM doc_entities");
-            }
-        } catch (...) {
-        }
-
-        if (!recs.empty()) {
-            jsonResult["recommendations"] = yams::cli::recommendationsToJson(recs);
-        }
-
-        return jsonResult;
+        return doctor::DoctorRender::buildDoctorJson(cli_, cachedState, &recs);
     }
 
     void renderDoctorR2Credentials(yams::cli::RecommendationBuilder& recs) {
-        try {
-            auto r2Status = evaluateR2KeychainStatus();
-            if (!r2Status.enabled) {
-                return;
-            }
-
-            std::cout << "\n" << yams::cli::ui::section_header("R2 Credentials") << "\n\n";
-            std::vector<yams::cli::ui::Row> rows;
-            rows.push_back({"Auth Mode", r2Status.authMode, ""});
-            rows.push_back(
-                {"Account ID", r2Status.accountId.empty() ? "(unset)" : r2Status.accountId, ""});
-
-            std::string keychainState;
-            if (!r2Status.keychainSupported) {
-                keychainState = yams::cli::ui::colorize("not supported", yams::cli::ui::Ansi::DIM);
-            } else if (r2Status.tokenPresent) {
-                keychainState = yams::cli::ui::colorize("present", yams::cli::ui::Ansi::GREEN);
-            } else {
-                keychainState = yams::cli::ui::colorize("missing", yams::cli::ui::Ansi::YELLOW);
-            }
-            rows.push_back({"Keychain Token", keychainState, ""});
-            if (!r2Status.detail.empty()) {
-                rows.push_back({"Detail", r2Status.detail, ""});
-            }
-            yams::cli::ui::render_rows(std::cout, rows);
-
-            if (r2Status.keychainSupported && !r2Status.tokenPresent) {
-                recs.warning("DOCTOR_R2_KEYCHAIN_MISSING",
-                             "R2 temp-credentials mode is configured but keychain token is "
-                             "missing; set --s3-r2-api-token-keychain or env token.");
-            }
-        } catch (...) {
-        }
+        auto r2 = doctor::DoctorContext::evaluateR2Config();
+        if (!r2.enabled)
+            return;
+        std::cout << "\n" << yams::cli::ui::section_header("R2 Credentials") << "\n\n";
+        std::vector<yams::cli::ui::Row> rows;
+        rows.push_back({"Auth Mode", r2.authMode, ""});
+        rows.push_back({"Account ID", r2.accountId.empty() ? "(unset)" : r2.accountId, ""});
+        std::string kc =
+            r2.keychainSupported ? (r2.tokenPresent ? "present" : "missing") : "not supported";
+        rows.push_back(
+            {"Keychain Token",
+             doctor::DoctorContext::evaluateR2Config().keychainSupported
+                 ? yams::cli::ui::colorize(kc, r2.tokenPresent ? yams::cli::ui::Ansi::GREEN
+                                                               : yams::cli::ui::Ansi::YELLOW)
+                 : yams::cli::ui::colorize(kc, yams::cli::ui::Ansi::DIM),
+             ""});
+        if (!r2.detail.empty())
+            rows.push_back({"Detail", r2.detail, ""});
+        yams::cli::ui::render_rows(std::cout, rows);
+        if (r2.keychainSupported && !r2.tokenPresent)
+            recs.warning("DOCTOR_R2_KEYCHAIN_MISSING",
+                         "R2 temp-credentials mode is configured but keychain token is missing.");
     }
 
     void
@@ -942,62 +724,6 @@ private:
                                    std::optional<yams::daemon::GetStatsResponse>& cachedStats) {
         (void)cachedStatus;
         (void)cachedStats;
-    }
-
-    static std::vector<TrustedRootCheck>
-    assessTrustedRoots(const std::vector<std::filesystem::path>& trustedRoots, bool strictMode,
-                       const std::vector<std::filesystem::path>& defaultRoots) {
-        namespace fs = std::filesystem;
-        std::vector<TrustedRootCheck> checks;
-        checks.reserve(trustedRoots.size());
-
-        std::set<fs::path> defaultRootSet(defaultRoots.begin(), defaultRoots.end());
-        std::error_code tempEc;
-        fs::path tempRoot = fs::temp_directory_path(tempEc);
-        std::set<fs::path> tempSet;
-        if (!tempEc) {
-            tempSet.insert(tempRoot);
-        }
-
-        for (const auto& root : trustedRoots) {
-            TrustedRootCheck check;
-            check.path = root;
-
-            std::error_code ec;
-            auto canonical = fs::weakly_canonical(root, ec);
-            if (ec) {
-                canonical = root.lexically_normal();
-            }
-
-            if (!fs::exists(root, ec) || ec) {
-                check.issues.push_back("missing");
-            }
-
-            if (!tempSet.empty() && plugin::isPathTrusted(canonical, tempSet)) {
-                check.issues.push_back("temporary-path");
-            }
-
-            {
-                auto normalized = canonical.lexically_normal().string();
-                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                std::replace(normalized.begin(), normalized.end(), '\\', '/');
-                if (normalized.find("/build/") != std::string::npos ||
-                    normalized.find("/builddir") != std::string::npos ||
-                    normalized.find("/cmake-build") != std::string::npos) {
-                    check.issues.push_back("build-artifact-path");
-                }
-            }
-
-            if (!strictMode && !defaultRootSet.empty() &&
-                plugin::isPathTrusted(canonical, defaultRootSet)) {
-                check.issues.push_back("covered-by-default-root");
-            }
-
-            checks.push_back(std::move(check));
-        }
-
-        return checks;
     }
 
     static bool isTrustedPath(const std::filesystem::path& p,
@@ -1067,6 +793,8 @@ private:
             checkEmbeddingDimMismatch(cachedStatus);
             checkDbIntegrity(cachedStatus);
             checkOrphanSummary(cachedStatus);
+            checkStorageBlob(cachedStatus);
+            checkRefCount();
             return;
         }
         checkInstalledModels(cli_);
@@ -1076,6 +804,7 @@ private:
         checkOrphanSummary(cachedStatus);
         checkEmbeddingHealth(cachedStatus);
         checkStorageBlob(cachedStatus);
+        checkRefCount();
         renderDoctorR2Credentials(recs);
         renderDoctorEmbeddingRuntime(cachedStatus);
 
@@ -1139,6 +868,13 @@ private:
         doctor::StorageBlobCheck check;
         auto result = check.execute(ctx);
         doctor::StorageBlobCheck::render(std::cout, result);
+    }
+
+    void checkRefCount() {
+        doctor::DoctorContext ctx(cli_);
+        doctor::RefCountCheck check;
+        auto result = check.execute(ctx);
+        doctor::RefCountCheck::render(std::cout, result);
     }
 
     YamsCLI* cli_{nullptr};
@@ -1213,245 +949,6 @@ private:
     Result<void> writeConfigValue(const std::string& key, const std::string& value);
 };
 
-std::optional<SemanticDedupeAnalysis>
-DoctorCommand::analyzeSemanticDuplicates(metadata::MetadataRepository& metadataRepo,
-                                         vector::VectorDatabase& vectorDb) const {
-    auto docsResult = metadataRepo.queryDocuments(metadata::DocumentQueryOptions{});
-    if (!docsResult) {
-        return std::nullopt;
-    }
-
-    SemanticDedupeAnalysis analysis;
-    analysis.docs.reserve(docsResult.value().size());
-    for (const auto& doc : docsResult.value()) {
-        if (doc.sha256Hash.empty() || !vectorDb.hasEmbedding(doc.sha256Hash)) {
-            continue;
-        }
-        analysis.docs.push_back(SemanticDedupeAnalysis::Row{
-            doc, normalizeTextForTokens(doc.fileName), normalizeTextForTokens(doc.filePath)});
-    }
-
-    if (analysis.docs.empty()) {
-        return analysis;
-    }
-
-    std::vector<int> parent(analysis.docs.size());
-    std::iota(parent.begin(), parent.end(), 0);
-    auto findRoot = [&](int idx) {
-        int root = idx;
-        while (parent[root] != root) {
-            root = parent[root];
-        }
-        while (parent[idx] != idx) {
-            int next = parent[idx];
-            parent[idx] = root;
-            idx = next;
-        }
-        return root;
-    };
-    auto unite = [&](int lhs, int rhs) {
-        lhs = findRoot(lhs);
-        rhs = findRoot(rhs);
-        if (lhs != rhs) {
-            parent[rhs] = lhs;
-        }
-    };
-
-    for (size_t i = 0; i < analysis.docs.size(); ++i) {
-        vector::VectorSearchParams params;
-        params.k = 6;
-        params.similarity_threshold = static_cast<float>(dedupeSemanticThreshold_ - 0.08);
-        auto neighbors = vectorDb.searchSimilarToDocument(analysis.docs[i].doc.sha256Hash, params);
-        auto baseVectors = vectorDb.getVectorsByDocument(analysis.docs[i].doc.sha256Hash);
-        if (baseVectors.empty()) {
-            continue;
-        }
-
-        for (const auto& neighbor : neighbors) {
-            if (neighbor.document_hash.empty() ||
-                neighbor.document_hash == analysis.docs[i].doc.sha256Hash) {
-                continue;
-            }
-
-            auto it =
-                std::find_if(analysis.docs.begin(), analysis.docs.end(), [&](const auto& row) {
-                    return row.doc.sha256Hash == neighbor.document_hash;
-                });
-            if (it == analysis.docs.end()) {
-                continue;
-            }
-
-            const size_t j = static_cast<size_t>(std::distance(analysis.docs.begin(), it));
-            if (j <= i) {
-                continue;
-            }
-
-            auto neighborVectors = vectorDb.getVectorsByDocument(it->doc.sha256Hash);
-            if (neighborVectors.empty()) {
-                continue;
-            }
-
-            const double cosine =
-                cosineSimilarity(baseVectors.front().embedding, neighborVectors.front().embedding);
-            const double titleOverlap =
-                jaccardOverlap(analysis.docs[i].normalizedTitle, it->normalizedTitle);
-            const double pathOverlap =
-                jaccardOverlap(analysis.docs[i].normalizedPath, it->normalizedPath);
-            const double score = cosine * 0.8 + titleOverlap * 0.15 + pathOverlap * 0.05;
-
-            if (cosine < dedupeSemanticThreshold_) {
-                continue;
-            }
-            if (titleOverlap == 0.0 && pathOverlap == 0.0 && cosine < 0.975) {
-                continue;
-            }
-
-            analysis.accepted.push_back(
-                SemanticDedupeMatch{i, j, cosine, titleOverlap, pathOverlap, score});
-            unite(static_cast<int>(i), static_cast<int>(j));
-        }
-    }
-
-    std::unordered_map<int, std::vector<size_t>> groupedMembers;
-    for (size_t i = 0; i < analysis.docs.size(); ++i) {
-        groupedMembers[findRoot(static_cast<int>(i))].push_back(i);
-    }
-
-    for (auto& [root, members] : groupedMembers) {
-        (void)root;
-        if (members.size() < 2) {
-            continue;
-        }
-
-        auto cmpNewest = [&](size_t lhs, size_t rhs) {
-            return analysis.docs[lhs].doc.modifiedTime > analysis.docs[rhs].doc.modifiedTime;
-        };
-        auto cmpOldest = [&](size_t lhs, size_t rhs) {
-            return analysis.docs[lhs].doc.modifiedTime < analysis.docs[rhs].doc.modifiedTime;
-        };
-        auto cmpLargest = [&](size_t lhs, size_t rhs) {
-            return analysis.docs[lhs].doc.fileSize > analysis.docs[rhs].doc.fileSize;
-        };
-        if (dedupeStrategy_ == "keep-oldest") {
-            std::sort(members.begin(), members.end(), cmpOldest);
-        } else if (dedupeStrategy_ == "keep-largest") {
-            std::sort(members.begin(), members.end(), cmpLargest);
-        } else {
-            std::sort(members.begin(), members.end(), cmpNewest);
-        }
-
-        analysis.groups.push_back(SemanticDedupeGroupPlan{members, members.front()});
-    }
-
-    return analysis;
-}
-
-Result<void>
-DoctorCommand::persistSemanticDuplicateAnalysis(metadata::MetadataRepository& metadataRepo,
-                                                const SemanticDedupeAnalysis& analysis) const {
-    const auto now =
-        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
-
-    for (const auto& groupPlan : analysis.groups) {
-        nlohmann::json evidence;
-        evidence["strategy"] = dedupeStrategy_;
-        evidence["threshold"] = dedupeSemanticThreshold_;
-        evidence["documents"] = nlohmann::json::array();
-
-        std::vector<std::string> hashes;
-        hashes.reserve(groupPlan.members.size());
-        double maxPairScore = 0.0;
-        for (size_t memberIndex : groupPlan.members) {
-            const auto& doc = analysis.docs[memberIndex].doc;
-            hashes.push_back(doc.sha256Hash);
-            evidence["documents"].push_back(
-                {{"id", doc.id}, {"hash", doc.sha256Hash}, {"path", doc.filePath}});
-        }
-        std::sort(hashes.begin(), hashes.end());
-
-        for (const auto& match : analysis.accepted) {
-            const bool lhsInGroup = std::find(groupPlan.members.begin(), groupPlan.members.end(),
-                                              match.lhs) != groupPlan.members.end();
-            const bool rhsInGroup = std::find(groupPlan.members.begin(), groupPlan.members.end(),
-                                              match.rhs) != groupPlan.members.end();
-            if (lhsInGroup && rhsInGroup) {
-                maxPairScore = std::max(maxPairScore, match.score);
-            }
-        }
-
-        std::ostringstream keyBuilder;
-        keyBuilder << "semantic:" << dedupeStrategy_ << ':' << std::fixed << std::setprecision(3)
-                   << dedupeSemanticThreshold_ << ':';
-        for (size_t i = 0; i < hashes.size(); ++i) {
-            if (i > 0)
-                keyBuilder << ',';
-            keyBuilder << hashes[i];
-        }
-
-        metadata::SemanticDuplicateGroup group;
-        group.groupKey = keyBuilder.str();
-        group.algorithmVersion = "semantic-dedupe-v1";
-        group.status = "suggested";
-        group.reviewState = "pending";
-        group.canonicalDocumentId = analysis.docs[groupPlan.canonicalIndex].doc.id;
-        group.memberCount = static_cast<int64_t>(groupPlan.members.size());
-        group.maxPairScore = maxPairScore;
-        group.threshold = dedupeSemanticThreshold_;
-        group.evidenceJson = evidence.dump();
-        group.createdAt = now;
-        if (auto existing = metadataRepo.getSemanticDuplicateGroupByKey(group.groupKey);
-            existing && existing.value().has_value()) {
-            group.createdAt = existing.value()->createdAt;
-        }
-        group.updatedAt = now;
-        group.lastComputedAt = now;
-
-        auto groupId = metadataRepo.upsertSemanticDuplicateGroup(group);
-        if (!groupId) {
-            return groupId.error();
-        }
-
-        std::vector<metadata::SemanticDuplicateGroupMember> members;
-        members.reserve(groupPlan.members.size());
-        for (size_t memberIndex : groupPlan.members) {
-            metadata::SemanticDuplicateGroupMember member;
-            member.groupId = groupId.value();
-            member.documentId = analysis.docs[memberIndex].doc.id;
-            member.role = (memberIndex == groupPlan.canonicalIndex) ? "canonical" : "duplicate";
-            member.decision = (memberIndex == groupPlan.canonicalIndex) ? "keep" : "unknown";
-            member.reason = (memberIndex == groupPlan.canonicalIndex) ? dedupeStrategy_ : "";
-            member.createdAt = now;
-            member.updatedAt = now;
-
-            if (memberIndex != groupPlan.canonicalIndex) {
-                for (const auto& match : analysis.accepted) {
-                    const bool directPair =
-                        (match.lhs == groupPlan.canonicalIndex && match.rhs == memberIndex) ||
-                        (match.lhs == memberIndex && match.rhs == groupPlan.canonicalIndex);
-                    if (directPair) {
-                        member.similarityToCanonical = match.cosine;
-                        member.titleOverlap = match.titleOverlap;
-                        member.pathOverlap = match.pathOverlap;
-                        member.pairScore = match.score;
-                        break;
-                    }
-                }
-            }
-
-            members.push_back(std::move(member));
-        }
-
-        auto memberResult =
-            metadataRepo.replaceSemanticDuplicateGroupMembers(groupId.value(), members);
-        if (!memberResult) {
-            return memberResult.error();
-        }
-    }
-
-    return Result<void>();
-}
-
-// Factory
 std::unique_ptr<ICommand> createDoctorCommand() {
     return std::make_unique<DoctorCommand>();
 }

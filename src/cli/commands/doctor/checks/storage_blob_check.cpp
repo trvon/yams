@@ -2,55 +2,115 @@
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/database.h>
 
 #include <filesystem>
 #include <iomanip>
+#include <set>
 #include <sstream>
 
 namespace yams::cli::doctor {
 
 StorageBlobCheck::Result StorageBlobCheck::execute(const DoctorContext& ctx) {
     Result r;
-    const auto& state = ctx.cachedState();
+    namespace fs = std::filesystem;
+    auto dataDir = ctx.dataDir();
+    auto objectsDir = dataDir / "storage" / "objects";
+    std::error_code ec;
 
-    // Read from daemon stats when available
-    if (state.stats) {
-        auto getU64 = [&](const char* k) -> uint64_t {
-            auto it = state.stats->additionalStats.find(k);
-            if (it == state.stats->additionalStats.end())
-                return 0;
-            try {
-                return static_cast<uint64_t>(std::stoull(it->second));
-            } catch (...) {
-                return 0;
-            }
-        };
-        r.metadataDocuments = getU64("storage_documents");
-        r.storageObjects = getU64("storage_objects");
-        r.storageBytes = getU64("storage_physical_bytes");
-    }
-
-    // Local filesystem check when daemon is down
-    if (!state.daemonUp && r.storageObjects == 0) {
-        auto dataDir = ctx.dataDir();
-        // Count objects in the storage directory
-        namespace fs = std::filesystem;
-        auto objectsDir = dataDir / "storage" / "objects";
-        std::error_code ec;
-        if (fs::exists(objectsDir, ec)) {
-            for (const auto& entry : fs::recursive_directory_iterator(objectsDir, ec)) {
-                if (ec)
-                    break;
-                if (entry.is_regular_file()) {
-                    r.storageObjects++;
-                    r.storageBytes += entry.file_size();
-                }
+    // ── Count storage objects from filesystem ──
+    std::set<std::string> objectHashes;
+    if (fs::exists(objectsDir, ec)) {
+        for (const auto& entry : fs::recursive_directory_iterator(objectsDir, ec)) {
+            if (ec)
+                break;
+            if (entry.is_regular_file()) {
+                r.storageObjects++;
+                r.storageBytes += entry.file_size();
+                auto rel = fs::relative(entry.path(), objectsDir, ec);
+                if (!ec)
+                    objectHashes.insert(rel.string());
             }
         }
     }
 
-    r.ok = true; // no failures to report at this level
+    // ── Count metadata documents and check blob existence ──
+    bool dbAvailable = false;
+    try {
+        auto db = ctx.cli()->getDatabase();
+        dbAvailable = db && db->isOpen();
+        if (dbAvailable) {
+            // Count total documents
+            auto stCountR = db->prepare("SELECT COUNT(*) FROM documents");
+            if (stCountR) {
+                auto stCount = std::move(stCountR).value();
+                auto step = stCount.step();
+                if (step && step.value())
+                    r.metadataDocuments = static_cast<uint64_t>(stCount.getInt64(0));
+            }
+
+            // Find documents whose sha256_hash has no corresponding CAS object
+            auto stDocsR = db->prepare(
+                "SELECT id, file_path, sha256_hash FROM documents WHERE sha256_hash IS NOT NULL "
+                "AND extraction_status != 'orphaned' ORDER BY id");
+            if (stDocsR) {
+                auto stDocs = std::move(stDocsR).value();
+                while (true) {
+                    auto step = stDocs.step();
+                    if (!step || !step.value())
+                        break;
+
+                    std::string hash = stDocs.getString(2);
+                    if (hash.empty())
+                        continue;
+
+                    if (objectHashes.find(hash) == objectHashes.end()) {
+                        r.missingBlobs++;
+                        if (r.missingBlobDetails.size() < 50) {
+                            r.missingBlobDetails.push_back({hash, stDocs.getString(1), hash});
+                        }
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+
+    // ── Detect orphaned storage objects (no corresponding metadata doc) ──
+    // Only meaningful when DB is available; all objects are treated as
+    // potentially referenced when DB is missing.
+    if (!objectHashes.empty() && dbAvailable) {
+        try {
+            auto db = ctx.cli()->getDatabase();
+            if (db && db->isOpen()) {
+                auto stHashR =
+                    db->prepare("SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL");
+                if (stHashR) {
+                    std::set<std::string> docHashes;
+                    auto stHash = std::move(stHashR).value();
+                    while (true) {
+                        auto step = stHash.step();
+                        if (!step || !step.value())
+                            break;
+                        std::string h = stHash.getString(0);
+                        if (!h.empty())
+                            docHashes.insert(h);
+                    }
+                    for (const auto& oh : objectHashes) {
+                        if (docHashes.find(oh) == docHashes.end()) {
+                            r.orphanedBlobs++;
+                            if (r.orphanedBlobDetails.size() < 50) {
+                                r.orphanedBlobDetails.push_back({oh, 0});
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    r.ok = (r.missingBlobs == 0 && r.orphanedBlobs == 0);
     return r;
 }
 
@@ -58,12 +118,11 @@ void StorageBlobCheck::render(std::ostream& os, const Result& r) {
     using namespace yams::cli::ui;
 
     if (r.storageObjects == 0 && r.metadataDocuments == 0) {
-        os << "  " << status_ok("No storage blobs — daemon not running or corpus is empty.")
-           << "\n";
+        os << "  " << status_ok("No storage blobs — corpus is empty.") << "\n";
         return;
     }
 
-    os << "  " << status_ok("Storage blobs: ") << format_number(r.storageObjects) << " objects";
+    os << "  " << status_ok("Storage objects: ") << format_number(r.storageObjects) << " objects";
     if (r.storageBytes > 0) {
         double mb = r.storageBytes / (1024.0 * 1024.0);
         std::ostringstream s;
@@ -76,8 +135,26 @@ void StorageBlobCheck::render(std::ostream& os, const Result& r) {
         os << "  " << status_ok("Metadata documents: ") << format_number(r.metadataDocuments)
            << "\n";
 
+    if (r.missingBlobs > 0) {
+        os << "  " << status_error("Missing blobs (metadata ref without CAS object): ")
+           << format_number(r.missingBlobs) << "\n";
+        size_t show = std::min(r.missingBlobDetails.size(), size_t(5));
+        for (size_t i = 0; i < show; ++i) {
+            const auto& d = r.missingBlobDetails[i];
+            os << "    " << bullet(d.filePath)
+               << "  hash: " << colorize(d.sha256Hash.substr(0, 16) + "...", Ansi::DIM) << "\n";
+        }
+    }
+
+    if (r.orphanedBlobs > 0) {
+        os << "  " << status_warning("Orphaned objects (CAS without metadata ref): ")
+           << format_number(r.orphanedBlobs) << "\n";
+    }
+
     if (r.ok)
-        os << "  " << status_ok("Storage integrity: OK") << "\n";
+        os << "  " << status_ok("Storage blob integrity: OK") << "\n";
+    else
+        os << "  " << status_error("Storage blob integrity: ISSUES DETECTED") << "\n";
 }
 
 } // namespace yams::cli::doctor

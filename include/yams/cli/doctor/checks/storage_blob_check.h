@@ -3,23 +3,35 @@
 #include <cstdint>
 #include <ostream>
 #include <string>
-
-namespace yams::cli {
-class YamsCLI;
-} // namespace yams::cli
+#include <vector>
 
 namespace yams::cli::doctor {
 
 class DoctorContext;
 
-/// Checks storage blob integrity: verifies that CAS blobs on disk
-/// match the metadata references and reports missing or orphaned blobs.
+/// Verifies CAS blob integrity: metadata references vs on-disk objects,
+/// missing blobs, and orphaned storage objects.
 class StorageBlobCheck {
 public:
+    struct MissingBlob {
+        std::string sha256Hash; // metadata hash key
+        std::string filePath;   // document file path
+        std::string fileHash;   // actual file hash (if known)
+    };
+
+    struct OrphanedBlob {
+        std::string objectPath; // storage object relative path
+        uint64_t size{0};       // on-disk size in bytes
+    };
+
     struct Result {
         uint64_t metadataDocuments{0};
         uint64_t storageObjects{0};
         uint64_t storageBytes{0};
+        uint64_t missingBlobs{0};
+        uint64_t orphanedBlobs{0};
+        std::vector<MissingBlob> missingBlobDetails;   // capped at 50
+        std::vector<OrphanedBlob> orphanedBlobDetails; // capped at 50
         bool ok{true};
     };
 
