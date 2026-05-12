@@ -1130,7 +1130,8 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     // Phase 1: Metadata repair
     if (doOrphans)
         if (!runOp("orphans", [&] {
-                return cleanOrphanedMetadata(request.dryRun, request.verbose, progress);
+                return cleanOrphanedMetadata(request.dryRun, request.verbose, request.removeCorrupt,
+                                             progress);
             }))
             goto finalize;
     if (doMime)
@@ -1363,7 +1364,8 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
     }
     if (keepGoing && doOrphans) {
         keepGoing = runOp("orphans", [&] {
-            return cleanOrphanedMetadata(request.dryRun, request.verbose, progress);
+            return cleanOrphanedMetadata(request.dryRun, request.verbose, request.removeCorrupt,
+                                         progress);
         });
     }
     if (keepGoing && doMime) {
@@ -1728,6 +1730,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
 // ============================================================================
 
 RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool verbose,
+                                                           bool removeCorrupt,
                                                            ProgressFn progress) {
     RepairOperationResult result;
     result.operation = "orphans";
@@ -1739,33 +1742,46 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
         return result;
     }
 
-    // Phase 1: Salvage documents from corrupt metadata DBs before scanning
-    // for orphans. Recovered documents may have valid CAS blocks, and we need
-    // them in the DB before the orphan scan can verify CAS eligibility.
+    // Phase 1: Quick-check if salvage is needed, then optionally salvage documents
+    // from corrupt metadata DBs before scanning for orphans.  Skip salvage entirely
+    // when all corrupt-DB documents are already present in the current DB.
     size_t salvagedCount = 0;
+    bool salvageDidRun = false;
     if (!dryRun) {
         namespace fs = std::filesystem;
         fs::path dbPath = cfg_.dataDir / "yams.db";
         if (fs::exists(dbPath)) {
-            SalvageProgressFn salvageProgress;
-            if (progress) {
-                salvageProgress = [&progress](const std::string& phase, const std::string& message,
-                                              uint64_t proc, uint64_t total) {
-                    RepairEvent ev;
-                    ev.phase = phase;
-                    ev.operation = "orphans";
-                    ev.processed = proc;
-                    ev.total = total;
-                    ev.message = message;
-                    progress(ev);
-                };
-            }
-            auto salvaged = salvageFromAllCorruptDbs(cfg_.dataDir, dbPath, salvageProgress);
-            salvagedCount = salvaged.combined.documentsSalvaged;
-            if (salvagedCount > 0) {
-                spdlog::info("[RepairService] Salvage recovered {} document(s) "
-                             "from {} corrupt DB(s)",
-                             salvagedCount, salvaged.salvagedPaths.size());
+            auto qc = quickCheckSalvageNeeded(cfg_.dataDir, dbPath);
+            if (qc.needsSalvage) {
+                spdlog::info("[RepairService] Salvage needed: corrupt DB(s) have {} doc(s) "
+                             "more than current DB ({})",
+                             qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
+                SalvageProgressFn salvageProgress;
+                if (progress) {
+                    salvageProgress = [&progress](const std::string& phase,
+                                                  const std::string& message, uint64_t proc,
+                                                  uint64_t total) {
+                        RepairEvent ev;
+                        ev.phase = phase;
+                        ev.operation = "orphans";
+                        ev.processed = proc;
+                        ev.total = total;
+                        ev.message = message;
+                        progress(ev);
+                    };
+                }
+                auto salvaged = salvageFromAllCorruptDbs(cfg_.dataDir, dbPath, salvageProgress);
+                salvagedCount = salvaged.combined.documentsSalvaged;
+                salvageDidRun = true;
+                if (salvagedCount > 0) {
+                    spdlog::info("[RepairService] Salvage recovered {} document(s) "
+                                 "from {} corrupt DB(s)",
+                                 salvagedCount, salvaged.salvagedPaths.size());
+                }
+            } else {
+                spdlog::info("[RepairService] Salvage not needed "
+                             "(all {} docs already in current DB)",
+                             qc.currentDocCount);
             }
         }
     }
@@ -1788,34 +1804,43 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
 
     if (orphanedIds.empty()) {
         result.message = "No orphaned entries";
-        return result;
-    }
-
-    if (dryRun) {
+    } else if (dryRun) {
         result.skipped = orphanedIds.size();
         result.message = "Would clean " + std::to_string(orphanedIds.size()) + " orphans";
-        return result;
-    }
-
-    auto batchResult = meta->deleteDocumentsBatch(orphanedIds);
-    if (batchResult) {
-        result.succeeded = batchResult.value();
     } else {
-        // Fallback to individual deletes
-        for (int64_t id : orphanedIds) {
-            auto del = meta->deleteDocument(id);
-            if (del)
-                result.succeeded++;
-            else
-                result.failed++;
+        auto batchResult = meta->deleteDocumentsBatch(orphanedIds);
+        if (batchResult) {
+            result.succeeded = batchResult.value();
+        } else {
+            for (int64_t id : orphanedIds) {
+                auto del = meta->deleteDocument(id);
+                if (del)
+                    result.succeeded++;
+                else
+                    result.failed++;
+            }
         }
+        result.message = "Cleaned " + std::to_string(result.succeeded) + " orphans";
     }
 
-    result.message = "Cleaned " + std::to_string(result.succeeded) + " orphans";
     if (salvagedCount > 0) {
         result.message +=
             ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";
     }
+
+    // Phase 3: If requested, remove the corrupt DB files now that salvage is complete
+    if (!dryRun && removeCorrupt && salvageDidRun) {
+        auto cleanup = removeCorruptDbFiles(cfg_.dataDir);
+        if (!cleanup.removed.empty()) {
+            spdlog::info("[RepairService] Removed {} corrupt DB file(s)", cleanup.removed.size());
+            result.message +=
+                ", removed " + std::to_string(cleanup.removed.size()) + " corrupt DB file(s)";
+        }
+        for (const auto& err : cleanup.errors) {
+            spdlog::warn("[RepairService] Corrupt DB removal error: {}", err);
+        }
+    }
+
     return result;
 }
 

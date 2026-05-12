@@ -3137,6 +3137,7 @@ struct RepairRequest {
     bool dryRun{false};
     bool verbose{false};
     bool force{false};
+    bool removeCorrupt{false};
     bool foreground{false};
     std::string embeddingModel;
     std::vector<std::string> includeMime;
@@ -3148,7 +3149,7 @@ struct RepairRequest {
         ser << repairOrphans << repairMime << repairDownloads << repairPathTree << repairChunks
             << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << repairGraph
             << repairTopology << repairDedupe << optimizeDb << repairAll << dryRun << verbose
-            << force << foreground << embeddingModel << includeMime << maxRetries;
+            << force << removeCorrupt << foreground << embeddingModel << includeMime << maxRetries;
     }
 
     template <typename Deserializer>
@@ -3195,6 +3196,8 @@ struct RepairRequest {
         if (!readBool(req.verbose))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.force))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.removeCorrupt))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.foreground))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
