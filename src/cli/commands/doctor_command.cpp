@@ -38,11 +38,15 @@
 #include <yams/cli/doctor/checks/db_integrity.h>
 #include <yams/cli/doctor/checks/dim_consistency.h>
 #include <yams/cli/doctor/checks/model_check.h>
+#include <yams/cli/doctor/checks/orphan_summary.h>
 #include <yams/cli/doctor/checks/vec0_check.h>
+#include <yams/cli/doctor/checks/embedding_health.h>
+#include <yams/cli/doctor/checks/storage_blob_check.h>
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/doctor/rendering/display.h>
 #include <yams/cli/doctor/rendering/render.h>
 #include <yams/cli/doctor/repairs/vector_fix.h>
+#include <yams/cli/doctor/repairs/dedupe_helpers.h>
 #include <yams/cli/doctor/repairs/db_repair.h>
 #include <yams/cli/doctor/prune.h>
 #include <yams/cli/doctor/benchmark.h>
@@ -198,31 +202,9 @@ namespace yams::cli {
 
 namespace {
 
-struct SemanticDedupeMatch {
-    size_t lhs{0};
-    size_t rhs{0};
-    double cosine{0.0};
-    double titleOverlap{0.0};
-    double pathOverlap{0.0};
-    double score{0.0};
-};
-
-struct SemanticDedupeGroupPlan {
-    std::vector<size_t> members;
-    size_t canonicalIndex{0};
-};
-
-struct SemanticDedupeAnalysis {
-    struct Row {
-        metadata::DocumentInfo doc;
-        std::string normalizedTitle;
-        std::string normalizedPath;
-    };
-
-    std::vector<Row> docs;
-    std::vector<SemanticDedupeMatch> accepted;
-    std::vector<SemanticDedupeGroupPlan> groups;
-};
+using SemanticDedupeMatch = doctor::SemanticDedupeMatch;
+using SemanticDedupeGroupPlan = doctor::SemanticDedupeGroupPlan;
+using SemanticDedupeAnalysis = doctor::SemanticDedupeAnalysis;
 
 float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.empty() || b.empty() || a.size() != b.size()) {
@@ -1084,12 +1066,16 @@ private:
             checkVec0Module(); // Check vec0 module even when daemon is down
             checkEmbeddingDimMismatch(cachedStatus);
             checkDbIntegrity(cachedStatus);
+            checkOrphanSummary(cachedStatus);
             return;
         }
         checkInstalledModels(cli_);
         checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
         checkDbIntegrity(cachedStatus);
+        checkOrphanSummary(cachedStatus);
+        checkEmbeddingHealth(cachedStatus);
+        checkStorageBlob(cachedStatus);
         renderDoctorR2Credentials(recs);
         renderDoctorEmbeddingRuntime(cachedStatus);
 
@@ -1132,6 +1118,27 @@ private:
         doctor::DbIntegrityCheck check;
         auto result = check.execute(ctx);
         doctor::DbIntegrityCheck::render(std::cout, result);
+    }
+
+    void checkOrphanSummary(std::optional<yams::daemon::StatusResponse>&) {
+        doctor::DoctorContext ctx(cli_);
+        doctor::OrphanSummaryCheck check;
+        auto result = check.execute(ctx);
+        doctor::OrphanSummaryCheck::render(std::cout, result);
+    }
+
+    void checkEmbeddingHealth(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
+        doctor::DoctorContext ctx(cli_);
+        doctor::EmbeddingHealthCheck check;
+        auto result = check.execute(ctx, cachedStatus ? &cachedStatus.value() : nullptr);
+        doctor::EmbeddingHealthCheck::render(std::cout, result);
+    }
+
+    void checkStorageBlob(std::optional<yams::daemon::StatusResponse>&) {
+        doctor::DoctorContext ctx(cli_);
+        doctor::StorageBlobCheck check;
+        auto result = check.execute(ctx);
+        doctor::StorageBlobCheck::render(std::cout, result);
     }
 
     YamsCLI* cli_{nullptr};

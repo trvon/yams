@@ -13,15 +13,19 @@ namespace yams::cli::doctor {
 
 class DoctorContext;
 
-/// Checks WAL file sizes and looks for corrupt database artifacts.
-/// WAL sizes are read from daemon status when available or from the filesystem.
-/// Corrupt artifacts (*.corrupt-*) are detected from the data directory.
+/// Checks WAL file sizes, runs PRAGMA integrity_check on DB files,
+/// and looks for corrupt database artifacts.
 class DbIntegrityCheck {
 public:
     struct Result {
         uint64_t metadataWalBytes{0};
         uint64_t vectorWalBytes{0};
         std::vector<std::string> corruptArtifacts;
+        bool integrityCheckRan{false};
+        bool metadataIntegrityOk{true};
+        bool vectorIntegrityOk{true};
+        std::string metadataIntegrityDetail;
+        std::string vectorIntegrityDetail;
         bool ok{true};
     };
 
