@@ -40,6 +40,15 @@
 #include <yams/cli/doctor/checks/model_check.h>
 #include <yams/cli/doctor/checks/vec0_check.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/doctor/rendering/display.h>
+#include <yams/cli/doctor/rendering/render.h>
+#include <yams/cli/doctor/repairs/vector_fix.h>
+#include <yams/cli/doctor/prune.h>
+#include <yams/cli/doctor/benchmark.h>
+#include <yams/cli/doctor/plugin_trust.h>
+#include <yams/cli/doctor/checks/daemon_check.h>
+#include <yams/cli/doctor/checks/plugin_check.h>
+#include <yams/cli/doctor/repairs/dedupe.h>
 
 #include "yams/cli/prompt_util.h"
 #include <sqlite3.h>
@@ -1590,340 +1599,14 @@ private:
 
     // Minimal daemon check: connect and get status
     void checkDaemon(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
-        using namespace yams::daemon;
-        try {
-            std::string effectiveSocket = YamsCLI::resolveConfiguredDaemonSocketPath().string();
-
-            auto printTrustDiagnostics = [this]() {
-                // Plugin trust health (show stale/suspicious trusted roots with cleanup commands)
-                try {
-                    auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
-                    bool usedDaemonTrust = trustRootsFromDaemon.has_value();
-
-                    std::vector<std::filesystem::path> trustedRoots;
-                    if (trustRootsFromDaemon) {
-                        trustedRoots = dedupeRoots(*trustRootsFromDaemon);
-                    } else {
-                        auto localTrusted = readTrusted();
-                        trustedRoots.assign(localTrusted.begin(), localTrusted.end());
-                    }
-
-                    bool strictMode = resolveStrictPluginDirMode();
-                    auto defaultRoots = getDefaultPluginRoots(strictMode);
-                    auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
-
-                    std::size_t problematic = 0;
-                    for (const auto& check : checks) {
-                        bool hasProblem = std::any_of(
-                            check.issues.begin(), check.issues.end(), [](const std::string& issue) {
-                                return issue == "missing" || issue == "temporary-path" ||
-                                       issue == "build-artifact-path";
-                            });
-                        if (hasProblem) {
-                            ++problematic;
-                        }
-                    }
-
-                    std::cout << "\n" << yams::cli::ui::section_header("Plugin Trust") << "\n\n";
-                    std::vector<yams::cli::ui::Row> trustRows;
-                    trustRows.push_back({"Trust Source",
-                                         usedDaemonTrust ? "daemon" : "local trust file fallback",
-                                         ""});
-                    trustRows.push_back(
-                        {"Trust File", yams::config::get_daemon_plugin_trust_file().string(), ""});
-                    trustRows.push_back({"Strict Mode", strictMode ? "on" : "off", ""});
-
-                    std::string trustSummary = std::to_string(trustedRoots.size()) + " root(s)";
-                    if (problematic > 0) {
-                        trustSummary += " (" + std::to_string(problematic) + " problematic)";
-                    }
-                    trustRows.push_back({"Trusted Roots", trustSummary, ""});
-                    yams::cli::ui::render_rows(std::cout, trustRows);
-
-                    if (!checks.empty()) {
-                        std::cout << "\n";
-                        for (const auto& check : checks) {
-                            const bool hasIssues = !check.issues.empty();
-                            const bool hasProblem =
-                                std::any_of(check.issues.begin(), check.issues.end(),
-                                            [](const std::string& issue) {
-                                                return issue == "missing" ||
-                                                       issue == "temporary-path" ||
-                                                       issue == "build-artifact-path";
-                                            });
-                            const std::string mark =
-                                hasProblem
-                                    ? yams::cli::ui::colorize("⚠", yams::cli::ui::Ansi::YELLOW)
-                                    : (hasIssues
-                                           ? yams::cli::ui::colorize("i", yams::cli::ui::Ansi::CYAN)
-                                           : yams::cli::ui::colorize("✓",
-                                                                     yams::cli::ui::Ansi::GREEN));
-                            std::cout << "  " << mark << " " << check.path.string();
-                            if (hasIssues) {
-                                std::cout << " [";
-                                for (size_t i = 0; i < check.issues.size(); ++i) {
-                                    if (i)
-                                        std::cout << ", ";
-                                    std::cout << check.issues[i];
-                                }
-                                std::cout << "]";
-                            }
-                            std::cout << "\n";
-                        }
-                    }
-
-                    if (problematic > 0) {
-                        std::cout << "\nCleanup commands:\n";
-                        for (const auto& check : checks) {
-                            bool hasProblem = std::any_of(check.issues.begin(), check.issues.end(),
-                                                          [](const std::string& issue) {
-                                                              return issue == "missing" ||
-                                                                     issue == "temporary-path" ||
-                                                                     issue == "build-artifact-path";
-                                                          });
-                            if (!hasProblem) {
-                                continue;
-                            }
-                            std::cout << "  yams plugin trust remove \"" << check.path.string()
-                                      << "\"\n";
-                        }
-                        std::cout << "  yams plugin trust reset\n";
-                        std::cout << "  yams plugin trust status\n";
-                    }
-                } catch (...) {
-                }
-            };
-
-            // If we already have a cached status, skip the isDaemonRunning check to avoid
-            // race conditions where the daemon might momentarily be unresponsive.
-            // The cached status was successfully retrieved, so we know the daemon was running.
-            if (!cachedStatus) {
-                // First, perform a lightweight check to see if the daemon is responsive.
-                // This avoids triggering auto-start logic in a diagnostic command.
-                if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-                    std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
-                              << " - Daemon not running on socket: " << effectiveSocket << "\n";
-                    std::cout << "\n"
-                              << yams::cli::ui::colorize(
-                                     "Hint: Start the daemon with 'yams daemon start'",
-                                     yams::cli::ui::Ansi::DIM)
-                              << "\n";
-                    printTrustDiagnostics();
-                    return;
-                }
-            }
-
-            // If no cached status, fetch it now
-            if (!cachedStatus) {
-                yams::daemon::ClientConfig cfg;
-                if (cli_)
-                    if (cli_->hasExplicitDataDir()) {
-                        cfg.dataDir = cli_->getDataPath();
-                    }
-                cfg.requestTimeout = std::chrono::milliseconds(10000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                if (!leaseRes) {
-                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-                    std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
-                              << " - " << leaseRes.error().message << "\n";
-                    printTrustDiagnostics();
-                    return;
-                }
-                auto leaseHandle = std::move(leaseRes.value());
-                auto& client = **leaseHandle;
-
-                auto sres = yams::cli::run_result<StatusResponse>(client.status(),
-                                                                  std::chrono::seconds(10));
-                if (!sres) {
-                    std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-                    std::cout << yams::cli::ui::colorize("✗ Failed to get status",
-                                                         yams::cli::ui::Ansi::RED)
-                              << " - " << sres.error().message << "\n";
-                    printTrustDiagnostics();
-                    return;
-                }
-                cachedStatus = std::move(sres.value());
-            }
-
-            // Database migrations health (local DB), surface failures and guidance
-            try {
-                namespace fs = std::filesystem;
-                fs::path dbPath = cli_->getDataPath() / "yams.db";
-                sqlite3* db = nullptr;
-                if (sqlite3_open(dbPath.string().c_str(), &db) == SQLITE_OK) {
-                    auto queryScalar = [&](const char* sql) -> std::optional<std::string> {
-                        sqlite3_stmt* stmt = nullptr;
-                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-                            return std::nullopt;
-                        std::optional<std::string> out{};
-                        if (sqlite3_step(stmt) == SQLITE_ROW) {
-                            const unsigned char* txt = sqlite3_column_text(stmt, 0);
-                            if (txt)
-                                out = std::string(reinterpret_cast<const char*>(txt));
-                        }
-                        sqlite3_finalize(stmt);
-                        return out;
-                    };
-
-                    // Any failed migrations?
-                    sqlite3_stmt* st = nullptr;
-                    bool haveFail = false;
-                    if (sqlite3_prepare_v2(db,
-                                           "SELECT version,name,error FROM migration_history "
-                                           "WHERE success=0 ORDER BY applied_at DESC LIMIT 3",
-                                           -1, &st, nullptr) == SQLITE_OK) {
-                        while (sqlite3_step(st) == SQLITE_ROW) {
-                            if (!haveFail) {
-                                std::cout << "\nDatabase Migrations\n";
-                                std::cout << "-------------------\n";
-                                haveFail = true;
-                            }
-                            int ver = sqlite3_column_int(st, 0);
-                            const unsigned char* n = sqlite3_column_text(st, 1);
-                            const unsigned char* e = sqlite3_column_text(st, 2);
-                            std::cout
-                                << ui::status_error("version=" + std::to_string(ver) + ", name='" +
-                                                    (n ? (const char*)n : "?") + "'");
-                            if (e && *e)
-                                std::cout << ", error=\"" << (const char*)e << "\"";
-                            std::cout << "\n";
-                        }
-                        sqlite3_finalize(st);
-                    }
-                    // Leftover temp FTS table from failed swap?
-                    if (auto ftsNew =
-                            queryScalar("SELECT name FROM sqlite_master WHERE type='table' AND "
-                                        "name='documents_fts_new'")) {
-                        if (haveFail == false) {
-                            std::cout << "\nDatabase Migrations\n";
-                            std::cout << "-------------------\n";
-                            haveFail = true;
-                        }
-                        std::cout << ui::status_warning("Found leftover 'documents_fts_new' — an "
-                                                        "FTS migration likely failed mid-way.")
-                                  << "\n";
-                        std::cout << "  Run: yams repair --fts5\n";
-                    }
-                    if (haveFail) {
-                        std::cout << "Hint: try 'yams repair --fts5' to rebuild FTS, or rerun your "
-                                     "command with '--verbose' for details.\n";
-                    }
-                    sqlite3_close(db);
-                }
-            } catch (...) {
-            }
-            std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
-
-            // Use cached status
-            if (!cachedStatus) {
-                std::cout << yams::cli::ui::colorize("✗ Failed to get status",
-                                                     yams::cli::ui::Ansi::RED)
-                          << "\n";
-                printTrustDiagnostics();
-                return;
-            }
-            const auto& st = cachedStatus.value();
-
-            std::vector<yams::cli::ui::Row> daemonRows;
-            std::string statusDisplay;
-            if (st.ready) {
-                statusDisplay = yams::cli::ui::colorize("✓ READY", yams::cli::ui::Ansi::GREEN);
-            } else {
-                statusDisplay = yams::cli::ui::colorize("◷ NOT READY", yams::cli::ui::Ansi::YELLOW);
-            }
-            daemonRows.push_back({"Status", statusDisplay, ""});
-
-            std::string state = st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState;
-            daemonRows.push_back({"State", state, ""});
-            daemonRows.push_back({"Version", st.version.empty() ? "unknown" : st.version, ""});
-            daemonRows.push_back({"Connections", std::to_string(st.activeConnections), ""});
-            yams::cli::ui::render_rows(std::cout, daemonRows);
-
-            // Vector scoring and resources
-            std::cout << "\n";
-            std::vector<yams::cli::ui::Row> resourceRows;
-
-            // Show vector scoring availability
-            try {
-                bool vecAvail = false, vecEnabled = false;
-                if (auto it = st.readinessStates.find("vector_embeddings_available");
-                    it != st.readinessStates.end())
-                    vecAvail = it->second;
-                if (auto it = st.readinessStates.find("vector_scoring_enabled");
-                    it != st.readinessStates.end())
-                    vecEnabled = it->second;
-
-                std::string vecStatus;
-                if (vecEnabled) {
-                    vecStatus = yams::cli::ui::colorize("✓ enabled", yams::cli::ui::Ansi::GREEN);
-                } else {
-                    vecStatus = yams::cli::ui::colorize("✗ disabled", yams::cli::ui::Ansi::YELLOW);
-                    vecStatus +=
-                        " (" +
-                        std::string(vecAvail ? "config weight=0" : "embeddings unavailable") + ")";
-                }
-                resourceRows.push_back({"Vector Scoring", vecStatus, ""});
-            } catch (...) {
-            }
-
-            // Show resources
-            try {
-                const auto& phase =
-                    (st.lifecycleState.empty() ? st.overallStatus : st.lifecycleState);
-                double ram = st.memoryUsageMb;
-                double cpu = st.cpuUsagePercent;
-                auto wt = st.requestCounts.find("worker_threads");
-                auto wa = st.requestCounts.find("worker_active");
-                auto wq = st.requestCounts.find("worker_queued");
-                bool haveWorkers = (wt != st.requestCounts.end()) ||
-                                   (wa != st.requestCounts.end()) || (wq != st.requestCounts.end());
-                bool haveResources = (ram > 0.0 || cpu > 0.0);
-
-                if (haveResources) {
-                    std::ostringstream ramStr;
-                    ramStr << std::fixed << std::setprecision(1) << ram << " MB";
-                    resourceRows.push_back({"Memory", ramStr.str(), ""});
-                    resourceRows.push_back({"CPU", std::to_string((int)cpu) + "%", ""});
-                } else if (!phase.empty()) {
-                    std::string pending = "pending (" + phase + ")";
-                    if (st.retryAfterMs > 0) {
-                        pending += " - retry after " + std::to_string(st.retryAfterMs) + "ms";
-                    }
-                    resourceRows.push_back({"Resources", pending, ""});
-                }
-
-                if (haveWorkers) {
-                    size_t threads = wt != st.requestCounts.end() ? wt->second : 0;
-                    size_t active = wa != st.requestCounts.end() ? wa->second : 0;
-                    size_t queued = wq != st.requestCounts.end() ? wq->second : 0;
-                    std::ostringstream workerStr;
-                    workerStr << threads << " threads, " << active << " active, " << queued
-                              << " queued";
-                    resourceRows.push_back({"Worker Pool", workerStr.str(), ""});
-                } else if (!st.ready) {
-                    resourceRows.push_back({"Worker Pool", "pending", ""});
-                }
-
-                if (st.muxQueuedBytes > 0) {
-                    resourceRows.push_back(
-                        {"Mux Queued", std::to_string(st.muxQueuedBytes) + " bytes", ""});
-                }
-            } catch (...) {
-            }
-
-            if (!resourceRows.empty()) {
-                yams::cli::ui::render_rows(std::cout, resourceRows);
-            }
-
-            printTrustDiagnostics();
-        } catch (const std::exception& e) {
-            std::cout << "Daemon: ERROR - " << e.what() << "\n";
-        }
+        doctor::DaemonCheck check;
+        check.execute(std::cout, cli_, cachedStatus);
     }
 
     // Plugin utilities (delegating to extracted plugin_util)
-    static std::set<std::filesystem::path> readTrusted() { return plugin::readTrustedRoots(); }
+    static std::set<std::filesystem::path> readTrusted() {
+        return doctor::PluginTrust::readTrusted();
+    }
 
     static bool parseBoolValue(std::string value, bool fallback) {
         if (value.empty()) {
@@ -1935,39 +1618,16 @@ private:
     }
 
     static bool resolveStrictPluginDirMode() {
-        bool strictMode = false;
-        try {
-            auto cfg = yams::config::parse_simple_toml(yams::config::get_config_path());
-            if (auto it = cfg.find("daemon.plugin_dir_strict"); it != cfg.end()) {
-                strictMode = parseBoolValue(it->second, strictMode);
-            }
-        } catch (...) {
-        }
-        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-            strictMode = parseBoolValue(envStrict, strictMode);
-        }
-        return strictMode;
+        return doctor::PluginTrust::resolveStrictPluginDirMode();
     }
 
     static std::vector<std::filesystem::path>
     dedupeRoots(const std::vector<std::filesystem::path>& roots) {
-        std::set<std::string> seen;
-        std::vector<std::filesystem::path> unique;
-        unique.reserve(roots.size());
-        for (const auto& p : roots) {
-            auto key = p.lexically_normal().string();
-            if (seen.insert(key).second) {
-                unique.push_back(p);
-            }
-        }
-        return unique;
+        return doctor::PluginTrust::dedupeRoots(roots);
     }
 
     static std::vector<std::filesystem::path> getDefaultPluginRoots(bool strictMode) {
-        if (strictMode) {
-            return {};
-        }
-        return dedupeRoots(plugin::getPluginSearchDirs());
+        return doctor::PluginTrust::getDefaultPluginRoots(strictMode);
     }
 
     std::optional<std::vector<std::filesystem::path>> fetchTrustedRootsFromDaemon() const {
@@ -2583,182 +2243,22 @@ private:
 
     static bool isTrustedPath(const std::filesystem::path& p,
                               const std::set<std::filesystem::path>& roots) {
-        return plugin::isPathTrusted(p, roots);
+        return doctor::PluginTrust::isTrustedPath(p, roots);
     }
 
     static std::optional<std::filesystem::path> resolveByName(const std::string& name) {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-
-        for (const auto& dir : plugin::getPluginSearchDirs()) {
-            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
-                continue;
-            }
-
-            for (const auto& entry : fs::directory_iterator(dir, ec)) {
-                if (!entry.is_regular_file(ec)) {
-                    continue;
-                }
-
-                const auto& path = entry.path();
-                if (!plugin::hasPluginExtension(path)) {
-                    continue;
-                }
-
-                const std::string stem = path.stem().string();
-                const std::string filename = path.filename().string();
-                if (stem == name || filename == name || filename.find(name) != std::string::npos) {
-                    return path;
-                }
-            }
-        }
-
-        return std::nullopt;
+        return doctor::PluginTrust::resolveByName(name);
     }
 
     // Perform local dlopen + symbol/iface probes
     void checkPlugin(const std::string& arg) {
-        namespace fs = std::filesystem;
-        std::cout << "Plugin Doctor: " << arg << "\n";
-        fs::path target(arg);
-        if (!fs::exists(target)) {
-            auto rp = resolveByName(arg);
-            if (rp)
-                target = *rp;
-        }
-        if (!fs::exists(target)) {
-            std::cout << "  [FAIL] Not found as path or name in default dirs\n";
-            return;
-        }
-        // Read trust
-        auto trusted = readTrusted();
-        bool isTrusted = isTrustedPath(target, trusted);
-
-        // dlopen and basic ABI checks
-        void* handle = dlopen(target.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
-        if (!handle) {
-            std::cout << "  [FAIL] dlopen: " << (dlerror() ? dlerror() : "unknown") << "\n";
-            return;
-        }
-        auto close = [&]() { dlclose(handle); };
-        auto get_abi = reinterpret_cast<int (*)()>(dlsym(handle, "yams_plugin_get_abi_version"));
-        auto get_name = reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_name"));
-        auto get_ver =
-            reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_version"));
-        auto get_manifest =
-            reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_manifest_json"));
-        bool have_core = (get_abi && get_name && get_ver);
-        if (!have_core) {
-            std::cout << "  [FAIL] Missing required ABI symbols (get_abi/get_name/get_version)\n";
-            close();
-            return;
-        }
-        int abi = get_abi();
-        std::string pname = get_name() ? get_name() : "";
-        std::string pver = get_ver() ? get_ver() : "";
-        std::string manifest = (get_manifest && get_manifest()) ? get_manifest() : std::string();
-        std::cout << "  Name: " << pname << "  Version: " << pver << "  ABI: " << abi << "\n";
-        std::cout << "  Trusted: " << (isTrusted ? "yes" : "no") << "\n";
-
-        // Probe interface (default: model_provider_v1@1)
-        std::string iface = ifaceId_.empty() ? std::string("model_provider_v1") : ifaceId_;
-        uint32_t ivers = (ifaceVersion_ == 0 ? 1u : ifaceVersion_);
-        using GetIfaceFn = int (*)(const char*, uint32_t, void**);
-        dlerror();
-        auto get_iface = reinterpret_cast<GetIfaceFn>(dlsym(handle, "yams_plugin_get_interface"));
-        const char* dlerr = dlerror();
-        if (dlerr || !get_iface) {
-            std::cout << "  Interface: [SKIP] get_interface symbol not found\n";
-        } else {
-            void* out = nullptr;
-            int rc = get_iface(iface.c_str(), ivers, &out);
-            std::cout << "  Interface: " << iface << " v" << ivers << " -> "
-                      << ((rc == 0 && out) ? "AVAILABLE" : "UNAVAILABLE") << "\n";
-            // If model_provider_v1 is available, probe batch embedding API
-            if (rc == 0 && out && iface == std::string(YAMS_IFACE_MODEL_PROVIDER_V1) &&
-                ivers == YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) {
-                auto* prov = reinterpret_cast<yams_model_provider_v1*>(out);
-                bool has_batch = prov->generate_embedding_batch != nullptr;
-                std::cout << "  Batch API: " << (has_batch ? "PRESENT" : "MISSING") << "\n";
-                if (has_batch) {
-                    // Try a tiny batch with a likely model name
-                    const char* model_id = nullptr;
-                    std::string chosen;
-                    if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
-                        chosen = pref;
-                    if (chosen.empty()) {
-                        // Common defaults
-                        const char* candidates[] = {"nomic-embed-text-v1.5", "all-mpnet-base-v2",
-                                                    nullptr};
-                        for (int i = 0; candidates[i]; ++i) {
-                            chosen = candidates[i];
-                            break;
-                        }
-                    }
-                    model_id = chosen.c_str();
-                    bool loaded = false;
-                    if (prov->is_model_loaded) {
-                        bool out_loaded = false;
-                        if (prov->is_model_loaded(prov->self, model_id, &out_loaded) == YAMS_OK)
-                            loaded = out_loaded;
-                    }
-                    if (!loaded && prov->load_model) {
-                        // Best-effort load; ignore errors
-                        (void)prov->load_model(prov->self, model_id, nullptr, nullptr);
-                    }
-                    const char* texts_c[2] = {"hello", "world"};
-                    size_t lens[2] = {5, 5};
-                    float* vecs = nullptr;
-                    size_t out_b = 0, out_d = 0;
-                    int brc = prov->generate_embedding_batch(
-                        prov->self, model_id, reinterpret_cast<const uint8_t* const*>(texts_c),
-                        lens, 2, &vecs, &out_b, &out_d);
-                    if (brc == YAMS_OK && out_b == 2 && out_d > 0 && vecs != nullptr) {
-                        std::cout << "  Batch probe: OK (batch=" << out_b << ", dim=" << out_d
-                                  << ")\n";
-                        if (prov->free_embedding_batch)
-                            prov->free_embedding_batch(prov->self, vecs, out_b, out_d);
-                    } else {
-                        std::cout << "  Batch probe: FAIL (status=" << brc << ")\n";
-                        if (vecs && prov->free_embedding_batch)
-                            prov->free_embedding_batch(prov->self, vecs, out_b, out_d);
-                    }
-                }
-            }
-        }
-        close();
-
-        // Optional: daemon dry-run load to validate trust + loader behavior
-        if (!noDaemonProbe_) {
-            try {
-                using namespace yams::daemon;
-                yams::daemon::ClientConfig cfg;
-                if (cli_)
-                    if (cli_->hasExplicitDataDir()) {
-                        cfg.dataDir = cli_->getDataPath();
-                    }
-                cfg.requestTimeout = std::chrono::milliseconds(4000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                if (!leaseRes) {
-                    throw std::runtime_error(leaseRes.error().message);
-                }
-                auto leaseHandle = std::move(leaseRes.value());
-                auto& client = **leaseHandle;
-                PluginLoadRequest req;
-                req.pathOrName = target.string();
-                req.dryRun = true;
-                auto r = yams::cli::run_result<yams::daemon::PluginLoadResponse>(
-                    client.call(req), std::chrono::seconds(4));
-                if (!r) {
-                    std::cout << "  Daemon: DRY-RUN LOAD -> FAIL: " << r.error().message << "\n";
-                } else {
-                    const auto& lr = r.value();
-                    std::cout << "  Daemon: DRY-RUN LOAD -> OK (" << lr.record.name << ")\n";
-                }
-            } catch (const std::exception& e) {
-                std::cout << "  Daemon: DRY-RUN LOAD -> ERROR: " << e.what() << "\n";
-            }
-        }
+        doctor::PluginCheck::Config cfg;
+        cfg.arg = arg;
+        cfg.ifaceId = ifaceId_;
+        cfg.ifaceVersion = ifaceVersion_;
+        cfg.noDaemonProbe = noDaemonProbe_;
+        doctor::PluginCheck check;
+        check.execute(std::cout, cli_, cfg);
     }
 
     // doctor (no args): quick combined
@@ -3603,278 +3103,18 @@ Result<void> DoctorCommand::validateGraph() {
 }
 
 void DoctorCommand::runDedupe() {
-    try {
-        printHeader("Document Dedupe");
-        if (!cli_) {
-            std::cout << "  " << ui::status_error("CLI context unavailable") << "\n";
-            return;
-        }
-
-        if (dedupeMode_ == "semantic") {
-            auto ensured = cli_->ensureStorageInitialized();
-            if (!ensured) {
-                std::cout << "  "
-                          << ui::status_error("Storage init failed: " + ensured.error().message)
-                          << "\n";
-                return;
-            }
-
-            auto metadataRepo = cli_->getMetadataRepository();
-            auto vectorDb = cli_->getVectorDatabase();
-            if (!metadataRepo || !vectorDb) {
-                std::cout << "  " << ui::status_error("Metadata or vector database unavailable")
-                          << "\n";
-                return;
-            }
-
-            auto analysis = analyzeSemanticDuplicates(*metadataRepo, *vectorDb);
-            if (!analysis.has_value()) {
-                std::cout << "  " << ui::status_error("Semantic dedupe query failed") << "\n";
-                return;
-            }
-            if (analysis->docs.empty()) {
-                std::cout << "  "
-                          << ui::status_ok("No embedded documents available for semantic dedupe")
-                          << "\n";
-                return;
-            }
-            if (analysis->groups.empty()) {
-                std::cout << "  " << ui::status_ok("No semantic duplicate groups") << "\n";
-                return;
-            }
-
-            size_t candDel = 0;
-            for (const auto& group : analysis->groups) {
-                candDel += group.members.size() - 1;
-                if (dedupeVerbose_) {
-                    std::cout << "Group: semantic keep="
-                              << analysis->docs[group.canonicalIndex].doc.id
-                              << " total=" << group.members.size() << "\n";
-                    for (size_t rank = 0; rank < group.members.size(); ++rank) {
-                        const auto& doc = analysis->docs[group.members[rank]].doc;
-                        std::cout << (rank == 0 ? "  KEEP" : "  DEL ") << " id=" << doc.id
-                                  << " hash=" << doc.sha256Hash.substr(0, 8)
-                                  << " size=" << doc.fileSize << " path=" << doc.filePath << "\n";
-                    }
-                }
-            }
-
-            auto persistResult = persistSemanticDuplicateAnalysis(*metadataRepo, *analysis);
-            if (!persistResult) {
-                std::cout << "  "
-                          << ui::status_error("Persist failed: " + persistResult.error().message)
-                          << "\n";
-                return;
-            }
-
-            printStatusLine("Embedded documents", std::to_string(analysis->docs.size()));
-            printStatusLine("Semantic duplicate groups", std::to_string(analysis->groups.size()));
-            printStatusLine("Deletion candidates", std::to_string(candDel));
-            printStatusLine("Semantic threshold", std::to_string(dedupeSemanticThreshold_));
-            std::cout << "  " << ui::status_ok("Saved semantic duplicate suggestions to metadata")
-                      << "\n";
-            if (candDel > 0) {
-                std::cout << "  "
-                          << ui::status_info(
-                                 "Use 'yams repair --dedupe' to remove semantic duplicates.")
-                          << "\n";
-            }
-
-            if (dedupeVerbose_ && !analysis->accepted.empty()) {
-                auto accepted = analysis->accepted;
-                std::sort(accepted.begin(), accepted.end(),
-                          [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
-                size_t shown = 0;
-                for (const auto& match : accepted) {
-                    const auto& lhs = analysis->docs[match.lhs].doc;
-                    const auto& rhs = analysis->docs[match.rhs].doc;
-                    std::cout << "Pair: " << lhs.id << " <-> " << rhs.id << " cosine=" << std::fixed
-                              << std::setprecision(3) << match.cosine
-                              << " title_overlap=" << match.titleOverlap
-                              << " path_overlap=" << match.pathOverlap << " score=" << match.score
-                              << "\n";
-                    if (++shown >= 10) {
-                        break;
-                    }
-                }
-            }
-            return;
-        }
-
-        namespace fs = std::filesystem;
-        fs::path dataDir = cli_->getDataPath();
-
-        // Resolve knowledge_graph.db_path (default: yams.db). Accept absolute override.
-        std::string dbName = "yams.db";
-        try {
-            auto cfg = parseSimpleToml(getConfigPath());
-            auto it = cfg.find("knowledge_graph.db_path");
-            if (it != cfg.end() && !it->second.empty()) {
-                dbName = it->second;
-            }
-        } catch (...) {
-        }
-
-        fs::path dbPath = fs::path(dbName).is_absolute() ? fs::path(dbName) : dataDir / dbName;
-        if (!fs::exists(dbPath)) {
-            std::cout << "  "
-                      << ui::status_error(
-                             "metadata database not found (knowledge_graph.db_path): " +
-                             dbPath.string())
-                      << "\n";
-            return;
-        }
-        yams::metadata::Database db;
-        auto ro = db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite);
-        if (!ro) {
-            std::cout << "  " << ui::status_error(std::string("Open failed: ") + ro.error().message)
-                      << "\n";
-            return;
-        }
-        auto ps = db.prepare(
-            "SELECT id,file_path,file_name,file_size,sha256_hash,modified_time,indexed_time FROM "
-            "documents");
-        if (!ps) {
-            std::cout << "  " << ui::status_error("Prepare failed: " + ps.error().message) << "\n";
-            return;
-        }
-        yams::metadata::Statement stmt = std::move(ps).value();
-        struct Row {
-            int64_t id;
-            std::string path;
-            std::string name;
-            int64_t size;
-            std::string hash;
-            int64_t mtime;
-            int64_t itime;
-        };
-        std::vector<Row> rows;
-        while (true) {
-            auto step = stmt.step();
-            if (!step) {
-                std::cout << "  " << ui::status_error("Step error: " + step.error().message)
-                          << "\n";
-                return;
-            }
-            if (!step.value())
-                break;
-            rows.push_back({stmt.getInt64(0), stmt.getString(1), stmt.getString(2),
-                            stmt.getInt64(3), stmt.getString(4), stmt.getInt64(5),
-                            stmt.getInt64(6)});
-        }
-        if (rows.empty()) {
-            std::cout << "  " << ui::status_ok("No documents") << "\n";
-            return;
-        }
-        struct G {
-            Row r;
-        };
-        std::unordered_map<std::string, std::vector<G>> groups;
-        auto keyFn = [&](const Row& r) -> std::string {
-            if (dedupeMode_ == "name")
-                return r.name;
-            if (dedupeMode_ == "hash")
-                return r.hash;
-            return r.path;
-        };
-        for (auto& r : rows)
-            groups[keyFn(r)].push_back({r});
-        size_t dupGroups = 0, candDel = 0, skipped = 0;
-        std::vector<int64_t> toDelete;
-        for (auto& [k, vec] : groups) {
-            if (vec.size() < 2)
-                continue;
-            bool hashesDiffer = false;
-            std::string h0 = vec.front().r.hash;
-            for (auto& gi : vec)
-                if (gi.r.hash != h0) {
-                    hashesDiffer = true;
-                    break;
-                }
-            if (hashesDiffer && !dedupeForce_) {
-                skipped++;
-                continue;
-            }
-            dupGroups++;
-            auto newest = [](const G& a, const G& b) { return a.r.mtime > b.r.mtime; };
-            auto oldest = [](const G& a, const G& b) { return a.r.mtime < b.r.mtime; };
-            auto largest = [](const G& a, const G& b) { return a.r.size > b.r.size; };
-            if (dedupeStrategy_ == "keep-oldest")
-                std::sort(vec.begin(), vec.end(), oldest);
-            else if (dedupeStrategy_ == "keep-largest")
-                std::sort(vec.begin(), vec.end(), largest);
-            else
-                std::sort(vec.begin(), vec.end(), newest);
-            for (size_t i = 1; i < vec.size(); ++i)
-                toDelete.push_back(vec[i].r.id);
-            candDel += vec.size() - 1;
-            if (dedupeVerbose_) {
-                std::cout << "Group: " << k << " keep=" << vec[0].r.id << " total=" << vec.size()
-                          << (hashesDiffer ? " (hash-diff)" : "") << "\n";
-                for (size_t i = 0; i < vec.size(); ++i) {
-                    const auto& rr = vec[i].r;
-                    std::cout << (i == 0 ? "  KEEP" : "  DEL ") << " id=" << rr.id
-                              << " hash=" << rr.hash.substr(0, 8) << " size=" << rr.size
-                              << " mtime=" << rr.mtime << " itime=" << rr.itime << "\n";
-                }
-            }
-        }
-        if (!dupGroups) {
-            std::cout << "  " << ui::status_ok("No duplicate groups (mode=" + dedupeMode_ + ")")
-                      << "\n";
-            return;
-        }
-        printStatusLine("Total documents", std::to_string(rows.size()));
-        printStatusLine("Duplicate groups", std::to_string(dupGroups));
-        printStatusLine("Deletion candidates", std::to_string(candDel));
-        if (skipped)
-            printStatusLine("Skipped (hash mismatch, use --force)", std::to_string(skipped));
-        if (!dedupeApply_) {
-            std::cout << "  " << ui::status_warning("Dry-run. Use --apply to delete.") << "\n";
-            return;
-        }
-        if (toDelete.empty()) {
-            std::cout << "  " << ui::status_ok("Nothing to delete") << "\n";
-            return;
-        }
-        auto br = db.execute("BEGIN TRANSACTION");
-        if (!br) {
-            std::cout << "  " << ui::status_error("BEGIN failed: " + br.error().message) << "\n";
-            return;
-        }
-        bool err = false;
-        for (auto id : toDelete) {
-            auto psd = db.prepare("DELETE FROM documents WHERE id=?");
-            if (!psd) {
-                std::cout << "  " << ui::status_error("Prepare delete failed") << "\n";
-                err = true;
-                break;
-            }
-            auto st2 = std::move(psd).value();
-            auto b = st2.bind(1, id);
-            if (!b) {
-                err = true;
-                break;
-            }
-            auto ex = st2.execute();
-            if (!ex) {
-                err = true;
-                break;
-            }
-        }
-        auto er = db.execute(err ? "ROLLBACK" : "COMMIT");
-        if (!er)
-            std::cout << "  " << ui::status_error("Txn end failed: " + er.error().message) << "\n";
-        if (err) {
-            std::cout << "  " << ui::status_error("Aborted due to errors") << "\n";
-            return;
-        }
-        std::cout << "  "
-                  << ui::status_ok("Deleted " + std::to_string(toDelete.size()) + " duplicate rows")
-                  << "\n";
-    } catch (const std::exception& e) {
-        std::cout << "  " << ui::status_error(std::string("Exception: ") + e.what()) << "\n";
-    }
+    doctor::DedupeCommand::Config cfg;
+    cfg.mode = dedupeMode_;
+    cfg.strategy = dedupeStrategy_;
+    cfg.semanticThreshold = dedupeSemanticThreshold_;
+    cfg.apply = dedupeApply_;
+    cfg.verbose = dedupeVerbose_;
+    cfg.force = dedupeForce_;
+    cfg.listOnly = dedupeList_;
+    cfg.listLimit = dedupeListLimit_;
+    cfg.groupKey = dedupeGroupKey_;
+    doctor::DedupeCommand cmd;
+    cmd.execute(std::cout, cli_, cfg);
 }
 
 void DoctorCommand::runPrune() {

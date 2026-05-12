@@ -1324,6 +1324,8 @@ if catch2_dep.found()
       'unit/cli/data_dir_resolution_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
+      'unit/cli/doctor/db_integrity_catch2_test.cpp',
+      'unit/cli/doctor/dim_consistency_catch2_test.cpp',
       'unit/cli/dr_command_catch2_test.cpp',
       'unit/cli/error_hints_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
