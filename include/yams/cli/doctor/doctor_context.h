@@ -25,6 +25,16 @@ struct DimensionConfig;
 
 namespace yams::cli::doctor {
 
+/// R2 keychain credential status for temp-credentials mode.
+struct R2ConfigStatus {
+    bool enabled{false};
+    std::string authMode{"direct"};
+    std::string accountId;
+    bool tokenPresent{false};
+    bool keychainSupported{true};
+    std::string detail;
+};
+
 /// RAII signal handler that allows Ctrl-C to cancel long-running doctor operations.
 /// On first SIGINT, sets a cancel flag. On second SIGINT, exits immediately.
 struct DoctorSignalGuard {
@@ -89,6 +99,10 @@ public:
     bool writeConfigDims(size_t dim) const;
     std::map<std::string, std::string> parseToml() const;
 
+    // ── Storage/config diagnostics ──────────────────────────────────────────
+
+    static R2ConfigStatus evaluateR2Config();
+
     // ── Vector helpers ──────────────────────────────────────────────────────
 
     std::pair<size_t, std::string> resolveEmbeddingDim();
@@ -97,6 +111,10 @@ public:
 
     static uint64_t walFileSize(const std::filesystem::path& dataDir, const std::string& dbName);
     static void forceWalCheckpointLocal(const std::filesystem::path& dbPath);
+
+    // ── Repair helpers ──────────────────────────────────────────────────────
+
+    static void repairGraph(std::ostream& os, YamsCLI* cli);
 
 private:
     YamsCLI* cli_{nullptr};

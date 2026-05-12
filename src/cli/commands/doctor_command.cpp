@@ -585,70 +585,10 @@ private:
         return yams::config::write_dimension_config(cfg, dim);
     }
 
-    struct R2KeychainStatus {
-        bool enabled{false};
-        std::string authMode{"direct"};
-        std::string accountId;
-        bool tokenPresent{false};
-        bool keychainSupported{true};
-        std::string detail;
-    };
+    using R2KeychainStatus = doctor::R2ConfigStatus;
 
     static R2KeychainStatus evaluateR2KeychainStatus() {
-        R2KeychainStatus status;
-        auto cfg = yams::config::parse_simple_toml(resolveConfigPath());
-        auto getValue = [&cfg](const std::string& key,
-                               const std::string& fallback = "") -> std::string {
-            auto it = cfg.find(key);
-            if (it == cfg.end() || it->second.empty()) {
-                return fallback;
-            }
-            return it->second;
-        };
-
-        std::string engine = getValue("storage.engine", "local");
-        std::transform(engine.begin(), engine.end(), engine.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (engine != "s3") {
-            status.detail = "storage.engine != s3";
-            return status;
-        }
-
-        std::string authMode = getValue("storage.s3.r2.auth_mode", "direct");
-        std::transform(authMode.begin(), authMode.end(), authMode.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        status.authMode = authMode;
-        if (authMode != "temp_credentials") {
-            status.detail = "storage.s3.r2.auth_mode != temp_credentials";
-            return status;
-        }
-
-        status.enabled = true;
-        status.accountId = getValue("storage.s3.r2.account_id", "");
-        if (status.accountId.empty()) {
-            status.accountId =
-                yams::storage::extractCloudflareR2AccountId(getValue("storage.s3.endpoint", ""));
-        }
-        if (status.accountId.empty()) {
-            status.detail = "account id is not configured";
-            return status;
-        }
-
-        auto token = yams::storage::loadCloudflareApiTokenFromKeychain(status.accountId);
-        if (token) {
-            status.tokenPresent = true;
-            status.detail = "keychain token found";
-            return status;
-        }
-
-        if (token.error().code == ErrorCode::NotSupported) {
-            status.keychainSupported = false;
-            status.detail = token.error().message;
-            return status;
-        }
-
-        status.detail = token.error().message;
-        return status;
+        return doctor::DoctorContext::evaluateR2Config();
     }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.

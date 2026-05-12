@@ -1,10 +1,12 @@
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/storage/storage_runtime_resolver.h>
 
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
@@ -203,6 +205,59 @@ void DoctorContext::forceWalCheckpointLocal(const std::filesystem::path& dbPath)
                      sqlite3_errmsg(db));
     }
     sqlite3_close(db);
+}
+
+R2ConfigStatus DoctorContext::evaluateR2Config() {
+    R2ConfigStatus status;
+    auto cfg = yams::config::parse_simple_toml(yams::config::get_config_path());
+    auto getValue = [&cfg](const std::string& key,
+                           const std::string& fallback = "") -> std::string {
+        auto it = cfg.find(key);
+        if (it == cfg.end() || it->second.empty())
+            return fallback;
+        return it->second;
+    };
+
+    std::string engine = getValue("storage.engine", "local");
+    std::transform(engine.begin(), engine.end(), engine.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (engine != "s3") {
+        status.detail = "storage.engine != s3";
+        return status;
+    }
+
+    std::string authMode = getValue("storage.s3.r2.auth_mode", "direct");
+    std::transform(authMode.begin(), authMode.end(), authMode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    status.authMode = authMode;
+    if (authMode != "temp_credentials") {
+        status.detail = "storage.s3.r2.auth_mode != temp_credentials";
+        return status;
+    }
+
+    status.enabled = true;
+    status.accountId = getValue("storage.s3.r2.account_id", "");
+    if (status.accountId.empty())
+        status.accountId =
+            yams::storage::extractCloudflareR2AccountId(getValue("storage.s3.endpoint", ""));
+    if (status.accountId.empty()) {
+        status.detail = "account id is not configured";
+        return status;
+    }
+
+    auto token = yams::storage::loadCloudflareApiTokenFromKeychain(status.accountId);
+    if (token) {
+        status.tokenPresent = true;
+        status.detail = "keychain token found";
+        return status;
+    }
+    if (token.error().code == ErrorCode::NotSupported) {
+        status.keychainSupported = false;
+        status.detail = token.error().message;
+        return status;
+    }
+    status.detail = token.error().message;
+    return status;
 }
 
 } // namespace yams::cli::doctor
