@@ -1682,201 +1682,20 @@ Result<void> DoctorCommand::writeConfigValue(const std::string& key, const std::
 }
 
 Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
-    try {
-        // Simple baseline heuristic
-        unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0)
-            hc = 4;
-        uint32_t ipcMax = std::min<unsigned>(64, hc * 2);
-        uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
-        std::map<std::string, std::string> suggestions{
-            {"tuning.backpressure_read_pause_ms", "10"},
-            {"tuning.worker_poll_ms", "75"},
-            {"tuning.idle_cpu_pct", "10.0"},
-            {"tuning.idle_mux_low_bytes", "4194304"},
-            {"tuning.idle_shrink_hold_ms", "5000"},
-            {"tuning.pool_cooldown_ms", "500"},
-            {"tuning.pool_scale_step", "1"},
-            {"tuning.pool_ipc_min", "1"},
-            {"tuning.pool_ipc_max", std::to_string(ipcMax)},
-            {"tuning.pool_io_min", "1"},
-            {"tuning.pool_io_max", std::to_string(ioMax)},
-        };
-        std::cout << "Doctor tuning baseline (proposed):\n";
-        for (const auto& [k, v] : suggestions) {
-            std::cout << "  " << k << " = " << v << "\n";
-        }
-        if (apply) {
-            for (const auto& [k, v] : suggestions) {
-                auto r = writeConfigValue(k, v);
-                if (!r)
-                    return r;
-            }
-            std::cout << ui::status_ok("Applied tuning baseline to [tuning] in config.toml")
-                      << "\n";
-        } else {
-            std::cout << "Use 'yams doctor tuning --apply' to write these values.\n";
-        }
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
-    }
+    doctor::DoctorContext::applyTuningBaseline(std::cout, apply);
+    return Result<void>();
 }
 
 // Build/repair knowledge graph using tags/metadata (daemon-first approach)
 Result<void> DoctorCommand::repairGraph() {
-    try {
-        using namespace yams::daemon;
-        using namespace yams::cli::ui;
-
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::seconds(120);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-        if (!leaseRes) {
-            return Error{ErrorCode::InternalError,
-                         "Daemon unavailable: " + leaseRes.error().message};
-        }
-
-        auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
-
-        GraphRepairRequest req;
-        req.dryRun = false;
-
-        std::cout << status_pending("Repairing knowledge graph") << "\n";
-
-        auto result = yams::cli::run_result(client.graphRepair(req), std::chrono::seconds(180),
-                                            getExecutor());
-        if (!result) {
-            std::cout << status_error("Graph repair failed") << "\n";
-            return Error{ErrorCode::InternalError,
-                         "Graph repair failed: " + result.error().message};
-        }
-
-        const auto& resp = result.value();
-
-        if (resp.errors == 0) {
-            std::cout << status_ok("Graph repair completed") << "\n\n";
-        } else {
-            std::cout << status_warning("Graph repair completed with errors") << "\n\n";
-        }
-
-        std::cout << "  " << colorize("Nodes created:", Ansi::CYAN) << " "
-                  << format_number(resp.nodesCreated) << "\n";
-        std::cout << "  " << colorize("Nodes updated:", Ansi::CYAN) << " "
-                  << format_number(resp.nodesUpdated) << "\n";
-        std::cout << "  " << colorize("Edges created:", Ansi::CYAN) << " "
-                  << format_number(resp.edgesCreated) << "\n";
-
-        if (resp.errors > 0) {
-            std::cout << "  " << colorize("Errors:", Ansi::YELLOW) << " "
-                      << format_number(resp.errors) << "\n";
-        }
-
-        if (!resp.issues.empty()) {
-            std::cout << "\n" << colorize("Issues:", Ansi::YELLOW) << "\n";
-            size_t displayCount = std::min(resp.issues.size(), size_t(10));
-            for (size_t i = 0; i < displayCount; ++i) {
-                std::cout << "  " << bullet(resp.issues[i]) << "\n";
-            }
-            if (resp.issues.size() > displayCount) {
-                std::cout << "  "
-                          << colorize("... and " +
-                                          std::to_string(resp.issues.size() - displayCount) +
-                                          " more",
-                                      Ansi::DIM)
-                          << "\n";
-            }
-        }
-
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, e.what()};
-    }
+    doctor::DoctorContext::repairGraph(std::cout, cli_);
+    return Result<void>();
 }
 
 // Validate knowledge graph health
 Result<void> DoctorCommand::validateGraph() {
-    try {
-        using namespace yams::daemon;
-        using namespace yams::cli::ui;
-
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::seconds(60);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-        if (!leaseRes) {
-            return Error{ErrorCode::InternalError,
-                         "Daemon unavailable: " + leaseRes.error().message};
-        }
-
-        auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
-
-        GraphValidateRequest req;
-
-        std::cout << status_pending("Validating knowledge graph") << "\n";
-
-        auto result = yams::cli::run_result(client.graphValidate(req), std::chrono::seconds(120),
-                                            getExecutor());
-        if (!result) {
-            std::cout << status_error("Graph validation failed") << "\n";
-            return Error{ErrorCode::InternalError,
-                         "Graph validation failed: " + result.error().message};
-        }
-
-        const auto& resp = result.value();
-
-        bool hasIssues =
-            !resp.issues.empty() || resp.orphanedNodes > 0 || resp.unreachableNodes > 0;
-        if (!hasIssues) {
-            std::cout << status_ok("Graph validation completed - no issues found") << "\n\n";
-        } else {
-            std::cout << status_warning("Graph validation completed - issues detected") << "\n\n";
-        }
-
-        std::cout << "  " << colorize("Total nodes:", Ansi::CYAN) << " "
-                  << format_number(resp.totalNodes) << "\n";
-        std::cout << "  " << colorize("Total edges:", Ansi::CYAN) << " "
-                  << format_number(resp.totalEdges) << "\n";
-
-        if (resp.orphanedNodes > 0) {
-            std::cout << "  " << colorize("Orphaned nodes:", Ansi::YELLOW) << " "
-                      << format_number(resp.orphanedNodes) << "\n";
-        }
-
-        if (resp.unreachableNodes > 0) {
-            std::cout << "  " << colorize("Unreachable nodes:", Ansi::YELLOW) << " "
-                      << format_number(resp.unreachableNodes) << "\n";
-        }
-
-        if (!resp.issues.empty()) {
-            std::cout << "\n" << colorize("Issues:", Ansi::YELLOW) << "\n";
-            size_t displayCount = std::min(resp.issues.size(), size_t(10));
-            for (size_t i = 0; i < displayCount; ++i) {
-                std::cout << "  " << bullet(resp.issues[i]) << "\n";
-            }
-            if (resp.issues.size() > displayCount) {
-                std::cout << "  "
-                          << colorize("... and " +
-                                          std::to_string(resp.issues.size() - displayCount) +
-                                          " more",
-                                      Ansi::DIM)
-                          << "\n";
-            }
-        }
-
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError, e.what()};
-    }
+    doctor::DoctorContext::validateGraph(std::cout, cli_);
+    return Result<void>();
 }
 
 void DoctorCommand::runDedupe() {
@@ -1936,80 +1755,8 @@ void DoctorCommand::runTune() {
 }
 
 void DoctorCommand::printBenchmarkHistory() {
-    using namespace yams::cli::ui;
-
-    yams::search::BenchmarkHistoryStore store(yams::config::get_data_dir() /
-                                              "benchmark_history.json");
-    auto rowsResult = store.read(benchmarkHistoryLimit_);
-    if (!rowsResult) {
-        if (benchmarkHistoryJson_) {
-            std::cout << nlohmann::json{{"error", rowsResult.error().message}}.dump(2) << "\n";
-        } else {
-            std::cout << "  "
-                      << status_error("Failed to read benchmark history: " +
-                                      rowsResult.error().message)
-                      << "\n";
-        }
-        return;
-    }
-
-    const auto& rows = rowsResult.value();
-
-    if (benchmarkHistoryJson_) {
-        nlohmann::json out = nlohmann::json::array();
-        for (const auto& row : rows) {
-            out.push_back(row.toJson());
-        }
-        std::cout << out.dump(2) << "\n";
-        return;
-    }
-
-    std::cout << "\n" << section_header("Benchmark History") << "\n\n";
-    std::cout << "  " << colorize("Path:", Ansi::CYAN) << " " << store.path().string() << "\n";
-    std::cout << "  " << colorize("Rows:", Ansi::CYAN) << " " << rows.size()
-              << (rows.size() == benchmarkHistoryLimit_ ? " (truncated)" : "") << "\n\n";
-
-    if (rows.empty()) {
-        std::cout << "  " << status_ok("No history yet — run `yams doctor benchmark` first")
-                  << "\n";
-        return;
-    }
-
-    const char* headers[] = {"Timestamp", "Queries", "MRR", "R@K", "Mean ms", "Tuning", "Trend"};
-    std::cout << "  ";
-    for (const auto* h : headers) {
-        std::cout << colorize(h, Ansi::BOLD) << "\t";
-    }
-    std::cout << "\n";
-
-    std::optional<float> prevMrr;
-    for (const auto& row : rows) {
-        const auto& r = row.results;
-        std::string trend = "→";
-        const char* trendColor = Ansi::DIM;
-        if (prevMrr) {
-            if (r.mrr > *prevMrr + 1e-4f) {
-                trend = "↑";
-                trendColor = Ansi::GREEN;
-            } else if (r.mrr < *prevMrr - 1e-4f) {
-                trend = "↓";
-                trendColor = Ansi::RED;
-            }
-        }
-        prevMrr = r.mrr;
-
-        char mrrBuf[16];
-        std::snprintf(mrrBuf, sizeof(mrrBuf), "%.3f", r.mrr);
-        char recallBuf[16];
-        std::snprintf(recallBuf, sizeof(recallBuf), "%.3f", r.recallAtK);
-        char latBuf[16];
-        std::snprintf(latBuf, sizeof(latBuf), "%.1f", r.latency.meanMs);
-
-        std::cout << "  " << r.timestamp << "\t" << r.queriesRun << "\t" << mrrBuf << "\t"
-                  << recallBuf << "\t" << latBuf << "\t" << (r.tuningState.value_or("-")) << "\t"
-                  << colorize(trend, trendColor) << "\n";
-    }
-    std::cout << "\n";
+    doctor::BenchmarkCommand cmd(cli_, {});
+    cmd.printHistory(std::cout, benchmarkHistoryJson_, benchmarkHistoryLimit_);
 }
 
 void DoctorCommand::runVectorsFix() {
