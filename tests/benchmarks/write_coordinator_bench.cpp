@@ -63,7 +63,7 @@ BenchConfig loadConfig() {
             return fallback;
         char* end = nullptr;
         long parsed = std::strtol(val, &end, 10);
-        if (end == val || *end != '\0')
+        if (end == nullptr || end == val || *end != '\0')
             return fallback;
         return static_cast<int>(std::clamp<long>(parsed, minVal, maxVal));
     };
