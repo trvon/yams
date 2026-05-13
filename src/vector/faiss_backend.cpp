@@ -489,7 +489,11 @@ void FaissBackend::reconstructEmbedding(VectorRecord& rec, size_t recIdx) const 
     if (!rec.embedding.empty() || rec.embedding_dim == 0 || !index_)
         return;
     rec.embedding.resize(rec.embedding_dim);
-    index_->index->reconstruct(static_cast<faiss::idx_t>(recIdx), rec.embedding.data());
+    try {
+        index_->index->reconstruct(static_cast<faiss::idx_t>(recIdx + 1), rec.embedding.data());
+    } catch (...) {
+        rec.embedding.clear();
+    }
 }
 
 // ── Entity vectors (all unsupported) ────────────────────────────────────────

@@ -27,6 +27,7 @@ public:
         uint64_t unreferencedBytes{0};
         uint64_t negativeRefCounts{0};
         bool statsDrift{false};
+        bool dbError{false};
         std::vector<AdjustedStat> driftDetails; // capped at 20
         bool ok{true};
     };

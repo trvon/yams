@@ -7,6 +7,10 @@ namespace yams::daemon {
 MetadataWriteFacade::MetadataWriteFacade(WriteCoordinator* wc, metadata::MetadataRepository* repo)
     : wc_(wc), repo_(repo), coalescer_("MetadataWriteFacade") {}
 
+MetadataWriteFacade::~MetadataWriteFacade() {
+    flush();
+}
+
 void MetadataWriteFacade::setMetadata(int64_t docId, const std::string& key,
                                       metadata::MetadataValue value) {
     if (wc_) {

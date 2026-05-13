@@ -68,7 +68,8 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
 
     void* handle = dlopen(target.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
-        os << "  [FAIL] dlopen: " << (dlerror() ? dlerror() : "unknown") << "\n";
+        const char* dlErr = dlerror();
+        os << "  [FAIL] dlopen: " << (dlErr ? dlErr : "unknown") << "\n";
         return;
     }
     auto close = [&]() { dlclose(handle); };

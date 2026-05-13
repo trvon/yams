@@ -352,45 +352,40 @@ Result<void> persistSemanticDuplicateAnalysis(metadata::MetadataRepository& meta
 } // namespace
 
 void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
-    (void)os;
-
     try {
-        DoctorRender::printHeader(std::cout, "Document Dedupe");
+        DoctorRender::printHeader(os, "Document Dedupe");
         if (!cli) {
-            std::cout << "  " << ui::status_error("CLI context unavailable") << "\n";
+            os << "  " << ui::status_error("CLI context unavailable") << "\n";
             return;
         }
 
         if (cfg.mode == "semantic") {
             auto ensured = cli->ensureStorageInitialized();
             if (!ensured) {
-                std::cout << "  "
-                          << ui::status_error("Storage init failed: " + ensured.error().message)
-                          << "\n";
+                os << "  " << ui::status_error("Storage init failed: " + ensured.error().message)
+                   << "\n";
                 return;
             }
 
             auto metadataRepo = cli->getMetadataRepository();
             auto vectorDb = cli->getVectorDatabase();
             if (!metadataRepo || !vectorDb) {
-                std::cout << "  " << ui::status_error("Metadata or vector database unavailable")
-                          << "\n";
+                os << "  " << ui::status_error("Metadata or vector database unavailable") << "\n";
                 return;
             }
 
             auto analysis = analyzeSemanticDuplicates(*metadataRepo, *vectorDb, cfg);
             if (!analysis.has_value()) {
-                std::cout << "  " << ui::status_error("Semantic dedupe query failed") << "\n";
+                os << "  " << ui::status_error("Semantic dedupe query failed") << "\n";
                 return;
             }
             if (analysis->docs.empty()) {
-                std::cout << "  "
-                          << ui::status_ok("No embedded documents available for semantic dedupe")
-                          << "\n";
+                os << "  " << ui::status_ok("No embedded documents available for semantic dedupe")
+                   << "\n";
                 return;
             }
             if (analysis->groups.empty()) {
-                std::cout << "  " << ui::status_ok("No semantic duplicate groups") << "\n";
+                os << "  " << ui::status_ok("No semantic duplicate groups") << "\n";
                 return;
             }
 
@@ -398,41 +393,36 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
             for (const auto& group : analysis->groups) {
                 candDel += group.members.size() - 1;
                 if (cfg.verbose) {
-                    std::cout << "Group: semantic keep="
-                              << analysis->docs[group.canonicalIndex].doc.id
-                              << " total=" << group.members.size() << "\n";
+                    os << "Group: semantic keep=" << analysis->docs[group.canonicalIndex].doc.id
+                       << " total=" << group.members.size() << "\n";
                     for (size_t rank = 0; rank < group.members.size(); ++rank) {
                         const auto& doc = analysis->docs[group.members[rank]].doc;
-                        std::cout << (rank == 0 ? "  KEEP" : "  DEL ") << " id=" << doc.id
-                                  << " hash=" << doc.sha256Hash.substr(0, 8)
-                                  << " size=" << doc.fileSize << " path=" << doc.filePath << "\n";
+                        os << (rank == 0 ? "  KEEP" : "  DEL ") << " id=" << doc.id
+                           << " hash=" << doc.sha256Hash.substr(0, 8) << " size=" << doc.fileSize
+                           << " path=" << doc.filePath << "\n";
                     }
                 }
             }
 
             auto persistResult = persistSemanticDuplicateAnalysis(*metadataRepo, *analysis, cfg);
             if (!persistResult) {
-                std::cout << "  "
-                          << ui::status_error("Persist failed: " + persistResult.error().message)
-                          << "\n";
+                os << "  " << ui::status_error("Persist failed: " + persistResult.error().message)
+                   << "\n";
                 return;
             }
 
-            DoctorRender::printStatusLine(std::cout, "Embedded documents",
+            DoctorRender::printStatusLine(os, "Embedded documents",
                                           std::to_string(analysis->docs.size()));
-            DoctorRender::printStatusLine(std::cout, "Semantic duplicate groups",
+            DoctorRender::printStatusLine(os, "Semantic duplicate groups",
                                           std::to_string(analysis->groups.size()));
-            DoctorRender::printStatusLine(std::cout, "Deletion candidates",
-                                          std::to_string(candDel));
-            DoctorRender::printStatusLine(std::cout, "Semantic threshold",
+            DoctorRender::printStatusLine(os, "Deletion candidates", std::to_string(candDel));
+            DoctorRender::printStatusLine(os, "Semantic threshold",
                                           std::to_string(cfg.semanticThreshold));
-            std::cout << "  " << ui::status_ok("Saved semantic duplicate suggestions to metadata")
-                      << "\n";
+            os << "  " << ui::status_ok("Saved semantic duplicate suggestions to metadata") << "\n";
             if (candDel > 0) {
-                std::cout << "  "
-                          << ui::status_info(
-                                 "Use 'yams repair --dedupe' to remove semantic duplicates.")
-                          << "\n";
+                os << "  "
+                   << ui::status_info("Use 'yams repair --dedupe' to remove semantic duplicates.")
+                   << "\n";
             }
 
             if (cfg.verbose && !analysis->accepted.empty()) {
@@ -443,11 +433,10 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
                 for (const auto& match : accepted) {
                     const auto& lhs = analysis->docs[match.lhs].doc;
                     const auto& rhs = analysis->docs[match.rhs].doc;
-                    std::cout << "Pair: " << lhs.id << " <-> " << rhs.id << " cosine=" << std::fixed
-                              << std::setprecision(3) << match.cosine
-                              << " title_overlap=" << match.titleOverlap
-                              << " path_overlap=" << match.pathOverlap << " score=" << match.score
-                              << "\n";
+                    os << "Pair: " << lhs.id << " <-> " << rhs.id << " cosine=" << std::fixed
+                       << std::setprecision(3) << match.cosine
+                       << " title_overlap=" << match.titleOverlap
+                       << " path_overlap=" << match.pathOverlap << " score=" << match.score << "\n";
                     if (++shown >= 10) {
                         break;
                     }
@@ -471,25 +460,24 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
 
         fs::path dbPath = fs::path(dbName).is_absolute() ? fs::path(dbName) : dataDir / dbName;
         if (!fs::exists(dbPath)) {
-            std::cout << "  "
-                      << ui::status_error(
-                             "metadata database not found (knowledge_graph.db_path): " +
-                             dbPath.string())
-                      << "\n";
+            os << "  "
+               << ui::status_error("metadata database not found (knowledge_graph.db_path): " +
+                                   dbPath.string())
+               << "\n";
             return;
         }
         yams::metadata::Database db;
         auto ro = db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite);
         if (!ro) {
-            std::cout << "  " << ui::status_error(std::string("Open failed: ") + ro.error().message)
-                      << "\n";
+            os << "  " << ui::status_error(std::string("Open failed: ") + ro.error().message)
+               << "\n";
             return;
         }
         auto ps = db.prepare(
             "SELECT id,file_path,file_name,file_size,sha256_hash,modified_time,indexed_time FROM "
             "documents");
         if (!ps) {
-            std::cout << "  " << ui::status_error("Prepare failed: " + ps.error().message) << "\n";
+            os << "  " << ui::status_error("Prepare failed: " + ps.error().message) << "\n";
             return;
         }
         yams::metadata::Statement stmt = std::move(ps).value();
@@ -506,8 +494,7 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
         while (true) {
             auto step = stmt.step();
             if (!step) {
-                std::cout << "  " << ui::status_error("Step error: " + step.error().message)
-                          << "\n";
+                os << "  " << ui::status_error("Step error: " + step.error().message) << "\n";
                 return;
             }
             if (!step.value())
@@ -517,7 +504,7 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
                             stmt.getInt64(6)});
         }
         if (rows.empty()) {
-            std::cout << "  " << ui::status_ok("No documents") << "\n";
+            os << "  " << ui::status_ok("No documents") << "\n";
             return;
         }
         struct G {
@@ -563,46 +550,45 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
                 toDelete.push_back(vec[i].r.id);
             candDel += vec.size() - 1;
             if (cfg.verbose) {
-                std::cout << "Group: " << k << " keep=" << vec[0].r.id << " total=" << vec.size()
-                          << (hashesDiffer ? " (hash-diff)" : "") << "\n";
+                os << "Group: " << k << " keep=" << vec[0].r.id << " total=" << vec.size()
+                   << (hashesDiffer ? " (hash-diff)" : "") << "\n";
                 for (size_t i = 0; i < vec.size(); ++i) {
                     const auto& rr = vec[i].r;
-                    std::cout << (i == 0 ? "  KEEP" : "  DEL ") << " id=" << rr.id
-                              << " hash=" << rr.hash.substr(0, 8) << " size=" << rr.size
-                              << " mtime=" << rr.mtime << " itime=" << rr.itime << "\n";
+                    os << (i == 0 ? "  KEEP" : "  DEL ") << " id=" << rr.id
+                       << " hash=" << rr.hash.substr(0, 8) << " size=" << rr.size
+                       << " mtime=" << rr.mtime << " itime=" << rr.itime << "\n";
                 }
             }
         }
         if (!dupGroups) {
-            std::cout << "  " << ui::status_ok("No duplicate groups (mode=" + cfg.mode + ")")
-                      << "\n";
+            os << "  " << ui::status_ok("No duplicate groups (mode=" + cfg.mode + ")") << "\n";
             return;
         }
-        DoctorRender::printStatusLine(std::cout, "Total documents", std::to_string(rows.size()));
-        DoctorRender::printStatusLine(std::cout, "Duplicate groups", std::to_string(dupGroups));
-        DoctorRender::printStatusLine(std::cout, "Deletion candidates", std::to_string(candDel));
+        DoctorRender::printStatusLine(os, "Total documents", std::to_string(rows.size()));
+        DoctorRender::printStatusLine(os, "Duplicate groups", std::to_string(dupGroups));
+        DoctorRender::printStatusLine(os, "Deletion candidates", std::to_string(candDel));
         if (skipped) {
-            DoctorRender::printStatusLine(std::cout, "Skipped (hash mismatch, use --force)",
+            DoctorRender::printStatusLine(os, "Skipped (hash mismatch, use --force)",
                                           std::to_string(skipped));
         }
         if (!cfg.apply) {
-            std::cout << "  " << ui::status_warning("Dry-run. Use --apply to delete.") << "\n";
+            os << "  " << ui::status_warning("Dry-run. Use --apply to delete.") << "\n";
             return;
         }
         if (toDelete.empty()) {
-            std::cout << "  " << ui::status_ok("Nothing to delete") << "\n";
+            os << "  " << ui::status_ok("Nothing to delete") << "\n";
             return;
         }
         auto br = db.execute("BEGIN TRANSACTION");
         if (!br) {
-            std::cout << "  " << ui::status_error("BEGIN failed: " + br.error().message) << "\n";
+            os << "  " << ui::status_error("BEGIN failed: " + br.error().message) << "\n";
             return;
         }
         bool err = false;
         for (auto id : toDelete) {
             auto psd = db.prepare("DELETE FROM documents WHERE id=?");
             if (!psd) {
-                std::cout << "  " << ui::status_error("Prepare delete failed") << "\n";
+                os << "  " << ui::status_error("Prepare delete failed") << "\n";
                 err = true;
                 break;
             }
@@ -620,16 +606,16 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
         }
         auto er = db.execute(err ? "ROLLBACK" : "COMMIT");
         if (!er)
-            std::cout << "  " << ui::status_error("Txn end failed: " + er.error().message) << "\n";
+            os << "  " << ui::status_error("Txn end failed: " + er.error().message) << "\n";
         if (err) {
-            std::cout << "  " << ui::status_error("Aborted due to errors") << "\n";
+            os << "  " << ui::status_error("Aborted due to errors") << "\n";
             return;
         }
-        std::cout << "  "
-                  << ui::status_ok("Deleted " + std::to_string(toDelete.size()) + " duplicate rows")
-                  << "\n";
+        os << "  "
+           << ui::status_ok("Deleted " + std::to_string(toDelete.size()) + " duplicate rows")
+           << "\n";
     } catch (const std::exception& e) {
-        std::cout << "  " << ui::status_error(std::string("Exception: ") + e.what()) << "\n";
+        os << "  " << ui::status_error(std::string("Exception: ") + e.what()) << "\n";
     }
 }
 

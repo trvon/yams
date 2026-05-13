@@ -5,6 +5,8 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 
+#include <nlohmann/json.hpp>
+
 #include <sqlite3.h>
 #include <cstdlib>
 #include <filesystem>
@@ -166,7 +168,7 @@ void VectorFixRepair::render(std::ostream& os, const Result& r, bool jsonOutput)
 
     if (!r.error.empty() && !r.dbDim) {
         if (jsonOutput)
-            os << R"({"status": "no_vectors", "message": ")" << r.error << R"("})" << "\n";
+            os << nlohmann::json{{"status", "no_vectors"}, {"message", r.error}}.dump() << "\n";
         else
             os << status_warning(r.error) << "\n"
                << "Nothing to fix. Index some documents first with 'yams add'.\n";
@@ -175,23 +177,34 @@ void VectorFixRepair::render(std::ostream& os, const Result& r, bool jsonOutput)
 
     if (jsonOutput) {
         if (r.fixed) {
-            os << "{\"status\": \"fixed\", \"db_dim\": " << *r.dbDim << ", \"previous_model\": \""
-               << r.modelName << "\"";
+            nlohmann::json j;
+            j["status"] = "fixed";
+            j["db_dim"] = *r.dbDim;
+            j["previous_model"] = r.modelName;
             if (r.modelDim)
-                os << ", \"previous_model_dim\": " << *r.modelDim;
-            os << ", \"new_model\": \"" << r.matchingModel << "\", \"new_model_dim\": " << *r.dbDim
-               << "}\n";
+                j["previous_model_dim"] = *r.modelDim;
+            j["new_model"] = r.matchingModel;
+            j["new_model_dim"] = *r.dbDim;
+            os << j.dump() << "\n";
         } else if (r.mismatch) {
-            os << "{\"status\": \"error\", \"db_dim\": " << *r.dbDim << ", \"model\": \""
-               << r.modelName << "\"";
+            nlohmann::json j;
+            j["status"] = "error";
+            j["db_dim"] = *r.dbDim;
+            j["model"] = r.modelName;
             if (r.modelDim)
-                os << ", \"model_dim\": " << *r.modelDim;
-            os << ", \"mismatch\": true, \"fixed\": false"
-               << ", \"error\": \"" << r.error << "\"}\n";
+                j["model_dim"] = *r.modelDim;
+            j["mismatch"] = true;
+            j["fixed"] = false;
+            j["error"] = r.error;
+            os << j.dump() << "\n";
         } else {
-            os << "{\"status\": \"ok\", \"db_dim\": " << *r.dbDim << ", \"model\": \""
-               << r.modelName << "\""
-               << ", \"model_dim\": " << *r.modelDim << ", \"mismatch\": false}\n";
+            nlohmann::json j;
+            j["status"] = "ok";
+            j["db_dim"] = *r.dbDim;
+            j["model"] = r.modelName;
+            j["model_dim"] = *r.modelDim;
+            j["mismatch"] = false;
+            os << j.dump() << "\n";
         }
         return;
     }

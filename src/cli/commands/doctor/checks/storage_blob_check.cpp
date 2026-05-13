@@ -26,7 +26,10 @@ StorageBlobCheck::Result StorageBlobCheck::execute(const DoctorContext& ctx) {
                 break;
             if (entry.is_regular_file()) {
                 r.storageObjects++;
-                r.storageBytes += entry.file_size();
+                std::error_code sizeEc;
+                auto sz = entry.file_size(sizeEc);
+                if (!sizeEc)
+                    r.storageBytes += sz;
                 auto hashName = entry.path().filename().string();
                 objectHashes.insert(hashName);
             }

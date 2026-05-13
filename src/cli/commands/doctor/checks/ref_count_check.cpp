@@ -119,6 +119,7 @@ RefCountCheck::Result RefCountCheck::execute(const DoctorContext& ctx) {
     RefDbGuard refDb(refsPath);
     if (!refDb.get()) {
         r.ok = false;
+        r.dbError = true;
         return r;
     }
 
@@ -160,6 +161,11 @@ RefCountCheck::Result RefCountCheck::execute(const DoctorContext& ctx) {
 void RefCountCheck::render(std::ostream& os, const Result& r) {
     using namespace yams::cli::ui;
 
+    if (r.dbError) {
+        os << "  " << status_error("Cannot open reference-count database (corrupted or locked).")
+           << "\n";
+        return;
+    }
     if (r.totalBlocks == 0) {
         os << "  " << status_ok("No reference-count data — corpus is empty or no CAS blocks.")
            << "\n";
