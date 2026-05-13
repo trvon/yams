@@ -35,4 +35,20 @@ AggregateSalvageResult salvageFromAllCorruptDbs(const std::filesystem::path& dat
 
 int64_t countDocumentsInDb(const std::filesystem::path& dbPath);
 
+struct SalvageQuickCheck {
+    int64_t currentDocCount{0};
+    bool needsSalvage{false};
+    int64_t maxCorruptCount{0};
+};
+
+SalvageQuickCheck quickCheckSalvageNeeded(const std::filesystem::path& dataDir,
+                                          const std::filesystem::path& dbPath);
+
+struct CorruptDbCleanup {
+    std::vector<std::filesystem::path> removed;
+    std::vector<std::string> errors;
+};
+
+CorruptDbCleanup removeCorruptDbFiles(const std::filesystem::path& dataDir);
+
 } // namespace yams::daemon

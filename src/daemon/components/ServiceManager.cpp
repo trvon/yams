@@ -1867,38 +1867,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // database phase via the metrics/pool system.
     {
         auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
-        int64_t currentDocCount = countDocumentsInDb(dbPath);
+        auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
 
-        bool needsSalvage = false;
-        int64_t maxCorruptCount = 0;
-        const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
-        {
-            std::error_code ec;
-            for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
-                if (ec) {
-                    ec.clear();
-                    continue;
-                }
-                const auto& name = entry.path().filename().string();
-                if (name.rfind(corruptPrefix, 0) != 0)
-                    continue;
-                if (name.size() >= 4 && (name.substr(name.size() - 4) == "-wal" ||
-                                         name.substr(name.size() - 4) == "-shm"))
-                    continue;
-                int64_t count = countDocumentsInDb(entry.path());
-                spdlog::info("[ServiceManager] Corrupt DB '{}' has {} docs (current DB has {})",
-                             entry.path().filename().string(), count, currentDocCount);
-                if (count > currentDocCount) {
-                    needsSalvage = true;
-                    maxCorruptCount = std::max(maxCorruptCount, count);
-                }
-            }
-        }
-
-        if (needsSalvage) {
+        if (qc.needsSalvage) {
             spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB "
                          "({}); blocking startup to recover",
-                         maxCorruptCount - currentDocCount, currentDocCount);
+                         qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
             {
                 std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
                 state_.readiness.databasePhase = std::string(dbphase::kSalvaging);

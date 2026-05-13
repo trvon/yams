@@ -274,6 +274,16 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath, const 
         if (rc == SQLITE_OK) {
             spdlog::info("[db_salvage] Corrupt DB opened successfully");
             runIntegrityCheck(corruptDb, result.diagnostics);
+            // Count documents in the corrupt DB
+            sqlite3_stmt* countStmt = nullptr;
+            if (sqlite3_prepare_v2(corruptDb, "SELECT COUNT(*) FROM documents", -1, &countStmt,
+                                   nullptr) == SQLITE_OK) {
+                if (sqlite3_step(countStmt) == SQLITE_ROW) {
+                    int docCount = sqlite3_column_int(countStmt, 0);
+                    spdlog::info("[db_salvage] Corrupt DB contains {} document(s)", docCount);
+                }
+                sqlite3_finalize(countStmt);
+            }
             sqlite3_close(corruptDb);
         } else {
             result.diagnostics.push_back("Cannot open corrupt DB for diagnostics: " +
@@ -458,6 +468,78 @@ AggregateSalvageResult salvageFromAllCorruptDbs(const fs::path& dataDir, const f
     }
 
     return result;
+}
+
+SalvageQuickCheck quickCheckSalvageNeeded(const fs::path& dataDir, const fs::path& dbPath) {
+    SalvageQuickCheck qc;
+    qc.currentDocCount = countDocumentsInDb(dbPath);
+
+    const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
+
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const auto& name = entry.path().filename().string();
+        if (name.rfind(corruptPrefix, 0) != 0)
+            continue;
+        if (name.size() >= 4 &&
+            (name.substr(name.size() - 4) == "-wal" || name.substr(name.size() - 4) == "-shm"))
+            continue;
+        int64_t count = countDocumentsInDb(entry.path());
+        spdlog::info("[db_salvage] Corrupt DB '{}' has {} docs (current DB has {})",
+                     entry.path().filename().string(), count, qc.currentDocCount);
+        if (count > qc.currentDocCount) {
+            qc.needsSalvage = true;
+            qc.maxCorruptCount = std::max(qc.maxCorruptCount, count);
+        }
+    }
+    return qc;
+}
+
+CorruptDbCleanup removeCorruptDbFiles(const fs::path& dataDir) {
+    CorruptDbCleanup cleanup;
+
+    const std::string corruptPrefix = "yams.db.corrupt-";
+
+    std::error_code ec;
+    std::vector<fs::path> candidates;
+    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const auto& name = entry.path().filename().string();
+        if (name.rfind(corruptPrefix, 0) != 0)
+            continue;
+        if (name.size() >= 4 &&
+            (name.substr(name.size() - 4) == "-wal" || name.substr(name.size() - 4) == "-shm"))
+            continue;
+        candidates.push_back(entry.path());
+    }
+
+    for (const auto& corruptPath : candidates) {
+        // Remove the corrupt DB file
+        std::error_code removeEc;
+        if (!fs::remove(corruptPath, removeEc)) {
+            cleanup.errors.push_back("cannot remove " + corruptPath.string() + ": " +
+                                     removeEc.message());
+            continue;
+        }
+        cleanup.removed.push_back(corruptPath);
+
+        // Remove companion WAL and SHM files
+        fs::path walPath = corruptPath.string() + "-wal";
+        fs::path shmPath = corruptPath.string() + "-shm";
+        fs::remove(walPath, ec);
+        fs::remove(shmPath, ec);
+
+        spdlog::info("[db_salvage] Removed corrupt DB: {}", corruptPath.filename().string());
+    }
+
+    return cleanup;
 }
 
 } // namespace yams::daemon

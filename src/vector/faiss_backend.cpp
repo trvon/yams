@@ -126,6 +126,9 @@ Result<void> FaissBackend::insertVectorsBatch(const std::vector<VectorRecord>& r
 
         auto idVal = static_cast<faiss::idx_t>(nextId());
         index_->index->add_with_ids(1, r.embedding.data(), &idVal);
+        // FAISS stores its own copy; free the duplicate to halve vector RSS.
+        records_.back().embedding.clear();
+        records_.back().embedding.shrink_to_fit();
     }
     return {};
 }
@@ -222,7 +225,7 @@ FaissBackend::searchSimilar(const std::vector<float>& queryEmbedding, size_t k,
             continue;
 
         const auto& rec = records_[recIdx];
-        if (rec.embedding.empty())
+        if (rec.embedding_dim == 0)
             continue;
 
         if (documentHash && rec.document_hash != *documentHash)
@@ -269,8 +272,12 @@ FaissBackend::searchSimilarBatch(const std::vector<std::vector<float>>& queryEmb
 Result<std::optional<VectorRecord>> FaissBackend::getVector(const std::string& chunkId) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = chunkToIdx_.find(chunkId);
-    if (it != chunkToIdx_.end())
-        return std::optional<VectorRecord>{records_[it->second]};
+    if (it != chunkToIdx_.end()) {
+        size_t idx = it->second;
+        VectorRecord rec = records_[idx];
+        reconstructEmbedding(rec, idx);
+        return std::optional<VectorRecord>{std::move(rec)};
+    }
     return std::optional<VectorRecord>{};
 }
 
@@ -280,8 +287,12 @@ FaissBackend::getVectorsBatch(const std::vector<std::string>& chunkIds) {
     std::map<std::string, VectorRecord> out;
     for (const auto& cid : chunkIds) {
         auto it = chunkToIdx_.find(cid);
-        if (it != chunkToIdx_.end())
-            out.emplace(cid, records_[it->second]);
+        if (it != chunkToIdx_.end()) {
+            size_t idx = it->second;
+            VectorRecord rec = records_[idx];
+            reconstructEmbedding(rec, idx);
+            out.emplace(cid, std::move(rec));
+        }
     }
     return out;
 }
@@ -296,8 +307,11 @@ FaissBackend::getVectorsByDocument(const std::string& documentHash) {
     out.reserve(it->second.size());
     for (auto idx : it->second) {
         const auto& r = records_[idx];
-        if (!r.embedding.empty())
-            out.push_back(r);
+        if (r.embedding_dim == 0)
+            continue;
+        VectorRecord rec = r;
+        reconstructEmbedding(rec, idx);
+        out.push_back(std::move(rec));
     }
     return out;
 }
@@ -310,8 +324,11 @@ Result<std::unordered_map<std::string, VectorRecord>> FaissBackend::getDocumentL
     for (const auto& [hash, idxs] : docToIdxs_) {
         if (!idxs.empty()) {
             const auto& r = records_[idxs[0]];
-            if (!r.embedding.empty())
-                out.emplace(hash, r);
+            if (r.embedding_dim == 0)
+                continue;
+            VectorRecord rec = r;
+            reconstructEmbedding(rec, idxs[0]);
+            out.emplace(hash, std::move(rec));
         }
     }
     return out;
@@ -324,11 +341,13 @@ FaissBackend::forEachDocumentLevelVector(const std::function<bool(VectorRecord&&
     for (const auto& [hash, idxs] : docToIdxs_) {
         if (!idxs.empty()) {
             const auto& r = records_[idxs[0]];
-            if (!r.embedding.empty()) {
-                if (!visitor(VectorRecord(r)))
-                    break;
-                ++delivered;
-            }
+            if (r.embedding_dim == 0)
+                continue;
+            VectorRecord rec(r);
+            reconstructEmbedding(rec, idxs[0]);
+            if (!visitor(std::move(rec)))
+                break;
+            ++delivered;
         }
     }
     return delivered;
@@ -340,7 +359,7 @@ Result<size_t> FaissBackend::getVectorCount() {
     std::lock_guard<std::mutex> lock(mutex_);
     size_t count = 0;
     for (const auto& r : records_) {
-        if (!r.embedding.empty())
+        if (r.embedding_dim > 0)
             ++count;
     }
     return count;
@@ -365,7 +384,7 @@ Result<std::unordered_set<std::string>> FaissBackend::getEmbeddedDocumentHashes(
     std::lock_guard<std::mutex> lock(mutex_);
     std::unordered_set<std::string> out;
     for (const auto& [hash, idxs] : docToIdxs_) {
-        if (!idxs.empty() && !records_[idxs[0]].embedding.empty())
+        if (!idxs.empty() && records_[idxs[0]].embedding_dim > 0)
             out.insert(hash);
     }
     return out;
@@ -464,6 +483,17 @@ size_t FaissBackend::nextId() {
 
 std::filesystem::path FaissBackend::indexFilePath() const {
     return dbPath_.parent_path() / (dbPath_.stem().string() + ".faiss_idx");
+}
+
+void FaissBackend::reconstructEmbedding(VectorRecord& rec, size_t recIdx) const {
+    if (!rec.embedding.empty() || rec.embedding_dim == 0 || !index_)
+        return;
+    rec.embedding.resize(rec.embedding_dim);
+    try {
+        index_->index->reconstruct(static_cast<faiss::idx_t>(recIdx + 1), rec.embedding.data());
+    } catch (...) {
+        rec.embedding.clear();
+    }
 }
 
 // ── Entity vectors (all unsupported) ────────────────────────────────────────

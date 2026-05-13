@@ -125,6 +125,7 @@ private:
     std::filesystem::path indexFilePath() const;
     Result<void> loadOrCreateIndex();
     Result<void> saveIndex();
+    void reconstructEmbedding(VectorRecord& rec, size_t recIdx) const;
 
     FaissBackendConfig config_;
     std::filesystem::path dbPath_;

@@ -3137,6 +3137,7 @@ struct RepairRequest {
     bool dryRun{false};
     bool verbose{false};
     bool force{false};
+    bool removeCorrupt{false};
     bool foreground{false};
     std::string embeddingModel;
     std::vector<std::string> includeMime;
@@ -3148,7 +3149,7 @@ struct RepairRequest {
         ser << repairOrphans << repairMime << repairDownloads << repairPathTree << repairChunks
             << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << repairGraph
             << repairTopology << repairDedupe << optimizeDb << repairAll << dryRun << verbose
-            << force << foreground << embeddingModel << includeMime << maxRetries;
+            << force << removeCorrupt << foreground << embeddingModel << includeMime << maxRetries;
     }
 
     template <typename Deserializer>
@@ -3195,6 +3196,8 @@ struct RepairRequest {
         if (!readBool(req.verbose))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.force))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.removeCorrupt))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.foreground))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
@@ -4071,6 +4074,10 @@ struct StatusResponse {
     std::string contentStoreRoot;  // absolute path to storage root (daemon-resolved)
     std::string contentStoreError; // last initialization error (if any)
 
+    // WAL file sizes (bytes); zero when the file does not exist or is empty.
+    uint64_t metadataWalBytes{0};
+    uint64_t vectorWalBytes{0};
+
     // Embedding runtime details (best-effort)
     bool embeddingAvailable{false};
     std::string embeddingBackend;   // provider|daemon|local|hybrid|unknown
@@ -4341,6 +4348,9 @@ struct StatusResponse {
         // omit these and older clients tolerate missing tail fields).
         ser << databasePhase << static_cast<uint64_t>(databasePhaseElapsedMs) << databaseRecoveredAt
             << databaseRecoveredFrom << storageWarning;
+
+        // WAL file sizes (appended; older clients tolerate missing tail fields)
+        ser << static_cast<uint64_t>(metadataWalBytes) << static_cast<uint64_t>(vectorWalBytes);
     }
 
     template <typename Deserializer>
@@ -4733,6 +4743,14 @@ struct StatusResponse {
         auto storageWarnRes = deser.template read<std::string>();
         if (storageWarnRes)
             res.storageWarning = std::move(storageWarnRes.value());
+
+        // WAL file sizes (appended; tolerate missing for backward compat)
+        auto metaWalRes = deser.template read<uint64_t>();
+        if (metaWalRes)
+            res.metadataWalBytes = metaWalRes.value();
+        auto vecWalRes = deser.template read<uint64_t>();
+        if (vecWalRes)
+            res.vectorWalBytes = vecWalRes.value();
 
         return res;
     }

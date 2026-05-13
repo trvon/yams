@@ -67,6 +67,8 @@ public:
         cmd->add_flag(
             "--force", force_,
             "Force full rebuild (skip incremental optimizations and confirmation prompts)");
+        cmd->add_flag("--remove-corrupt", removeCorrupt_,
+                      "Remove corrupt DB files after successful salvage");
         cmd->add_option("--max-retries", maxRetries_, "Max retry attempts for stuck documents");
 
         cmd->callback([this]() {
@@ -126,6 +128,7 @@ public:
         req.dryRun = dryRun_;
         req.verbose = verbose_;
         req.force = force_;
+        req.removeCorrupt = removeCorrupt_;
         req.foreground = foreground_;
         req.embeddingModel = embeddingModel_;
         req.includeMime = includeMime_;
@@ -428,6 +431,7 @@ private:
     bool dryRun_ = false;
     bool verbose_ = false;
     bool force_ = false;
+    bool removeCorrupt_ = false;
     int32_t maxRetries_ = 3;
 };
 

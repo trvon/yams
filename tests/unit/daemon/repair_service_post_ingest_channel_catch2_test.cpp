@@ -910,7 +910,19 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(repairResp.success);
     const auto op = findOperationResult(repairResp, "stuck_docs");
     REQUIRE(op.has_value());
+    // The background loop may have already recovered the document, so
+    // succeeded==0 is legitimate (the repair is a no-op on already-recovered docs).
+    // Regardless of who recovered it, assert the document is no longer in Failed state.
     CHECK(op->succeeded >= 0);
+    {
+        // Give the WriteCoordinator time to process the MetadataWriteFacade flush.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        auto docQuery = meta->getDocument(docId);
+        REQUIRE(docQuery.has_value());
+        auto docOpt = docQuery.value();
+        REQUIRE(docOpt.has_value());
+        CHECK(docOpt->extractionStatus != metadata::ExtractionStatus::Failed);
+    }
 
     repair.stop();
     drainQueue(postIngestRpc);

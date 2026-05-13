@@ -14,6 +14,7 @@ namespace yams::daemon {
 class MetadataWriteFacade {
 public:
     MetadataWriteFacade(WriteCoordinator* wc, metadata::MetadataRepository* repo);
+    ~MetadataWriteFacade();
 
     void setMetadata(int64_t docId, const std::string& key, metadata::MetadataValue value);
     void updateExtractionStatus(int64_t docId, bool contentExtracted,
