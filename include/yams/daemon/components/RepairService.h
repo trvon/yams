@@ -226,7 +226,8 @@ private:
     virtual std::shared_ptr<metadata::IMetadataRepository> getMetadataRepoForRepair() const;
 
     // ── Core repair operations (each returns per-op result) ──
-    RepairOperationResult cleanOrphanedMetadata(bool dryRun, bool verbose, ProgressFn progress);
+    RepairOperationResult cleanOrphanedMetadata(bool dryRun, bool verbose, bool removeCorrupt,
+                                                ProgressFn progress);
     RepairOperationResult repairMimeTypes(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairDownloads(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
