@@ -27,7 +27,7 @@ catch2_incs = []
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
 _test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
-_test_timeout_scale = _test_thread_sanitizer ? 10 : 1
+_test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
 fs = import('fs')
