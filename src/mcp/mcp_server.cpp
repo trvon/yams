@@ -140,9 +140,9 @@ app::services::RetrievalOptions
 makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
     yams::app::services::RetrievalOptions ropts;
     ropts.socketPath = daemonClientConfig.socketPath;
-    ropts.requestTimeoutMs = 60000;
-    ropts.headerTimeoutMs = 30000;
-    ropts.bodyTimeoutMs = 120000;
+    ropts.requestTimeoutMs = 15000;
+    ropts.headerTimeoutMs = 10000;
+    ropts.bodyTimeoutMs = 60000;
     return ropts;
 }
 
@@ -632,9 +632,9 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         }
         cfg.enableChunkedResponses = true;
         cfg.singleUseConnections = false;
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
         cfg.headerTimeout = std::chrono::milliseconds(10000);
-        cfg.bodyTimeout = std::chrono::milliseconds(120000);
+        cfg.bodyTimeout = std::chrono::milliseconds(60000);
         cfg.maxInflight = 128;
         cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
         daemon_client_config_ = cfg;
@@ -930,39 +930,80 @@ void MCPServer::start() {
                     // while a tool is still executing, leading to use-after-free.
                     auto self = this->shared_from_this();
 
+                    // Shared flag: first coroutine to CAS false→true owns the response.
+                    // This guards against double-response when the deadline timer fires
+                    // concurrently with the tool result.
+                    auto completed = std::make_shared<std::atomic<bool>>(false);
+
+                    // Deadline timer: fires after 30s to prevent indefinite hangs
+                    // when the daemon client is slow or unresponsive.
                     boost::asio::co_spawn(
 #if defined(YAMS_WASI)
                         boost::asio::system_executor(),
 #else
                         yams::daemon::GlobalIOContext::global_executor(),
 #endif
-                        [self, toolName, toolArgs, id_copy,
-                         progressToken]() -> boost::asio::awaitable<void> {
+                        [self, toolName, id_copy, completed]() -> boost::asio::awaitable<void> {
+                            auto exec = co_await boost::asio::this_coro::executor;
+                            boost::asio::steady_timer timer(exec);
+                            timer.expires_after(std::chrono::seconds(30));
+                            co_await timer.async_wait(boost::asio::use_awaitable);
+                            bool expected = false;
+                            if (completed->compare_exchange_strong(expected, true)) {
+                                json err = {{"code", -32603},
+                                            {"message", std::string("Tool '") + toolName +
+                                                            "' timed out after 30s deadline"}};
+                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                    {"error", err},
+                                                    {"id", id_copy}});
+                            }
+                            co_return;
+                        },
+                        boost::asio::detached);
+
+                    // Tool execution coroutine
+                    boost::asio::co_spawn(
+#if defined(YAMS_WASI)
+                        boost::asio::system_executor(),
+#else
+                        yams::daemon::GlobalIOContext::global_executor(),
+#endif
+                        [self, toolName, toolArgs, id_copy, progressToken,
+                         completed]() -> boost::asio::awaitable<void> {
                             if (progressToken)
                                 MCPServer::tlsProgressToken_ = std::move(*progressToken);
                             try {
                                 json raw = co_await self->callToolAsync(toolName, toolArgs);
-                                if (raw.is_object() && raw.contains("error")) {
-                                    const auto& err = raw["error"];
+                                bool expected = false;
+                                if (completed->compare_exchange_strong(expected, true)) {
+                                    if (raw.is_object() && raw.contains("error")) {
+                                        const auto& err = raw["error"];
+                                        self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                            {"error", err},
+                                                            {"id", id_copy}});
+                                    } else {
+                                        self->sendResponse(self->createResponse(id_copy, raw));
+                                    }
+                                    self->sendProgress("tool", 100.0,
+                                                       std::string("completed ") + toolName,
+                                                       progressToken);
+                                }
+                            } catch (const std::exception& e) {
+                                bool expected = false;
+                                if (completed->compare_exchange_strong(expected, true)) {
+                                    json err = {{"code", -32603}, {"message", e.what()}};
                                     self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                         {"error", err},
                                                         {"id", id_copy}});
-                                } else {
-                                    self->sendResponse(self->createResponse(id_copy, raw));
                                 }
-                                self->sendProgress("tool", 100.0,
-                                                   std::string("completed ") + toolName,
-                                                   progressToken);
-                            } catch (const std::exception& e) {
-                                json err = {{"code", -32603}, {"message", e.what()}};
-                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                    {"error", err},
-                                                    {"id", id_copy}});
                             } catch (...) {
-                                json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                    {"error", err},
-                                                    {"id", id_copy}});
+                                bool expected = false;
+                                if (completed->compare_exchange_strong(expected, true)) {
+                                    json err = {{"code", -32603}, {"message", "Tool call failed"}};
+                                    self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                                        {"error", err},
+                                                        {"id", id_copy}});
+                                }
                             }
                             MCPServer::tlsProgressToken_ = nullptr;
                             co_return;

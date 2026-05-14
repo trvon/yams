@@ -631,6 +631,13 @@ public:
                 boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
                                       handleRequestAsync(request), boost::asio::use_future);
 #endif
+            auto status = future.wait_for(std::chrono::seconds(30));
+            if (status != std::future_status::ready) {
+                return json{
+                    {"jsonrpc", "2.0"},
+                    {"error", {{"code", -32603}, {"message", "Tool call timed out after 30s"}}},
+                    {"id", request.value("id", nullptr)}};
+            }
             return future.get();
         }
 

@@ -90,6 +90,12 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         boost::asio::co_spawn(exec, reg->callTool(name, arguments), boost::asio::use_future);
 
     try {
+        auto status = future.wait_for(std::chrono::seconds(30));
+        if (status != std::future_status::ready) {
+            return {{"error",
+                     {{"code", -32603},
+                      {"message", std::string("Tool '") + name + "' timed out after 30 seconds"}}}};
+        }
         json result = future.get();
 
         if (spdlog::should_log(spdlog::level::debug)) {

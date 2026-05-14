@@ -1289,6 +1289,7 @@ if catch2_dep.found()
       'unit/mcp/mcp_server_catch2_test.cpp',
       'unit/mcp/mcp_server_exec_catch2_test.cpp',
       'unit/mcp/mcp_socket_resolution_catch2_test.cpp',
+      'unit/mcp/mcp_timeout_catch2_test.cpp',
       'unit/mcp/mcp_code_mode_catch2_test.cpp',
       'unit/mcp/mcp_composite_dispatch_catch2_test.cpp',
       'unit/mcp/mcp_mode_router_catch2_test.cpp',
