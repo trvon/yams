@@ -59,6 +59,10 @@ public:
                                            const std::string& mime,
                                            const std::string& extension) override;
 
+    std::optional<yams::extraction::ExtractedContent>
+    extractTextAndMetadata(const std::vector<std::byte>& bytes, const std::string& mime,
+                           const std::string& extension) override;
+
     /// Get the plugin name
     const std::string& name() const { return name_; }
 
@@ -93,6 +97,11 @@ private:
     std::optional<std::string> extractExternal(const std::vector<std::byte>& bytes,
                                                const std::string& mime,
                                                const std::string& extension);
+    std::optional<yams::extraction::ExtractedContent>
+    extractAbiTextAndMetadata(const std::vector<std::byte>& bytes);
+    std::optional<yams::extraction::ExtractedContent>
+    extractExternalTextAndMetadata(const std::vector<std::byte>& bytes, const std::string& mime,
+                                   const std::string& extension);
 };
 
 // Backward compatibility alias

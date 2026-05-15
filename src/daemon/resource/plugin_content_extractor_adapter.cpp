@@ -63,6 +63,22 @@ PluginContentExtractorAdapter::extractText(const std::vector<std::byte>& bytes,
         backend_);
 }
 
+std::optional<yams::extraction::ExtractedContent>
+PluginContentExtractorAdapter::extractTextAndMetadata(const std::vector<std::byte>& bytes,
+                                                      const std::string& mime,
+                                                      const std::string& extension) {
+    return std::visit(
+        [&](auto& backend) -> std::optional<yams::extraction::ExtractedContent> {
+            using T = std::decay_t<decltype(backend)>;
+            if constexpr (std::is_same_v<T, AbiBackend>) {
+                return extractAbiTextAndMetadata(bytes);
+            } else {
+                return extractExternalTextAndMetadata(bytes, mime, extension);
+            }
+        },
+        backend_);
+}
+
 // ============================================================================
 // ABI Backend Implementation
 // ============================================================================
@@ -89,6 +105,33 @@ PluginContentExtractorAdapter::extractAbi(const std::vector<std::byte>& bytes) {
     std::optional<std::string> out;
     if (res->text)
         out = std::string(res->text);
+    abi.table->free_result(res);
+    return out;
+}
+
+std::optional<yams::extraction::ExtractedContent>
+PluginContentExtractorAdapter::extractAbiTextAndMetadata(const std::vector<std::byte>& bytes) {
+    auto& abi = std::get<AbiBackend>(backend_);
+    if (!abi.table || !abi.table->extract || !abi.table->free_result)
+        return std::nullopt;
+
+    yams_extraction_result_t* res = nullptr;
+    int rc = abi.table->extract(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), &res);
+    if (rc != YAMS_PLUGIN_OK || !res)
+        return std::nullopt;
+
+    yams::extraction::ExtractedContent out;
+    if (res->text)
+        out.text = std::string(res->text);
+
+    if (res->metadata.pairs && res->metadata.count > 0) {
+        for (size_t i = 0; i < res->metadata.count; ++i) {
+            if (res->metadata.pairs[i].key && res->metadata.pairs[i].value) {
+                out.metadata.emplace(res->metadata.pairs[i].key, res->metadata.pairs[i].value);
+            }
+        }
+    }
+
     abi.table->free_result(res);
     return out;
 }
@@ -224,6 +267,16 @@ bool PluginContentExtractorAdapter::isBusy() const {
         return false;
     }
     return true;
+}
+
+std::optional<yams::extraction::ExtractedContent>
+PluginContentExtractorAdapter::extractExternalTextAndMetadata(const std::vector<std::byte>& bytes,
+                                                              const std::string& mime,
+                                                              const std::string& extension) {
+    auto text = extractExternal(bytes, mime, extension);
+    if (!text || text->empty())
+        return std::nullopt;
+    return yams::extraction::ExtractedContent{std::move(*text), {}};
 }
 
 } // namespace yams::daemon

@@ -18,13 +18,13 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/pressure_limited_poller.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/extraction/extraction_util.h>
@@ -1054,19 +1054,19 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.shouldDispatchEntity =
         isCodeFile ? false : extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
-    // Extract document text
+    // Extract document text (and metadata when available from plugin extractors).
+    // Always use extractDocumentContent so we can grab plugin-provided metadata
+    // (e.g. PDF title from zyp) and skip expensive ML-based title inference.
     const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
-    if (wantContentBytes) {
-        auto extracted = yams::extraction::util::extractDocumentTextAndBytes(
-            store_, hash, prepared.mimeType, prepared.extension, extractors_);
-        if (!extracted || extracted->text.empty()) {
-            spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
-                          prepared.mimeType, prepared.extension);
-            return ExtractionFailure{info.id, hash, "No text extracted"};
-        }
+    auto extracted = yams::extraction::util::extractDocumentContent(
+        store_, hash, prepared.mimeType, prepared.extension, extractors_);
+    if (extracted && !extracted->text.empty()) {
         prepared.extractedText = std::move(extracted->text);
-        prepared.contentBytes = std::move(extracted->bytes);
+        if (wantContentBytes) {
+            prepared.contentBytes = std::move(extracted->bytes);
+        }
     } else {
+        // Fallback: text-only extraction without metadata
         auto txt =
             extractDocumentText(store_, hash, prepared.mimeType, prepared.extension, extractors_);
         if (!txt || txt->empty()) {
@@ -1075,6 +1075,23 @@ PostIngestQueue::prepareMetadataEntry(
             return ExtractionFailure{info.id, hash, "No text extracted"};
         }
         prepared.extractedText = std::move(*txt);
+    }
+
+    // If the plugin already provided a title in its metadata (e.g. zyp PDF title),
+    // use it directly and skip GLiNER title inference for this document.
+    bool pluginProvidedTitle = false;
+    if (extracted) {
+        auto titleIt = extracted->metadata.find("title");
+        if (titleIt != extracted->metadata.end() && !titleIt->second.empty()) {
+            prepared.title = titleIt->second;
+            pluginProvidedTitle = true;
+            spdlog::debug("[PostIngestQueue] using plugin-provided title for {}: {}", hash,
+                          prepared.title);
+        }
+        auto authorIt = extracted->metadata.find("author");
+        if (authorIt != extracted->metadata.end() && !authorIt->second.empty()) {
+            prepared.fallbackEntities.push_back("author:" + authorIt->second);
+        }
     }
 
     // Cap extracted text to 16 MiB to avoid SQLite bind limits
@@ -1090,13 +1107,17 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.language =
         yams::extraction::LanguageDetector::detectLanguage(prepared.extractedText, &langConfidence);
 
-    prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
-                                 prepared.extension);
+    if (!pluginProvidedTitle) {
+        prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
+                                     prepared.extension);
+    }
 
     // Title+NL extraction: single GLiNER call for both title and NL entities.
     // Skip for code files — GLiNER does not extract meaningful titles from
     // source code, and the deriveTitle heuristic already produces good results.
-    if (!isCodeFile && hasTitleExtractor() && !isGlinerTitleExtractionDisabled()) {
+    // Also skip when the plugin already provided a title (e.g. PDF metadata).
+    if (!isCodeFile && !pluginProvidedTitle && hasTitleExtractor() &&
+        !isGlinerTitleExtractionDisabled()) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)

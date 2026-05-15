@@ -94,10 +94,12 @@ public:
     /** Extract text from a single page */
     [[nodiscard]] TextBuffer extractPage(int pageNum) const;
 
-    /** Extract text from all pages (sequential) */
+    /** Extract text from all pages (sequential, reading-order) */
     [[nodiscard]] TextBuffer extractAll() const;
 
-    /** Extract text from all pages (parallel - fastest) */
+    /** Alias for extractAll(); named for backward compatibility.
+     *  Note: despite the name this is sequential, not parallel;
+     *        the zpdf backend does not support true parallel extraction. */
     [[nodiscard]] TextBuffer extractAllParallel() const;
 
     /** Extract text in visual reading order (experimental) */

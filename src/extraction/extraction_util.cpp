@@ -1,8 +1,8 @@
 #include <yams/extraction/extraction_util.h>
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <memory>
-#include <spdlog/spdlog.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
 
@@ -83,7 +83,7 @@ std::optional<std::string> extractTextFromBytes(const std::vector<std::byte>& by
     } catch (const std::exception& e) {
         spdlog::debug("FileTypeDetector error for extension {}: {}", extension, e.what());
     } catch (...) {
-        // ignore
+        spdlog::debug("FileTypeDetector unknown error for extension {}", extension);
     }
 
     return std::nullopt;
@@ -128,6 +128,100 @@ extractDocumentTextAndBytes(std::shared_ptr<yams::api::IContentStore> store,
     ExtractedTextAndBytes out;
     out.text = std::move(*textOpt);
     out.bytes = std::make_shared<std::vector<std::byte>>(std::move(ownedBytes));
+    return out;
+}
+
+std::optional<yams::extraction::util::ExtractedTextBytesAndMetadata>
+extractDocumentContent(std::shared_ptr<yams::api::IContentStore> store, const std::string& hash,
+                       const std::string& mime, const std::string& extension,
+                       const ContentExtractorList& extractors) {
+    if (!store)
+        return std::nullopt;
+
+    auto bytesRes = store->retrieveBytes(hash);
+    if (!bytesRes)
+        return std::nullopt;
+
+    std::vector<std::byte> ownedBytes = std::move(bytesRes.value());
+
+    // Normalize extension for factory lookup
+    std::string normalizedExt = extension;
+    if (!normalizedExt.empty() && normalizedExt[0] != '.')
+        normalizedExt = "." + normalizedExt;
+    std::transform(normalizedExt.begin(), normalizedExt.end(), normalizedExt.begin(), ::tolower);
+
+    std::string text;
+    std::unordered_map<std::string, std::string> metadata;
+
+    // 1) Try built-in extractors
+    if (!normalizedExt.empty()) {
+        auto& factory = TextExtractorFactory::instance();
+        if (factory.isSupported(normalizedExt)) {
+            try {
+                auto extractor = factory.create(normalizedExt);
+                if (extractor) {
+                    ExtractionConfig cfg{};
+                    cfg.preserveFormatting = true;
+                    auto result = extractor->extractFromBuffer(
+                        std::span<const std::byte>(ownedBytes.data(), ownedBytes.size()), cfg);
+                    if (result && result.value().isSuccess() && !result.value().text.empty()) {
+                        text = std::move(result.value().text);
+                    }
+                }
+            } catch (...) {
+                spdlog::debug("Built-in extractor failed for extension {}", normalizedExt);
+            }
+        }
+    }
+
+    // 2) Try plugin extractors — prefer the combined text+metadata path
+    if (text.empty()) {
+        for (const auto& ext : extractors) {
+            try {
+                if (ext && ext->supports(mime, extension)) {
+                    auto content = ext->extractTextAndMetadata(ownedBytes, mime, extension);
+                    if (content && !content->text.empty()) {
+                        text = std::move(content->text);
+                        metadata = std::move(content->metadata);
+                        break;
+                    }
+                }
+            } catch (...) {
+                spdlog::debug("Plugin extractor failed for extension {}", extension);
+            }
+        }
+    }
+
+    // 3) Fallback: raw bytes for text MIME types
+    auto& detector = yams::detection::FileTypeDetector::instance();
+    if (text.empty()) {
+        if (!mime.empty() && detector.isTextMimeType(mime)) {
+            text = std::string(reinterpret_cast<const char*>(ownedBytes.data()), ownedBytes.size());
+        }
+    }
+
+    // 4) Last resort
+    if (text.empty()) {
+        try {
+            auto detectedMime =
+                yams::detection::FileTypeDetector::getMimeTypeFromExtension(normalizedExt);
+            if (!detectedMime.empty() && detector.isTextMimeType(detectedMime)) {
+                text = std::string(reinterpret_cast<const char*>(ownedBytes.data()),
+                                   ownedBytes.size());
+            }
+        } catch (...) {
+            spdlog::debug("FileTypeDetector error for extension {} in extractDocumentContent",
+                          extension);
+        }
+    }
+
+    if (text.empty())
+        return std::nullopt;
+
+    ExtractedTextBytesAndMetadata out;
+    out.text = std::move(text);
+    out.bytes = std::make_shared<std::vector<std::byte>>(std::move(ownedBytes));
+    out.metadata = std::move(metadata);
     return out;
 }
 

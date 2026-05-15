@@ -63,8 +63,8 @@ int extract(const uint8_t* content, size_t content_len, yams_extraction_result_t
         return YAMS_PLUGIN_ERR_INVALID;
     }
 
-    // Extract text using parallel processing for best performance
-    auto text = doc->extractAllParallel();
+    // Extract text using reading-order extraction
+    auto text = doc->extractAll();
 
     // Extract metadata
     auto metadata = yams::zyp::extractMetadata(buffer);
