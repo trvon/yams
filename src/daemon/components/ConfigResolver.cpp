@@ -592,11 +592,27 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                                                   const std::filesystem::path& resolvedDataDir) {
     std::string preferred;
 
+    // Returns true if the model name is acceptable as the preferred model for
+    // the currently-resolved embedding backend.  simeon sentinels are only
+    // valid when the backend is actually simeon (in-process, model-free).
+    auto acceptAsPreferred = [&](const std::string& model) -> bool {
+        if (model != "simeon-default" && model != "simeon")
+            return true;
+        if (resolveEmbeddingBackend("auto") == "simeon")
+            return true;
+        spdlog::debug("Model '{}' is a simeon sentinel but backend is not simeon; "
+                      "skipping",
+                      model);
+        return false;
+    };
+
     if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
         preferred = envp;
         if (!preferred.empty()) {
             spdlog::debug("Preferred model from environment: {}", preferred);
-            return preferred;
+            if (acceptAsPreferred(preferred))
+                return preferred;
+            preferred.clear();
         }
     }
 
@@ -611,7 +627,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             if (it != kv.end() && !it->second.empty()) {
                 preferred = it->second;
                 spdlog::debug("Preferred model from config: {}", preferred);
-                return preferred;
+                if (acceptAsPreferred(preferred))
+                    return preferred;
+                preferred.clear();
             }
 
             // daemon.models.preload_models -> take the first known value
@@ -629,7 +647,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                 }
                 if (!preferred.empty()) {
                     spdlog::debug("Preferred model from config preload list: {}", preferred);
-                    return preferred;
+                    if (acceptAsPreferred(preferred))
+                        return preferred;
+                    preferred.clear();
                 }
             }
 
@@ -662,7 +682,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                     }
                     if (!preferred.empty()) {
                         spdlog::debug("Preferred model from config: {}", preferred);
-                        return preferred;
+                        if (acceptAsPreferred(preferred))
+                            return preferred;
+                        preferred.clear();
                     }
                 }
                 // daemon.models.preload_models -> take the first
@@ -683,7 +705,9 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                     }
                     if (!preferred.empty()) {
                         spdlog::debug("Preferred model from config preload list: {}", preferred);
-                        return preferred;
+                        if (acceptAsPreferred(preferred))
+                            return preferred;
+                        preferred.clear();
                     }
                 }
             }
@@ -721,6 +745,60 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
     }
 
     return preferred;
+}
+
+ResolvedEmbeddingConfig
+ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
+                                       const std::filesystem::path& resolvedDataDir) {
+    ResolvedEmbeddingConfig result;
+    result.backend = resolveEmbeddingBackend("auto");
+    result.isTrainingFree = (result.backend == "simeon");
+    result.preferredModel = resolvePreferredModel(config, resolvedDataDir);
+
+    auto isSimeonSentinel = [](const std::string& s) {
+        return s == "simeon-default" || s == "simeon";
+    };
+
+    if (result.isTrainingFree && !result.preferredModel.empty() &&
+        !isSimeonSentinel(result.preferredModel)) {
+        spdlog::warn("[ConfigResolver] backend '{}' is model-free but preferred_model '{}' "
+                     "is an ONNX model name; using 'simeon-default' instead",
+                     result.backend, result.preferredModel);
+        result.warnings.push_back(fmt::format(
+            "backend '{}' is model-free but preferred_model '{}' is an ONNX model name; "
+            "using 'simeon-default' instead",
+            result.backend, result.preferredModel));
+        result.preferredModel = "simeon-default";
+    }
+
+    if (!result.isTrainingFree && isSimeonSentinel(result.preferredModel) &&
+        result.backend != "simeon") {
+        spdlog::warn("[ConfigResolver] preferred_model '{}' is a simeon sentinel but "
+                     "backend is '{}'; model may not be loadable",
+                     result.preferredModel, result.backend);
+        result.warnings.push_back(
+            fmt::format("preferred_model '{}' is a simeon sentinel but backend is '{}'; "
+                        "model may not be loadable",
+                        result.preferredModel, result.backend));
+    }
+
+    if (result.backend == "onnxruntime" && !result.preferredModel.empty() &&
+        !isSimeonSentinel(result.preferredModel) && !resolvedDataDir.empty()) {
+        namespace fs = std::filesystem;
+        fs::path modelPath = resolvedDataDir / "models" / result.preferredModel / "model.onnx";
+        std::error_code ec;
+        if (!fs::exists(modelPath, ec)) {
+            spdlog::warn("[ConfigResolver] backend 'onnxruntime' selected but model file "
+                         "not found: {} (download with: yams model --download {})",
+                         modelPath.string(), result.preferredModel);
+            result.warnings.push_back(
+                fmt::format("backend 'onnxruntime' selected but model file not found: {} "
+                            "(download with: yams model --download {})",
+                            modelPath.string(), result.preferredModel));
+        }
+    }
+
+    return result;
 }
 
 std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {

@@ -8,12 +8,27 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <yams/vector/document_chunker.h>
 
 namespace yams::daemon {
 
 struct DaemonConfig; // Forward declaration
+
+/**
+ * @brief Resolved embedding configuration with cross-validated backend and model.
+ *
+ * Produced by ConfigResolver::resolveEmbeddingConfig() which validates
+ * the backend + preferred_model pair and emits warnings for mismatches
+ * (e.g. ONNX model name under model-free simeon backend).
+ */
+struct ResolvedEmbeddingConfig {
+    std::string backend;               // canonical: "simeon"|"onnxruntime"|"daemon"|"mock"|"auto"
+    std::string preferredModel;        // validated, canonicalized (empty if unresolved)
+    bool isTrainingFree = false;       // true when backend does not load ONNX models (e.g. simeon)
+    std::vector<std::string> warnings; // config mismatches detected during resolution
+};
 
 /**
  * @brief Static utility class for configuration resolution and parsing.
@@ -245,6 +260,28 @@ public:
      */
     static std::string resolvePreferredModel(const DaemonConfig& config,
                                              const std::filesystem::path& resolvedDataDir);
+
+    /**
+     * @brief Resolve and cross-validate backend + preferred model in one call.
+     *
+     * Avoids the consistency bug of calling resolveEmbeddingBackend() and
+     * resolvePreferredModel() separately (which can read from different
+     * config files). Validates the pair and emits warnings for:
+     *
+     * - ONNX model name under model-free simeon backend
+     *   → canonicalizes to "simeon-default" + warning
+     * - simeon sentinel under onnxruntime backend
+     *   → skipped, falls through to data-dir scan
+     * - Missing model.onnx under resolvedDataDir when backend=onnxruntime
+     *   → loose warning (not a hard error)
+     *
+     * @param config Daemon configuration
+     * @param resolvedDataDir Data directory for ONNX model auto-detection
+     * @return Validated ResolvedEmbeddingConfig
+     */
+    static ResolvedEmbeddingConfig
+    resolveEmbeddingConfig(const DaemonConfig& config,
+                           const std::filesystem::path& resolvedDataDir);
 
     /**
      * @brief Resolve the preferred reranker model name from env/config.
