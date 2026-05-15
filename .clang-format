@@ -23,23 +23,23 @@ ColumnLimit: 100
 # Braces
 BreakBeforeBraces: Attach
 BraceWrapping:
-  AfterCaseLabel: false
-  AfterClass: false
-  AfterControlStatement: Never
-  AfterEnum: false
-  AfterFunction: false
-  AfterNamespace: false
-  AfterStruct: false
-  AfterUnion: false
-  AfterExternBlock: true
-  BeforeCatch: false
-  BeforeElse: false
-  BeforeLambdaBody: false
-  BeforeWhile: false
-  IndentBraces: false
-  SplitEmptyFunction: true
-  SplitEmptyRecord: true
-  SplitEmptyNamespace: true
+    AfterCaseLabel: false
+    AfterClass: false
+    AfterControlStatement: Never
+    AfterEnum: false
+    AfterFunction: false
+    AfterNamespace: false
+    AfterStruct: false
+    AfterUnion: false
+    AfterExternBlock: true
+    BeforeCatch: false
+    BeforeElse: false
+    BeforeLambdaBody: false
+    BeforeWhile: false
+    IndentBraces: false
+    SplitEmptyFunction: true
+    SplitEmptyRecord: true
+    SplitEmptyNamespace: true
 
 # Alignment
 AlignAfterOpenBracket: Align
@@ -111,19 +111,19 @@ FixNamespaceComments: true
 IncludeBlocks: Preserve
 IndentRequires: false
 IndentWrappedFunctionNames: false
-InsertBraces: false
-InsertTrailingCommas: None
+# InsertBraces: false  # requires clang-format 15+
+# InsertTrailingCommas: None  # requires clang-format 15+
 KeepEmptyLinesAtTheStartOfBlocks: false
-LambdaBodyIndentation: Signature
+# LambdaBodyIndentation: Signature  # requires clang-format 15+
 MaxEmptyLinesToKeep: 1
 PointerAlignment: Left
 QualifierAlignment: Leave
 ReferenceAlignment: Pointer
 ReflowComments: true
-RemoveBracesLLVM: false
-RequiresClausePosition: OwnLine
-SeparateDefinitionBlocks: Leave
-ShortNamespaceLines: 1
+# RemoveBracesLLVM: false  # requires clang-format 15+
+# RequiresClausePosition: OwnLine  # requires clang-format 15+
+# SeparateDefinitionBlocks: Leave  # requires clang-format 15+
+# ShortNamespaceLines: 1  # requires clang-format 15+
 SortIncludes: CaseInsensitive
 SortUsingDeclarations: true
 
@@ -141,44 +141,44 @@ PenaltyReturnTypeOnItsOwnLine: 60
 
 # Include Categories
 IncludeCategories:
-  - Regex:           '^"yams/'
-    Priority:        1
-    SortPriority:    1
-  - Regex:           '^<tracy/'
-    Priority:        2
-    SortPriority:    2
-  - Regex:           '^<(sqlite3|sqlite_vec)'
-    Priority:        3
-    SortPriority:    3
-  - Regex:           '^<(spdlog|nlohmann|CLI11|magic_enum|toml|onnxruntime)'
-    Priority:        4
-    SortPriority:    4
-  - Regex:           '^<[^/]+>'
-    Priority:        5
-    SortPriority:    5
-  - Regex:           '.*'
-    Priority:        6
-    SortPriority:    6
+    - Regex: '^"yams/'
+      Priority: 1
+      SortPriority: 1
+    - Regex: "^<tracy/"
+      Priority: 2
+      SortPriority: 2
+    - Regex: "^<(sqlite3|sqlite_vec)"
+      Priority: 3
+      SortPriority: 3
+    - Regex: "^<(spdlog|nlohmann|CLI11|magic_enum|toml|onnxruntime)"
+      Priority: 4
+      SortPriority: 4
+    - Regex: "^<[^/]+>"
+      Priority: 5
+      SortPriority: 5
+    - Regex: ".*"
+      Priority: 6
+      SortPriority: 6
 
 # Macros
 AttributeMacros:
-  - __capability
+    - __capability
 ForEachMacros:
-  - foreach
-  - Q_FOREACH
-  - BOOST_FOREACH
+    - foreach
+    - Q_FOREACH
+    - BOOST_FOREACH
 IfMacros:
-  - KJ_IF_MAYBE
-MacroBlockBegin: ''
-MacroBlockEnd: ''
+    - KJ_IF_MAYBE
+MacroBlockBegin: ""
+MacroBlockEnd: ""
 StatementAttributeLikeMacros:
-  - Q_EMIT
+    - Q_EMIT
 StatementMacros:
-  - Q_UNUSED
-  - QT_REQUIRE_VERSION
+    - Q_UNUSED
+    - QT_REQUIRE_VERSION
 WhitespaceSensitiveMacros:
-  - STRINGIZE
-  - PP_STRINGIZE
-  - BOOST_PP_STRINGIZE
-  - NS_SWIFT_NAME
-  - CF_SWIFT_NAME
+    - STRINGIZE
+    - PP_STRINGIZE
+    - BOOST_PP_STRINGIZE
+    - NS_SWIFT_NAME
+    - CF_SWIFT_NAME

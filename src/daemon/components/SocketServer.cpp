@@ -227,7 +227,8 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
                                                        RequestDispatcher* dispatcher) const {
     RequestHandler::Config handlerConfig;
     handlerConfig.writer_budget_ref = writerBudget_;
-    handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
+    handlerConfig.writer_budget_bytes_per_turn =
+        writerBudget_ ? writerBudget_->load(std::memory_order_relaxed) : 0;
     handlerConfig.enable_streaming = true;
     handlerConfig.enable_multiplexing = !isProxy;
 

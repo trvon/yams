@@ -1,33 +1,18 @@
 {
-  "name": "YAMS CI DevContainer",
-  "build": {
-    "dockerfile": "Dockerfile"
-  },
-  "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
-  },
-  "runArgs": [
-    "--init"
-  ],
-  "containerEnv": {
-    "DEBIAN_FRONTEND": "noninteractive"
-  },
-  "customizations": {
-    "vscode": {
-      "extensions": [
-        "ms-vscode.cpptools",
-        "ms-vscode.cmake-tools",
-        "twxs.cmake",
-            "ms-azuretools.vscode-docker",
-            "xaver.clang-format",
-            "notskm.clang-tidy"
-      ]
-    }
-  },
-  "remoteUser": "vscode",
-  "postCreateCommand": "bash /usr/local/share/yams/postCreate.sh",
-  "mounts": [
-  // Use a named volume for Docker-in-Docker storage; source must be a volume name, not a path
-  "source=docker-data,target=/var/lib/docker,type=volume"
-  ]
+    "name": "YAMS Dev Container",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "."
+    },
+    "postCreateCommand": "bash /usr/local/share/yams/postCreate.sh",
+    "features": {
+        "ghcr.io/devcontainers/features/git:1": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+    },
+    "runArgs": ["--cap-add=SYS_PTRACE", "--security-opt=seccomp=unconfined"],
+    "remoteEnv": {
+        "CC": "gcc",
+        "CXX": "g++"
+    },
+    "mounts": ["source=conan-cache,target=/home/vscode/.conan2,type=volume"]
 }
