@@ -849,6 +849,7 @@ TEST_CASE("EntityGraphService: All languages create file nodes",
 
     // Verify file nodes were created
     auto kg = fixture.getKgStore();
+    REQUIRE(kg);
     auto fileNodesResult = kg->findNodesByType("file", 100, 0);
 
     if (fileNodesResult.has_value()) {

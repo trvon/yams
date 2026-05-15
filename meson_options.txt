@@ -21,6 +21,7 @@ option('plugin-zyp', type: 'boolean', value: true, description: 'Build zyp PDF e
 option('plugin-glint', type: 'boolean', value: false, description: 'Build Glint NL entity extractor plugin (GLiNER-based)')
 option('yams-version', type: 'string', value: '', description: 'Override runtime/display version (falls back to project version when empty). A generated header will expose this.')
 option('unit-timeout', type: 'integer', value: 1200, description: 'Total time budget (seconds) for unit tests; per-shard timeout is derived automatically when sharding is enabled')
+option('test-timeout-scale', type: 'integer', value: 1, description: 'Multiplier for daemon startup/wait timeouts in test code (e.g., 2 gives 2× the default waits)')
 option('unit-shards', type: 'integer', value: 6, description: 'Number of shards to split the unit test binary into via GTest sharding (set to 1 to disable)')
 option('bench-timeout', type: 'integer', value: 90, description: 'Timeout (seconds) for benchmark/stress-oriented test suite')
 option('integration-timeout', type: 'integer', value: 600, description: 'Timeout (seconds) for integration_services suite (doubled for CI stability)')

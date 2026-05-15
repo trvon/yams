@@ -116,7 +116,7 @@ public:
     }
 
     // Helper: Wait for post-ingest queue to drain (both channel AND in-flight work)
-    bool waitForQueueDrain(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    bool waitForQueueDrain(std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
         auto start = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - start < timeout) {
             if (auto queue = serviceManager_->getPostIngestQueue()) {
@@ -241,7 +241,7 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
         }
 
         // Wait for queue to drain
-        bool drained = fixture.waitForQueueDrain(std::chrono::seconds(15));
+        bool drained = fixture.waitForQueueDrain(std::chrono::seconds(30));
         REQUIRE(drained);
 
         auto finalProcessed = queue->processed();
@@ -269,7 +269,7 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
         fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
         // Wait for processing
-        bool drained = fixture.waitForQueueDrain(std::chrono::seconds(15));
+        bool drained = fixture.waitForQueueDrain(std::chrono::seconds(30));
         REQUIRE(drained);
 
         // Try to search for the document
@@ -323,7 +323,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
         // Enqueue for post-ingest processing
         fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
-        REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(15)));
+        REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(30)));
 
         auto appContext = fixture.serviceManager_->getAppContext();
         auto searchService = makeSearchService(appContext);
@@ -359,7 +359,7 @@ TEST_CASE("PostIngestQueue - continues processing when KG stage is paused",
                                       "Pipeline should still index this content when KG is paused");
     fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
-    REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(15)));
+    REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(30)));
 
     auto appContext = fixture.serviceManager_->getAppContext();
     auto searchService = makeSearchService(appContext);

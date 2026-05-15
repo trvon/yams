@@ -1019,7 +1019,8 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
                                << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs
                                << std::setw(12) << r.firstInferMs << std::setw(10) << "-"
                                << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(12)
-                               << "-" << "FAIL: " << r.error);
+                               << "-"
+                               << "FAIL: " << r.error);
         }
     }
     UNSCOPED_INFO(

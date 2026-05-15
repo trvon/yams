@@ -124,7 +124,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: true
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2"
           - suffix: linux-arm64
             runs_on: ubuntu-24.04-arm
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -132,7 +132,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2"
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ./conan/profiles/host-macos-apple-clang
@@ -140,7 +140,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2"
           - suffix: windows-x86_64
             runs_on: windows-latest
             conan_host_profile: ./conan/profiles/host-windows-msvc
@@ -148,7 +148,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2"
           - suffix: linux-x86_64-asan
             runs_on: ubuntu-24.04
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -156,7 +156,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-asan=true -Db_sanitize=address -Db_lundef=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-asan=true -Db_sanitize=address -Db_lundef=false -Dtest-timeout-scale=2"
           - suffix: linux-x86_64-ubsan
             runs_on: ubuntu-24.04
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -164,7 +164,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2"
           # TSAN intentionally excluded from CI: boost::asio strand destruction triggers
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
           # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread

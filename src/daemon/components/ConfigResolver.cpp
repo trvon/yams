@@ -99,7 +99,7 @@ std::optional<double> parseDouble(const std::string& raw) {
     char* end = nullptr;
     errno = 0;
     double parsed = std::strtod(value.c_str(), &end);
-    if (errno != 0 || end == value.c_str() || *end != '\0') {
+    if (errno != 0 || end == nullptr || end == value.c_str() || *end != '\0') {
         return std::nullopt;
     }
     return parsed;

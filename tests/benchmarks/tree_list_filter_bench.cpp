@@ -177,8 +177,8 @@ BENCHMARK_DEFINE_F(TreeListFilterFixture, TreeQueryPathPrefixWithTag)(benchmark:
 }
 
 // Benchmark 3: Tree query with path prefix + multiple tags
-BENCHMARK_DEFINE_F(TreeListFilterFixture,
-                   TreeQueryPathPrefixWithMultipleTags)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(TreeListFilterFixture, TreeQueryPathPrefixWithMultipleTags)
+(benchmark::State& state) {
     DocumentQueryOptions opts;
     opts.pathPrefix = "/project/src";
     opts.prefixIsDirectory = true;
@@ -214,8 +214,8 @@ BENCHMARK_DEFINE_F(TreeListFilterFixture, TreeQueryPathPrefixWithMime)(benchmark
 }
 
 // Benchmark 5: Tree query with path prefix + extension filter
-BENCHMARK_DEFINE_F(TreeListFilterFixture,
-                   TreeQueryPathPrefixWithExtension)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(TreeListFilterFixture, TreeQueryPathPrefixWithExtension)
+(benchmark::State& state) {
     DocumentQueryOptions opts;
     opts.pathPrefix = "/project/src";
     opts.prefixIsDirectory = true;
@@ -233,8 +233,8 @@ BENCHMARK_DEFINE_F(TreeListFilterFixture,
 }
 
 // Benchmark 6: Tree query with all filters combined
-BENCHMARK_DEFINE_F(TreeListFilterFixture,
-                   TreeQueryPathPrefixWithAllFilters)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(TreeListFilterFixture, TreeQueryPathPrefixWithAllFilters)
+(benchmark::State& state) {
     DocumentQueryOptions opts;
     opts.pathPrefix = "/project/src";
     opts.prefixIsDirectory = true;
