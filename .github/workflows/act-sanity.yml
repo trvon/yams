@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -q "run_id:" .github/workflows/publish-repos.yml
-          grep -q "workflow_run.id" .github/workflows/publish-repos.yml
+          grep -q "workflow_runs" .github/workflows/publish-repos.yml
           grep -q -- "--content-type" .github/workflows/publish-repos.yml
           grep -q "Get-MsiProperty" packaging/windows/generate-winget-manifest.ps1
           grep -q "ProductCode: '\$productCode'" packaging/windows/generate-winget-manifest.ps1

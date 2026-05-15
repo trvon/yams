@@ -110,11 +110,13 @@ jobs:
       - name: Setup ccache env
         shell: bash
         run: |
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_COMPRESS=1"
+            echo "CCACHE_MAXSIZE=5G"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro"
+          } >> "$GITHUB_ENV"
           ccache -z >/dev/null 2>&1 || true
 
       - name: Configure (Release) and Build
@@ -124,7 +126,8 @@ jobs:
           rm -rf "$BUILD_DIR"
 
           # Keep AF_UNIX socket path short
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           mkdir -p "$XDG_RUNTIME_DIR" || true
 
           # Use setup.sh with CI environment variables for consistent configuration
@@ -148,6 +151,7 @@ jobs:
           done
           if [ -n "$CONAN_BUILD_ENV" ]; then
             set +u
+            # shellcheck disable=SC1090
             source "$CONAN_BUILD_ENV"
             set -u
           fi
@@ -272,19 +276,21 @@ jobs:
         run: |
           set -euo pipefail
           SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
-          echo "### Bench Results" >> "$SUMMARY_FILE"
-          if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
-            for json in "$BUILD_DIR/bench_results"/*.json; do
-              echo >> "$SUMMARY_FILE"
-              echo "#### $(basename "$json")" >> "$SUMMARY_FILE"
-              echo '```json' >> "$SUMMARY_FILE"
-              sed -e 's/[[:cntrl:]]//g' "$json" | head -c 120000 >> "$SUMMARY_FILE" || true
-              echo >> "$SUMMARY_FILE"
-              echo '```' >> "$SUMMARY_FILE"
-            done
-          else
-            echo "_No bench_results found._" >> "$SUMMARY_FILE"
-          fi
+          {
+            echo "### Bench Results"
+            if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
+              for json in "$BUILD_DIR/bench_results"/*.json; do
+                echo
+                echo "#### $(basename "$json")"
+                echo '```json'
+                sed -e 's/[[:cntrl:]]//g' "$json" | head -c 120000 || true
+                echo
+                echo '```'
+              done
+            else
+              echo "_No bench_results found._"
+            fi
+          } >> "$SUMMARY_FILE"
 
       - name: Upload Benchmark Artifacts
         uses: actions/upload-artifact@v4
