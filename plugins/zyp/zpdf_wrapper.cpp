@@ -6,7 +6,11 @@
 #include "zpdf_wrapper.h"
 #include "zpdf.h"
 
+#include <algorithm>
 #include <cstring>
+#include <future>
+#include <sstream>
+#include <thread>
 #include <utility>
 
 namespace yams::zyp {
@@ -167,6 +171,91 @@ TextBuffer Document::extractAllReadingOrder() const {
 
 bool Document::valid() const {
     return handle_ != nullptr;
+}
+
+TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int numThreads) {
+    if (data.empty())
+        return {};
+
+    if (numThreads <= 0)
+        numThreads = static_cast<int>(std::thread::hardware_concurrency());
+    if (numThreads < 1)
+        numThreads = 1;
+
+    auto probeDoc = Document::openMemory(data);
+    if (!probeDoc)
+        return {};
+    const int totalPages = probeDoc->pageCount();
+    probeDoc.reset();
+    if (totalPages <= 0)
+        return {};
+
+    if (numThreads > totalPages)
+        numThreads = totalPages;
+    if (numThreads <= 1) {
+        auto doc = Document::openMemory(data);
+        if (!doc)
+            return {};
+        return doc->extractAll();
+    }
+
+    // Open per-thread documents and distribute pages
+    const int pagesPerThread = (totalPages + numThreads - 1) / numThreads;
+    std::vector<std::future<std::pair<int, std::string>>> futures;
+    futures.reserve(static_cast<size_t>(numThreads));
+
+    for (int t = 0; t < numThreads; ++t) {
+        const int startPage = t * pagesPerThread;
+        const int endPage = std::min(startPage + pagesPerThread, totalPages);
+        if (startPage >= totalPages)
+            break;
+
+        futures.push_back(std::async(
+            std::launch::async, [data, startPage, endPage]() -> std::pair<int, std::string> {
+                auto doc = Document::openMemory(data);
+                if (!doc)
+                    return {startPage, {}};
+
+                std::ostringstream oss;
+                for (int p = startPage; p < endPage; ++p) {
+                    auto pageText = doc->extractPage(p);
+                    auto view = pageText.text();
+                    if (!view.empty())
+                        oss.write(view.data(), static_cast<std::streamsize>(view.size()));
+                    oss << '\n';
+                }
+                return {startPage, oss.str()};
+            }));
+    }
+
+    // Collect results in page order
+    std::vector<std::pair<int, std::string>> results;
+    results.reserve(futures.size());
+    for (auto& f : futures) {
+        try {
+            results.push_back(f.get());
+        } catch (const std::exception& e) {
+            (void)e; // thread failed; skip its pages
+        }
+    }
+    std::sort(results.begin(), results.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::ostringstream combined;
+    for (auto& [_, text] : results) {
+        if (!text.empty())
+            combined << text;
+    }
+    const std::string finalText = combined.str();
+    if (finalText.empty())
+        return {};
+
+    auto* buf = static_cast<uint8_t*>(std::malloc(finalText.size() + 1));
+    if (!buf)
+        return {};
+    std::memcpy(buf, finalText.data(), finalText.size());
+    buf[finalText.size()] = '\0';
+    return TextBuffer(buf, finalText.size());
 }
 
 } // namespace yams::zyp

@@ -1,11 +1,11 @@
-# zyp - Zig YAMS PDF Extractor
-# High-performance PDF text extraction using zpdf (https://github.com/Lulzx/zpdf)
+#zyp - Zig YAMS PDF Extractor
+#High - performance PDF text extraction using zpdf(https: // github.com/Lulzx/zpdf)
 
-if not get_option('plugin-zyp')
-  subdir_done()
+if not get_option ('plugin-zyp')
+subdir_done()
 endif
 
-# Find Zig compiler (requires 0.15.x; zpdf is not Zig 0.16-compatible yet)
+#Find Zig compiler(requires 0.15.x; zpdf is not Zig 0.16 - compatible yet)
 zig = find_program('zig', required: false)
 if not zig.found()
   warning('Zig compiler not found, skipping zyp plugin. Install Zig 0.15.x to enable.')
@@ -24,17 +24,17 @@ if not zig_version.version_compare('>=0.15.0')
   subdir_done()
 endif
 
-# Platform-specific library name and rpath
+#Platform - specific library name and rpath
 if host_machine.system() == 'darwin'
   zpdf_lib_name = 'libzpdf.dylib'
-  # @loader_path is used for shared libraries/modules to find libs in same directory
+#@loader_path is used for shared libraries / modules to find libs in same directory
   zyp_install_rpath = '@loader_path'
   zyp_link_args = ['-fno-sanitize=thread']
 elif host_machine.system() == 'windows'
   zpdf_lib_name = 'zpdf.dll'
   zpdf_import_lib_name = 'zpdf.lib'
   zyp_install_rpath = ''  # Windows doesn't use rpath
-  # Link against dynamic CRT libraries; avoid static CRT conflict
+#Link against dynamic CRT libraries; avoid static CRT conflict
   zyp_link_args = [
     '/NODEFAULTLIB:libcmt',
     '/NODEFAULTLIB:libcmtd',
@@ -44,16 +44,16 @@ elif host_machine.system() == 'windows'
   ]
 else
   zpdf_lib_name = 'libzpdf.so'
-  # $ORIGIN refers to directory containing the loading module
+#$ORIGIN refers to directory containing the loading module
   zyp_install_rpath = '$ORIGIN'
   zyp_link_args = ['-fno-sanitize=thread']
 endif
 
-# Build zpdf shared library via Zig and copy to build directory
-# Zig outputs DLLs to zpdf/zig-out/bin/ on Windows, shared libs to zig-out/lib/ on Unix
+#Build zpdf shared library via Zig and copy to build directory
+#Zig outputs DLLs to zpdf / zig - out / bin / on Windows, shared libs to zig - out / lib / on Unix
 zpdf_src_dir = meson.current_source_dir() / 'zpdf'
 if host_machine.system() == 'windows'
-  # Windows: DLL goes to bin/, import lib goes to lib/
+#Windows : DLL goes to bin /, import lib goes to lib /
   zpdf_lib_src = zpdf_src_dir / 'zig-out' / 'bin' / zpdf_lib_name
   zpdf_import_lib_src = zpdf_src_dir / 'zig-out' / 'lib' / zpdf_import_lib_name
 else
@@ -66,10 +66,10 @@ if not fs.exists(zpdf_src_dir / 'build.zig')
   subdir_done()
 endif
 
-# Platform-specific build command
+#Platform - specific build command
 if host_machine.system() == 'windows'
-  # Windows: Use PowerShell for build
-  # Build zpdf and copy both DLL and import lib to build directory
+#Windows : Use PowerShell for build
+#Build zpdf and copy both DLL and import lib to build directory
   zpdf_lib = custom_target('zpdf_shared',
     command: [
       'powershell', '-NoProfile', '-Command',
@@ -87,7 +87,7 @@ if host_machine.system() == 'windows'
     build_by_default: true,
     console: true,
   )
-  # Extract just the import library for linking
+#Extract just the import library for linking
   zpdf_import_lib = zpdf_lib[1]
 elif host_machine.system() == 'darwin'
   zpdf_build_command = (
@@ -109,7 +109,7 @@ elif host_machine.system() == 'darwin'
     console: true,
   )
 else
-  # Unix (Linux/macOS): Use shell
+#Unix(Linux / macOS) : Use shell
   zpdf_lib = custom_target('zpdf_shared',
     command: [
       'sh', '-c',
@@ -127,11 +127,11 @@ else
   )
 endif
 
-# Create a dependency object that includes the zpdf library
-# Use build_rpath for build-time, install_rpath handles installed location
+#Create a dependency object that includes the zpdf library
+#Use build_rpath for build - time, install_rpath handles installed location
 if host_machine.system() == 'windows'
-  # On Windows, link against the import library only (not the DLL)
-  # Use sources to establish build dependency, but link via explicit path
+#On Windows, link against the import library only(not the DLL)
+#Use sources to establish build dependency, but link via explicit path
   zpdf_dep = declare_dependency(
     link_args: [zpdf_build_dir / zpdf_import_lib_name],
     sources: [zpdf_import_lib],  # Build dependency on just the import lib
@@ -143,20 +143,20 @@ else
   )
 endif
 
-# Compiler-specific flags for this plugin.
+#Compiler - specific flags for this plugin.
 zyp_cpp_args = []
 if meson.get_compiler('cpp').get_id() != 'msvc'
   zyp_cpp_args = ['-std=c++20', '-fno-sanitize=thread']
 endif
 
-# Plugin sources
+#Plugin sources
 zyp_sources = files(
   'zyp_plugin.cpp',
   'zpdf_wrapper.cpp',
   'pdf_metadata.cpp',
 )
 
-# Build the plugin (minimal dependencies - no spdlog to avoid TSan conflicts)
+#Build the plugin(minimal dependencies - no spdlog to avoid TSan conflicts)
 zyp_plugin = shared_module('yams_zyp',
   zyp_sources,
   include_directories: [
@@ -166,9 +166,9 @@ zyp_plugin = shared_module('yams_zyp',
   dependencies: [zpdf_dep],
   cpp_args: zyp_cpp_args,
   link_args: zyp_link_args,
-  # build_rpath ensures the plugin can find libzpdf during build/test
+#build_rpath ensures the plugin can find libzpdf during build / test
   build_rpath: zpdf_build_dir,
-  # install_rpath ensures the plugin can find libzpdf after installation
+#install_rpath ensures the plugin can find libzpdf after installation
   install_rpath: zyp_install_rpath,
   build_by_default: true,
   install: true,
@@ -176,8 +176,8 @@ zyp_plugin = shared_module('yams_zyp',
   name_prefix: '',
 )
 
-# Install zpdf library alongside the plugin
-# Use platform-specific install script
+#Install zpdf library alongside the plugin
+#Use platform - specific install script
 if host_machine.system() == 'windows'
   meson.add_install_script('powershell', '-NoProfile', '-Command',
     '$dest = if ($env:DESTDIR) { Join-Path $env:DESTDIR "@1@" } else { "@1@" }; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item -Path "@0@" -Destination $dest'.format(
@@ -193,3 +193,27 @@ else
     )
   )
 endif
+
+#-- -- zyp extraction benchmark -- --
+#Measures sequential vs parallel PDF extraction throughput.
+#Usage : zyp_extraction_bench < pdf_path>[repeat_count]
+zyp_extraction_bench_sources = files(
+  '../../tests/benchmarks/zyp_extraction_bench.cpp',
+  'zpdf_wrapper.cpp',
+)
+
+zyp_extraction_bench = executable('zyp_extraction_bench',
+  zyp_extraction_bench_sources,
+  include_directories: [
+    include_directories('../../include'),
+    include_directories('../..'),
+    include_directories('.'),
+  ],
+  dependencies: [zpdf_dep],
+  cpp_args: zyp_cpp_args,
+  build_rpath: zpdf_build_dir,
+  install: false,
+  override_options: ['b_sanitize=none'],
+)
+
+alias_target('bench_zyp', zyp_extraction_bench)

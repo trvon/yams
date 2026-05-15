@@ -5,11 +5,14 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace yams::zyp {
 
@@ -97,9 +100,18 @@ public:
     /** Extract text from all pages (sequential, reading-order) */
     [[nodiscard]] TextBuffer extractAll() const;
 
+    /** Extract text from all pages using multiple threads.
+     *  Opens per-thread Document instances from the same buffer and
+     *  distributes pages across threads for true parallelism.
+     *  @param data   Raw PDF buffer (must remain valid for the duration of the call)
+     *  @param numThreads  Number of threads (0 = hardware concurrency)
+     *  @return Combined text buffer, or empty TextBuffer on failure */
+    [[nodiscard]] static TextBuffer extractAllParallelized(std::span<const uint8_t> data,
+                                                           int numThreads = 0);
+
     /** Alias for extractAll(); named for backward compatibility.
      *  Note: despite the name this is sequential, not parallel;
-     *        the zpdf backend does not support true parallel extraction. */
+     *        use extractAllParallelized() for true parallelism. */
     [[nodiscard]] TextBuffer extractAllParallel() const;
 
     /** Extract text in visual reading order (experimental) */

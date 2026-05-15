@@ -56,22 +56,27 @@ int extract(const uint8_t* content, size_t content_len, yams_extraction_result_t
 
     *result = nullptr;
 
-    // Open document from memory
     std::span<const uint8_t> buffer(content, content_len);
-    auto doc = yams::zyp::Document::openMemory(buffer);
-    if (!doc) {
-        return YAMS_PLUGIN_ERR_INVALID;
+
+    // Get page count and validate PDF (probe open/close)
+    int pageCount = 0;
+    {
+        auto probeDoc = yams::zyp::Document::openMemory(buffer);
+        if (!probeDoc) {
+            return YAMS_PLUGIN_ERR_INVALID;
+        }
+        pageCount = probeDoc->pageCount();
     }
 
-    // Extract text using reading-order extraction
-    auto text = doc->extractAll();
+    // Extract text using true parallel extraction across pages
+    auto text = yams::zyp::Document::extractAllParallelized(buffer);
 
     // Extract metadata
     auto metadata = yams::zyp::extractMetadata(buffer);
     auto metaMap = metadata ? metadata->toMap() : std::unordered_map<std::string, std::string>{};
 
     // Add page count
-    metaMap["page_count"] = std::to_string(doc->pageCount());
+    metaMap["page_count"] = std::to_string(pageCount);
 
     // Allocate result structure
     *result = static_cast<yams_extraction_result_t*>(std::malloc(sizeof(yams_extraction_result_t)));
