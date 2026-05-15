@@ -26,9 +26,9 @@
 #include "google/protobuf/generated_message_reflection.h"
 #include "google/protobuf/message.h"
 #include "google/protobuf/message_lite.h"
-#include "google/protobuf/repeated_field.h"  // IWYU pragma: export
+#include "google/protobuf/repeated_field.h" // IWYU pragma: export
 #include "google/protobuf/extension_set.h"  // IWYU pragma: export
-#include "google/protobuf/map.h"  // IWYU pragma: export
+#include "google/protobuf/map.h"            // IWYU pragma: export
 #include "google/protobuf/map_entry.h"
 #include "google/protobuf/map_field_inl.h"
 #include "google/protobuf/unknown_field_set.h"
@@ -42,18 +42,16 @@
 namespace google {
 namespace protobuf {
 namespace internal {
-template <typename T>
-::absl::string_view GetAnyMessageName();
-}  // namespace internal
-}  // namespace protobuf
-}  // namespace google
+template <typename T>::absl::string_view GetAnyMessageName();
+} // namespace internal
+} // namespace protobuf
+} // namespace google
 
 // Internal implementation detail -- do not use these members.
 struct TableStruct_manifest_2eproto {
-  static const ::uint32_t offsets[];
+    static const ::uint32_t offsets[];
 };
-extern const ::google::protobuf::internal::DescriptorTable
-    descriptor_table_manifest_2eproto;
+extern const ::google::protobuf::internal::DescriptorTable descriptor_table_manifest_2eproto;
 namespace kronos {
 namespace manifest {
 class ChunkReference;
@@ -64,1017 +62,971 @@ struct FileManifestDefaultTypeInternal;
 extern FileManifestDefaultTypeInternal _FileManifest_default_instance_;
 class FileManifest_MetadataEntry_DoNotUse;
 struct FileManifest_MetadataEntry_DoNotUseDefaultTypeInternal;
-extern FileManifest_MetadataEntry_DoNotUseDefaultTypeInternal _FileManifest_MetadataEntry_DoNotUse_default_instance_;
+extern FileManifest_MetadataEntry_DoNotUseDefaultTypeInternal
+    _FileManifest_MetadataEntry_DoNotUse_default_instance_;
 class ManifestBatch;
 struct ManifestBatchDefaultTypeInternal;
 extern ManifestBatchDefaultTypeInternal _ManifestBatch_default_instance_;
-}  // namespace manifest
-}  // namespace kronos
+} // namespace manifest
+} // namespace kronos
 namespace google {
-namespace protobuf {
-}  // namespace protobuf
-}  // namespace google
+namespace protobuf {} // namespace protobuf
+} // namespace google
 
 namespace kronos {
 namespace manifest {
 
 // ===================================================================
 
-
 // -------------------------------------------------------------------
 
 class FileManifest_MetadataEntry_DoNotUse final
     : public ::google::protobuf::internal::MapEntry<
-          std::string, std::string,
-          ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
+          std::string, std::string, ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
           ::google::protobuf::internal::WireFormatLite::TYPE_STRING> {
- public:
-  using SuperType = ::google::protobuf::internal::MapEntry<
-      std::string, std::string,
-      ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
-      ::google::protobuf::internal::WireFormatLite::TYPE_STRING>;
-  FileManifest_MetadataEntry_DoNotUse();
-  template <typename = void>
-  explicit PROTOBUF_CONSTEXPR FileManifest_MetadataEntry_DoNotUse(
-      ::google::protobuf::internal::ConstantInitialized);
-  explicit FileManifest_MetadataEntry_DoNotUse(::google::protobuf::Arena* arena);
-  static const FileManifest_MetadataEntry_DoNotUse* internal_default_instance() {
-    return reinterpret_cast<const FileManifest_MetadataEntry_DoNotUse*>(
-        &_FileManifest_MetadataEntry_DoNotUse_default_instance_);
-  }
+public:
+    using SuperType = ::google::protobuf::internal::MapEntry<
+        std::string, std::string, ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
+        ::google::protobuf::internal::WireFormatLite::TYPE_STRING>;
+    FileManifest_MetadataEntry_DoNotUse();
+    template <typename = void>
+    explicit PROTOBUF_CONSTEXPR
+        FileManifest_MetadataEntry_DoNotUse(::google::protobuf::internal::ConstantInitialized);
+    explicit FileManifest_MetadataEntry_DoNotUse(::google::protobuf::Arena* arena);
+    static const FileManifest_MetadataEntry_DoNotUse* internal_default_instance() {
+        return reinterpret_cast<const FileManifest_MetadataEntry_DoNotUse*>(
+            &_FileManifest_MetadataEntry_DoNotUse_default_instance_);
+    }
 
+private:
+    friend class ::google::protobuf::MessageLite;
+    friend struct ::TableStruct_manifest_2eproto;
 
- private:
-  friend class ::google::protobuf::MessageLite;
-  friend struct ::TableStruct_manifest_2eproto;
+    friend class ::google::protobuf::internal::TcParser;
+    static const ::google::protobuf::internal::TcParseTable<1, 2, 0, 59, 2> _table_;
 
-  friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<
-      1, 2, 0,
-      59, 2>
-      _table_;
-
-  const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
-  static void* PlacementNew_(const void*, void* mem,
-                             ::google::protobuf::Arena* arena);
-  static constexpr auto InternalNewImpl_();
-  static const ::google::protobuf::internal::ClassDataFull _class_data_;
+    const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
+    static void* PlacementNew_(const void*, void* mem, ::google::protobuf::Arena* arena);
+    static constexpr auto InternalNewImpl_();
+    static const ::google::protobuf::internal::ClassDataFull _class_data_;
 };
 // -------------------------------------------------------------------
 
 class ChunkReference final : public ::google::protobuf::Message
 /* @@protoc_insertion_point(class_definition:kronos.manifest.ChunkReference) */ {
- public:
-  inline ChunkReference() : ChunkReference(nullptr) {}
-  ~ChunkReference() PROTOBUF_FINAL;
+public:
+    inline ChunkReference() : ChunkReference(nullptr) {}
+    ~ChunkReference() PROTOBUF_FINAL;
 
 #if defined(PROTOBUF_CUSTOM_VTABLE)
-  void operator delete(ChunkReference* msg, std::destroying_delete_t) {
-    SharedDtor(*msg);
-    ::google::protobuf::internal::SizedDelete(msg, sizeof(ChunkReference));
-  }
+    void operator delete(ChunkReference* msg, std::destroying_delete_t) {
+        SharedDtor(*msg);
+        ::google::protobuf::internal::SizedDelete(msg, sizeof(ChunkReference));
+    }
 #endif
 
-  template <typename = void>
-  explicit PROTOBUF_CONSTEXPR ChunkReference(
-      ::google::protobuf::internal::ConstantInitialized);
+    template <typename = void>
+    explicit PROTOBUF_CONSTEXPR ChunkReference(::google::protobuf::internal::ConstantInitialized);
 
-  inline ChunkReference(const ChunkReference& from) : ChunkReference(nullptr, from) {}
-  inline ChunkReference(ChunkReference&& from) noexcept
-      : ChunkReference(nullptr, std::move(from)) {}
-  inline ChunkReference& operator=(const ChunkReference& from) {
-    CopyFrom(from);
-    return *this;
-  }
-  inline ChunkReference& operator=(ChunkReference&& from) noexcept {
-    if (this == &from) return *this;
-    if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
-      InternalSwap(&from);
-    } else {
-      CopyFrom(from);
+    inline ChunkReference(const ChunkReference& from) : ChunkReference(nullptr, from) {}
+    inline ChunkReference(ChunkReference&& from) noexcept
+        : ChunkReference(nullptr, std::move(from)) {}
+    inline ChunkReference& operator=(const ChunkReference& from) {
+        CopyFrom(from);
+        return *this;
     }
-    return *this;
-  }
-
-  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
-  }
-  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
-  }
-
-  static const ::google::protobuf::Descriptor* descriptor() {
-    return GetDescriptor();
-  }
-  static const ::google::protobuf::Descriptor* GetDescriptor() {
-    return default_instance().GetMetadata().descriptor;
-  }
-  static const ::google::protobuf::Reflection* GetReflection() {
-    return default_instance().GetMetadata().reflection;
-  }
-  static const ChunkReference& default_instance() {
-    return *internal_default_instance();
-  }
-  static inline const ChunkReference* internal_default_instance() {
-    return reinterpret_cast<const ChunkReference*>(
-        &_ChunkReference_default_instance_);
-  }
-  static constexpr int kIndexInFileMessages = 0;
-  friend void swap(ChunkReference& a, ChunkReference& b) { a.Swap(&b); }
-  inline void Swap(ChunkReference* other) {
-    if (other == this) return;
-    if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
-      InternalSwap(other);
-    } else {
-      ::google::protobuf::internal::GenericSwap(this, other);
+    inline ChunkReference& operator=(ChunkReference&& from) noexcept {
+        if (this == &from)
+            return *this;
+        if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
+            InternalSwap(&from);
+        } else {
+            CopyFrom(from);
+        }
+        return *this;
     }
-  }
-  void UnsafeArenaSwap(ChunkReference* other) {
-    if (other == this) return;
-    ABSL_DCHECK(GetArena() == other->GetArena());
-    InternalSwap(other);
-  }
 
-  // implements Message ----------------------------------------------
+    inline const ::google::protobuf::UnknownFieldSet&
+    unknown_fields() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(
+            ::google::protobuf::UnknownFieldSet::default_instance);
+    }
+    inline ::google::protobuf::UnknownFieldSet*
+    mutable_unknown_fields() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+    }
 
-  ChunkReference* New(::google::protobuf::Arena* arena = nullptr) const {
-    return ::google::protobuf::Message::DefaultConstruct<ChunkReference>(arena);
-  }
-  using ::google::protobuf::Message::CopyFrom;
-  void CopyFrom(const ChunkReference& from);
-  using ::google::protobuf::Message::MergeFrom;
-  void MergeFrom(const ChunkReference& from) { ChunkReference::MergeImpl(*this, from); }
+    static const ::google::protobuf::Descriptor* descriptor() { return GetDescriptor(); }
+    static const ::google::protobuf::Descriptor* GetDescriptor() {
+        return default_instance().GetMetadata().descriptor;
+    }
+    static const ::google::protobuf::Reflection* GetReflection() {
+        return default_instance().GetMetadata().reflection;
+    }
+    static const ChunkReference& default_instance() { return *internal_default_instance(); }
+    static inline const ChunkReference* internal_default_instance() {
+        return reinterpret_cast<const ChunkReference*>(&_ChunkReference_default_instance_);
+    }
+    static constexpr int kIndexInFileMessages = 0;
+    friend void swap(ChunkReference& a, ChunkReference& b) { a.Swap(&b); }
+    inline void Swap(ChunkReference* other) {
+        if (other == this)
+            return;
+        if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
+            InternalSwap(other);
+        } else {
+            ::google::protobuf::internal::GenericSwap(this, other);
+        }
+    }
+    void UnsafeArenaSwap(ChunkReference* other) {
+        if (other == this)
+            return;
+        ABSL_DCHECK(GetArena() == other->GetArena());
+        InternalSwap(other);
+    }
 
-  private:
-  static void MergeImpl(
-      ::google::protobuf::MessageLite& to_msg,
-      const ::google::protobuf::MessageLite& from_msg);
+    // implements Message ----------------------------------------------
 
-  public:
-  bool IsInitialized() const {
-    return true;
-  }
-  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
-  #if defined(PROTOBUF_CUSTOM_VTABLE)
-  private:
-  static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
-  static ::uint8_t* _InternalSerialize(
-      const MessageLite& msg, ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream);
+    ChunkReference* New(::google::protobuf::Arena* arena = nullptr) const {
+        return ::google::protobuf::Message::DefaultConstruct<ChunkReference>(arena);
+    }
+    using ::google::protobuf::Message::CopyFrom;
+    void CopyFrom(const ChunkReference& from);
+    using ::google::protobuf::Message::MergeFrom;
+    void MergeFrom(const ChunkReference& from) { ChunkReference::MergeImpl(*this, from); }
 
-  public:
-  ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const {
-    return _InternalSerialize(*this, target, stream);
-  }
-  #else   // PROTOBUF_CUSTOM_VTABLE
-  ::size_t ByteSizeLong() const final;
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
-  #endif  // PROTOBUF_CUSTOM_VTABLE
-  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+private:
+    static void MergeImpl(::google::protobuf::MessageLite& to_msg,
+                          const ::google::protobuf::MessageLite& from_msg);
 
-  private:
-  void SharedCtor(::google::protobuf::Arena* arena);
-  static void SharedDtor(MessageLite& self);
-  void InternalSwap(ChunkReference* other);
- private:
-  template <typename T>
-  friend ::absl::string_view(
-      ::google::protobuf::internal::GetAnyMessageName)();
-  static ::absl::string_view FullMessageName() { return "kronos.manifest.ChunkReference"; }
+public:
+    bool IsInitialized() const { return true; }
+    ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+private:
+    static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
+    static ::uint8_t* _InternalSerialize(const MessageLite& msg, ::uint8_t* target,
+                                         ::google::protobuf::io::EpsCopyOutputStream* stream);
 
- protected:
-  explicit ChunkReference(::google::protobuf::Arena* arena);
-  ChunkReference(::google::protobuf::Arena* arena, const ChunkReference& from);
-  ChunkReference(::google::protobuf::Arena* arena, ChunkReference&& from) noexcept
-      : ChunkReference(arena) {
-    *this = ::std::move(from);
-  }
-  const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
-  static void* PlacementNew_(const void*, void* mem,
-                             ::google::protobuf::Arena* arena);
-  static constexpr auto InternalNewImpl_();
-  static const ::google::protobuf::internal::ClassDataFull _class_data_;
+public:
+    ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+        return _InternalSerialize(*this, target, stream);
+    }
+#else  // PROTOBUF_CUSTOM_VTABLE
+    ::size_t ByteSizeLong() const final;
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+#endif // PROTOBUF_CUSTOM_VTABLE
+    int GetCachedSize() const { return _impl_._cached_size_.Get(); }
 
- public:
-  ::google::protobuf::Metadata GetMetadata() const;
-  // nested types ----------------------------------------------------
+private:
+    void SharedCtor(::google::protobuf::Arena* arena);
+    static void SharedDtor(MessageLite& self);
+    void InternalSwap(ChunkReference* other);
 
-  // accessors -------------------------------------------------------
-  enum : int {
-    kHashFieldNumber = 1,
-    kOffsetFieldNumber = 2,
-    kSizeFieldNumber = 3,
-    kFlagsFieldNumber = 4,
-  };
-  // string hash = 1;
-  void clear_hash() ;
-  const std::string& hash() const;
-  template <typename Arg_ = const std::string&, typename... Args_>
-  void set_hash(Arg_&& arg, Args_... args);
-  std::string* mutable_hash();
-  PROTOBUF_NODISCARD std::string* release_hash();
-  void set_allocated_hash(std::string* value);
+private:
+    template <typename T>
+    friend ::absl::string_view(::google::protobuf::internal::GetAnyMessageName)();
+    static ::absl::string_view FullMessageName() { return "kronos.manifest.ChunkReference"; }
 
-  private:
-  const std::string& _internal_hash() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_hash(
-      const std::string& value);
-  std::string* _internal_mutable_hash();
+protected:
+    explicit ChunkReference(::google::protobuf::Arena* arena);
+    ChunkReference(::google::protobuf::Arena* arena, const ChunkReference& from);
+    ChunkReference(::google::protobuf::Arena* arena, ChunkReference&& from) noexcept
+        : ChunkReference(arena) {
+        *this = ::std::move(from);
+    }
+    const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
+    static void* PlacementNew_(const void*, void* mem, ::google::protobuf::Arena* arena);
+    static constexpr auto InternalNewImpl_();
+    static const ::google::protobuf::internal::ClassDataFull _class_data_;
 
-  public:
-  // uint64 offset = 2;
-  void clear_offset() ;
-  ::uint64_t offset() const;
-  void set_offset(::uint64_t value);
+public:
+    ::google::protobuf::Metadata GetMetadata() const;
+    // nested types ----------------------------------------------------
 
-  private:
-  ::uint64_t _internal_offset() const;
-  void _internal_set_offset(::uint64_t value);
+    // accessors -------------------------------------------------------
+    enum : int {
+        kHashFieldNumber = 1,
+        kOffsetFieldNumber = 2,
+        kSizeFieldNumber = 3,
+        kFlagsFieldNumber = 4,
+    };
+    // string hash = 1;
+    void clear_hash();
+    const std::string& hash() const;
+    template <typename Arg_ = const std::string&, typename... Args_>
+    void set_hash(Arg_&& arg, Args_... args);
+    std::string* mutable_hash();
+    PROTOBUF_NODISCARD std::string* release_hash();
+    void set_allocated_hash(std::string* value);
 
-  public:
-  // uint32 size = 3;
-  void clear_size() ;
-  ::uint32_t size() const;
-  void set_size(::uint32_t value);
+private:
+    const std::string& _internal_hash() const;
+    inline PROTOBUF_ALWAYS_INLINE void _internal_set_hash(const std::string& value);
+    std::string* _internal_mutable_hash();
 
-  private:
-  ::uint32_t _internal_size() const;
-  void _internal_set_size(::uint32_t value);
+public:
+    // uint64 offset = 2;
+    void clear_offset();
+    ::uint64_t offset() const;
+    void set_offset(::uint64_t value);
 
-  public:
-  // uint32 flags = 4;
-  void clear_flags() ;
-  ::uint32_t flags() const;
-  void set_flags(::uint32_t value);
+private:
+    ::uint64_t _internal_offset() const;
+    void _internal_set_offset(::uint64_t value);
 
-  private:
-  ::uint32_t _internal_flags() const;
-  void _internal_set_flags(::uint32_t value);
+public:
+    // uint32 size = 3;
+    void clear_size();
+    ::uint32_t size() const;
+    void set_size(::uint32_t value);
 
-  public:
-  // @@protoc_insertion_point(class_scope:kronos.manifest.ChunkReference)
- private:
-  class _Internal;
-  friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<
-      2, 4, 0,
-      43, 2>
-      _table_;
+private:
+    ::uint32_t _internal_size() const;
+    void _internal_set_size(::uint32_t value);
 
-  friend class ::google::protobuf::MessageLite;
-  friend class ::google::protobuf::Arena;
-  template <typename T>
-  friend class ::google::protobuf::Arena::InternalHelper;
-  using InternalArenaConstructable_ = void;
-  using DestructorSkippable_ = void;
-  struct Impl_ {
-    inline explicit constexpr Impl_(
-        ::google::protobuf::internal::ConstantInitialized) noexcept;
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena);
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena, const Impl_& from,
-                          const ChunkReference& from_msg);
-    ::google::protobuf::internal::ArenaStringPtr hash_;
-    ::uint64_t offset_;
-    ::uint32_t size_;
-    ::uint32_t flags_;
-    ::google::protobuf::internal::CachedSize _cached_size_;
-    PROTOBUF_TSAN_DECLARE_MEMBER
-  };
-  union { Impl_ _impl_; };
-  friend struct ::TableStruct_manifest_2eproto;
+public:
+    // uint32 flags = 4;
+    void clear_flags();
+    ::uint32_t flags() const;
+    void set_flags(::uint32_t value);
+
+private:
+    ::uint32_t _internal_flags() const;
+    void _internal_set_flags(::uint32_t value);
+
+public:
+    // @@protoc_insertion_point(class_scope:kronos.manifest.ChunkReference)
+private:
+    class _Internal;
+    friend class ::google::protobuf::internal::TcParser;
+    static const ::google::protobuf::internal::TcParseTable<2, 4, 0, 43, 2> _table_;
+
+    friend class ::google::protobuf::MessageLite;
+    friend class ::google::protobuf::Arena;
+    template <typename T> friend class ::google::protobuf::Arena::InternalHelper;
+    using InternalArenaConstructable_ = void;
+    using DestructorSkippable_ = void;
+    struct Impl_ {
+        inline explicit constexpr Impl_(::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from,
+                              const ChunkReference& from_msg);
+        ::google::protobuf::internal::ArenaStringPtr hash_;
+        ::uint64_t offset_;
+        ::uint32_t size_;
+        ::uint32_t flags_;
+        ::google::protobuf::internal::CachedSize _cached_size_;
+        PROTOBUF_TSAN_DECLARE_MEMBER
+    };
+    union {
+        Impl_ _impl_;
+    };
+    friend struct ::TableStruct_manifest_2eproto;
 };
 // -------------------------------------------------------------------
 
 class FileManifest final : public ::google::protobuf::Message
 /* @@protoc_insertion_point(class_definition:kronos.manifest.FileManifest) */ {
- public:
-  inline FileManifest() : FileManifest(nullptr) {}
-  ~FileManifest() PROTOBUF_FINAL;
+public:
+    inline FileManifest() : FileManifest(nullptr) {}
+    ~FileManifest() PROTOBUF_FINAL;
 
 #if defined(PROTOBUF_CUSTOM_VTABLE)
-  void operator delete(FileManifest* msg, std::destroying_delete_t) {
-    SharedDtor(*msg);
-    ::google::protobuf::internal::SizedDelete(msg, sizeof(FileManifest));
-  }
+    void operator delete(FileManifest* msg, std::destroying_delete_t) {
+        SharedDtor(*msg);
+        ::google::protobuf::internal::SizedDelete(msg, sizeof(FileManifest));
+    }
 #endif
 
-  template <typename = void>
-  explicit PROTOBUF_CONSTEXPR FileManifest(
-      ::google::protobuf::internal::ConstantInitialized);
+    template <typename = void>
+    explicit PROTOBUF_CONSTEXPR FileManifest(::google::protobuf::internal::ConstantInitialized);
 
-  inline FileManifest(const FileManifest& from) : FileManifest(nullptr, from) {}
-  inline FileManifest(FileManifest&& from) noexcept
-      : FileManifest(nullptr, std::move(from)) {}
-  inline FileManifest& operator=(const FileManifest& from) {
-    CopyFrom(from);
-    return *this;
-  }
-  inline FileManifest& operator=(FileManifest&& from) noexcept {
-    if (this == &from) return *this;
-    if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
-      InternalSwap(&from);
-    } else {
-      CopyFrom(from);
+    inline FileManifest(const FileManifest& from) : FileManifest(nullptr, from) {}
+    inline FileManifest(FileManifest&& from) noexcept : FileManifest(nullptr, std::move(from)) {}
+    inline FileManifest& operator=(const FileManifest& from) {
+        CopyFrom(from);
+        return *this;
     }
-    return *this;
-  }
-
-  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
-  }
-  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
-  }
-
-  static const ::google::protobuf::Descriptor* descriptor() {
-    return GetDescriptor();
-  }
-  static const ::google::protobuf::Descriptor* GetDescriptor() {
-    return default_instance().GetMetadata().descriptor;
-  }
-  static const ::google::protobuf::Reflection* GetReflection() {
-    return default_instance().GetMetadata().reflection;
-  }
-  static const FileManifest& default_instance() {
-    return *internal_default_instance();
-  }
-  static inline const FileManifest* internal_default_instance() {
-    return reinterpret_cast<const FileManifest*>(
-        &_FileManifest_default_instance_);
-  }
-  static constexpr int kIndexInFileMessages = 2;
-  friend void swap(FileManifest& a, FileManifest& b) { a.Swap(&b); }
-  inline void Swap(FileManifest* other) {
-    if (other == this) return;
-    if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
-      InternalSwap(other);
-    } else {
-      ::google::protobuf::internal::GenericSwap(this, other);
+    inline FileManifest& operator=(FileManifest&& from) noexcept {
+        if (this == &from)
+            return *this;
+        if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
+            InternalSwap(&from);
+        } else {
+            CopyFrom(from);
+        }
+        return *this;
     }
-  }
-  void UnsafeArenaSwap(FileManifest* other) {
-    if (other == this) return;
-    ABSL_DCHECK(GetArena() == other->GetArena());
-    InternalSwap(other);
-  }
 
-  // implements Message ----------------------------------------------
+    inline const ::google::protobuf::UnknownFieldSet&
+    unknown_fields() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(
+            ::google::protobuf::UnknownFieldSet::default_instance);
+    }
+    inline ::google::protobuf::UnknownFieldSet*
+    mutable_unknown_fields() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+    }
 
-  FileManifest* New(::google::protobuf::Arena* arena = nullptr) const {
-    return ::google::protobuf::Message::DefaultConstruct<FileManifest>(arena);
-  }
-  using ::google::protobuf::Message::CopyFrom;
-  void CopyFrom(const FileManifest& from);
-  using ::google::protobuf::Message::MergeFrom;
-  void MergeFrom(const FileManifest& from) { FileManifest::MergeImpl(*this, from); }
+    static const ::google::protobuf::Descriptor* descriptor() { return GetDescriptor(); }
+    static const ::google::protobuf::Descriptor* GetDescriptor() {
+        return default_instance().GetMetadata().descriptor;
+    }
+    static const ::google::protobuf::Reflection* GetReflection() {
+        return default_instance().GetMetadata().reflection;
+    }
+    static const FileManifest& default_instance() { return *internal_default_instance(); }
+    static inline const FileManifest* internal_default_instance() {
+        return reinterpret_cast<const FileManifest*>(&_FileManifest_default_instance_);
+    }
+    static constexpr int kIndexInFileMessages = 2;
+    friend void swap(FileManifest& a, FileManifest& b) { a.Swap(&b); }
+    inline void Swap(FileManifest* other) {
+        if (other == this)
+            return;
+        if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
+            InternalSwap(other);
+        } else {
+            ::google::protobuf::internal::GenericSwap(this, other);
+        }
+    }
+    void UnsafeArenaSwap(FileManifest* other) {
+        if (other == this)
+            return;
+        ABSL_DCHECK(GetArena() == other->GetArena());
+        InternalSwap(other);
+    }
 
-  private:
-  static void MergeImpl(
-      ::google::protobuf::MessageLite& to_msg,
-      const ::google::protobuf::MessageLite& from_msg);
+    // implements Message ----------------------------------------------
 
-  public:
-  bool IsInitialized() const {
-    return true;
-  }
-  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
-  #if defined(PROTOBUF_CUSTOM_VTABLE)
-  private:
-  static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
-  static ::uint8_t* _InternalSerialize(
-      const MessageLite& msg, ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream);
+    FileManifest* New(::google::protobuf::Arena* arena = nullptr) const {
+        return ::google::protobuf::Message::DefaultConstruct<FileManifest>(arena);
+    }
+    using ::google::protobuf::Message::CopyFrom;
+    void CopyFrom(const FileManifest& from);
+    using ::google::protobuf::Message::MergeFrom;
+    void MergeFrom(const FileManifest& from) { FileManifest::MergeImpl(*this, from); }
 
-  public:
-  ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const {
-    return _InternalSerialize(*this, target, stream);
-  }
-  #else   // PROTOBUF_CUSTOM_VTABLE
-  ::size_t ByteSizeLong() const final;
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
-  #endif  // PROTOBUF_CUSTOM_VTABLE
-  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+private:
+    static void MergeImpl(::google::protobuf::MessageLite& to_msg,
+                          const ::google::protobuf::MessageLite& from_msg);
 
-  private:
-  void SharedCtor(::google::protobuf::Arena* arena);
-  static void SharedDtor(MessageLite& self);
-  void InternalSwap(FileManifest* other);
- private:
-  template <typename T>
-  friend ::absl::string_view(
-      ::google::protobuf::internal::GetAnyMessageName)();
-  static ::absl::string_view FullMessageName() { return "kronos.manifest.FileManifest"; }
+public:
+    bool IsInitialized() const { return true; }
+    ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+private:
+    static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
+    static ::uint8_t* _InternalSerialize(const MessageLite& msg, ::uint8_t* target,
+                                         ::google::protobuf::io::EpsCopyOutputStream* stream);
 
- protected:
-  explicit FileManifest(::google::protobuf::Arena* arena);
-  FileManifest(::google::protobuf::Arena* arena, const FileManifest& from);
-  FileManifest(::google::protobuf::Arena* arena, FileManifest&& from) noexcept
-      : FileManifest(arena) {
-    *this = ::std::move(from);
-  }
-  const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
-  static void* PlacementNew_(const void*, void* mem,
-                             ::google::protobuf::Arena* arena);
-  static constexpr auto InternalNewImpl_();
-  static const ::google::protobuf::internal::ClassDataFull _class_data_;
+public:
+    ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+        return _InternalSerialize(*this, target, stream);
+    }
+#else  // PROTOBUF_CUSTOM_VTABLE
+    ::size_t ByteSizeLong() const final;
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+#endif // PROTOBUF_CUSTOM_VTABLE
+    int GetCachedSize() const { return _impl_._cached_size_.Get(); }
 
- public:
-  ::google::protobuf::Metadata GetMetadata() const;
-  // nested types ----------------------------------------------------
+private:
+    void SharedCtor(::google::protobuf::Arena* arena);
+    static void SharedDtor(MessageLite& self);
+    void InternalSwap(FileManifest* other);
 
-  // accessors -------------------------------------------------------
-  enum : int {
-    kChunksFieldNumber = 8,
-    kMetadataFieldNumber = 9,
-    kFileHashFieldNumber = 2,
-    kOriginalNameFieldNumber = 4,
-    kMimeTypeFieldNumber = 5,
-    kCompressionFieldNumber = 11,
-    kFileSizeFieldNumber = 3,
-    kVersionFieldNumber = 1,
-    kChecksumFieldNumber = 10,
-    kCreatedAtFieldNumber = 6,
-    kModifiedAtFieldNumber = 7,
-    kUncompressedSizeFieldNumber = 12,
-  };
-  // repeated .kronos.manifest.ChunkReference chunks = 8;
-  int chunks_size() const;
-  private:
-  int _internal_chunks_size() const;
+private:
+    template <typename T>
+    friend ::absl::string_view(::google::protobuf::internal::GetAnyMessageName)();
+    static ::absl::string_view FullMessageName() { return "kronos.manifest.FileManifest"; }
 
-  public:
-  void clear_chunks() ;
-  ::yams::manifest::ChunkReference* mutable_chunks(int index);
-  ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>* mutable_chunks();
+protected:
+    explicit FileManifest(::google::protobuf::Arena* arena);
+    FileManifest(::google::protobuf::Arena* arena, const FileManifest& from);
+    FileManifest(::google::protobuf::Arena* arena, FileManifest&& from) noexcept
+        : FileManifest(arena) {
+        *this = ::std::move(from);
+    }
+    const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
+    static void* PlacementNew_(const void*, void* mem, ::google::protobuf::Arena* arena);
+    static constexpr auto InternalNewImpl_();
+    static const ::google::protobuf::internal::ClassDataFull _class_data_;
 
-  private:
-  const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>& _internal_chunks() const;
-  ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>* _internal_mutable_chunks();
-  public:
-  const ::yams::manifest::ChunkReference& chunks(int index) const;
-  ::yams::manifest::ChunkReference* add_chunks();
-  const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>& chunks() const;
-  // map<string, string> metadata = 9;
-  int metadata_size() const;
-  private:
-  int _internal_metadata_size() const;
+public:
+    ::google::protobuf::Metadata GetMetadata() const;
+    // nested types ----------------------------------------------------
 
-  public:
-  void clear_metadata() ;
-  const ::google::protobuf::Map<std::string, std::string>& metadata() const;
-  ::google::protobuf::Map<std::string, std::string>* mutable_metadata();
+    // accessors -------------------------------------------------------
+    enum : int {
+        kChunksFieldNumber = 8,
+        kMetadataFieldNumber = 9,
+        kFileHashFieldNumber = 2,
+        kOriginalNameFieldNumber = 4,
+        kMimeTypeFieldNumber = 5,
+        kCompressionFieldNumber = 11,
+        kFileSizeFieldNumber = 3,
+        kVersionFieldNumber = 1,
+        kChecksumFieldNumber = 10,
+        kCreatedAtFieldNumber = 6,
+        kModifiedAtFieldNumber = 7,
+        kUncompressedSizeFieldNumber = 12,
+    };
+    // repeated .kronos.manifest.ChunkReference chunks = 8;
+    int chunks_size() const;
 
-  private:
-  const ::google::protobuf::Map<std::string, std::string>& _internal_metadata() const;
-  ::google::protobuf::Map<std::string, std::string>* _internal_mutable_metadata();
+private:
+    int _internal_chunks_size() const;
 
-  public:
-  // string file_hash = 2;
-  void clear_file_hash() ;
-  const std::string& file_hash() const;
-  template <typename Arg_ = const std::string&, typename... Args_>
-  void set_file_hash(Arg_&& arg, Args_... args);
-  std::string* mutable_file_hash();
-  PROTOBUF_NODISCARD std::string* release_file_hash();
-  void set_allocated_file_hash(std::string* value);
+public:
+    void clear_chunks();
+    ::yams::manifest::ChunkReference* mutable_chunks(int index);
+    ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>* mutable_chunks();
 
-  private:
-  const std::string& _internal_file_hash() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_file_hash(
-      const std::string& value);
-  std::string* _internal_mutable_file_hash();
+private:
+    const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>&
+    _internal_chunks() const;
+    ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>*
+    _internal_mutable_chunks();
 
-  public:
-  // string original_name = 4;
-  void clear_original_name() ;
-  const std::string& original_name() const;
-  template <typename Arg_ = const std::string&, typename... Args_>
-  void set_original_name(Arg_&& arg, Args_... args);
-  std::string* mutable_original_name();
-  PROTOBUF_NODISCARD std::string* release_original_name();
-  void set_allocated_original_name(std::string* value);
+public:
+    const ::yams::manifest::ChunkReference& chunks(int index) const;
+    ::yams::manifest::ChunkReference* add_chunks();
+    const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>& chunks() const;
+    // map<string, string> metadata = 9;
+    int metadata_size() const;
 
-  private:
-  const std::string& _internal_original_name() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_original_name(
-      const std::string& value);
-  std::string* _internal_mutable_original_name();
+private:
+    int _internal_metadata_size() const;
 
-  public:
-  // string mime_type = 5;
-  void clear_mime_type() ;
-  const std::string& mime_type() const;
-  template <typename Arg_ = const std::string&, typename... Args_>
-  void set_mime_type(Arg_&& arg, Args_... args);
-  std::string* mutable_mime_type();
-  PROTOBUF_NODISCARD std::string* release_mime_type();
-  void set_allocated_mime_type(std::string* value);
+public:
+    void clear_metadata();
+    const ::google::protobuf::Map<std::string, std::string>& metadata() const;
+    ::google::protobuf::Map<std::string, std::string>* mutable_metadata();
 
-  private:
-  const std::string& _internal_mime_type() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_mime_type(
-      const std::string& value);
-  std::string* _internal_mutable_mime_type();
+private:
+    const ::google::protobuf::Map<std::string, std::string>& _internal_metadata() const;
+    ::google::protobuf::Map<std::string, std::string>* _internal_mutable_metadata();
 
-  public:
-  // string compression = 11;
-  void clear_compression() ;
-  const std::string& compression() const;
-  template <typename Arg_ = const std::string&, typename... Args_>
-  void set_compression(Arg_&& arg, Args_... args);
-  std::string* mutable_compression();
-  PROTOBUF_NODISCARD std::string* release_compression();
-  void set_allocated_compression(std::string* value);
+public:
+    // string file_hash = 2;
+    void clear_file_hash();
+    const std::string& file_hash() const;
+    template <typename Arg_ = const std::string&, typename... Args_>
+    void set_file_hash(Arg_&& arg, Args_... args);
+    std::string* mutable_file_hash();
+    PROTOBUF_NODISCARD std::string* release_file_hash();
+    void set_allocated_file_hash(std::string* value);
 
-  private:
-  const std::string& _internal_compression() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_compression(
-      const std::string& value);
-  std::string* _internal_mutable_compression();
+private:
+    const std::string& _internal_file_hash() const;
+    inline PROTOBUF_ALWAYS_INLINE void _internal_set_file_hash(const std::string& value);
+    std::string* _internal_mutable_file_hash();
 
-  public:
-  // uint64 file_size = 3;
-  void clear_file_size() ;
-  ::uint64_t file_size() const;
-  void set_file_size(::uint64_t value);
+public:
+    // string original_name = 4;
+    void clear_original_name();
+    const std::string& original_name() const;
+    template <typename Arg_ = const std::string&, typename... Args_>
+    void set_original_name(Arg_&& arg, Args_... args);
+    std::string* mutable_original_name();
+    PROTOBUF_NODISCARD std::string* release_original_name();
+    void set_allocated_original_name(std::string* value);
 
-  private:
-  ::uint64_t _internal_file_size() const;
-  void _internal_set_file_size(::uint64_t value);
+private:
+    const std::string& _internal_original_name() const;
+    inline PROTOBUF_ALWAYS_INLINE void _internal_set_original_name(const std::string& value);
+    std::string* _internal_mutable_original_name();
 
-  public:
-  // uint32 version = 1;
-  void clear_version() ;
-  ::uint32_t version() const;
-  void set_version(::uint32_t value);
+public:
+    // string mime_type = 5;
+    void clear_mime_type();
+    const std::string& mime_type() const;
+    template <typename Arg_ = const std::string&, typename... Args_>
+    void set_mime_type(Arg_&& arg, Args_... args);
+    std::string* mutable_mime_type();
+    PROTOBUF_NODISCARD std::string* release_mime_type();
+    void set_allocated_mime_type(std::string* value);
 
-  private:
-  ::uint32_t _internal_version() const;
-  void _internal_set_version(::uint32_t value);
+private:
+    const std::string& _internal_mime_type() const;
+    inline PROTOBUF_ALWAYS_INLINE void _internal_set_mime_type(const std::string& value);
+    std::string* _internal_mutable_mime_type();
 
-  public:
-  // uint32 checksum = 10;
-  void clear_checksum() ;
-  ::uint32_t checksum() const;
-  void set_checksum(::uint32_t value);
+public:
+    // string compression = 11;
+    void clear_compression();
+    const std::string& compression() const;
+    template <typename Arg_ = const std::string&, typename... Args_>
+    void set_compression(Arg_&& arg, Args_... args);
+    std::string* mutable_compression();
+    PROTOBUF_NODISCARD std::string* release_compression();
+    void set_allocated_compression(std::string* value);
 
-  private:
-  ::uint32_t _internal_checksum() const;
-  void _internal_set_checksum(::uint32_t value);
+private:
+    const std::string& _internal_compression() const;
+    inline PROTOBUF_ALWAYS_INLINE void _internal_set_compression(const std::string& value);
+    std::string* _internal_mutable_compression();
 
-  public:
-  // int64 created_at = 6;
-  void clear_created_at() ;
-  ::int64_t created_at() const;
-  void set_created_at(::int64_t value);
+public:
+    // uint64 file_size = 3;
+    void clear_file_size();
+    ::uint64_t file_size() const;
+    void set_file_size(::uint64_t value);
 
-  private:
-  ::int64_t _internal_created_at() const;
-  void _internal_set_created_at(::int64_t value);
+private:
+    ::uint64_t _internal_file_size() const;
+    void _internal_set_file_size(::uint64_t value);
 
-  public:
-  // int64 modified_at = 7;
-  void clear_modified_at() ;
-  ::int64_t modified_at() const;
-  void set_modified_at(::int64_t value);
+public:
+    // uint32 version = 1;
+    void clear_version();
+    ::uint32_t version() const;
+    void set_version(::uint32_t value);
 
-  private:
-  ::int64_t _internal_modified_at() const;
-  void _internal_set_modified_at(::int64_t value);
+private:
+    ::uint32_t _internal_version() const;
+    void _internal_set_version(::uint32_t value);
 
-  public:
-  // uint32 uncompressed_size = 12;
-  void clear_uncompressed_size() ;
-  ::uint32_t uncompressed_size() const;
-  void set_uncompressed_size(::uint32_t value);
+public:
+    // uint32 checksum = 10;
+    void clear_checksum();
+    ::uint32_t checksum() const;
+    void set_checksum(::uint32_t value);
 
-  private:
-  ::uint32_t _internal_uncompressed_size() const;
-  void _internal_set_uncompressed_size(::uint32_t value);
+private:
+    ::uint32_t _internal_checksum() const;
+    void _internal_set_checksum(::uint32_t value);
 
-  public:
-  // @@protoc_insertion_point(class_scope:kronos.manifest.FileManifest)
- private:
-  class _Internal;
-  friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<
-      4, 12, 2,
-      95, 2>
-      _table_;
+public:
+    // int64 created_at = 6;
+    void clear_created_at();
+    ::int64_t created_at() const;
+    void set_created_at(::int64_t value);
 
-  friend class ::google::protobuf::MessageLite;
-  friend class ::google::protobuf::Arena;
-  template <typename T>
-  friend class ::google::protobuf::Arena::InternalHelper;
-  using InternalArenaConstructable_ = void;
-  using DestructorSkippable_ = void;
-  struct Impl_ {
-    inline explicit constexpr Impl_(
-        ::google::protobuf::internal::ConstantInitialized) noexcept;
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena);
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena, const Impl_& from,
-                          const FileManifest& from_msg);
-    ::google::protobuf::RepeatedPtrField< ::yams::manifest::ChunkReference > chunks_;
-    ::google::protobuf::internal::MapField<FileManifest_MetadataEntry_DoNotUse, std::string, std::string,
-                      ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
-                      ::google::protobuf::internal::WireFormatLite::TYPE_STRING>
-        metadata_;
-    ::google::protobuf::internal::ArenaStringPtr file_hash_;
-    ::google::protobuf::internal::ArenaStringPtr original_name_;
-    ::google::protobuf::internal::ArenaStringPtr mime_type_;
-    ::google::protobuf::internal::ArenaStringPtr compression_;
-    ::uint64_t file_size_;
-    ::uint32_t version_;
-    ::uint32_t checksum_;
-    ::int64_t created_at_;
-    ::int64_t modified_at_;
-    ::uint32_t uncompressed_size_;
-    ::google::protobuf::internal::CachedSize _cached_size_;
-    PROTOBUF_TSAN_DECLARE_MEMBER
-  };
-  union { Impl_ _impl_; };
-  friend struct ::TableStruct_manifest_2eproto;
+private:
+    ::int64_t _internal_created_at() const;
+    void _internal_set_created_at(::int64_t value);
+
+public:
+    // int64 modified_at = 7;
+    void clear_modified_at();
+    ::int64_t modified_at() const;
+    void set_modified_at(::int64_t value);
+
+private:
+    ::int64_t _internal_modified_at() const;
+    void _internal_set_modified_at(::int64_t value);
+
+public:
+    // uint32 uncompressed_size = 12;
+    void clear_uncompressed_size();
+    ::uint32_t uncompressed_size() const;
+    void set_uncompressed_size(::uint32_t value);
+
+private:
+    ::uint32_t _internal_uncompressed_size() const;
+    void _internal_set_uncompressed_size(::uint32_t value);
+
+public:
+    // @@protoc_insertion_point(class_scope:kronos.manifest.FileManifest)
+private:
+    class _Internal;
+    friend class ::google::protobuf::internal::TcParser;
+    static const ::google::protobuf::internal::TcParseTable<4, 12, 2, 95, 2> _table_;
+
+    friend class ::google::protobuf::MessageLite;
+    friend class ::google::protobuf::Arena;
+    template <typename T> friend class ::google::protobuf::Arena::InternalHelper;
+    using InternalArenaConstructable_ = void;
+    using DestructorSkippable_ = void;
+    struct Impl_ {
+        inline explicit constexpr Impl_(::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from,
+                              const FileManifest& from_msg);
+        ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference> chunks_;
+        ::google::protobuf::internal::MapField<
+            FileManifest_MetadataEntry_DoNotUse, std::string, std::string,
+            ::google::protobuf::internal::WireFormatLite::TYPE_STRING,
+            ::google::protobuf::internal::WireFormatLite::TYPE_STRING>
+            metadata_;
+        ::google::protobuf::internal::ArenaStringPtr file_hash_;
+        ::google::protobuf::internal::ArenaStringPtr original_name_;
+        ::google::protobuf::internal::ArenaStringPtr mime_type_;
+        ::google::protobuf::internal::ArenaStringPtr compression_;
+        ::uint64_t file_size_;
+        ::uint32_t version_;
+        ::uint32_t checksum_;
+        ::int64_t created_at_;
+        ::int64_t modified_at_;
+        ::uint32_t uncompressed_size_;
+        ::google::protobuf::internal::CachedSize _cached_size_;
+        PROTOBUF_TSAN_DECLARE_MEMBER
+    };
+    union {
+        Impl_ _impl_;
+    };
+    friend struct ::TableStruct_manifest_2eproto;
 };
 // -------------------------------------------------------------------
 
 class ManifestBatch final : public ::google::protobuf::Message
 /* @@protoc_insertion_point(class_definition:kronos.manifest.ManifestBatch) */ {
- public:
-  inline ManifestBatch() : ManifestBatch(nullptr) {}
-  ~ManifestBatch() PROTOBUF_FINAL;
+public:
+    inline ManifestBatch() : ManifestBatch(nullptr) {}
+    ~ManifestBatch() PROTOBUF_FINAL;
 
 #if defined(PROTOBUF_CUSTOM_VTABLE)
-  void operator delete(ManifestBatch* msg, std::destroying_delete_t) {
-    SharedDtor(*msg);
-    ::google::protobuf::internal::SizedDelete(msg, sizeof(ManifestBatch));
-  }
+    void operator delete(ManifestBatch* msg, std::destroying_delete_t) {
+        SharedDtor(*msg);
+        ::google::protobuf::internal::SizedDelete(msg, sizeof(ManifestBatch));
+    }
 #endif
 
-  template <typename = void>
-  explicit PROTOBUF_CONSTEXPR ManifestBatch(
-      ::google::protobuf::internal::ConstantInitialized);
+    template <typename = void>
+    explicit PROTOBUF_CONSTEXPR ManifestBatch(::google::protobuf::internal::ConstantInitialized);
 
-  inline ManifestBatch(const ManifestBatch& from) : ManifestBatch(nullptr, from) {}
-  inline ManifestBatch(ManifestBatch&& from) noexcept
-      : ManifestBatch(nullptr, std::move(from)) {}
-  inline ManifestBatch& operator=(const ManifestBatch& from) {
-    CopyFrom(from);
-    return *this;
-  }
-  inline ManifestBatch& operator=(ManifestBatch&& from) noexcept {
-    if (this == &from) return *this;
-    if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
-      InternalSwap(&from);
-    } else {
-      CopyFrom(from);
+    inline ManifestBatch(const ManifestBatch& from) : ManifestBatch(nullptr, from) {}
+    inline ManifestBatch(ManifestBatch&& from) noexcept : ManifestBatch(nullptr, std::move(from)) {}
+    inline ManifestBatch& operator=(const ManifestBatch& from) {
+        CopyFrom(from);
+        return *this;
     }
-    return *this;
-  }
-
-  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
-  }
-  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
-      ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
-  }
-
-  static const ::google::protobuf::Descriptor* descriptor() {
-    return GetDescriptor();
-  }
-  static const ::google::protobuf::Descriptor* GetDescriptor() {
-    return default_instance().GetMetadata().descriptor;
-  }
-  static const ::google::protobuf::Reflection* GetReflection() {
-    return default_instance().GetMetadata().reflection;
-  }
-  static const ManifestBatch& default_instance() {
-    return *internal_default_instance();
-  }
-  static inline const ManifestBatch* internal_default_instance() {
-    return reinterpret_cast<const ManifestBatch*>(
-        &_ManifestBatch_default_instance_);
-  }
-  static constexpr int kIndexInFileMessages = 3;
-  friend void swap(ManifestBatch& a, ManifestBatch& b) { a.Swap(&b); }
-  inline void Swap(ManifestBatch* other) {
-    if (other == this) return;
-    if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
-      InternalSwap(other);
-    } else {
-      ::google::protobuf::internal::GenericSwap(this, other);
+    inline ManifestBatch& operator=(ManifestBatch&& from) noexcept {
+        if (this == &from)
+            return *this;
+        if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
+            InternalSwap(&from);
+        } else {
+            CopyFrom(from);
+        }
+        return *this;
     }
-  }
-  void UnsafeArenaSwap(ManifestBatch* other) {
-    if (other == this) return;
-    ABSL_DCHECK(GetArena() == other->GetArena());
-    InternalSwap(other);
-  }
 
-  // implements Message ----------------------------------------------
+    inline const ::google::protobuf::UnknownFieldSet&
+    unknown_fields() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(
+            ::google::protobuf::UnknownFieldSet::default_instance);
+    }
+    inline ::google::protobuf::UnknownFieldSet*
+    mutable_unknown_fields() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+        return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+    }
 
-  ManifestBatch* New(::google::protobuf::Arena* arena = nullptr) const {
-    return ::google::protobuf::Message::DefaultConstruct<ManifestBatch>(arena);
-  }
-  using ::google::protobuf::Message::CopyFrom;
-  void CopyFrom(const ManifestBatch& from);
-  using ::google::protobuf::Message::MergeFrom;
-  void MergeFrom(const ManifestBatch& from) { ManifestBatch::MergeImpl(*this, from); }
+    static const ::google::protobuf::Descriptor* descriptor() { return GetDescriptor(); }
+    static const ::google::protobuf::Descriptor* GetDescriptor() {
+        return default_instance().GetMetadata().descriptor;
+    }
+    static const ::google::protobuf::Reflection* GetReflection() {
+        return default_instance().GetMetadata().reflection;
+    }
+    static const ManifestBatch& default_instance() { return *internal_default_instance(); }
+    static inline const ManifestBatch* internal_default_instance() {
+        return reinterpret_cast<const ManifestBatch*>(&_ManifestBatch_default_instance_);
+    }
+    static constexpr int kIndexInFileMessages = 3;
+    friend void swap(ManifestBatch& a, ManifestBatch& b) { a.Swap(&b); }
+    inline void Swap(ManifestBatch* other) {
+        if (other == this)
+            return;
+        if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
+            InternalSwap(other);
+        } else {
+            ::google::protobuf::internal::GenericSwap(this, other);
+        }
+    }
+    void UnsafeArenaSwap(ManifestBatch* other) {
+        if (other == this)
+            return;
+        ABSL_DCHECK(GetArena() == other->GetArena());
+        InternalSwap(other);
+    }
 
-  private:
-  static void MergeImpl(
-      ::google::protobuf::MessageLite& to_msg,
-      const ::google::protobuf::MessageLite& from_msg);
+    // implements Message ----------------------------------------------
 
-  public:
-  bool IsInitialized() const {
-    return true;
-  }
-  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
-  #if defined(PROTOBUF_CUSTOM_VTABLE)
-  private:
-  static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
-  static ::uint8_t* _InternalSerialize(
-      const MessageLite& msg, ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream);
+    ManifestBatch* New(::google::protobuf::Arena* arena = nullptr) const {
+        return ::google::protobuf::Message::DefaultConstruct<ManifestBatch>(arena);
+    }
+    using ::google::protobuf::Message::CopyFrom;
+    void CopyFrom(const ManifestBatch& from);
+    using ::google::protobuf::Message::MergeFrom;
+    void MergeFrom(const ManifestBatch& from) { ManifestBatch::MergeImpl(*this, from); }
 
-  public:
-  ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const {
-    return _InternalSerialize(*this, target, stream);
-  }
-  #else   // PROTOBUF_CUSTOM_VTABLE
-  ::size_t ByteSizeLong() const final;
-  ::uint8_t* _InternalSerialize(
-      ::uint8_t* target,
-      ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
-  #endif  // PROTOBUF_CUSTOM_VTABLE
-  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+private:
+    static void MergeImpl(::google::protobuf::MessageLite& to_msg,
+                          const ::google::protobuf::MessageLite& from_msg);
 
-  private:
-  void SharedCtor(::google::protobuf::Arena* arena);
-  static void SharedDtor(MessageLite& self);
-  void InternalSwap(ManifestBatch* other);
- private:
-  template <typename T>
-  friend ::absl::string_view(
-      ::google::protobuf::internal::GetAnyMessageName)();
-  static ::absl::string_view FullMessageName() { return "kronos.manifest.ManifestBatch"; }
+public:
+    bool IsInitialized() const { return true; }
+    ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+private:
+    static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
+    static ::uint8_t* _InternalSerialize(const MessageLite& msg, ::uint8_t* target,
+                                         ::google::protobuf::io::EpsCopyOutputStream* stream);
 
- protected:
-  explicit ManifestBatch(::google::protobuf::Arena* arena);
-  ManifestBatch(::google::protobuf::Arena* arena, const ManifestBatch& from);
-  ManifestBatch(::google::protobuf::Arena* arena, ManifestBatch&& from) noexcept
-      : ManifestBatch(arena) {
-    *this = ::std::move(from);
-  }
-  const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
-  static void* PlacementNew_(const void*, void* mem,
-                             ::google::protobuf::Arena* arena);
-  static constexpr auto InternalNewImpl_();
-  static const ::google::protobuf::internal::ClassDataFull _class_data_;
+public:
+    ::size_t ByteSizeLong() const { return ByteSizeLong(*this); }
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+        return _InternalSerialize(*this, target, stream);
+    }
+#else  // PROTOBUF_CUSTOM_VTABLE
+    ::size_t ByteSizeLong() const final;
+    ::uint8_t* _InternalSerialize(::uint8_t* target,
+                                  ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+#endif // PROTOBUF_CUSTOM_VTABLE
+    int GetCachedSize() const { return _impl_._cached_size_.Get(); }
 
- public:
-  ::google::protobuf::Metadata GetMetadata() const;
-  // nested types ----------------------------------------------------
+private:
+    void SharedCtor(::google::protobuf::Arena* arena);
+    static void SharedDtor(MessageLite& self);
+    void InternalSwap(ManifestBatch* other);
 
-  // accessors -------------------------------------------------------
-  enum : int {
-    kManifestsFieldNumber = 1,
-    kCreatedAtFieldNumber = 3,
-    kBatchVersionFieldNumber = 2,
-    kManifestCountFieldNumber = 4,
-  };
-  // repeated .kronos.manifest.FileManifest manifests = 1;
-  int manifests_size() const;
-  private:
-  int _internal_manifests_size() const;
+private:
+    template <typename T>
+    friend ::absl::string_view(::google::protobuf::internal::GetAnyMessageName)();
+    static ::absl::string_view FullMessageName() { return "kronos.manifest.ManifestBatch"; }
 
-  public:
-  void clear_manifests() ;
-  ::yams::manifest::FileManifest* mutable_manifests(int index);
-  ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>* mutable_manifests();
+protected:
+    explicit ManifestBatch(::google::protobuf::Arena* arena);
+    ManifestBatch(::google::protobuf::Arena* arena, const ManifestBatch& from);
+    ManifestBatch(::google::protobuf::Arena* arena, ManifestBatch&& from) noexcept
+        : ManifestBatch(arena) {
+        *this = ::std::move(from);
+    }
+    const ::google::protobuf::internal::ClassData* GetClassData() const PROTOBUF_FINAL;
+    static void* PlacementNew_(const void*, void* mem, ::google::protobuf::Arena* arena);
+    static constexpr auto InternalNewImpl_();
+    static const ::google::protobuf::internal::ClassDataFull _class_data_;
 
-  private:
-  const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>& _internal_manifests() const;
-  ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>* _internal_mutable_manifests();
-  public:
-  const ::yams::manifest::FileManifest& manifests(int index) const;
-  ::yams::manifest::FileManifest* add_manifests();
-  const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>& manifests() const;
-  // int64 created_at = 3;
-  void clear_created_at() ;
-  ::int64_t created_at() const;
-  void set_created_at(::int64_t value);
+public:
+    ::google::protobuf::Metadata GetMetadata() const;
+    // nested types ----------------------------------------------------
 
-  private:
-  ::int64_t _internal_created_at() const;
-  void _internal_set_created_at(::int64_t value);
+    // accessors -------------------------------------------------------
+    enum : int {
+        kManifestsFieldNumber = 1,
+        kCreatedAtFieldNumber = 3,
+        kBatchVersionFieldNumber = 2,
+        kManifestCountFieldNumber = 4,
+    };
+    // repeated .kronos.manifest.FileManifest manifests = 1;
+    int manifests_size() const;
 
-  public:
-  // uint32 batch_version = 2;
-  void clear_batch_version() ;
-  ::uint32_t batch_version() const;
-  void set_batch_version(::uint32_t value);
+private:
+    int _internal_manifests_size() const;
 
-  private:
-  ::uint32_t _internal_batch_version() const;
-  void _internal_set_batch_version(::uint32_t value);
+public:
+    void clear_manifests();
+    ::yams::manifest::FileManifest* mutable_manifests(int index);
+    ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>* mutable_manifests();
 
-  public:
-  // uint32 manifest_count = 4;
-  void clear_manifest_count() ;
-  ::uint32_t manifest_count() const;
-  void set_manifest_count(::uint32_t value);
+private:
+    const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>&
+    _internal_manifests() const;
+    ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>*
+    _internal_mutable_manifests();
 
-  private:
-  ::uint32_t _internal_manifest_count() const;
-  void _internal_set_manifest_count(::uint32_t value);
+public:
+    const ::yams::manifest::FileManifest& manifests(int index) const;
+    ::yams::manifest::FileManifest* add_manifests();
+    const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>& manifests() const;
+    // int64 created_at = 3;
+    void clear_created_at();
+    ::int64_t created_at() const;
+    void set_created_at(::int64_t value);
 
-  public:
-  // @@protoc_insertion_point(class_scope:kronos.manifest.ManifestBatch)
- private:
-  class _Internal;
-  friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<
-      2, 4, 1,
-      0, 2>
-      _table_;
+private:
+    ::int64_t _internal_created_at() const;
+    void _internal_set_created_at(::int64_t value);
 
-  friend class ::google::protobuf::MessageLite;
-  friend class ::google::protobuf::Arena;
-  template <typename T>
-  friend class ::google::protobuf::Arena::InternalHelper;
-  using InternalArenaConstructable_ = void;
-  using DestructorSkippable_ = void;
-  struct Impl_ {
-    inline explicit constexpr Impl_(
-        ::google::protobuf::internal::ConstantInitialized) noexcept;
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena);
-    inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
-                          ::google::protobuf::Arena* arena, const Impl_& from,
-                          const ManifestBatch& from_msg);
-    ::google::protobuf::RepeatedPtrField< ::yams::manifest::FileManifest > manifests_;
-    ::int64_t created_at_;
-    ::uint32_t batch_version_;
-    ::uint32_t manifest_count_;
-    ::google::protobuf::internal::CachedSize _cached_size_;
-    PROTOBUF_TSAN_DECLARE_MEMBER
-  };
-  union { Impl_ _impl_; };
-  friend struct ::TableStruct_manifest_2eproto;
+public:
+    // uint32 batch_version = 2;
+    void clear_batch_version();
+    ::uint32_t batch_version() const;
+    void set_batch_version(::uint32_t value);
+
+private:
+    ::uint32_t _internal_batch_version() const;
+    void _internal_set_batch_version(::uint32_t value);
+
+public:
+    // uint32 manifest_count = 4;
+    void clear_manifest_count();
+    ::uint32_t manifest_count() const;
+    void set_manifest_count(::uint32_t value);
+
+private:
+    ::uint32_t _internal_manifest_count() const;
+    void _internal_set_manifest_count(::uint32_t value);
+
+public:
+    // @@protoc_insertion_point(class_scope:kronos.manifest.ManifestBatch)
+private:
+    class _Internal;
+    friend class ::google::protobuf::internal::TcParser;
+    static const ::google::protobuf::internal::TcParseTable<2, 4, 1, 0, 2> _table_;
+
+    friend class ::google::protobuf::MessageLite;
+    friend class ::google::protobuf::Arena;
+    template <typename T> friend class ::google::protobuf::Arena::InternalHelper;
+    using InternalArenaConstructable_ = void;
+    using DestructorSkippable_ = void;
+    struct Impl_ {
+        inline explicit constexpr Impl_(::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from,
+                              const ManifestBatch& from_msg);
+        ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest> manifests_;
+        ::int64_t created_at_;
+        ::uint32_t batch_version_;
+        ::uint32_t manifest_count_;
+        ::google::protobuf::internal::CachedSize _cached_size_;
+        PROTOBUF_TSAN_DECLARE_MEMBER
+    };
+    union {
+        Impl_ _impl_;
+    };
+    friend struct ::TableStruct_manifest_2eproto;
 };
 
 // ===================================================================
 
-
-
-
 // ===================================================================
-
 
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
-#endif  // __GNUC__
+#endif // __GNUC__
 // -------------------------------------------------------------------
 
 // ChunkReference
 
 // string hash = 1;
 inline void ChunkReference::clear_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.hash_.ClearToEmpty();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.hash_.ClearToEmpty();
 }
-inline const std::string& ChunkReference::hash() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.hash)
-  return _internal_hash();
+inline const std::string& ChunkReference::hash() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.hash)
+    return _internal_hash();
 }
 template <typename Arg_, typename... Args_>
-inline PROTOBUF_ALWAYS_INLINE void ChunkReference::set_hash(Arg_&& arg,
-                                                     Args_... args) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.hash_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
-  // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.hash)
+inline PROTOBUF_ALWAYS_INLINE void ChunkReference::set_hash(Arg_&& arg, Args_... args) {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.hash_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+    // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.hash)
 }
 inline std::string* ChunkReference::mutable_hash() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  std::string* _s = _internal_mutable_hash();
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.ChunkReference.hash)
-  return _s;
+    std::string* _s = _internal_mutable_hash();
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.ChunkReference.hash)
+    return _s;
 }
 inline const std::string& ChunkReference::_internal_hash() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.hash_.Get();
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.hash_.Get();
 }
 inline void ChunkReference::_internal_set_hash(const std::string& value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.hash_.Set(value, GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.hash_.Set(value, GetArena());
 }
 inline std::string* ChunkReference::_internal_mutable_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.hash_.Mutable( GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.hash_.Mutable(GetArena());
 }
 inline std::string* ChunkReference::release_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  // @@protoc_insertion_point(field_release:kronos.manifest.ChunkReference.hash)
-  return _impl_.hash_.Release();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    // @@protoc_insertion_point(field_release:kronos.manifest.ChunkReference.hash)
+    return _impl_.hash_.Release();
 }
 inline void ChunkReference::set_allocated_hash(std::string* value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.hash_.SetAllocated(value, GetArena());
-  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.hash_.IsDefault()) {
-    _impl_.hash_.Set("", GetArena());
-  }
-  // @@protoc_insertion_point(field_set_allocated:kronos.manifest.ChunkReference.hash)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.hash_.SetAllocated(value, GetArena());
+    if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() &&
+        _impl_.hash_.IsDefault()) {
+        _impl_.hash_.Set("", GetArena());
+    }
+    // @@protoc_insertion_point(field_set_allocated:kronos.manifest.ChunkReference.hash)
 }
 
 // uint64 offset = 2;
 inline void ChunkReference::clear_offset() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.offset_ = ::uint64_t{0u};
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.offset_ = ::uint64_t{0u};
 }
 inline ::uint64_t ChunkReference::offset() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.offset)
-  return _internal_offset();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.offset)
+    return _internal_offset();
 }
 inline void ChunkReference::set_offset(::uint64_t value) {
-  _internal_set_offset(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.offset)
+    _internal_set_offset(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.offset)
 }
 inline ::uint64_t ChunkReference::_internal_offset() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.offset_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.offset_;
 }
 inline void ChunkReference::_internal_set_offset(::uint64_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.offset_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.offset_ = value;
 }
 
 // uint32 size = 3;
 inline void ChunkReference::clear_size() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.size_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.size_ = 0u;
 }
 inline ::uint32_t ChunkReference::size() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.size)
-  return _internal_size();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.size)
+    return _internal_size();
 }
 inline void ChunkReference::set_size(::uint32_t value) {
-  _internal_set_size(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.size)
+    _internal_set_size(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.size)
 }
 inline ::uint32_t ChunkReference::_internal_size() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.size_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.size_;
 }
 inline void ChunkReference::_internal_set_size(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.size_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.size_ = value;
 }
 
 // uint32 flags = 4;
 inline void ChunkReference::clear_flags() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.flags_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.flags_ = 0u;
 }
 inline ::uint32_t ChunkReference::flags() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.flags)
-  return _internal_flags();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ChunkReference.flags)
+    return _internal_flags();
 }
 inline void ChunkReference::set_flags(::uint32_t value) {
-  _internal_set_flags(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.flags)
+    _internal_set_flags(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ChunkReference.flags)
 }
 inline ::uint32_t ChunkReference::_internal_flags() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.flags_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.flags_;
 }
 inline void ChunkReference::_internal_set_flags(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.flags_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.flags_ = value;
 }
 
 // -------------------------------------------------------------------
@@ -1085,403 +1037,403 @@ inline void ChunkReference::_internal_set_flags(::uint32_t value) {
 
 // uint32 version = 1;
 inline void FileManifest::clear_version() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.version_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.version_ = 0u;
 }
 inline ::uint32_t FileManifest::version() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.version)
-  return _internal_version();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.version)
+    return _internal_version();
 }
 inline void FileManifest::set_version(::uint32_t value) {
-  _internal_set_version(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.version)
+    _internal_set_version(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.version)
 }
 inline ::uint32_t FileManifest::_internal_version() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.version_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.version_;
 }
 inline void FileManifest::_internal_set_version(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.version_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.version_ = value;
 }
 
 // string file_hash = 2;
 inline void FileManifest::clear_file_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_hash_.ClearToEmpty();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_hash_.ClearToEmpty();
 }
-inline const std::string& FileManifest::file_hash() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.file_hash)
-  return _internal_file_hash();
+inline const std::string& FileManifest::file_hash() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.file_hash)
+    return _internal_file_hash();
 }
 template <typename Arg_, typename... Args_>
-inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_file_hash(Arg_&& arg,
-                                                     Args_... args) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_hash_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.file_hash)
+inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_file_hash(Arg_&& arg, Args_... args) {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_hash_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.file_hash)
 }
 inline std::string* FileManifest::mutable_file_hash() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  std::string* _s = _internal_mutable_file_hash();
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.file_hash)
-  return _s;
+    std::string* _s = _internal_mutable_file_hash();
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.file_hash)
+    return _s;
 }
 inline const std::string& FileManifest::_internal_file_hash() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.file_hash_.Get();
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.file_hash_.Get();
 }
 inline void FileManifest::_internal_set_file_hash(const std::string& value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_hash_.Set(value, GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_hash_.Set(value, GetArena());
 }
 inline std::string* FileManifest::_internal_mutable_file_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.file_hash_.Mutable( GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.file_hash_.Mutable(GetArena());
 }
 inline std::string* FileManifest::release_file_hash() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.file_hash)
-  return _impl_.file_hash_.Release();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.file_hash)
+    return _impl_.file_hash_.Release();
 }
 inline void FileManifest::set_allocated_file_hash(std::string* value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_hash_.SetAllocated(value, GetArena());
-  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.file_hash_.IsDefault()) {
-    _impl_.file_hash_.Set("", GetArena());
-  }
-  // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.file_hash)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_hash_.SetAllocated(value, GetArena());
+    if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() &&
+        _impl_.file_hash_.IsDefault()) {
+        _impl_.file_hash_.Set("", GetArena());
+    }
+    // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.file_hash)
 }
 
 // uint64 file_size = 3;
 inline void FileManifest::clear_file_size() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_size_ = ::uint64_t{0u};
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_size_ = ::uint64_t{0u};
 }
 inline ::uint64_t FileManifest::file_size() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.file_size)
-  return _internal_file_size();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.file_size)
+    return _internal_file_size();
 }
 inline void FileManifest::set_file_size(::uint64_t value) {
-  _internal_set_file_size(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.file_size)
+    _internal_set_file_size(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.file_size)
 }
 inline ::uint64_t FileManifest::_internal_file_size() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.file_size_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.file_size_;
 }
 inline void FileManifest::_internal_set_file_size(::uint64_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.file_size_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.file_size_ = value;
 }
 
 // string original_name = 4;
 inline void FileManifest::clear_original_name() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.original_name_.ClearToEmpty();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.original_name_.ClearToEmpty();
 }
-inline const std::string& FileManifest::original_name() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.original_name)
-  return _internal_original_name();
+inline const std::string& FileManifest::original_name() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.original_name)
+    return _internal_original_name();
 }
 template <typename Arg_, typename... Args_>
-inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_original_name(Arg_&& arg,
-                                                     Args_... args) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.original_name_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.original_name)
+inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_original_name(Arg_&& arg, Args_... args) {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.original_name_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.original_name)
 }
 inline std::string* FileManifest::mutable_original_name() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  std::string* _s = _internal_mutable_original_name();
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.original_name)
-  return _s;
+    std::string* _s = _internal_mutable_original_name();
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.original_name)
+    return _s;
 }
 inline const std::string& FileManifest::_internal_original_name() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.original_name_.Get();
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.original_name_.Get();
 }
 inline void FileManifest::_internal_set_original_name(const std::string& value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.original_name_.Set(value, GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.original_name_.Set(value, GetArena());
 }
 inline std::string* FileManifest::_internal_mutable_original_name() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.original_name_.Mutable( GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.original_name_.Mutable(GetArena());
 }
 inline std::string* FileManifest::release_original_name() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.original_name)
-  return _impl_.original_name_.Release();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.original_name)
+    return _impl_.original_name_.Release();
 }
 inline void FileManifest::set_allocated_original_name(std::string* value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.original_name_.SetAllocated(value, GetArena());
-  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.original_name_.IsDefault()) {
-    _impl_.original_name_.Set("", GetArena());
-  }
-  // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.original_name)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.original_name_.SetAllocated(value, GetArena());
+    if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() &&
+        _impl_.original_name_.IsDefault()) {
+        _impl_.original_name_.Set("", GetArena());
+    }
+    // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.original_name)
 }
 
 // string mime_type = 5;
 inline void FileManifest::clear_mime_type() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.mime_type_.ClearToEmpty();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.mime_type_.ClearToEmpty();
 }
-inline const std::string& FileManifest::mime_type() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.mime_type)
-  return _internal_mime_type();
+inline const std::string& FileManifest::mime_type() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.mime_type)
+    return _internal_mime_type();
 }
 template <typename Arg_, typename... Args_>
-inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_mime_type(Arg_&& arg,
-                                                     Args_... args) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.mime_type_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.mime_type)
+inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_mime_type(Arg_&& arg, Args_... args) {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.mime_type_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.mime_type)
 }
 inline std::string* FileManifest::mutable_mime_type() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  std::string* _s = _internal_mutable_mime_type();
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.mime_type)
-  return _s;
+    std::string* _s = _internal_mutable_mime_type();
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.mime_type)
+    return _s;
 }
 inline const std::string& FileManifest::_internal_mime_type() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.mime_type_.Get();
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.mime_type_.Get();
 }
 inline void FileManifest::_internal_set_mime_type(const std::string& value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.mime_type_.Set(value, GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.mime_type_.Set(value, GetArena());
 }
 inline std::string* FileManifest::_internal_mutable_mime_type() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.mime_type_.Mutable( GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.mime_type_.Mutable(GetArena());
 }
 inline std::string* FileManifest::release_mime_type() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.mime_type)
-  return _impl_.mime_type_.Release();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.mime_type)
+    return _impl_.mime_type_.Release();
 }
 inline void FileManifest::set_allocated_mime_type(std::string* value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.mime_type_.SetAllocated(value, GetArena());
-  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.mime_type_.IsDefault()) {
-    _impl_.mime_type_.Set("", GetArena());
-  }
-  // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.mime_type)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.mime_type_.SetAllocated(value, GetArena());
+    if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() &&
+        _impl_.mime_type_.IsDefault()) {
+        _impl_.mime_type_.Set("", GetArena());
+    }
+    // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.mime_type)
 }
 
 // int64 created_at = 6;
 inline void FileManifest::clear_created_at() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.created_at_ = ::int64_t{0};
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.created_at_ = ::int64_t{0};
 }
 inline ::int64_t FileManifest::created_at() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.created_at)
-  return _internal_created_at();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.created_at)
+    return _internal_created_at();
 }
 inline void FileManifest::set_created_at(::int64_t value) {
-  _internal_set_created_at(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.created_at)
+    _internal_set_created_at(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.created_at)
 }
 inline ::int64_t FileManifest::_internal_created_at() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.created_at_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.created_at_;
 }
 inline void FileManifest::_internal_set_created_at(::int64_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.created_at_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.created_at_ = value;
 }
 
 // int64 modified_at = 7;
 inline void FileManifest::clear_modified_at() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.modified_at_ = ::int64_t{0};
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.modified_at_ = ::int64_t{0};
 }
 inline ::int64_t FileManifest::modified_at() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.modified_at)
-  return _internal_modified_at();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.modified_at)
+    return _internal_modified_at();
 }
 inline void FileManifest::set_modified_at(::int64_t value) {
-  _internal_set_modified_at(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.modified_at)
+    _internal_set_modified_at(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.modified_at)
 }
 inline ::int64_t FileManifest::_internal_modified_at() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.modified_at_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.modified_at_;
 }
 inline void FileManifest::_internal_set_modified_at(::int64_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.modified_at_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.modified_at_ = value;
 }
 
 // repeated .kronos.manifest.ChunkReference chunks = 8;
 inline int FileManifest::_internal_chunks_size() const {
-  return _internal_chunks().size();
+    return _internal_chunks().size();
 }
 inline int FileManifest::chunks_size() const {
-  return _internal_chunks_size();
+    return _internal_chunks_size();
 }
 inline void FileManifest::clear_chunks() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.chunks_.Clear();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.chunks_.Clear();
 }
-inline ::yams::manifest::ChunkReference* FileManifest::mutable_chunks(int index)
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.chunks)
-  return _internal_mutable_chunks()->Mutable(index);
+inline ::yams::manifest::ChunkReference*
+FileManifest::mutable_chunks(int index) ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.chunks)
+    return _internal_mutable_chunks()->Mutable(index);
 }
-inline ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>* FileManifest::mutable_chunks()
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_mutable_list:kronos.manifest.FileManifest.chunks)
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _internal_mutable_chunks();
+inline ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>*
+FileManifest::mutable_chunks() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_mutable_list:kronos.manifest.FileManifest.chunks)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _internal_mutable_chunks();
 }
-inline const ::yams::manifest::ChunkReference& FileManifest::chunks(int index) const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.chunks)
-  return _internal_chunks().Get(index);
+inline const ::yams::manifest::ChunkReference&
+FileManifest::chunks(int index) const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.chunks)
+    return _internal_chunks().Get(index);
 }
 inline ::yams::manifest::ChunkReference* FileManifest::add_chunks() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  ::yams::manifest::ChunkReference* _add = _internal_mutable_chunks()->Add();
-  // @@protoc_insertion_point(field_add:kronos.manifest.FileManifest.chunks)
-  return _add;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    ::yams::manifest::ChunkReference* _add = _internal_mutable_chunks()->Add();
+    // @@protoc_insertion_point(field_add:kronos.manifest.FileManifest.chunks)
+    return _add;
 }
-inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>& FileManifest::chunks() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_list:kronos.manifest.FileManifest.chunks)
-  return _internal_chunks();
+inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>&
+FileManifest::chunks() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_list:kronos.manifest.FileManifest.chunks)
+    return _internal_chunks();
 }
 inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>&
 FileManifest::_internal_chunks() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.chunks_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.chunks_;
 }
 inline ::google::protobuf::RepeatedPtrField<::yams::manifest::ChunkReference>*
 FileManifest::_internal_mutable_chunks() {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return &_impl_.chunks_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return &_impl_.chunks_;
 }
 
 // map<string, string> metadata = 9;
 inline int FileManifest::_internal_metadata_size() const {
-  return _internal_metadata().size();
+    return _internal_metadata().size();
 }
 inline int FileManifest::metadata_size() const {
-  return _internal_metadata_size();
+    return _internal_metadata_size();
 }
 inline void FileManifest::clear_metadata() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.metadata_.Clear();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.metadata_.Clear();
 }
-inline const ::google::protobuf::Map<std::string, std::string>& FileManifest::_internal_metadata() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.metadata_.GetMap();
+inline const ::google::protobuf::Map<std::string, std::string>&
+FileManifest::_internal_metadata() const {
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.metadata_.GetMap();
 }
-inline const ::google::protobuf::Map<std::string, std::string>& FileManifest::metadata() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_map:kronos.manifest.FileManifest.metadata)
-  return _internal_metadata();
+inline const ::google::protobuf::Map<std::string, std::string>&
+FileManifest::metadata() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_map:kronos.manifest.FileManifest.metadata)
+    return _internal_metadata();
 }
-inline ::google::protobuf::Map<std::string, std::string>* FileManifest::_internal_mutable_metadata() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.metadata_.MutableMap();
+inline ::google::protobuf::Map<std::string, std::string>*
+FileManifest::_internal_mutable_metadata() {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.metadata_.MutableMap();
 }
-inline ::google::protobuf::Map<std::string, std::string>* FileManifest::mutable_metadata() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_mutable_map:kronos.manifest.FileManifest.metadata)
-  return _internal_mutable_metadata();
+inline ::google::protobuf::Map<std::string, std::string>*
+FileManifest::mutable_metadata() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_mutable_map:kronos.manifest.FileManifest.metadata)
+    return _internal_mutable_metadata();
 }
 
 // uint32 checksum = 10;
 inline void FileManifest::clear_checksum() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.checksum_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.checksum_ = 0u;
 }
 inline ::uint32_t FileManifest::checksum() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.checksum)
-  return _internal_checksum();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.checksum)
+    return _internal_checksum();
 }
 inline void FileManifest::set_checksum(::uint32_t value) {
-  _internal_set_checksum(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.checksum)
+    _internal_set_checksum(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.checksum)
 }
 inline ::uint32_t FileManifest::_internal_checksum() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.checksum_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.checksum_;
 }
 inline void FileManifest::_internal_set_checksum(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.checksum_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.checksum_ = value;
 }
 
 // string compression = 11;
 inline void FileManifest::clear_compression() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.compression_.ClearToEmpty();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.compression_.ClearToEmpty();
 }
-inline const std::string& FileManifest::compression() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.compression)
-  return _internal_compression();
+inline const std::string& FileManifest::compression() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.compression)
+    return _internal_compression();
 }
 template <typename Arg_, typename... Args_>
-inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_compression(Arg_&& arg,
-                                                     Args_... args) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.compression_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.compression)
+inline PROTOBUF_ALWAYS_INLINE void FileManifest::set_compression(Arg_&& arg, Args_... args) {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.compression_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.compression)
 }
 inline std::string* FileManifest::mutable_compression() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  std::string* _s = _internal_mutable_compression();
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.compression)
-  return _s;
+    std::string* _s = _internal_mutable_compression();
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.FileManifest.compression)
+    return _s;
 }
 inline const std::string& FileManifest::_internal_compression() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.compression_.Get();
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.compression_.Get();
 }
 inline void FileManifest::_internal_set_compression(const std::string& value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.compression_.Set(value, GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.compression_.Set(value, GetArena());
 }
 inline std::string* FileManifest::_internal_mutable_compression() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _impl_.compression_.Mutable( GetArena());
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _impl_.compression_.Mutable(GetArena());
 }
 inline std::string* FileManifest::release_compression() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.compression)
-  return _impl_.compression_.Release();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    // @@protoc_insertion_point(field_release:kronos.manifest.FileManifest.compression)
+    return _impl_.compression_.Release();
 }
 inline void FileManifest::set_allocated_compression(std::string* value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.compression_.SetAllocated(value, GetArena());
-  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.compression_.IsDefault()) {
-    _impl_.compression_.Set("", GetArena());
-  }
-  // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.compression)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.compression_.SetAllocated(value, GetArena());
+    if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() &&
+        _impl_.compression_.IsDefault()) {
+        _impl_.compression_.Set("", GetArena());
+    }
+    // @@protoc_insertion_point(field_set_allocated:kronos.manifest.FileManifest.compression)
 }
 
 // uint32 uncompressed_size = 12;
 inline void FileManifest::clear_uncompressed_size() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.uncompressed_size_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.uncompressed_size_ = 0u;
 }
 inline ::uint32_t FileManifest::uncompressed_size() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.uncompressed_size)
-  return _internal_uncompressed_size();
+    // @@protoc_insertion_point(field_get:kronos.manifest.FileManifest.uncompressed_size)
+    return _internal_uncompressed_size();
 }
 inline void FileManifest::set_uncompressed_size(::uint32_t value) {
-  _internal_set_uncompressed_size(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.uncompressed_size)
+    _internal_set_uncompressed_size(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.FileManifest.uncompressed_size)
 }
 inline ::uint32_t FileManifest::_internal_uncompressed_size() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.uncompressed_size_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.uncompressed_size_;
 }
 inline void FileManifest::_internal_set_uncompressed_size(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.uncompressed_size_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.uncompressed_size_ = value;
 }
 
 // -------------------------------------------------------------------
@@ -1490,130 +1442,130 @@ inline void FileManifest::_internal_set_uncompressed_size(::uint32_t value) {
 
 // repeated .kronos.manifest.FileManifest manifests = 1;
 inline int ManifestBatch::_internal_manifests_size() const {
-  return _internal_manifests().size();
+    return _internal_manifests().size();
 }
 inline int ManifestBatch::manifests_size() const {
-  return _internal_manifests_size();
+    return _internal_manifests_size();
 }
 inline void ManifestBatch::clear_manifests() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.manifests_.Clear();
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.manifests_.Clear();
 }
-inline ::yams::manifest::FileManifest* ManifestBatch::mutable_manifests(int index)
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_mutable:kronos.manifest.ManifestBatch.manifests)
-  return _internal_mutable_manifests()->Mutable(index);
+inline ::yams::manifest::FileManifest*
+ManifestBatch::mutable_manifests(int index) ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_mutable:kronos.manifest.ManifestBatch.manifests)
+    return _internal_mutable_manifests()->Mutable(index);
 }
-inline ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>* ManifestBatch::mutable_manifests()
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_mutable_list:kronos.manifest.ManifestBatch.manifests)
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  return _internal_mutable_manifests();
+inline ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>*
+ManifestBatch::mutable_manifests() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_mutable_list:kronos.manifest.ManifestBatch.manifests)
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    return _internal_mutable_manifests();
 }
-inline const ::yams::manifest::FileManifest& ManifestBatch::manifests(int index) const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.manifests)
-  return _internal_manifests().Get(index);
+inline const ::yams::manifest::FileManifest&
+ManifestBatch::manifests(int index) const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.manifests)
+    return _internal_manifests().Get(index);
 }
-inline ::yams::manifest::FileManifest* ManifestBatch::add_manifests() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  ::yams::manifest::FileManifest* _add = _internal_mutable_manifests()->Add();
-  // @@protoc_insertion_point(field_add:kronos.manifest.ManifestBatch.manifests)
-  return _add;
+inline ::yams::manifest::FileManifest*
+ManifestBatch::add_manifests() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    ::yams::manifest::FileManifest* _add = _internal_mutable_manifests()->Add();
+    // @@protoc_insertion_point(field_add:kronos.manifest.ManifestBatch.manifests)
+    return _add;
 }
-inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>& ManifestBatch::manifests() const
-    ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  // @@protoc_insertion_point(field_list:kronos.manifest.ManifestBatch.manifests)
-  return _internal_manifests();
+inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>&
+ManifestBatch::manifests() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    // @@protoc_insertion_point(field_list:kronos.manifest.ManifestBatch.manifests)
+    return _internal_manifests();
 }
 inline const ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>&
 ManifestBatch::_internal_manifests() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.manifests_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.manifests_;
 }
 inline ::google::protobuf::RepeatedPtrField<::yams::manifest::FileManifest>*
 ManifestBatch::_internal_mutable_manifests() {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return &_impl_.manifests_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return &_impl_.manifests_;
 }
 
 // uint32 batch_version = 2;
 inline void ManifestBatch::clear_batch_version() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.batch_version_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.batch_version_ = 0u;
 }
 inline ::uint32_t ManifestBatch::batch_version() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.batch_version)
-  return _internal_batch_version();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.batch_version)
+    return _internal_batch_version();
 }
 inline void ManifestBatch::set_batch_version(::uint32_t value) {
-  _internal_set_batch_version(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.batch_version)
+    _internal_set_batch_version(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.batch_version)
 }
 inline ::uint32_t ManifestBatch::_internal_batch_version() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.batch_version_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.batch_version_;
 }
 inline void ManifestBatch::_internal_set_batch_version(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.batch_version_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.batch_version_ = value;
 }
 
 // int64 created_at = 3;
 inline void ManifestBatch::clear_created_at() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.created_at_ = ::int64_t{0};
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.created_at_ = ::int64_t{0};
 }
 inline ::int64_t ManifestBatch::created_at() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.created_at)
-  return _internal_created_at();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.created_at)
+    return _internal_created_at();
 }
 inline void ManifestBatch::set_created_at(::int64_t value) {
-  _internal_set_created_at(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.created_at)
+    _internal_set_created_at(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.created_at)
 }
 inline ::int64_t ManifestBatch::_internal_created_at() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.created_at_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.created_at_;
 }
 inline void ManifestBatch::_internal_set_created_at(::int64_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.created_at_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.created_at_ = value;
 }
 
 // uint32 manifest_count = 4;
 inline void ManifestBatch::clear_manifest_count() {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.manifest_count_ = 0u;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.manifest_count_ = 0u;
 }
 inline ::uint32_t ManifestBatch::manifest_count() const {
-  // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.manifest_count)
-  return _internal_manifest_count();
+    // @@protoc_insertion_point(field_get:kronos.manifest.ManifestBatch.manifest_count)
+    return _internal_manifest_count();
 }
 inline void ManifestBatch::set_manifest_count(::uint32_t value) {
-  _internal_set_manifest_count(value);
-  // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.manifest_count)
+    _internal_set_manifest_count(value);
+    // @@protoc_insertion_point(field_set:kronos.manifest.ManifestBatch.manifest_count)
 }
 inline ::uint32_t ManifestBatch::_internal_manifest_count() const {
-  ::google::protobuf::internal::TSanRead(&_impl_);
-  return _impl_.manifest_count_;
+    ::google::protobuf::internal::TSanRead(&_impl_);
+    return _impl_.manifest_count_;
 }
 inline void ManifestBatch::_internal_set_manifest_count(::uint32_t value) {
-  ::google::protobuf::internal::TSanWrite(&_impl_);
-  _impl_.manifest_count_ = value;
+    ::google::protobuf::internal::TSanWrite(&_impl_);
+    _impl_.manifest_count_ = value;
 }
 
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
-#endif  // __GNUC__
+#endif // __GNUC__
 
 // @@protoc_insertion_point(namespace_scope)
-}  // namespace manifest
-}  // namespace kronos
-
+} // namespace manifest
+} // namespace kronos
 
 // @@protoc_insertion_point(global_scope)
 
 #include "google/protobuf/port_undef.inc"
 
-#endif  // manifest_2eproto_2epb_2eh
+#endif // manifest_2eproto_2epb_2eh

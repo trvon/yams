@@ -106,6 +106,17 @@ GlobalIOContextInitializer::~GlobalIOContextInitializer() {
 }
 
 GlobalIOContext& GlobalIOContext::instance() {
+    // Schwarz Counter teardown defence: callers that reach `instance()`
+    // outside the [first initializer ctor, last initializer dtor] window
+    // would otherwise dereference null and hit UB. `is_destroyed()` is the
+    // documented null-check helper (line 325); callers that skip it land
+    // here. Terminate to make the precondition violation a defined crash
+    // rather than UB. (Surfaced by fold null-deref audit, 2026-05-14.)
+    if (!g_global_io_context_ptr) {
+        log_noexcept_error("[GlobalIOContext] instance() called after static destruction; "
+                           "callers must consult is_destroyed() first");
+        std::terminate();
+    }
     return *g_global_io_context_ptr;
 }
 

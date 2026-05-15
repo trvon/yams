@@ -1273,7 +1273,8 @@ void DoctorCommand::runVectorsFix() {
 
     if (!cli_) {
         if (useJson) {
-            std::cout << R"({"error": "CLI context unavailable"})" << "\n";
+            std::cout << R"({"error": "CLI context unavailable"})"
+                      << "\n";
         } else {
             std::cout << ui::status_error("CLI context unavailable") << "\n";
         }

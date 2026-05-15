@@ -177,7 +177,8 @@ private:
         if (!verboseMode) {
             return;
         }
-        std::cout << "Using in-process transport (socket daemon not ready)" << "\n";
+        std::cout << "Using in-process transport (socket daemon not ready)"
+                  << "\n";
         if (!plan.fallbackReason.empty()) {
             std::cout << "  Reason: " << plan.fallbackReason << "\n";
         }
