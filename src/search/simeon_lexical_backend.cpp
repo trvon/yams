@@ -874,4 +874,92 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     return decision;
 }
 
+Result<SimeonLexicalBackend::RescoreDecision>
+SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view arm_name,
+                                        std::span<const std::int64_t> candidate_doc_ids) const {
+    if (!ready_.load(std::memory_order_acquire) || !index_) {
+        return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
+    }
+
+    std::vector<float> full(doc_count_, 0.0f);
+    const char* recipe_label = "Bm25SabSmooth";
+
+    // Dispatch on bandit arm name. Each arm corresponds to a simeon scoring
+    // recipe tested in the Omega benchmark. Training-free at inference.
+    if (arm_name == "sab_smooth") {
+        index_->score(query, std::span<float>{full});
+        recipe_label = "Bm25SabSmooth";
+    } else if (arm_name == "sab_smooth_rm3_adaptive") {
+        simeon::PrfConfig pc;
+        pc.k = 10;
+        pc.n_terms = 20;
+        pc.alpha = 0.5f;
+        simeon::score_with_prf(*index_, query, std::span<float>{full}, pc);
+        recipe_label = "Bm25SabRm3Adaptive";
+    } else if (arm_name == "sab_smooth_rm3_diverse") {
+        // Diverse RM3: larger feedback set, MMR-style diversity (not exposed
+        // here via the simple PrfConfig; we approximate with higher k/n_terms).
+        simeon::PrfConfig pc;
+        pc.k = 20;
+        pc.n_terms = 40;
+        pc.alpha = 0.5f;
+        simeon::score_with_prf(*index_, query, std::span<float>{full}, pc);
+        recipe_label = "Bm25SabRm3Diverse";
+    } else if (arm_name == "bm25_variants_rrf" && atire_index_) {
+        const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
+        simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
+                                        query, std::span<float>{full});
+        recipe_label = "Bm25VariantsRrf";
+    } else if (arm_name == "atire" && atire_index_) {
+        atire_index_->score(query, std::span<float>{full});
+        recipe_label = "Bm25Atire";
+    } else if (arm_name == "keyphrase" && strategy_router_ && !strategies_.empty()) {
+        // Use the KeyphraseStrategy (#1) from the strategy router pool.
+        simeon::AdapterEvidence ev;
+        simeon::QueryProfile profile;
+        std::vector<simeon::RetrievalStrategy*> pool;
+        pool.reserve(strategies_.size());
+        for (const auto& s : strategies_)
+            pool.push_back(s.get());
+        // Route to Keyphrase strategy directly (index 1 in the pool).
+        auto& kp = (pool.size() > 1) ? pool[1] : pool[0];
+        kp->score_indexed(query, 0, ev, std::span<float>{full});
+        recipe_label = "Keyphrase";
+    } else if (arm_name == "lead_field" && strategy_router_ && strategies_.size() > 2) {
+        simeon::AdapterEvidence ev;
+        auto& lead = strategies_[2];
+        lead->score_indexed(query, 0, ev, std::span<float>{full});
+        recipe_label = "LeadField";
+    } else {
+        // Unrecognized or unavailable arm: fall back to plain SAB.
+        index_->score(query, std::span<float>{full});
+        recipe_label = "Bm25SabSmooth";
+    }
+
+    // Blend concept scores when available.
+    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+        std::vector<float> conceptScores(doc_count_, 0.0f);
+        concept_index_->score(query, std::span<float>{conceptScores});
+        const float cw = cfg_.concept_config.concept_weight;
+        for (size_t i = 0; i < doc_count_; ++i) {
+            full[i] += cw * conceptScores[i];
+        }
+    }
+
+    RescoreDecision decision;
+    decision.recipe_name = recipe_label;
+    decision.scores.reserve(candidate_doc_ids.size());
+    for (auto id : candidate_doc_ids) {
+        auto it = doc_id_to_index_.find(id);
+        if (it == doc_id_to_index_.end()) {
+            decision.scores.push_back(0.0f);
+            continue;
+        }
+        const auto di = it->second;
+        const float score = std::isfinite(full[di]) ? full[di] : 0.0f;
+        decision.scores.push_back(score);
+    }
+    return decision;
+}
+
 } // namespace yams::search

@@ -19,6 +19,7 @@
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/tuner_mab.h>
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
@@ -788,10 +789,17 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
+    // Per-profile simeon bandit arms. Each corpus profile learns independently
+    // which simeon recipe works best via UCB1 from proxy rewards. Training-free.
+    using ProfileKey = std::string;
+    mutable std::unordered_map<ProfileKey, TunerMAB> simeonBandits_;
+    bool simeonBanditsInitialized_ = false;
     // Recipe label from the last simeon rescore call in this request; empty
     // when rescoring was skipped (backend off, not ready, or empty result set).
     // Surfaced to response.debugStats["simeon_route"] for per-query tracing.
     mutable std::string lastSimeonRouteRecipe_;
+    mutable std::string lastSimeonBanditArm_;
+    mutable ProfileKey lastSimeonBanditProfile_;
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -816,6 +824,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     auto startTime = std::chrono::steady_clock::now();
     stats_.totalQueries.fetch_add(1, std::memory_order_relaxed);
     lastSimeonRouteRecipe_.clear();
+    lastSimeonBanditArm_.clear();
+    lastSimeonBanditProfile_.clear();
+
+    // Initialize per-profile simeon bandits once (training-free: proxy rewards).
+    if (!simeonBanditsInitialized_ && simeonLexical_ && simeonLexical_->ready()) {
+        std::vector<TunerMAB::Arm> arms;
+        arms.push_back({"sab_smooth", 0.0, {}});
+        arms.push_back({"sab_smooth_rm3_adaptive", 0.0, {}});
+        arms.push_back({"sab_smooth_rm3_diverse", 0.0, {}});
+        if (simeonLexical_->hasStrategyRouter()) {
+            arms.push_back({"keyphrase", 0.0, {}});
+            arms.push_back({"lead_field", 0.0, {}});
+        }
+        using CP = SearchEngineConfig::CorpusProfile;
+        for (auto profile : {CP::CODE, CP::PROSE, CP::DOCS, CP::MIXED, CP::CUSTOM}) {
+            std::vector<TunerMAB::Arm> profileArms = arms;
+            auto key = SearchEngineConfig::corpusProfileToString(profile);
+            simeonBandits_[key].setArms(std::move(profileArms));
+        }
+        simeonBanditsInitialized_ = true;
+    }
+
+    // Select simeon bandit arm for this query from the per-profile bandit.
+    if (simeonBanditsInitialized_) {
+        auto profileKey = SearchEngineConfig::corpusProfileToString(config_.corpusProfile);
+        lastSimeonBanditProfile_ = profileKey;
+        auto it = simeonBandits_.find(profileKey);
+        if (it == simeonBandits_.end())
+            it = simeonBandits_.find("MIXED");
+        if (it != simeonBandits_.end()) {
+            auto armIdx = it->second.selectArm();
+            if (armIdx.has_value() && *armIdx < it->second.arms().size()) {
+                config_.simeonBanditArm = it->second.arms()[*armIdx].id;
+                lastSimeonBanditArm_ = config_.simeonBanditArm;
+            }
+        }
+    }
 
     SearchResponse response;
     std::vector<std::string> timedOut;
@@ -2334,6 +2379,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["simeon_recipe"] = recipe;
         if (!lastSimeonRouteRecipe_.empty()) {
             response.debugStats["simeon_route"] = lastSimeonRouteRecipe_;
+        }
+        if (!lastSimeonBanditArm_.empty()) {
+            response.debugStats["simeon_bandit_arm"] = lastSimeonBanditArm_;
+        }
+        if (!lastSimeonBanditProfile_.empty()) {
+            response.debugStats["simeon_bandit_profile"] = lastSimeonBanditProfile_;
+        }
+    }
+
+    // Record simeon bandit reward for the arm selected this query.
+    // Training-free: uses proxy signals (result density per ms).
+    if (!lastSimeonBanditArm_.empty() && !lastSimeonBanditProfile_.empty()) {
+        auto profileIt = simeonBandits_.find(lastSimeonBanditProfile_);
+        if (profileIt == simeonBandits_.end())
+            profileIt = simeonBandits_.find("MIXED");
+        if (profileIt != simeonBandits_.end()) {
+            auto& bandit = profileIt->second;
+            std::optional<std::size_t> armIdx;
+            const auto& arms = bandit.arms();
+            for (std::size_t i = 0; i < arms.size(); ++i) {
+                if (arms[i].id == lastSimeonBanditArm_) {
+                    armIdx = i;
+                    break;
+                }
+            }
+            if (armIdx.has_value()) {
+                double elapsedMs = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - startTime)
+                                       .count();
+                double resultCount = static_cast<double>(response.results.size());
+                double resultRate =
+                    std::clamp(resultCount / std::max(1.0, elapsedMs) * 10.0, 0.0, 0.95);
+                double armBonus =
+                    (lastSimeonBanditArm_.find("rm3") != std::string::npos) ? 0.05 : 0.0;
+                double reward = std::clamp(resultRate + armBonus, 0.0, 1.0);
+                bandit.recordReward(*armIdx, reward, TunerMAB::RewardSource::Proxy);
+            }
         }
     }
 

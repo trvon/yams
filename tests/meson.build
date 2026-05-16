@@ -1159,6 +1159,8 @@ if catch2_dep.found()
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
       'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
+      'unit/search/simeon_bandit_catch2_test.cpp',
+      'unit/search/simeon_bandit_backend_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_router_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
@@ -1223,6 +1225,15 @@ if catch2_dep.found()
 
   catch2_benchmark_history_store_exe = executable('catch2_benchmark_history_store',
     files('unit/search/benchmark_history_store_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_search_bandit_bench_exe = executable('catch2_search_bandit_bench',
+    files('benchmarks/search_bandit_bench.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

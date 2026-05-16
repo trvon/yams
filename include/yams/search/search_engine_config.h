@@ -33,6 +33,23 @@ struct SearchEngineConfig {
         CUSTOM
     } corpusProfile = CorpusProfile::MIXED;
 
+    [[nodiscard]] static constexpr const char*
+    corpusProfileToString(CorpusProfile profile) noexcept {
+        switch (profile) {
+            case CorpusProfile::CODE:
+                return "CODE";
+            case CorpusProfile::PROSE:
+                return "PROSE";
+            case CorpusProfile::DOCS:
+                return "DOCS";
+            case CorpusProfile::MIXED:
+                return "MIXED";
+            case CorpusProfile::CUSTOM:
+                return "CUSTOM";
+        }
+        return "MIXED";
+    }
+
     enum class NavigationZoomLevel {
         Auto,
         Map,
@@ -356,6 +373,13 @@ struct SearchEngineConfig {
         }
         return CorpusProfile::MIXED;
     }
+
+    // Per-query simeon bandit arm selection. When non-empty, the lexical
+    // pipeline calls SimeonLexicalBackend::scoreBanditRouted() with this
+    // arm name instead of the default strategy/router-based scoring.
+    // Training-free at inference: the arm name is selected by TunerMAB
+    // from qrel-free proxy rewards. Empty = use existing scoring path.
+    std::string simeonBanditArm;
 };
 
 } // namespace yams::search

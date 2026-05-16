@@ -149,6 +149,13 @@ public:
         // benchmarks. Corpus-sensitive — defaults to off.
         bool rm3_enabled = false;
         simeon::PrfConfig rm3_config{};
+
+        // When true, scoreBanditRouted() dispatches to a simeon scoring recipe
+        // selected by a per-query bandit arm name. The arm names map to preset
+        // combinations of BM25 variant + PRF + field structure. Currently
+        // supported arms: "sab_smooth", "sab_smooth_rm3_adaptive".
+        // Training-free at inference (arm names come from qrel-free bandit).
+        bool bandit_arm_enabled = false;
     };
 
     explicit SimeonLexicalBackend(Config cfg);
@@ -211,6 +218,18 @@ public:
     Result<RescoreDecision>
     scoreStrategyRouted(std::string_view query,
                         std::span<const std::int64_t> candidate_doc_ids) const;
+
+    // Bandit-driven rescore: selects the simeon scoring recipe for `arm_name`.
+    // The arm names are preset keys that map to tested (R_q, R_d, S) combos
+    // from the simeon Omega search. Currently supported:
+    //   "sab_smooth"              — plain SAB-smooth γ=5
+    //   "sab_smooth_rm3_adaptive" — SAB-smooth γ=5 + adaptive PRF
+    // Falls back to plain SAB when the arm name is unrecognized.
+    // Training-free at inference: the arm name is selected by TunerMAB from
+    // qrel-free proxy rewards.
+    Result<RescoreDecision>
+    scoreBanditRouted(std::string_view query, std::string_view arm_name,
+                      std::span<const std::int64_t> candidate_doc_ids) const;
 
 private:
     Config cfg_;

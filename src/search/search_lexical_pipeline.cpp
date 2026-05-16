@@ -78,7 +78,7 @@ void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
 std::optional<yams::metadata::SearchResults>
 makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend,
                          const yams::metadata::SearchResults& searchResults,
-                         std::string* lastSimeonRouteRecipe) {
+                         std::string* lastSimeonRouteRecipe, const SearchEngineConfig& config) {
     if (!backend || !backend->ready() || searchResults.results.empty()) {
         return std::nullopt;
     }
@@ -89,8 +89,15 @@ makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend
         ids.push_back(r.document.id);
     }
 
-    auto decision = backend->hasStrategyRouter() ? backend->scoreStrategyRouted(query, ids)
-                                                 : backend->scoreRouted(query, ids);
+    auto decision = [&]() -> Result<SimeonLexicalBackend::RescoreDecision> {
+        if (!config.simeonBanditArm.empty()) {
+            return backend->scoreBanditRouted(query, config.simeonBanditArm, ids);
+        }
+        if (backend->hasStrategyRouter()) {
+            return backend->scoreStrategyRouted(query, ids);
+        }
+        return backend->scoreRouted(query, ids);
+    }();
     if (!decision) {
         spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
                       decision.error().message);
@@ -125,7 +132,7 @@ void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend* ba
                               std::vector<ComponentResult>& results,
                               QueryExpansionStats* expansionStats) {
     auto simeonResults =
-        makeSimeonLexicalResults(query, backend, searchResults, lastSimeonRouteRecipe);
+        makeSimeonLexicalResults(query, backend, searchResults, lastSimeonRouteRecipe, config);
     if (!simeonResults) {
         return;
     }
