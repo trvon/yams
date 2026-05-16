@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <yams/search/search_engine_config.h>

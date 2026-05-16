@@ -150,11 +150,10 @@ public:
         bool rm3_enabled = false;
         simeon::PrfConfig rm3_config{};
 
-        // When true, scoreBanditRouted() dispatches to a simeon scoring recipe
-        // selected by a per-query bandit arm name. The arm names map to preset
-        // combinations of BM25 variant + PRF + field structure. Currently
-        // supported arms: "sab_smooth", "sab_smooth_rm3_adaptive".
-        // Training-free at inference (arm names come from qrel-free bandit).
+        // Reserved for backend-owned bandit flows. Normal SearchEngine bandit
+        // routing is controlled per request by SearchEngineConfig::simeonBanditArm.
+        // Direct scoreBanditRouted() calls are available whenever the backend is
+        // ready and receive an explicit arm name from the caller.
         bool bandit_arm_enabled = false;
     };
 
@@ -221,9 +220,14 @@ public:
 
     // Bandit-driven rescore: selects the simeon scoring recipe for `arm_name`.
     // The arm names are preset keys that map to tested (R_q, R_d, S) combos
-    // from the simeon Omega search. Currently supported:
-    //   "sab_smooth"              — plain SAB-smooth γ=5
-    //   "sab_smooth_rm3_adaptive" — SAB-smooth γ=5 + adaptive PRF
+    // from the simeon Omega search. Recognized presets include:
+    //   "sab_smooth"              - plain SAB-smooth gamma=5
+    //   "sab_smooth_rm3_adaptive" - SAB-smooth gamma=5 + adaptive PRF
+    //   "sab_smooth_rm3_diverse"  - SAB-smooth gamma=5 + broader PRF
+    //   "bm25_variants_rrf"       - RRF over SAB-smooth + ATIRE when available
+    //   "atire"                   - ATIRE BM25 when available
+    //   "keyphrase"               - keyphrase strategy when available
+    //   "lead_field"              - lead-field strategy when available
     // Falls back to plain SAB when the arm name is unrecognized.
     // Training-free at inference: the arm name is selected by TunerMAB from
     // qrel-free proxy rewards.

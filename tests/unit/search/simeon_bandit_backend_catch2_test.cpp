@@ -2,7 +2,8 @@
 // Copyright 2025 YAMS Contributors
 //
 // Unit tests for bandit-driven simeon backend dispatch (scoreBanditRouted).
-// Tests cover all 5 implemented arms with a real backend on a small corpus.
+// Tests cover the core SAB/RM3 arms plus fallback and not-ready behavior with
+// a real backend on a small corpus.
 
 #include <catch2/catch_test_macros.hpp>
 
