@@ -778,6 +778,10 @@ yams::Result<void> ServiceManager::initialize() {
     // Persist resolved dataDir for downstream components/telemetry
     resolvedDataDir_ = std::move(dataDir);
 
+    // Cross-validate embedding backend + preferred model at startup.
+    // Emits spdlog warnings for mismatches (e.g. ONNX model under simeon).
+    embeddingConfig_ = ConfigResolver::resolveEmbeddingConfig(config_, resolvedDataDir_);
+
     // Wire the adaptive SearchTuner's state file so EWMA counters survive daemon restarts.
     searchEngineManager_.setTunerStatePath(resolvedDataDir_ / "tuner_state.json");
 

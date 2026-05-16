@@ -50,6 +50,7 @@
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -695,6 +696,7 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     std::filesystem::path resolvedDataDir_;
+    ResolvedEmbeddingConfig embeddingConfig_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
