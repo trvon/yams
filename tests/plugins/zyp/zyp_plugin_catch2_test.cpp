@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/dlfcn.h>
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -121,6 +122,44 @@ startxref
 650
 %%EOF
 )";
+
+    return {pdf.begin(), pdf.end()};
+}
+
+std::vector<uint8_t> buildTwoPagePdf() {
+    std::string pdf = "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    auto addObject = [&](int number, const std::string& body) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(number) + " 0 obj\n" + body + "\nendobj\n";
+    };
+
+    addObject(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    addObject(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>");
+    addObject(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                 "/Contents 5 0 R /Resources << /Font << /F1 7 0 R >> >> >>");
+    addObject(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                 "/Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>");
+
+    const std::string firstStream = "BT\n/F1 12 Tf\n100 700 Td\n(First Page Text) Tj\nET\n";
+    const std::string secondStream = "BT\n/F1 12 Tf\n100 700 Td\n(Second Page Text) Tj\nET\n";
+    addObject(5, "<< /Length " + std::to_string(firstStream.size()) + " >>\nstream\n" +
+                     firstStream + "endstream");
+    addObject(6, "<< /Length " + std::to_string(secondStream.size()) + " >>\nstream\n" +
+                     secondStream + "endstream");
+    addObject(7, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
+    const size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t offset : offsets) {
+        char entry[24]{};
+        std::snprintf(entry, sizeof(entry), "%010zu 00000 n \n", offset);
+        pdf += entry;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) +
+           " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
 
     return {pdf.begin(), pdf.end()};
 }
@@ -346,6 +385,29 @@ TEST_CASE_METHOD(ZypPluginTest, "ExtractPdfWithMetadata", "[plugin][zyp]") {
     }
 
     extractor_->free_result(result);
+}
+
+TEST_CASE_METHOD(ZypPluginTest, "ExtractMultiPagePdfRepeatedly", "[plugin][zyp][memory]") {
+    if (!pluginAvailable()) {
+        SKIP("zyp plugin not available");
+    }
+
+    auto pdf = buildTwoPagePdf();
+    for (int i = 0; i < 10; ++i) {
+        INFO("iteration=" << i);
+        yams_extraction_result_t* result = nullptr;
+        int rc = extractor_->extract(pdf.data(), pdf.size(), &result);
+
+        REQUIRE(rc == YAMS_PLUGIN_OK);
+        REQUIRE(result != nullptr);
+        REQUIRE(result->text != nullptr);
+
+        std::string text = result->text;
+        CHECK(text.find("First Page Text") != std::string::npos);
+        CHECK(text.find("Second Page Text") != std::string::npos);
+
+        extractor_->free_result(result);
+    }
 }
 
 // ============================================================================
