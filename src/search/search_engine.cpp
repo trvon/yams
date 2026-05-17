@@ -19,6 +19,7 @@
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/tuner_mab.h>
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
@@ -36,6 +37,7 @@
 #include <fstream>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -756,7 +758,8 @@ private:
     queryFullText(const std::string& query, QueryIntent queryIntent,
                   const SearchEngineConfig& config, size_t limit,
                   QueryExpansionStats* expansionStats = nullptr,
-                  const std::vector<GraphExpansionTerm>* graphExpansionTerms = nullptr);
+                  const std::vector<GraphExpansionTerm>* graphExpansionTerms = nullptr,
+                  std::string* simeonRouteRecipe = nullptr);
 
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>>
@@ -788,10 +791,12 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
-    // Recipe label from the last simeon rescore call in this request; empty
-    // when rescoring was skipped (backend off, not ready, or empty result set).
-    // Surfaced to response.debugStats["simeon_route"] for per-query tracing.
-    mutable std::string lastSimeonRouteRecipe_;
+    // Per-profile simeon bandit arms. Each corpus profile learns independently
+    // which simeon recipe works best via UCB1 from proxy rewards. Training-free.
+    using ProfileKey = std::string;
+    std::mutex simeonBanditsMutex_;
+    std::unordered_map<ProfileKey, TunerMAB> simeonBandits_;
+    bool simeonBanditsInitialized_ = false;
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -815,7 +820,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     auto startTime = std::chrono::steady_clock::now();
     stats_.totalQueries.fetch_add(1, std::memory_order_relaxed);
-    lastSimeonRouteRecipe_.clear();
+    std::string simeonRouteRecipe;
+    std::string selectedSimeonBanditArm;
+    ProfileKey selectedSimeonBanditProfile;
 
     SearchResponse response;
     std::vector<std::string> timedOut;
@@ -925,6 +932,45 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const auto effectiveZoomLevel = policy.effectiveZoomLevel;
     const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
     workingConfig = std::move(policy.config);
+
+    // Select a Simeon bandit arm after tuner/policy resolution so the arm is
+    // request-local and cannot leak through shared config_ state.
+    if (simeonLexical_ && simeonLexical_->ready()) {
+        std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
+        if (!simeonBanditsInitialized_) {
+            std::vector<TunerMAB::Arm> arms;
+            arms.push_back({"sab_smooth", 0.0, {}});
+            arms.push_back({"sab_smooth_rm3_adaptive", 0.0, {}});
+            arms.push_back({"sab_smooth_rm3_diverse", 0.0, {}});
+            if (simeonLexical_->hasStrategyRouter()) {
+                arms.push_back({"keyphrase", 0.0, {}});
+                arms.push_back({"lead_field", 0.0, {}});
+            }
+            using CP = SearchEngineConfig::CorpusProfile;
+            for (auto profile : {CP::CODE, CP::PROSE, CP::DOCS, CP::MIXED, CP::CUSTOM}) {
+                std::vector<TunerMAB::Arm> profileArms = arms;
+                auto key = SearchEngineConfig::corpusProfileToString(profile);
+                simeonBandits_[key].setArms(std::move(profileArms));
+            }
+            simeonBanditsInitialized_ = true;
+        }
+
+        ProfileKey profileKey =
+            std::string{SearchEngineConfig::corpusProfileToString(workingConfig.corpusProfile)};
+        auto it = simeonBandits_.find(profileKey);
+        if (it == simeonBandits_.end()) {
+            profileKey = "MIXED";
+            it = simeonBandits_.find(profileKey);
+        }
+        if (it != simeonBandits_.end()) {
+            auto armIdx = it->second.selectArm();
+            if (armIdx.has_value() && *armIdx < it->second.arms().size()) {
+                selectedSimeonBanditArm = it->second.arms()[*armIdx].id;
+                selectedSimeonBanditProfile = std::move(profileKey);
+                workingConfig.simeonBanditArm = selectedSimeonBanditArm;
+            }
+        }
+    }
 
     // R2/audit: route-derived query-fast features populated after
     // classification so R4+ contextual policies see real signals instead
@@ -1512,11 +1558,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // --- TIER 1: Text + Path (fast, high precision) ---
             textFuture = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, intent, &workingConfig, &textExpansionStats,
-                 &graphExpansionTerms]() {
+                [this, &query, intent, &workingConfig, &textExpansionStats, &graphExpansionTerms,
+                 &simeonRouteRecipe]() {
                     YAMS_ZONE_SCOPED_N("component::text");
                     return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
-                                         &textExpansionStats, &graphExpansionTerms);
+                                         &textExpansionStats, &graphExpansionTerms,
+                                         &simeonRouteRecipe);
                 });
 
             pathFuture = schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
@@ -1711,11 +1758,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // All components run in parallel
             textFuture = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, intent, &workingConfig, &textExpansionStats,
-                 &graphExpansionTerms]() {
+                [this, &query, intent, &workingConfig, &textExpansionStats, &graphExpansionTerms,
+                 &simeonRouteRecipe]() {
                     YAMS_ZONE_SCOPED_N("component::text");
                     return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
-                                         &textExpansionStats, &graphExpansionTerms);
+                                         &textExpansionStats, &graphExpansionTerms,
+                                         &simeonRouteRecipe);
                 });
 
             const bool deferSemanticStages = semanticBudgetActive;
@@ -1859,7 +1907,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         runSequential(
             [&]() {
                 return queryFullText(query, intent, workingConfig, workingConfig.textMaxResults,
-                                     &textExpansionStats, &graphExpansionTerms);
+                                     &textExpansionStats, &graphExpansionTerms, &simeonRouteRecipe);
             },
             "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros);
 
@@ -2332,8 +2380,46 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             recipe += std::to_string(workingConfig.weightedLinearZScorePoolSize);
         }
         response.debugStats["simeon_recipe"] = recipe;
-        if (!lastSimeonRouteRecipe_.empty()) {
-            response.debugStats["simeon_route"] = lastSimeonRouteRecipe_;
+        if (!simeonRouteRecipe.empty()) {
+            response.debugStats["simeon_route"] = simeonRouteRecipe;
+        }
+        if (!selectedSimeonBanditArm.empty()) {
+            response.debugStats["simeon_bandit_arm"] = selectedSimeonBanditArm;
+        }
+        if (!selectedSimeonBanditProfile.empty()) {
+            response.debugStats["simeon_bandit_profile"] = selectedSimeonBanditProfile;
+        }
+    }
+
+    // Record simeon bandit reward for the arm selected this query.
+    // Training-free: uses proxy signals (result density per ms).
+    if (!selectedSimeonBanditArm.empty() && !selectedSimeonBanditProfile.empty()) {
+        double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime)
+                .count();
+        double resultCount = static_cast<double>(response.results.size());
+        double resultRate = std::clamp(resultCount / std::max(1.0, elapsedMs) * 10.0, 0.0, 0.95);
+        double armBonus = (selectedSimeonBanditArm.find("rm3") != std::string::npos) ? 0.05 : 0.0;
+        double reward = std::clamp(resultRate + armBonus, 0.0, 1.0);
+
+        std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
+        auto profileIt = simeonBandits_.find(selectedSimeonBanditProfile);
+        if (profileIt == simeonBandits_.end()) {
+            profileIt = simeonBandits_.find("MIXED");
+        }
+        if (profileIt != simeonBandits_.end()) {
+            auto& bandit = profileIt->second;
+            std::optional<std::size_t> armIdx;
+            const auto& arms = bandit.arms();
+            for (std::size_t i = 0; i < arms.size(); ++i) {
+                if (arms[i].id == selectedSimeonBanditArm) {
+                    armIdx = i;
+                    break;
+                }
+            }
+            if (armIdx.has_value()) {
+                bandit.recordReward(*armIdx, reward, TunerMAB::RewardSource::Proxy);
+            }
         }
     }
 
@@ -4121,11 +4207,10 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
     return results;
 }
 
-Result<std::vector<ComponentResult>>
-SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryIntent,
-                                  const SearchEngineConfig& config, size_t limit,
-                                  QueryExpansionStats* expansionStats,
-                                  const std::vector<GraphExpansionTerm>* graphExpansionTerms) {
+Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(
+    const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
+    size_t limit, QueryExpansionStats* expansionStats,
+    const std::vector<GraphExpansionTerm>* graphExpansionTerms, std::string* simeonRouteRecipe) {
     try {
         return detail::queryFullTextPipeline(
             metadataRepo_, query, queryIntent, config, limit, expansionStats,
@@ -4147,7 +4232,7 @@ SearchEngine::Impl::queryFullText(const std::string& query, QueryIntent queryInt
                                          .maxSeeds = config.graphExpansionMaxSeeds,
                                          .maxNeighbors = config.graphMaxNeighbors});
             },
-            simeonLexical_.get(), &lastSimeonRouteRecipe_);
+            simeonLexical_.get(), simeonRouteRecipe);
     } catch (const std::exception& e) {
         spdlog::warn("Full-text query exception: {}", e.what());
         return std::vector<ComponentResult>{};

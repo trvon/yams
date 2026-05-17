@@ -790,6 +790,15 @@ void EmbeddingService::updateSemanticNeighborGraph(
             coord->enqueue(std::move(batch));
             recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
             semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
+            spdlog::debug(
+                "EmbeddingService: streaming semantic neighbor graph added {} edges "
+                "(processed_docs={} candidate_docs={} similarity_pairs={} candidate_neighbors={} "
+                "missing_src_nodes={} missing_dst_nodes={} threshold_mode={} threshold_min={} "
+                "threshold_max={} topk={})",
+                enqueuedCount, sources.size(), candidateDocs, similarityPairCount,
+                candidateNeighborCount, missingSrcNodeCount, missingDstNodeCount,
+                explicitSemanticThreshold.has_value() ? "explicit" : "adaptive",
+                minEffectiveThreshold, maxEffectiveThreshold, semanticTopK);
             return;
         }
         recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
@@ -797,17 +806,6 @@ void EmbeddingService::updateSemanticNeighborGraph(
         spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} streaming "
                      "semantic_neighbor edges",
                      semanticEdges.size());
-        return;
-        spdlog::debug(
-            "EmbeddingService: streaming semantic neighbor graph added {} edges "
-            "(processed_docs={} candidate_docs={} similarity_pairs={} candidate_neighbors={} "
-            "missing_src_nodes={} missing_dst_nodes={} threshold_mode={} threshold_min={} "
-            "threshold_max={} topk={})",
-            semanticEdges.size(), sources.size(), candidateDocs, similarityPairCount,
-            candidateNeighborCount, missingSrcNodeCount, missingDstNodeCount,
-            explicitSemanticThreshold.has_value() ? "explicit" : "adaptive", minEffectiveThreshold,
-            maxEffectiveThreshold, semanticTopK);
-        return;
     }
 
     std::vector<CorpusVector> corpus;
@@ -1055,6 +1053,14 @@ void EmbeddingService::updateSemanticNeighborGraph(
         coord->enqueue(std::move(batch));
         recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
         semanticEdgesCreated_.fetch_add(enqueuedCount, std::memory_order_relaxed);
+        spdlog::debug(
+            "EmbeddingService: semantic neighbor graph added {} edges (processed_docs={} "
+            "candidate_docs={} similarity_pairs={} candidate_neighbors={} missing_src_nodes={} "
+            "missing_dst_nodes={} threshold_mode={} threshold_min={} threshold_max={} topk={})",
+            enqueuedCount, sources.size(), corpus.size(), similarityPairCount,
+            candidateNeighborCount, missingSrcNodeCount, missingDstNodeCount,
+            explicitSemanticThreshold.has_value() ? "explicit" : "adaptive", minEffectiveThreshold,
+            maxEffectiveThreshold, semanticTopK);
         return;
     }
     recordPhaseTiming("semantic_edge_upsert", tEdgeUpsert);
@@ -1062,15 +1068,6 @@ void EmbeddingService::updateSemanticNeighborGraph(
     spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} corpus "
                  "semantic_neighbor edges",
                  semanticEdges.size());
-    return;
-    spdlog::debug(
-        "EmbeddingService: semantic neighbor graph added {} edges (processed_docs={} "
-        "candidate_docs={} similarity_pairs={} candidate_neighbors={} missing_src_nodes={} "
-        "missing_dst_nodes={} threshold_mode={} threshold_min={} threshold_max={} topk={})",
-        semanticEdges.size(), sources.size(), corpus.size(), similarityPairCount,
-        candidateNeighborCount, missingSrcNodeCount, missingDstNodeCount,
-        explicitSemanticThreshold.has_value() ? "explicit" : "adaptive", minEffectiveThreshold,
-        maxEffectiveThreshold, semanticTopK);
 }
 
 Result<std::size_t>

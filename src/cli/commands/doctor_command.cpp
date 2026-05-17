@@ -207,72 +207,11 @@ using SemanticDedupeMatch = doctor::SemanticDedupeMatch;
 using SemanticDedupeGroupPlan = doctor::SemanticDedupeGroupPlan;
 using SemanticDedupeAnalysis = doctor::SemanticDedupeAnalysis;
 
-float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
-    if (a.empty() || b.empty() || a.size() != b.size()) {
-        return 0.0f;
-    }
-
-    const auto na = yams::vector::vector_utils::normalize(a);
-    const auto nb = yams::vector::vector_utils::normalize(b);
-    float dot = 0.0f;
-    for (size_t i = 0; i < na.size(); ++i) {
-        dot += na[i] * nb[i];
-    }
-    return dot;
-}
-
-std::string normalizeTextForTokens(std::string value) {
-    for (char& c : value) {
-        if (!std::isalnum(static_cast<unsigned char>(c))) {
-            c = ' ';
-        } else {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-    }
-
-    std::ostringstream out;
-    std::istringstream in(value);
-    std::string token;
-    bool first = true;
-    while (in >> token) {
-        if (!first) {
-            out << ' ';
-        }
-        out << token;
-        first = false;
-    }
-    return out.str();
-}
-
-std::unordered_set<std::string> tokenSet(std::string_view text) {
-    std::unordered_set<std::string> tokens;
-    std::istringstream in{std::string(text)};
-    std::string token;
-    while (in >> token) {
-        tokens.insert(token);
-    }
-    return tokens;
-}
-
-double jaccardOverlap(std::string_view lhs, std::string_view rhs) {
-    const auto lt = tokenSet(lhs);
-    const auto rt = tokenSet(rhs);
-    if (lt.empty() || rt.empty()) {
-        return 0.0;
-    }
-
-    size_t intersection = 0;
-    for (const auto& token : lt) {
-        if (rt.contains(token)) {
-            ++intersection;
-        }
-    }
-    const size_t uni = lt.size() + rt.size() - intersection;
-    if (uni == 0) {
-        return 0.0;
-    }
-    return static_cast<double>(intersection) / static_cast<double>(uni);
-}
+// `cosineSimilarity`, `normalizeTextForTokens`, `tokenSet`, and
+// `jaccardOverlap` were copy-pasted into
+// `src/cli/commands/doctor/repairs/dedupe.cpp` (lines 53/60/93) and the
+// originals here became unused. Removed 2026-05-15 after the fold SAST
+// audit flagged them; the canonical definitions remain in dedupe.cpp.
 
 } // namespace
 

@@ -24,6 +24,7 @@ class TextBuffer {
 public:
     TextBuffer() = default;
     TextBuffer(uint8_t* data, size_t len);
+    static TextBuffer fromMalloc(uint8_t* data, size_t len);
     ~TextBuffer();
 
     // Move-only
@@ -48,8 +49,14 @@ public:
     [[nodiscard]] size_t size() const { return len_; }
 
 private:
+    enum class Deallocator { Zpdf, Malloc };
+
+    TextBuffer(uint8_t* data, size_t len, Deallocator deallocator);
+    void release() noexcept;
+
     uint8_t* data_ = nullptr;
     size_t len_ = 0;
+    Deallocator deallocator_ = Deallocator::Zpdf;
 };
 
 /**

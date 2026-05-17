@@ -7,6 +7,7 @@
 #include "zpdf.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <sstream>
@@ -19,24 +20,42 @@ namespace yams::zyp {
 // TextBuffer
 // ============================================================================
 
-TextBuffer::TextBuffer(uint8_t* data, size_t len) : data_(data), len_(len) {}
+TextBuffer::TextBuffer(uint8_t* data, size_t len)
+    : TextBuffer(data, len, TextBuffer::Deallocator::Zpdf) {}
+
+TextBuffer::TextBuffer(uint8_t* data, size_t len, TextBuffer::Deallocator deallocator)
+    : data_(data), len_(len), deallocator_(deallocator) {}
+
+TextBuffer TextBuffer::fromMalloc(uint8_t* data, size_t len) {
+    return TextBuffer(data, len, TextBuffer::Deallocator::Malloc);
+}
 
 TextBuffer::~TextBuffer() {
+    release();
+}
+
+void TextBuffer::release() noexcept {
     if (data_) {
-        zpdf_free_buffer(data_, len_);
+        if (deallocator_ == TextBuffer::Deallocator::Malloc) {
+            std::free(data_);
+        } else {
+            zpdf_free_buffer(data_, len_);
+        }
+        data_ = nullptr;
+        len_ = 0;
     }
 }
 
 TextBuffer::TextBuffer(TextBuffer&& other) noexcept
-    : data_(std::exchange(other.data_, nullptr)), len_(std::exchange(other.len_, 0)) {}
+    : data_(std::exchange(other.data_, nullptr)), len_(std::exchange(other.len_, 0)),
+      deallocator_(std::exchange(other.deallocator_, TextBuffer::Deallocator::Zpdf)) {}
 
 TextBuffer& TextBuffer::operator=(TextBuffer&& other) noexcept {
     if (this != &other) {
-        if (data_) {
-            zpdf_free_buffer(data_, len_);
-        }
+        release();
         data_ = std::exchange(other.data_, nullptr);
         len_ = std::exchange(other.len_, 0);
+        deallocator_ = std::exchange(other.deallocator_, TextBuffer::Deallocator::Zpdf);
     }
     return *this;
 }
@@ -255,7 +274,7 @@ TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int n
         return {};
     std::memcpy(buf, finalText.data(), finalText.size());
     buf[finalText.size()] = '\0';
-    return TextBuffer(buf, finalText.size());
+    return TextBuffer::fromMalloc(buf, finalText.size());
 }
 
 } // namespace yams::zyp

@@ -179,18 +179,9 @@ static void fwht(std::vector<float>& data) {
     }
 }
 
-// Pad vector to next power of 2
-static std::vector<float> padToPowerOf2(const std::vector<float>& data, size_t target_dim) {
-    size_t n = 1;
-    while (n < target_dim) {
-        n *= 2;
-    }
-    std::vector<float> padded(n, 0.0f);
-    for (size_t i = 0; i < target_dim; ++i) {
-        padded[i] = data[i];
-    }
-    return padded;
-}
+// `padToPowerOf2` (previously here) was unused — removed 2026-05-15 after
+// the fold SAST audit flagged it. The current encode/score paths size
+// vectors directly to `bits_per_channel` and never need power-of-2 padding.
 
 void TurboQuantMSE::generateCentroids() {
     const uint8_t bits = config_.bits_per_channel;
