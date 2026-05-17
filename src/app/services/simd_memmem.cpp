@@ -40,6 +40,8 @@ static size_t scalarMemmem(const char* haystack, size_t haystackLen, const char*
                            size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
 
@@ -74,6 +76,8 @@ static size_t scalarMemmemCI(const char* haystack, size_t haystackLen, const cha
                              size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
 
@@ -102,6 +106,8 @@ static size_t avx2Memmem(const char* haystack, size_t haystackLen, const char* n
                          size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
     if (needleLen == 1) {
@@ -161,6 +167,8 @@ static size_t avx2MemmemCI(const char* haystack, size_t haystackLen, const char*
                            size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
 
@@ -251,6 +259,8 @@ static size_t sse2Memmem(const char* haystack, size_t haystackLen, const char* n
                          size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
     if (needleLen == 1) {
@@ -305,6 +315,8 @@ static size_t sse2MemmemCI(const char* haystack, size_t haystackLen, const char*
                            size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
 
@@ -422,6 +434,8 @@ static size_t neonMemmem(const char* haystack, size_t haystackLen, const char* n
                          size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
     if (needleLen == 1) {
@@ -470,6 +484,8 @@ static size_t neonMemmemCI(const char* haystack, size_t haystackLen, const char*
                            size_t needleLen) {
     if (needleLen == 0)
         return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     if (needleLen > haystackLen)
         return kMemmemNpos;
 
@@ -586,11 +602,19 @@ static const MemmemFn gMemmemCIImpl = pickMemmemCIImpl();
 // ============================================================================
 
 size_t simdMemmem(const char* haystack, size_t haystackLen, const char* needle, size_t needleLen) {
+    if (needleLen == 0)
+        return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     return gMemmemImpl(haystack, haystackLen, needle, needleLen);
 }
 
 size_t simdMemmemCI(const char* haystack, size_t haystackLen, const char* needle,
                     size_t needleLen) {
+    if (needleLen == 0)
+        return 0;
+    if (haystack == nullptr || needle == nullptr)
+        return kMemmemNpos;
     return gMemmemCIImpl(haystack, haystackLen, needle, needleLen);
 }
 

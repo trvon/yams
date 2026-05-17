@@ -15,6 +15,10 @@ namespace services {
 #if defined(YAMS_SIMD_AVX2)
 
 size_t SimdNewlineScanner::findNewlineAVX2(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return size;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
 
@@ -51,6 +55,10 @@ size_t SimdNewlineScanner::findNewlineAVX2(const char* data, size_t size) {
 }
 
 size_t SimdNewlineScanner::countNewlinesAVX2(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return 0;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
     size_t count = 0;
@@ -79,6 +87,10 @@ size_t SimdNewlineScanner::countNewlinesAVX2(const char* data, size_t size) {
 #if defined(YAMS_SIMD_SSE2)
 
 size_t SimdNewlineScanner::findNewlineSSE2(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return size;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
 
@@ -115,6 +127,10 @@ size_t SimdNewlineScanner::findNewlineSSE2(const char* data, size_t size) {
 }
 
 size_t SimdNewlineScanner::countNewlinesSSE2(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return 0;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
     size_t count = 0;
@@ -142,6 +158,10 @@ size_t SimdNewlineScanner::countNewlinesSSE2(const char* data, size_t size) {
 #if defined(YAMS_SIMD_NEON)
 
 size_t SimdNewlineScanner::findNewlineNEON(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return size;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
 
@@ -176,6 +196,10 @@ size_t SimdNewlineScanner::findNewlineNEON(const char* data, size_t size) {
 }
 
 size_t SimdNewlineScanner::countNewlinesNEON(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return 0;
+    }
+
     const char* ptr = data;
     const char* end = data + size;
     size_t count = 0;
@@ -206,6 +230,10 @@ size_t SimdNewlineScanner::countNewlinesNEON(const char* data, size_t size) {
 // ============================================================================
 
 size_t SimdNewlineScanner::findNewlineScalar(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return size;
+    }
+
     const void* result = std::memchr(data, '\n', size);
     if (result == nullptr) {
         return size;
@@ -214,6 +242,10 @@ size_t SimdNewlineScanner::findNewlineScalar(const char* data, size_t size) {
 }
 
 size_t SimdNewlineScanner::countNewlinesScalar(const char* data, size_t size) {
+    if (size == 0 || data == nullptr) {
+        return 0;
+    }
+
     size_t count = 0;
     for (size_t i = 0; i < size; ++i) {
         if (data[i] == '\n') {
@@ -233,6 +265,9 @@ size_t SimdNewlineScanner::findNewline(const char* data, size_t size) {
     if (size == 0) {
         return 0;
     }
+    if (data == nullptr) {
+        return size;
+    }
 
     return findNewlineScalar(data, size);
 }
@@ -242,7 +277,7 @@ bool SimdNewlineScanner::containsNewline(const char* data, size_t size) {
 }
 
 size_t SimdNewlineScanner::countNewlines(const char* data, size_t size) {
-    if (size == 0) {
+    if (size == 0 || data == nullptr) {
         return 0;
     }
 

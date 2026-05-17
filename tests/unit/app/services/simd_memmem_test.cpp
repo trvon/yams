@@ -27,6 +27,12 @@ TEST_CASE("simdMemmem: empty haystack returns npos", "[simd_memmem]") {
     REQUIRE(simdMemmem("", 0, "x", 1) == kMemmemNpos);
 }
 
+TEST_CASE("simdMemmem: null non-empty buffers return npos", "[simd_memmem]") {
+    REQUIRE(simdMemmem(nullptr, 8, "x", 1) == kMemmemNpos);
+    REQUIRE(simdMemmem("anything", 8, nullptr, 1) == kMemmemNpos);
+    REQUIRE(simdMemmem(nullptr, 8, nullptr, 1) == kMemmemNpos);
+}
+
 TEST_CASE("simdMemmem: needle longer than haystack returns npos", "[simd_memmem]") {
     REQUIRE(simdMemmem("abc", 3, "abcdef", 6) == kMemmemNpos);
 }
@@ -179,6 +185,12 @@ TEST_CASE("simdMemmemCI: empty haystack returns npos", "[simd_memmem][ci]") {
     REQUIRE(simdMemmemCI("", 0, "x", 1) == kMemmemNpos);
 }
 
+TEST_CASE("simdMemmemCI: null non-empty buffers return npos", "[simd_memmem][ci]") {
+    REQUIRE(simdMemmemCI(nullptr, 8, "x", 1) == kMemmemNpos);
+    REQUIRE(simdMemmemCI("anything", 8, nullptr, 1) == kMemmemNpos);
+    REQUIRE(simdMemmemCI(nullptr, 8, nullptr, 1) == kMemmemNpos);
+}
+
 TEST_CASE("simdMemmemCI: basic case folding", "[simd_memmem][ci]") {
     SECTION("uppercase haystack, lowercase needle") {
         REQUIRE(simdMemmemCI("HELLO WORLD", 11, "hello", 5) == 0);
@@ -288,4 +300,14 @@ TEST_CASE("kMemmemNpos equals size_t(-1)", "[simd_memmem]") {
     REQUIRE(kMemmemNpos == static_cast<size_t>(-1));
     // It should also equal std::string::npos on all platforms we care about.
     REQUIRE(kMemmemNpos == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// SimdNewlineScanner raw-pointer guards
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SimdNewlineScanner: null non-empty buffer is treated as no data", "[simd_newline]") {
+    REQUIRE(SimdNewlineScanner::findNewline(nullptr, 8) == 8);
+    REQUIRE_FALSE(SimdNewlineScanner::containsNewline(nullptr, 8));
+    REQUIRE(SimdNewlineScanner::countNewlines(nullptr, 8) == 0);
 }
