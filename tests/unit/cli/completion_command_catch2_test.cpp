@@ -371,9 +371,19 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
     const fs::path tempDir = yams::test::make_temp_dir("yams_zsh_completion_source_");
     const fs::path dataDir = tempDir / "data";
     fs::create_directories(dataDir);
-    const fs::path configPath = tempDir / "missing-config.toml";
+    const fs::path configPath = tempDir / "config.toml";
     const fs::path out = tempDir / "zsh-sourced-registration.out";
     const fs::path err = tempDir / "zsh-sourced-registration.err";
+    {
+        std::ofstream cfg(configPath);
+        cfg << "[core]\n";
+        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+    }
+
+    if (std::system("command -v zsh >/dev/null 2>&1") != 0) {
+        SKIP("zsh completion smoke test requires zsh on PATH");
+    }
+
     const std::string cmd =
         "env YAMS_CONFIG='" + configPath.string() + "' YAMS_DATA_DIR='" + dataDir.string() +
         "' YAMS_NON_INTERACTIVE=1 YAMS_CLI_DISABLE_DAEMON_AUTOSTART=1 "
@@ -383,18 +393,23 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
 
     const int rc = std::system(cmd.c_str());
     REQUIRE(WIFEXITED(rc));
-    REQUIRE((WEXITSTATUS(rc) == 0));
 
-    std::ifstream input(out);
-    REQUIRE(input.good());
-    std::string registered;
-    std::getline(input, registered);
-    CHECK((registered == "_yams"));
-
+    std::ifstream outInput(out);
+    const std::string stdoutOutput((std::istreambuf_iterator<char>(outInput)),
+                                   std::istreambuf_iterator<char>());
     std::ifstream errInput(err);
-    REQUIRE(errInput.good());
     const std::string stderrOutput((std::istreambuf_iterator<char>(errInput)),
                                    std::istreambuf_iterator<char>());
+    INFO("zsh completion command: " << cmd);
+    INFO("zsh stdout: " << stdoutOutput);
+    INFO("zsh stderr: " << stderrOutput);
+    REQUIRE((WEXITSTATUS(rc) == 0));
+
+    std::string registered;
+    std::istringstream registeredInput(stdoutOutput);
+    std::getline(registeredInput, registered);
+    CHECK((registered == "_yams"));
+
     CHECK(stderrOutput.empty());
 
     std::error_code ec;

@@ -242,11 +242,11 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         WorkCoordinator coordinator;
         coordinator.start(2);
         coordinator.stop();
+        coordinator.join();
 
         std::atomic<int> counter{0};
         boost::asio::post(coordinator.getExecutor(), [&counter]() { counter.fetch_add(1); });
 
-        coordinator.join();
         REQUIRE(counter.load() == 0);
     }
 }

@@ -306,12 +306,15 @@ PostIngestQueue::PostIngestQueue(
 }
 
 PostIngestQueue::~PostIngestQueue() {
-    stop();
+    stop_.store(true, std::memory_order_release);
+    notifyLifecycle();
     // Wait for all in-flight operations to complete before destroying members.
     // This prevents data races where workers access members during destruction.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
     std::unique_lock<std::mutex> lock(lifecycleMutex_);
-    lifecycleCv_.wait_until(lock, deadline, [this]() { return totalInFlight() == 0; });
+    lifecycleCv_.wait_until(lock, deadline, [this]() {
+        return totalInFlight() == 0 && callbacksInFlight_.load(std::memory_order_acquire) == 0;
+    });
 
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
     // The timers hold references to io_context service objects that may be
@@ -322,6 +325,15 @@ PostIngestQueue::~PostIngestQueue() {
     if (kgWakeTimer_) {
         (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
     }
+    if (symbolWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
+    }
+    if (entityWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
+    }
+    if (titleWakeTimer_) {
+        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
+    }
 }
 
 void PostIngestQueue::start() {
@@ -331,7 +343,8 @@ void PostIngestQueue::start() {
         !stageStarted_[1].load(std::memory_order_acquire) &&
         !stageStarted_[2].load(std::memory_order_acquire) &&
         !stageStarted_[3].load(std::memory_order_acquire) &&
-        !stageStarted_[4].load(std::memory_order_acquire) && totalInFlight() == 0) {
+        !stageStarted_[4].load(std::memory_order_acquire) && totalInFlight() == 0 &&
+        callbacksInFlight_.load(std::memory_order_acquire) == 0) {
         startGuard_.store(false, std::memory_order_release);
     }
     if (!startGuard_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
@@ -378,8 +391,20 @@ void PostIngestQueue::start() {
 }
 
 void PostIngestQueue::stop() {
-    stop_.store(true);
+    const bool alreadyStopping = stop_.exchange(true, std::memory_order_acq_rel);
     notifyLifecycle();
+    if (!alreadyStopping) {
+        auto cancelTimer = [](auto& timer) {
+            if (timer) {
+                timer->cancel();
+            }
+        };
+        cancelTimer(extractionWakeTimer_);
+        cancelTimer(kgWakeTimer_);
+        cancelTimer(symbolWakeTimer_);
+        cancelTimer(entityWakeTimer_);
+        cancelTimer(titleWakeTimer_);
+    }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
@@ -400,11 +425,21 @@ void PostIngestQueue::stop() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, deadline,
-                                [&]() { return allPollersStopped() && totalInFlight() == 0; });
-        if (allPollersStopped() && totalInFlight() == 0) {
+        lifecycleCv_.wait_until(lock, deadline, [&]() {
+            return allPollersStopped() && totalInFlight() == 0 &&
+                   callbacksInFlight_.load(std::memory_order_acquire) == 0;
+        });
+        if (allPollersStopped() && totalInFlight() == 0 &&
+            callbacksInFlight_.load(std::memory_order_acquire) == 0) {
             startGuard_.store(false, std::memory_order_release);
         }
+    }
+    if (!alreadyStopping) {
+        extractionWakeTimer_.reset();
+        kgWakeTimer_.reset();
+        symbolWakeTimer_.reset();
+        entityWakeTimer_.reset();
+        titleWakeTimer_.reset();
     }
 }
 
@@ -677,7 +712,9 @@ PostIngestQueue::BackpressureStatus PostIngestQueue::getBackpressureStatus() con
 
 void PostIngestQueue::checkDrainAndSignal() {
     // Check if queue is now drained (all stages idle)
-    if (totalInFlight() == 0) {
+    const bool channelsEmpty = size() == 0 && kgQueueDepth() == 0 && symbolQueueDepth() == 0 &&
+                               entityQueueDepth() == 0 && titleQueueDepth() == 0;
+    if (channelsEmpty && totalInFlight() == 0) {
         // Only signal if we were previously active (had work)
         bool expected = true;
         if (wasActive_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
@@ -739,6 +776,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
     cfg.batchMode = true;
@@ -1297,6 +1335,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
 
@@ -1333,6 +1372,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string {
         return j.hash;
@@ -1555,6 +1595,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor =
         entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string {
@@ -1911,6 +1952,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string {
         return j.hash;
@@ -1925,6 +1967,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         processTitleExtractionBatch(std::move(jobs));
     };
 
+    cfg.wakeTimer = titleWakeTimer_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 

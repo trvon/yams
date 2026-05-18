@@ -22,15 +22,15 @@
 
 #include <simeon/corpus_adapter.hpp>
 
-#include <yams/common/utf8_utils.h>
 #include <yams/api/content_store.h>
+#include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
-#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/pressure_limited_poller.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/extraction/title_util.h>
@@ -322,6 +322,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.completeJobFn = [this](auto& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this] { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this] { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.batchMode = true;
@@ -407,6 +408,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.completeJobFn = [this](auto& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this] { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this] { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.batchMode = true;
@@ -479,6 +481,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     cfg.completeJobFn = [this](auto& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this] { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this] { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor =
         entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
@@ -682,6 +685,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.completeJobFn = [this](auto& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this] { checkDrainAndSignal(); };
     cfg.notifyLifecycleFn = [this] { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.isCapableFn = [this] -> bool { return hasTitleExtractor(); };
@@ -691,6 +695,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
             titleQueueDepth(), std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize()), 32u);
     };
     cfg.batchProcessFn = [this](auto&& jobs) { processTitleExtractionBatch(std::move(jobs)); };
+    cfg.wakeTimer = titleWakeTimer_;
     co_await pressureLimitedPoll(std::move(ch), std::move(cfg));
 }
 

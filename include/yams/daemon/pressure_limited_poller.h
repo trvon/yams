@@ -104,6 +104,9 @@ template <typename Task> struct PressureLimitedPollerConfig {
     // Invoked on poller lifecycle transitions (start entry, stop exit, inflight decrement)
     // so owners can wake condition variables observing these state changes.
     std::function<void()> notifyLifecycleFn;
+    // Tracks posted executor callbacks that may still access owner state after
+    // inFlightCounter reaches zero.
+    std::atomic<std::size_t>* callbackInFlightCounter = nullptr;
     boost::asio::any_io_executor executor;
 
     // Single-item processing
@@ -131,6 +134,23 @@ template <typename Task> struct PressureLimitedPollerConfig {
     // a cancel races past, the poller resumes within 10ms worst case.
     // When nullptr, falls back to legacy adaptive-backoff timer.
     std::shared_ptr<boost::asio::steady_timer> wakeTimer;
+};
+
+template <typename Task> class PressureLimitedPollerCallbackGuard {
+public:
+    explicit PressureLimitedPollerCallbackGuard(PressureLimitedPollerConfig<Task>& cfg)
+        : cfg_(cfg) {}
+    ~PressureLimitedPollerCallbackGuard() {
+        if (cfg_.callbackInFlightCounter) {
+            cfg_.callbackInFlightCounter->fetch_sub(1, std::memory_order_acq_rel);
+        }
+        if (cfg_.notifyLifecycleFn) {
+            cfg_.notifyLifecycleFn();
+        }
+    }
+
+private:
+    PressureLimitedPollerConfig<Task>& cfg_;
 };
 
 /// Generic pressure-limited poller coroutine.
@@ -264,10 +284,14 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             hashes.push_back(cfg.getHashFn(t));
                         }
                     }
+                    if (cfg.callbackInFlightCounter) {
+                        cfg.callbackInFlightCounter->fetch_add(1, std::memory_order_acq_rel);
+                    }
                     boost::asio::post(cfg.executor, [cfg, batch = std::move(batch), batchCount,
                                                      hashes = std::move(hashes),
                                                      batchLimiterId = std::move(batchLimiterId),
                                                      batchLimiterAcquired]() mutable {
+                        PressureLimitedPollerCallbackGuard<Task> callbackGuard(cfg);
                         bool success = false;
                         try {
                             cfg.batchProcessFn(std::move(batch));
@@ -287,10 +311,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             cfg.completeJobFn(h, success);
                         }
                         cfg.inFlightCounter->fetch_sub(batchCount);
-                        if (cfg.notifyLifecycleFn) {
-                            cfg.notifyLifecycleFn();
+                        if (cfg.checkDrainFn) {
+                            cfg.checkDrainFn();
                         }
-                        cfg.checkDrainFn();
                     });
                 } else if (batchLimiterAcquired) {
                     cfg.completeJobFn(batchLimiterId, false);
@@ -313,8 +336,12 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     didWork = true;
                     cfg.wasActiveFlag->store(true, std::memory_order_release);
                     cfg.inFlightCounter->fetch_add(1);
+                    if (cfg.callbackInFlightCounter) {
+                        cfg.callbackInFlightCounter->fetch_add(1, std::memory_order_acq_rel);
+                    }
                     boost::asio::post(cfg.executor, [cfg, job = std::move(job),
                                                      hash = std::move(hash)]() mutable {
+                        PressureLimitedPollerCallbackGuard<Task> callbackGuard(cfg);
                         bool success = false;
                         try {
                             cfg.processFn(job);
@@ -328,10 +355,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         }
                         cfg.completeJobFn(hash, success);
                         cfg.inFlightCounter->fetch_sub(1);
-                        if (cfg.notifyLifecycleFn) {
-                            cfg.notifyLifecycleFn();
+                        if (cfg.checkDrainFn) {
+                            cfg.checkDrainFn();
                         }
-                        cfg.checkDrainFn();
                     });
                 }
             }

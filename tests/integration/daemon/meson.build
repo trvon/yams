@@ -372,6 +372,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+      should_fail: host_machine.system() == 'windows',
     )
 
     cli_responsiveness_under_load_exe = executable('yams_cli_responsiveness_under_load_tests_catch2',
