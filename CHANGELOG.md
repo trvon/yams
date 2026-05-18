@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.16.0](https://github.com/trvon/yams/compare/v0.15.0...v0.16.0) (2026-05-17)
+
+
+### Added
+
+* **search:** add Simeon bandit tuning ([#33](https://github.com/trvon/yams/issues/33)) ([6d8877a](https://github.com/trvon/yams/commit/6d8877a6d4034435a90538768f3cb3d1b22a6fb5))
+
+
+### Fixed
+
+* **config:** cross-validate backend + model at startup ([aec755e](https://github.com/trvon/yams/commit/aec755eaaa103ff578a3ff33caa86d70feeb0c96))
+* **config:** skip simeon sentinels when ONNX backend is active ([cee859d](https://github.com/trvon/yams/commit/cee859df61aac19b43a14651e92317c075e77709))
+
 ## [0.15.0](https://github.com/trvon/yams/compare/v0.14.2...v0.15.0) (2026-05-15)
 
 
