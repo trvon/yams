@@ -53,11 +53,17 @@ struct TestPluginHandle {
 // rc: plugin call return code, out_ptr: optional result struct with `error` field, reason: context
 #define PLUGIN_MISSING_SKIP(rc, out_ptr, reason)                                                   \
     do {                                                                                           \
-        if ((rc) == YAMS_PLUGIN_ERR_NOT_FOUND || ((out_ptr) != nullptr && (out_ptr)->error)) {     \
+        auto* _yams_out_ptr = (out_ptr);                                                           \
+        const bool _yams_missing = (rc) == YAMS_PLUGIN_ERR_NOT_FOUND;                              \
+        bool _yams_has_error = false;                                                              \
+        if (_yams_out_ptr != nullptr) {                                                            \
+            _yams_has_error = _yams_out_ptr->error != nullptr;                                     \
+        }                                                                                          \
+        if (_yams_missing || _yams_has_error) {                                                    \
             std::string _yams_skip_msg = (reason);                                                 \
-            if ((out_ptr) && (out_ptr)->error) {                                                   \
+            if (_yams_out_ptr != nullptr && _yams_out_ptr->error != nullptr) {                     \
                 _yams_skip_msg += " \xE2\x80\x94 ";                                                \
-                _yams_skip_msg += (out_ptr)->error;                                                \
+                _yams_skip_msg += _yams_out_ptr->error;                                            \
             }                                                                                      \
             SKIP("Plugin missing dependency: " + _yams_skip_msg);                                  \
         }                                                                                          \

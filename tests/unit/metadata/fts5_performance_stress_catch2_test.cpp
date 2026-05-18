@@ -78,6 +78,13 @@ struct FTS5StressFixture {
 
     void populateLargeCorpus(size_t count) {
         spdlog::info("Populating {} documents...", count);
+        if (count == 0) {
+            return;
+        }
+        size_t progressDenominator = 1;
+        if (count > 0) {
+            progressDenominator = count;
+        }
         auto start = high_resolution_clock::now();
 
         std::vector<std::string> words = {
@@ -130,13 +137,18 @@ struct FTS5StressFixture {
             if ((i + 1) % 10000 == 0) {
                 auto elapsed = duration_cast<seconds>(high_resolution_clock::now() - start);
                 spdlog::info("  Progress: {}/{} ({:.1f}%) - {}s elapsed", i + 1, count,
-                             (i + 1) * 100.0 / count, elapsed.count());
+                             (i + 1) * 100.0 / progressDenominator, elapsed.count());
             }
         }
 
         auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start);
-        spdlog::info("Populated {} documents in {}ms ({:.2f} docs/sec)", count, elapsed.count(),
-                     count * 1000.0 / elapsed.count());
+        const auto elapsedMs = elapsed.count();
+        double docsPerSec = 0.0;
+        if (elapsedMs > 0) {
+            docsPerSec = count * 1000.0 / elapsedMs;
+        }
+        spdlog::info("Populated {} documents in {}ms ({:.2f} docs/sec)", count, elapsedMs,
+                     docsPerSec);
     }
 
     std::filesystem::path dbPath;
@@ -249,14 +261,23 @@ TEST_CASE("FTS5 Stress: concurrent search", "[stress][metadata][fts5]") {
 
     auto elapsed = duration_cast<milliseconds>(high_resolution_clock::now() - start);
     int totalQueries = numThreads * queriesPerThread;
-    double avgTimeMs = totalTimeMs.load() / static_cast<double>(successCount.load());
+    const auto successes = successCount.load();
+    double avgTimeMs = 0.0;
+    if (successes > 0) {
+        avgTimeMs = totalTimeMs.load() / static_cast<double>(successes);
+    }
+    const auto elapsedMs = elapsed.count();
+    double throughput = 0.0;
+    if (elapsedMs > 0) {
+        throughput = totalQueries * 1000.0 / elapsedMs;
+    }
 
     spdlog::info("Concurrent test results:");
-    spdlog::info("  Total time: {}ms", elapsed.count());
-    spdlog::info("  Success: {}/{}", successCount.load(), totalQueries);
+    spdlog::info("  Total time: {}ms", elapsedMs);
+    spdlog::info("  Success: {}/{}", successes, totalQueries);
     spdlog::info("  Failures: {}", failureCount.load());
     spdlog::info("  Avg query time: {:.2f}ms", avgTimeMs);
-    spdlog::info("  Throughput: {:.2f} queries/sec", totalQueries * 1000.0 / elapsed.count());
+    spdlog::info("  Throughput: {:.2f} queries/sec", throughput);
 
     CHECK(failureCount.load() == 0);
     CHECK(successCount.load() > totalQueries * 0.95);

@@ -99,19 +99,20 @@ std::optional<PluginAPI> loadPlugin() {
 #endif
 }
 
-bool has_symbol(yams_symbol_extraction_result_v1* result, const char* name, const char* kind) {
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        if (result->symbols[i].name && std::strcmp(result->symbols[i].name, name) == 0 &&
-            result->symbols[i].kind && std::strcmp(result->symbols[i].kind, kind) == 0) {
+bool has_symbol(const yams_symbol_extraction_result_v1& result, const char* name,
+                const char* kind) {
+    for (size_t i = 0; i < result.symbol_count; ++i) {
+        if (result.symbols[i].name && std::strcmp(result.symbols[i].name, name) == 0 &&
+            result.symbols[i].kind && std::strcmp(result.symbols[i].kind, kind) == 0) {
             return true;
         }
     }
     return false;
 }
 
-bool has_symbol_any_kind(yams_symbol_extraction_result_v1* result, const char* name) {
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        if (result->symbols[i].name && std::strcmp(result->symbols[i].name, name) == 0) {
+bool has_symbol_any_kind(const yams_symbol_extraction_result_v1& result, const char* name) {
+    for (size_t i = 0; i < result.symbol_count; ++i) {
+        if (result.symbols[i].name && std::strcmp(result.symbols[i].name, name) == 0) {
             return true;
         }
     }
@@ -174,29 +175,35 @@ contract MyToken {
                                           solidityCode.size(), "test.sol", "solidity", &result);
 
     REQUIRE(rc == YAMS_PLUGIN_OK);
-    REQUIRE(result != nullptr);
+    if (result == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
+    const auto& extraction = *result;
 
-    fprintf(stderr, "[Solidity ERC-20] Extracted %zu symbols\n", result->symbol_count);
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        fprintf(stderr, "  - %s (%s)\n", result->symbols[i].name ? result->symbols[i].name : "?",
-                result->symbols[i].kind ? result->symbols[i].kind : "?");
+    fprintf(stderr, "[Solidity ERC-20] Extracted %zu symbols\n", extraction.symbol_count);
+    for (size_t i = 0; i < extraction.symbol_count; ++i) {
+        fprintf(stderr, "  - %s (%s)\n",
+                extraction.symbols[i].name ? extraction.symbols[i].name : "?",
+                extraction.symbols[i].kind ? extraction.symbols[i].kind : "?");
     }
 
     // Verify contract extracted
     INFO("MyToken contract should be extracted");
-    CHECK((has_symbol(result, "MyToken", "contract") || has_symbol(result, "MyToken", "class")));
+    CHECK((has_symbol(extraction, "MyToken", "contract") ||
+           has_symbol(extraction, "MyToken", "class")));
 
     // Verify functions (at least some should be extracted)
-    bool hasBalanceOf = has_symbol_any_kind(result, "balanceOf");
-    bool hasTransfer = has_symbol_any_kind(result, "transfer");
-    bool hasPrivateTransfer = has_symbol_any_kind(result, "_transfer");
+    bool hasBalanceOf = has_symbol_any_kind(extraction, "balanceOf");
+    bool hasTransfer = has_symbol_any_kind(extraction, "transfer");
+    bool hasPrivateTransfer = has_symbol_any_kind(extraction, "_transfer");
 
     fprintf(stderr, "[Solidity ERC-20] Functions found: balanceOf=%d transfer=%d _transfer=%d\n",
             hasBalanceOf, hasTransfer, hasPrivateTransfer);
 
     // At least the contract should be there
     INFO("Should extract at least the contract");
-    CHECK(result->symbol_count > 0UL);
+    CHECK(extraction.symbol_count > 0UL);
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -234,19 +241,24 @@ contract Token is IERC20 {
                                           "sol", &result);
 
     REQUIRE(rc == YAMS_PLUGIN_OK);
-    REQUIRE(result != nullptr);
+    if (result == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
+    const auto& extraction = *result;
 
-    fprintf(stderr, "[Solidity Inheritance] Extracted %zu symbols\n", result->symbol_count);
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        fprintf(stderr, "  - %s (%s)\n", result->symbols[i].name ? result->symbols[i].name : "?",
-                result->symbols[i].kind ? result->symbols[i].kind : "?");
+    fprintf(stderr, "[Solidity Inheritance] Extracted %zu symbols\n", extraction.symbol_count);
+    for (size_t i = 0; i < extraction.symbol_count; ++i) {
+        fprintf(stderr, "  - %s (%s)\n",
+                extraction.symbols[i].name ? extraction.symbols[i].name : "?",
+                extraction.symbols[i].kind ? extraction.symbols[i].kind : "?");
     }
 
     // Verify interface and contract (kind may vary based on grammar)
     bool hasInterface =
-        has_symbol(result, "IERC20", "interface") || has_symbol(result, "IERC20", "class");
+        has_symbol(extraction, "IERC20", "interface") || has_symbol(extraction, "IERC20", "class");
     bool hasContract =
-        has_symbol(result, "Token", "contract") || has_symbol(result, "Token", "class");
+        has_symbol(extraction, "Token", "contract") || has_symbol(extraction, "Token", "class");
 
     INFO("Should extract interface or contract");
     CHECK((hasInterface || hasContract));
@@ -286,17 +298,22 @@ contract DataTypes {
                                           "solidity", &result);
 
     REQUIRE(rc == YAMS_PLUGIN_OK);
-    REQUIRE(result != nullptr);
+    if (result == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
+    const auto& extraction = *result;
 
-    fprintf(stderr, "[Solidity DataTypes] Extracted %zu symbols\n", result->symbol_count);
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        fprintf(stderr, "  - %s (%s)\n", result->symbols[i].name ? result->symbols[i].name : "?",
-                result->symbols[i].kind ? result->symbols[i].kind : "?");
+    fprintf(stderr, "[Solidity DataTypes] Extracted %zu symbols\n", extraction.symbol_count);
+    for (size_t i = 0; i < extraction.symbol_count; ++i) {
+        fprintf(stderr, "  - %s (%s)\n",
+                extraction.symbols[i].name ? extraction.symbols[i].name : "?",
+                extraction.symbols[i].kind ? extraction.symbols[i].kind : "?");
     }
 
     // At least the contract should be extracted
     INFO("Should extract at least the contract");
-    CHECK(result->symbol_count > 0UL);
+    CHECK(extraction.symbol_count > 0UL);
 
     plugin->api->free_result(plugin->api->self, result);
 }
@@ -328,17 +345,22 @@ library SafeMath {
                                           "sol", &result);
 
     REQUIRE(rc == YAMS_PLUGIN_OK);
-    REQUIRE(result != nullptr);
+    if (result == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
+    const auto& extraction = *result;
 
-    fprintf(stderr, "[Solidity Library] Extracted %zu symbols\n", result->symbol_count);
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        fprintf(stderr, "  - %s (%s)\n", result->symbols[i].name ? result->symbols[i].name : "?",
-                result->symbols[i].kind ? result->symbols[i].kind : "?");
+    fprintf(stderr, "[Solidity Library] Extracted %zu symbols\n", extraction.symbol_count);
+    for (size_t i = 0; i < extraction.symbol_count; ++i) {
+        fprintf(stderr, "  - %s (%s)\n",
+                extraction.symbols[i].name ? extraction.symbols[i].name : "?",
+                extraction.symbols[i].kind ? extraction.symbols[i].kind : "?");
     }
 
     // Library should be extracted (kind depends on grammar)
-    bool hasLibrary =
-        has_symbol(result, "SafeMath", "library") || has_symbol(result, "SafeMath", "class");
+    bool hasLibrary = has_symbol(extraction, "SafeMath", "library") ||
+                      has_symbol(extraction, "SafeMath", "class");
     INFO("SafeMath library should be extracted");
     CHECK(hasLibrary);
 
@@ -362,7 +384,10 @@ pragma solidity ^0.8.0;
 
     // Should succeed even with no symbols
     REQUIRE(rc == YAMS_PLUGIN_OK);
-    REQUIRE(result != nullptr);
+    if (result == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
 
     fprintf(stderr, "[Solidity Empty] Extracted %zu symbols\n", result->symbol_count);
 

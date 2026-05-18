@@ -13,6 +13,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/compression/integrity_validator.h>
 
 using namespace yams;
 using namespace yams::compression;
@@ -414,4 +415,19 @@ TEST_CASE_METHOD(CompressionComprehensiveFixture, "CompressionComprehensive - Bo
         REQUIRE(decompressed.has_value());
         CHECK(decompressed.value() == maxBytes);
     }
+}
+
+TEST_CASE("IntegrityValidator - EmptyCompressedSpanRatio", "[compression][integrity][catch2]") {
+    IntegrityValidator validator;
+    std::vector<std::byte> compressed;
+    std::vector<std::byte> decompressed = {std::byte{0x01}, std::byte{0x02}};
+    const auto checksum = validator.calculateChecksum(decompressed);
+
+    auto result = validator.validateDecompression(compressed, decompressed, checksum,
+                                                  ValidationType::Checksum);
+
+    CHECK(result.isValid);
+    CHECK(result.originalSize == decompressed.size());
+    CHECK(result.compressedSize == 0);
+    CHECK(result.compressionRatio == 0.0);
 }

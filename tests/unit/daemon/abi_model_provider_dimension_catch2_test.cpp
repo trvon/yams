@@ -43,6 +43,9 @@ yams_status_t mock_generate_embedding(void* self, const char* model_id, const ui
     (void)text;
     (void)text_len;
     auto* ctx = static_cast<MockProviderContext*>(self);
+    if (!ctx || !out_vec || !out_dim) {
+        return YAMS_ERR_INVALID_ARG;
+    }
     if (ctx->simulateDimensionMismatch) {
         // Return wrong dimension
         *out_dim = 768; // Wrong! Config expects 384
@@ -66,6 +69,9 @@ yams_status_t mock_generate_embedding_batch(void* self, const char* model_id,
                                             size_t* out_dim) {
     (void)model_id;
     auto* ctx = static_cast<MockProviderContext*>(self);
+    if (!ctx || !out_vecs || !out_batch || !out_dim) {
+        return YAMS_ERR_INVALID_ARG;
+    }
     ctx->batchCalls++;
     if (ctx->simulateDimensionMismatch) {
         return YAMS_ERR_INVALID_ARG;
@@ -121,6 +127,9 @@ yams_status_t mock_load_model(void* self, const char* model_id, const char* mode
 yams_status_t mock_is_model_loaded(void* self, const char* model_id, bool* loaded) {
     (void)self;
     (void)model_id;
+    if (!loaded) {
+        return YAMS_ERR_INVALID_ARG;
+    }
     *loaded = true;
     return YAMS_OK;
 }
@@ -128,12 +137,18 @@ yams_status_t mock_is_model_loaded(void* self, const char* model_id, bool* loade
 yams_status_t mock_get_embedding_dim(void* self, const char* model_id, size_t* dim) {
     (void)model_id;
     auto* ctx = static_cast<MockProviderContext*>(self);
+    if (!ctx || !dim) {
+        return YAMS_ERR_INVALID_ARG;
+    }
     *dim = ctx->outputDim;
     return YAMS_OK;
 }
 
 yams_status_t mock_get_loaded_models(void* self, const char*** model_ids, size_t* count) {
     (void)self;
+    if (!model_ids || !count) {
+        return YAMS_ERR_INVALID_ARG;
+    }
     static const char* models[] = {"test-model"};
     *model_ids = models;
     *count = 1;
