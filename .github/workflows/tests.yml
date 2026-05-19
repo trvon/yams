@@ -495,7 +495,15 @@ jobs:
           # creates build.dat incompatible with older system meson).
           CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
           if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; source "${CONAN_BUILD_ENV}"; set -u; fi
-          $ARCH_PREFIX meson compile -C builddir
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+            $ARCH_PREFIX meson compile -C builddir \
+              catch2_daemon_metrics \
+              catch2_post_ingest_queue_unit \
+              catch2_storage_submodule \
+              catch2_work_coordinator
+          else
+            $ARCH_PREFIX meson compile -C builddir
+          fi
 
       - name: Configure and Build with Meson (Windows)
         id: build_windows
@@ -585,9 +593,13 @@ jobs:
             set -u
           fi
           # Run unit and integration tests (TSAN disabled in CI). ASAN is a sanitizer smoke lane;
-          # keep it unit-scoped so hosted runners do not get recycled during the full debug build.
+          # build/test selected targets only so hosted runners do not get recycled.
           if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
-            meson test -C ${{ env.BUILD_DIR }} --suite unit --print-errorlogs --timeout-multiplier 2
+            meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
+              daemon_metrics_status \
+              post_ingest_queue_unit \
+              storage_submodule \
+              work_coordinator
           else
             meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
           fi
