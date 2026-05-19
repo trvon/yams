@@ -409,19 +409,6 @@ public:
                                     }
                                     kgNodesCreated++;
 
-                                    // Link path version to blob (has_version edge)
-                                    // Note: diffId not available yet (would need TreeDiffer
-                                    // integration)
-                                    auto linkResult = ctx_.kgStore->linkPathVersion(
-                                        pathNodeResult.value(), blobNodeResult.value(), 0);
-                                    if (!linkResult) {
-                                        spdlog::debug(
-                                            "[IndexingService] KG linkPathVersion failed: {}",
-                                            linkResult.error().message);
-                                        continue;
-                                    }
-                                    kgEdgesCreated++;
-
                                     if (docNodeId) {
                                         metadata::KGEdge hasBlob;
                                         hasBlob.srcNodeId = docNodeId.value();
@@ -438,6 +425,19 @@ public:
                                         } else {
                                             kgEdgesCreated++;
                                         }
+                                    }
+
+                                    // Link path version to blob (has_version edge). This is
+                                    // best-effort; the canonical doc->blob edge above should not
+                                    // be skipped if snapshot path linking is unavailable.
+                                    auto linkResult = ctx_.kgStore->linkPathVersion(
+                                        pathNodeResult.value(), blobNodeResult.value(), 0);
+                                    if (!linkResult) {
+                                        spdlog::debug(
+                                            "[IndexingService] KG linkPathVersion failed: {}",
+                                            linkResult.error().message);
+                                    } else {
+                                        kgEdgesCreated++;
                                     }
                                 }
 

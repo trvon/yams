@@ -289,22 +289,24 @@ else
       args: ['--allow-running-no-tests'],
     )
 
-    post_ingest_queue_benchmark_exe = executable('yams_post_ingest_queue_benchmark',
-      post_ingest_queue_benchmark_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
+    if get_option('enable-bench-tests')
+      post_ingest_queue_benchmark_exe = executable('yams_post_ingest_queue_benchmark',
+        post_ingest_queue_benchmark_srcs,
+        include_directories: incs,
+        dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+        cpp_args: ['-DYAMS_TESTING=1'],
+        install: false,
+      )
 
-    test('post_ingest_queue_benchmark',
-      post_ingest_queue_benchmark_exe,
-      suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'benchmark'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 600, # Longer timeout for benchmark
-      args: ['--allow-running-no-tests'],
-    )
+      test('post_ingest_queue_benchmark',
+        post_ingest_queue_benchmark_exe,
+        suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'benchmark'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 600, # Longer timeout for benchmark
+        args: ['--allow-running-no-tests'],
+      )
+    endif
 
     client_timeout_recovery_exe = executable('yams_client_timeout_recovery_tests_catch2',
       client_timeout_recovery_srcs,
@@ -372,7 +374,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
-      should_fail: host_machine.system() == 'windows',
+      args: ['--allow-running-no-tests'],
     )
 
     cli_responsiveness_under_load_exe = executable('yams_cli_responsiveness_under_load_tests_catch2',

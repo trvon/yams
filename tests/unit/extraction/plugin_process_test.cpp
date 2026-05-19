@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <thread>
 
 using namespace yams::extraction;
@@ -278,32 +279,8 @@ TEST_CASE("PluginProcess builder pattern configuration", "[extraction][plugin]")
 }
 
 TEST_CASE("PluginProcess handles invalid executable", "[extraction][plugin][!mayfail]") {
-#ifdef _WIN32
-    // On Windows, CreateProcess fails immediately for nonexistent executables
-    // and throws an exception from PluginProcess constructor
     PluginProcessConfig config{.executable = "/nonexistent/binary", .args = {}};
-    REQUIRE_THROWS(PluginProcess{std::move(config)});
-#else
-    PluginProcessConfig config{.executable = "/nonexistent/binary", .args = {}};
-
-    // Note: PluginProcess doesn't throw on invalid executable - the fork() succeeds but exec()
-    // fails, so the child process exits with code 127. The parent can detect this by checking
-    // is_alive() later.
-    // TODO: Implement pipe-based exec failure detection for immediate feedback
-    PluginProcess process{std::move(config)};
-
-    // Give the process time to attempt exec and fail (timing-dependent)
-    std::this_thread::sleep_for(std::chrono::seconds{1});
-
-    // Process should have terminated by now (exec failed)
-    if (process.is_alive()) {
-        // If still alive, force terminate before failing
-        process.terminate();
-    }
-
-    REQUIRE_FALSE(process.is_alive());
-    REQUIRE(process.state() == ProcessState::Terminated);
-#endif
+    REQUIRE_THROWS_AS(PluginProcess{std::move(config)}, std::runtime_error);
 }
 
 TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
