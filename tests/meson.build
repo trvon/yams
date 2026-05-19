@@ -27,6 +27,8 @@ catch2_incs = []
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
 _test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
+_test_address_sanitizer = get_option('enable-asan') or get_option('b_sanitize').contains('address')
+_test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
@@ -181,7 +183,7 @@ if get_option('build-plugins') and catch2_dep.found()
   subdir('plugins')
 endif
 
-if get_option('enable-integration-tests') or get_option('buildtype') == 'debug'
+if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/smoke')
   subdir('integration/daemon')
   subdir('integration/cli')
@@ -288,7 +290,7 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 #
 #IMPORTANT : services integration includes both GTest - and Catch2 - based suites.
 #Do not gate the entire subdir on GTest.
-if get_option('enable-integration-tests') or get_option('enable-integration-services') or get_option('buildtype') == 'debug'
+if get_option('enable-integration-tests') or get_option('enable-integration-services') or _test_debug_integrations
   subdir('integration/services')
 endif
 
@@ -2126,29 +2128,31 @@ if catch2_dep.found()
 #Corpus Stats Search Integration Tests(Catch2)
 #Phase 1 of Epic yams - 7ez4 : Validates corpus stats collection from real document store
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  corpus_stats_search_integration_exe = executable('corpus_stats_search_integration',
-    files('unit/search/corpus_stats_search_integration_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
-      dependency('yams_daemon'),
-      dependency('yams_daemon_client'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-#Ghidra plugin integration test(PBI - 075)
-#Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
-  if host_machine.system() != 'windows'
-    ghidra_plugin_exe = executable('ghidra_plugin_communication',
-      files('integration/ghidra_plugin_communication_test.cpp'),
+  if not _test_address_sanitizer
+    corpus_stats_search_integration_exe = executable('corpus_stats_search_integration',
+      files('unit/search/corpus_stats_search_integration_test.cpp'),
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+      dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
+        dependency('yams_daemon'),
+        dependency('yams_daemon_client'),
+      ],
       cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )
+
+#Ghidra plugin integration test(PBI - 075)
+#Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
+    if host_machine.system() != 'windows'
+      ghidra_plugin_exe = executable('ghidra_plugin_communication',
+        files('integration/ghidra_plugin_communication_test.cpp'),
+        include_directories: incs,
+        dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+        cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+        build_rpath: ':'.join(_test_rpaths),
+        install: false,
+      )
+    endif
   endif
 
 #Test Registrations
@@ -2482,23 +2486,25 @@ if catch2_dep.found()
     timeout: 120
   )
 
-  test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
-    suite: ['catch2', 'integration', 'search', 'corpus_stats'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_DISABLE_VECTORS': '1',
-    },
-    timeout: 180
-  )
+  if not _test_address_sanitizer
+    test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
+      suite: ['catch2', 'integration', 'search', 'corpus_stats'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      timeout: 180
+    )
 
 #Plugin integration tests
-  if host_machine.system() != 'windows'
-    test('ghidra_plugin_communication', ghidra_plugin_exe,
-      suite: ['catch2', 'integration', 'plugin', 'ghidra'],
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
-      timeout: 30,
-      is_parallel: false
-    )
+    if host_machine.system() != 'windows'
+      test('ghidra_plugin_communication', ghidra_plugin_exe,
+        suite: ['catch2', 'integration', 'plugin', 'ghidra'],
+        env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
+        timeout: 30,
+        is_parallel: false
+      )
+    endif
   endif
 
 #Daemon tests

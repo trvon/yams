@@ -12,12 +12,14 @@
 #include <yams/cli/cli_sync.h>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -448,6 +450,10 @@ TEST_CASE("Lane metrics update during slot acquisition", "[daemon][onnx][lanes][
 TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
           "[daemon][onnx][adapter][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
+    if (ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+        ConfigResolver::envTruthy(std::getenv("YAMS_SQLITE_VEC_SKIP_INIT"))) {
+        SKIP("Real ONNX adapter test requires vector support enabled");
+    }
 
     // Configure conservative slot limits to observe contention
     ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");

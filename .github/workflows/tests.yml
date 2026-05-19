@@ -584,8 +584,13 @@ jobs:
             source "$CONAN_BUILD_ENV"
             set -u
           fi
-          # Run unit and integration tests (TSAN disabled in CI)
-          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          # Run unit and integration tests (TSAN disabled in CI). ASAN is a sanitizer smoke lane;
+          # keep it unit-scoped so hosted runners do not get recycled during the full debug build.
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+            meson test -C ${{ env.BUILD_DIR }} --suite unit --print-errorlogs --timeout-multiplier 2
+          else
+            meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          fi
 
       - name: Run Tests with Meson (Windows)
         id: meson_tests_windows

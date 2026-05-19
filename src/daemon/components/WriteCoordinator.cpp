@@ -6,6 +6,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -22,7 +23,8 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                                    std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                                    Config config)
     : strand_(boost::asio::make_strand(ioc)), kg_(std::move(kgStore)),
-      meta_(std::move(metadataRepo)), config_(config) {
+      meta_(std::move(metadataRepo)), config_(config),
+      wakeTimer_(std::make_shared<boost::asio::steady_timer>(strand_)) {
     spdlog::info("[WriteCoordinator] Initialized maxBatchSize={} maxDelayMs={} capacity={}",
                  config_.maxBatchSize, config_.maxBatchDelayMs.count(), config_.channelCapacity);
 }
@@ -50,26 +52,41 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
         std::lock_guard<std::mutex> slock(statsMutex_);
         stats_.batchesEnqueued++;
     }
+    wakeWriter();
 }
 
 bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
     if (!batch)
         return false;
-    std::lock_guard<std::mutex> lock(queueMutex_);
-    if (pendingBatches_.size() >= config_.channelCapacity) {
-        return false;
-    }
-    batch->enqueueTime = std::chrono::steady_clock::now();
-    pendingBatches_.push_back(std::move(batch));
     {
-        std::lock_guard<std::mutex> slock(statsMutex_);
-        stats_.batchesEnqueued++;
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (pendingBatches_.size() >= config_.channelCapacity) {
+            return false;
+        }
+        batch->enqueueTime = std::chrono::steady_clock::now();
+        pendingBatches_.push_back(std::move(batch));
+        {
+            std::lock_guard<std::mutex> slock(statsMutex_);
+            stats_.batchesEnqueued++;
+        }
     }
+    wakeWriter();
     return true;
+}
+
+void WriteCoordinator::wakeWriter() {
+    auto timer = wakeTimer_;
+    boost::asio::post(strand_, [timer]() {
+        if (!timer) {
+            return;
+        }
+        timer->cancel();
+    });
 }
 
 void WriteCoordinator::start() {
     stop_.store(false);
+    writerExited_.store(false, std::memory_order_release);
     boost::asio::co_spawn(strand_, writerLoop(), boost::asio::detached);
     spdlog::info("[WriteCoordinator] Writer coroutine started");
 }
@@ -98,6 +115,7 @@ void WriteCoordinator::shutdown() {
         return;
     }
     spdlog::info("[WriteCoordinator] Shutting down...");
+    wakeWriter();
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         drainCv_.notify_all();
@@ -105,10 +123,16 @@ void WriteCoordinator::shutdown() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     {
         std::unique_lock<std::mutex> lock(queueMutex_);
-        drainCv_.wait_until(lock, deadline, [this]() { return pendingBatches_.empty(); });
+        drainCv_.wait_until(lock, deadline, [this]() {
+            return pendingBatches_.empty() && inFlight_.load(std::memory_order_acquire) == 0 &&
+                   writerExited_.load(std::memory_order_acquire);
+        });
     }
     if (queuedBatches() > 0) {
         spdlog::warn("[WriteCoordinator] Shutdown with {} batches still pending", queuedBatches());
+    }
+    if (!writerExited_.load(std::memory_order_acquire)) {
+        spdlog::warn("[WriteCoordinator] Shutdown timed out waiting for writer loop exit");
     }
     spdlog::info("[WriteCoordinator] Shutdown complete");
 }
@@ -176,7 +200,7 @@ void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_
 
 boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
     spdlog::info("[WriteCoordinator] Writer loop started");
-    boost::asio::steady_timer pollTimer(co_await boost::asio::this_coro::executor);
+    auto pollTimer = wakeTimer_;
 
     while (!stop_.load()) {
         std::vector<std::unique_ptr<WriteBatch>> batchesToProcess;
@@ -208,9 +232,9 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
                     std::max(idleDelay, std::chrono::milliseconds(std::max<uint32_t>(
                                             TuneAdvisor::idleTickMs(), snap->workerPollMs)));
             }
-            pollTimer.expires_after(idleDelay);
+            pollTimer->expires_after(idleDelay);
             boost::system::error_code ec;
-            co_await pollTimer.async_wait(
+            co_await pollTimer->async_wait(
                 boost::asio::redirect_error(boost::asio::use_awaitable, ec));
             continue;
         }
@@ -231,9 +255,14 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             drainCv_.notify_all();
         }
 
-        pollTimer.expires_after(std::chrono::milliseconds(1));
+        pollTimer->expires_after(std::chrono::milliseconds(1));
         boost::system::error_code ec;
-        co_await pollTimer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        co_await pollTimer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    }
+    writerExited_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        drainCv_.notify_all();
     }
     spdlog::info("[WriteCoordinator] Writer loop exited");
 }
