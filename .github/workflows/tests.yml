@@ -169,8 +169,8 @@ jobs:
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
           # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread
     runs-on: ${{ matrix.runs_on }}
-    # Allow extra time for safety across runners.
-    timeout-minutes: 100
+    # Windows debug builds can consume most of the previous 100-minute budget before tests start.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
