@@ -17,6 +17,33 @@ struct BackendHandle {
     std::shared_ptr<IObjectStorageBackend> impl;
 };
 
+static int c_create(const char* /*config_json*/, void** out_backend);
+static void c_destroy(void* backend);
+static int c_put(void* backend, const char* key, const void* buf, size_t len,
+                 const char* /*opts_json*/);
+static int c_get(void* backend, const char* key, void** out_buf, size_t* out_len,
+                 const char* /*opts_json*/);
+static int c_head(void* backend, const char* key, char** out_metadata_json,
+                  const char* /*opts_json*/);
+static int c_del(void* backend, const char* key, const char* /*opts_json*/);
+static int c_list(void* backend, const char* prefix, char** out_list_json, const char* opts_json);
+
+yams_object_storage_v1* makeTable() {
+    auto* v = static_cast<yams_object_storage_v1*>(std::malloc(sizeof(yams_object_storage_v1)));
+    if (!v)
+        return nullptr;
+    v->size = sizeof(yams_object_storage_v1);
+    v->version = 1;
+    v->create = c_create;
+    v->destroy = c_destroy;
+    v->put = c_put;
+    v->get = c_get;
+    v->head = c_head;
+    v->del = c_del;
+    v->list = c_list;
+    return v;
+}
+
 static char* dup_cstr(const std::string& s) {
     char* p = static_cast<char*>(std::malloc(s.size() + 1));
     if (!p)
@@ -236,25 +263,7 @@ std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* /*v1_i
 yams_object_storage_v1* expose_as_c_abi(std::shared_ptr<IObjectStorageBackend> impl) {
     if (!impl)
         return nullptr;
-    auto* handle = new BackendHandle{std::move(impl)};
-    // Allocate and populate the interface table
-    auto* v = static_cast<yams_object_storage_v1*>(std::malloc(sizeof(yams_object_storage_v1)));
-    if (!v) {
-        delete handle;
-        return nullptr;
-    }
-    v->size = sizeof(yams_object_storage_v1);
-    v->version = 1;
-    v->create = c_create;   // no-op; backend already bound
-    v->destroy = c_destroy; // frees the BackendHandle
-    v->put = c_put;
-    v->get = c_get;
-    v->head = c_head;
-    v->del = c_del;
-    v->list = c_list;
-    // The caller should pass 'handle' as the backend pointer to these functions.
-    // Ownership: destroy() will delete handle.
-    return v;
+    return makeTable();
 }
 
 std::pair<yams_object_storage_v1*, void*>
@@ -262,7 +271,7 @@ expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl) {
     if (!impl)
         return {nullptr, nullptr};
     auto* handle = new BackendHandle{impl};
-    auto* v = expose_as_c_abi(impl);
+    auto* v = makeTable();
     if (!v) {
         delete handle;
         return {nullptr, nullptr};

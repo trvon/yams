@@ -66,4 +66,5 @@ TEST_CASE("ObjectStorageAdapter list produces prefixes when delimiter provided",
 
     std::free(out);
     table->destroy(handle);
+    std::free(table);
 }
