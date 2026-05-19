@@ -225,11 +225,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          retry_cmd() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$attempts" ]; then
+                return 1
+              fi
+              echo "Command failed (attempt ${attempt}/${attempts}): $*" >&2
+              sleep $((attempt * 10))
+              attempt=$((attempt + 1))
+            done
+          }
+          if [ "$(dpkg --print-architecture)" = "arm64" ]; then
+            source_files="$(sudo grep -RIl '://ports.ubuntu.com/ubuntu-ports' \
+              /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)"
+            if [ -n "$source_files" ]; then
+              printf '%s\n' "$source_files" | xargs sudo sed -i \
+                's|http://ports.ubuntu.com/ubuntu-ports|https://azure.ports.ubuntu.com/ubuntu-ports|g; s|https://ports.ubuntu.com/ubuntu-ports|https://azure.ports.ubuntu.com/ubuntu-ports|g'
+            fi
+          fi
+          retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
           # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
+          retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
+            install -y --fix-missing --no-install-recommends \
+            libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
