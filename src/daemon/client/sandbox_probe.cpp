@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #if defined(_WIN32)
+#include <process.h>
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
@@ -65,13 +66,21 @@ std::filesystem::path probe_temp_dir() {
     return std::filesystem::temp_directory_path();
 }
 
+long long currentProcessId() {
+#if defined(_WIN32)
+    return static_cast<long long>(::_getpid());
+#else
+    return static_cast<long long>(::getpid());
+#endif
+}
+
 std::string probe_socket_path() {
     std::random_device rd;
     std::mt19937_64 rng(rd());
     auto suffix = rng();
     auto dir = probe_temp_dir();
-    return (dir /
-            ("yams-probe-" + std::to_string(::getpid()) + "-" + std::to_string(suffix) + ".sock"))
+    return (dir / ("yams-probe-" + std::to_string(currentProcessId()) + "-" +
+                   std::to_string(suffix) + ".sock"))
         .string();
 }
 

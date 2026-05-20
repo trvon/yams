@@ -50,6 +50,14 @@ using yams::Result;
 using yams::daemon::ClientConfig;
 using yams::daemon::DaemonClient;
 
+pid_t currentProcessId() {
+#if defined(_WIN32)
+    return static_cast<pid_t>(::_getpid());
+#else
+    return ::getpid();
+#endif
+}
+
 Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseconds timeout) {
     try {
         auto request = [cfg]() -> boost::asio::awaitable<Result<void>> {
@@ -127,7 +135,7 @@ Result<void> LifecycleComponent::initialize() {
         // YamsDaemon instance is already running within this process. Do NOT
         // treat it as stale; refuse to start to preserve single-instance
         // semantics expected by DaemonTest.SingleInstance.
-        if (haveInfo && existingPid == getpid()) {
+        if (haveInfo && existingPid == currentProcessId()) {
             return Error{ErrorCode::InvalidState,
                          "Another daemon instance is already running in this process"};
         }
@@ -163,7 +171,7 @@ Result<void> LifecycleComponent::initialize() {
                     "terminate it.");
                 if (haveInfo && existingPid > 0 && identity == PidIdentityStatus::Verified) {
                     // Avoid accidentally terminating our own process
-                    if (existingPid == getpid()) {
+                    if (existingPid == currentProcessId()) {
                         spdlog::warn(
                             "Existing PID matches current process ({}); skipping terminate.",
                             existingPid);
@@ -328,14 +336,14 @@ Result<void> LifecycleComponent::createPidFile() {
         instanceToken_ = generateInstanceToken();
     }
     if (startTimeNs_ == 0) {
-        startTimeNs_ = getProcessStartTimeNs(getpid());
+        startTimeNs_ = getProcessStartTimeNs(currentProcessId());
     }
     if (startTimeNs_ == 0) {
         auto now = std::chrono::system_clock::now().time_since_epoch();
         startTimeNs_ = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
     }
-    auto exePath = getProcessExecutablePath(getpid());
+    auto exePath = getProcessExecutablePath(currentProcessId());
     if (!exePath.empty()) {
         std::error_code ec;
         exePath = std::filesystem::weakly_canonical(exePath, ec).string();
@@ -345,7 +353,7 @@ Result<void> LifecycleComponent::createPidFile() {
     }
     json payload = json::object();
     payload["v"] = 1;
-    payload["pid"] = static_cast<std::int64_t>(getpid());
+    payload["pid"] = static_cast<std::int64_t>(currentProcessId());
     payload["start_ns"] = startTimeNs_;
     payload["token"] = instanceToken_;
     if (!exePath.empty()) {
@@ -625,7 +633,7 @@ LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& deta
             return PidIdentityStatus::Unknown;
         }
     } else if (!liveExe.empty()) {
-        auto currentExe = getProcessExecutablePath(getpid());
+        auto currentExe = getProcessExecutablePath(currentProcessId());
         if (!currentExe.empty()) {
             std::error_code ec;
             auto canonicalLive = std::filesystem::weakly_canonical(liveExe, ec).string();
@@ -971,7 +979,7 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
                 spdlog::warn("Shutdown request to existing daemon failed: {}",
                              result.error().message);
                 if (aggressiveModeEnabled() && existingInfo.pid > 0 &&
-                    existingInfo.pid != getpid() && isProcessRunning(existingInfo.pid)) {
+                    existingInfo.pid != currentProcessId() && isProcessRunning(existingInfo.pid)) {
                     spdlog::warn("Attempting forced termination for stale daemon PID {}",
                                  existingInfo.pid);
                     if (auto term = terminateProcess(existingInfo.pid); !term) {
@@ -1003,7 +1011,7 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
             }
 
             if (!lockAcquired && aggressiveModeEnabled() && existingInfo.pid > 0 &&
-                existingInfo.pid != getpid() && isProcessRunning(existingInfo.pid)) {
+                existingInfo.pid != currentProcessId() && isProcessRunning(existingInfo.pid)) {
                 spdlog::warn("Data-dir lock still held by PID {}, forcing termination",
                              existingInfo.pid);
                 if (auto term = terminateProcess(existingInfo.pid); !term) {
@@ -1049,7 +1057,7 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
     }
 
     // Write our lock info
-    json lockInfo = {{"pid", static_cast<std::int64_t>(getpid())},
+    json lockInfo = {{"pid", static_cast<std::int64_t>(currentProcessId())},
                      {"socket", daemon_->config_.socketPath.string()},
                      {"timestamp", std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::system_clock::now().time_since_epoch())

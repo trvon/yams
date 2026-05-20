@@ -12,7 +12,9 @@
 #include <thread>
 #include <utility>
 
-#ifndef _WIN32
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -28,6 +30,14 @@ struct ProbeOutcome {
     bool ok{false};
     std::string detail;
 };
+
+long long currentProcessId() {
+#if defined(_WIN32)
+    return static_cast<long long>(::_getpid());
+#else
+    return static_cast<long long>(::getpid());
+#endif
+}
 
 ProbeOutcome runProbe(const fs::path& dataDir) {
     ProbeOutcome out;
@@ -51,7 +61,7 @@ ProbeOutcome runProbe(const fs::path& dataDir) {
     }
     (void)statusOk;
 
-    const auto probeName = ".yams-preflight-" + std::to_string(static_cast<long long>(::getpid()));
+    const auto probeName = ".yams-preflight-" + std::to_string(currentProcessId());
     const fs::path probeFile = dataDir / probeName;
 
 #ifndef _WIN32
