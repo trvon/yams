@@ -5,6 +5,7 @@
 #include <string>
 
 #include <yams/app/services/services.hpp>
+#include <yams/compat/unistd.h>
 
 namespace yams::test::capability {
 

@@ -9,6 +9,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 

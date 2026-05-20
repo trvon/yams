@@ -8,6 +8,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <yams/app/services/document_ingestion_service.h>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 
 #include "common/daemon_preflight.h"

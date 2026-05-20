@@ -25,6 +25,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/compat/unistd.h>
 #include <yams/compression/compression_header.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>

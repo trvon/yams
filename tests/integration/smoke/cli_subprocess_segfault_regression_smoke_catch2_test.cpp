@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+#include <yams/compat/unistd.h>
+
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif

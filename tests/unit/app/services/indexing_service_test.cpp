@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/content/content_handler_registry.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/detection/file_type_detector.h>

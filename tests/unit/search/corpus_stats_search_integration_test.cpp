@@ -18,6 +18,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <yams/compat/unistd.h>
+
 #if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
 #include <onnxruntime_c_api.h>
 #define YAMS_ORT_API_VERSION ORT_API_VERSION

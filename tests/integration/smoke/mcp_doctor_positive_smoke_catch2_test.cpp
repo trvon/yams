@@ -13,6 +13,7 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>

@@ -23,6 +23,7 @@
 #include <sqlite3.h>
 #include "../common/env_compat.h"
 #include <benchmark/benchmark.h>
+#include <yams/compat/unistd.h>
 
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
