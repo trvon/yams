@@ -47,22 +47,8 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     return cfg;
 }
 
-static boost::asio::any_io_executor selectExecutor(const RetrievalOptions& opts) {
-    if (opts.executor.has_value()) {
-        return *opts.executor;
-    }
-    return yams::daemon::GlobalIOContext::global_executor();
-}
-
-std::shared_ptr<yams::daemon::DaemonClient>
-RetrievalService::getOrCreateClient(const RetrievalOptions& opts) const {
-    if (client_)
-        return client_;
-    return std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
-}
-
-Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_opts,
-                                                        const RetrievalOptions& opts) const {
+static yams::daemon::GetRequest makeGetRequest(const GetOptions& req_opts,
+                                               const RetrievalOptions& opts) {
     yams::daemon::GetRequest req;
     req.hash = req_opts.hash;
     req.acceptCompressed = req_opts.acceptCompressed || opts.acceptCompressed;
@@ -90,6 +76,180 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
     req.showGraph = req_opts.showGraph;
     req.graphDepth = req_opts.graphDepth;
     req.verbose = req_opts.verbose;
+    return req;
+}
+
+static yams::daemon::GrepRequest makeGrepRequest(const GrepOptions& req_opts) {
+    yams::daemon::GrepRequest req;
+    req.pattern = req_opts.pattern;
+    req.paths = req_opts.paths;
+    req.caseInsensitive = req_opts.caseInsensitive;
+    req.invertMatch = req_opts.invertMatch;
+    req.contextLines = req_opts.contextLines;
+    req.maxMatches = req_opts.maxMatches;
+    req.includePatterns = req_opts.includePatterns;
+    req.recursive = req_opts.recursive;
+    req.wholeWord = req_opts.wholeWord;
+    req.showLineNumbers = req_opts.showLineNumbers;
+    req.showFilename = req_opts.showFilename;
+    req.noFilename = req_opts.noFilename;
+    req.countOnly = req_opts.countOnly;
+    req.filesOnly = req_opts.filesOnly;
+    req.filesWithoutMatch = req_opts.filesWithoutMatch;
+    req.pathsOnly = req_opts.pathsOnly;
+    req.literalText = req_opts.literalText;
+    req.regexOnly = req_opts.regexOnly;
+    req.semanticLimit = req_opts.semanticLimit;
+    req.filterTags = req_opts.filterTags;
+    req.matchAllTags = req_opts.matchAllTags;
+    req.colorMode = req_opts.colorMode;
+    req.beforeContext = req_opts.beforeContext;
+    req.afterContext = req_opts.afterContext;
+    req.showDiff = req_opts.showDiff;
+    req.useSession = req_opts.useSession;
+    req.sessionName = req_opts.sessionName;
+    return req;
+}
+
+static yams::daemon::ListRequest makeListRequest(const ListOptions& req_opts) {
+    yams::daemon::ListRequest req;
+    req.limit = req_opts.limit;
+    req.tags = req_opts.tags;
+    req.format = req_opts.format;
+    req.sortBy = req_opts.sortBy;
+    req.fileType = req_opts.fileType;
+    req.mimeType = req_opts.mimeType;
+    req.extensions = req_opts.extensions;
+    req.createdAfter = req_opts.createdAfter;
+    req.createdBefore = req_opts.createdBefore;
+    req.modifiedAfter = req_opts.modifiedAfter;
+    req.modifiedBefore = req_opts.modifiedBefore;
+    req.indexedAfter = req_opts.indexedAfter;
+    req.indexedBefore = req_opts.indexedBefore;
+    req.sinceTime = req_opts.sinceTime;
+    req.changeWindow = req_opts.changeWindow;
+    req.filterTags = req_opts.filterTags;
+    req.namePattern = req_opts.namePattern;
+    req.offset = req_opts.offset;
+    req.recentCount = req_opts.recentCount;
+    req.snippetLength = req_opts.snippetLength;
+    req.recent = req_opts.recent;
+    req.reverse = req_opts.reverse;
+    req.verbose = req_opts.verbose;
+    req.showSnippets = req_opts.showSnippets;
+    req.showMetadata = req_opts.showMetadata;
+    req.showTags = req_opts.showTags;
+    req.groupBySession = req_opts.groupBySession;
+    req.noSnippets = req_opts.noSnippets;
+    req.pathsOnly = req_opts.pathsOnly;
+    req.binaryOnly = req_opts.binaryOnly;
+    req.textOnly = req_opts.textOnly;
+    req.showChanges = req_opts.showChanges;
+    req.showDiffTags = req_opts.showDiffTags;
+    req.showDeleted = req_opts.showDeleted;
+    req.matchAllTags = req_opts.matchAllTags;
+    req.metadataFilters = req_opts.metadataFilters;
+    req.matchAllMetadata = req_opts.matchAllMetadata;
+    return req;
+}
+
+static yams::daemon::GetInitRequest makeGetInitRequest(const GetInitOptions& req_opts) {
+    yams::daemon::GetInitRequest req;
+    req.hash = req_opts.hash;
+    req.name = req_opts.name;
+    req.byName = req_opts.byName;
+    req.metadataOnly = req_opts.metadataOnly;
+    req.maxBytes = req_opts.maxBytes;
+    req.chunkSize = req_opts.chunkSize;
+    return req;
+}
+
+static yams::daemon::SearchRequest makeSearchRequest(const SearchOptions& req_opts) {
+    yams::daemon::SearchRequest req;
+    req.query = req_opts.query;
+    req.limit = req_opts.limit;
+    req.fuzzy = req_opts.fuzzy;
+    req.literalText = req_opts.literalText;
+    req.similarity = req_opts.similarity;
+    req.searchType = req_opts.searchType;
+    req.pathsOnly = req_opts.pathsOnly;
+    req.showHash = req_opts.showHash;
+    req.verbose = req_opts.verbose;
+    req.jsonOutput = req_opts.jsonOutput;
+    req.showLineNumbers = req_opts.showLineNumbers;
+    req.afterContext = req_opts.afterContext;
+    req.beforeContext = req_opts.beforeContext;
+    req.context = req_opts.context;
+    req.hashQuery = req_opts.hashQuery;
+    req.pathPattern = req_opts.pathPattern;
+    req.pathPatterns = req_opts.pathPatterns;
+    req.tags = req_opts.tags;
+    req.matchAllTags = req_opts.matchAllTags;
+    req.extension = req_opts.extension;
+    req.mimeType = req_opts.mimeType;
+    req.fileType = req_opts.fileType;
+    req.textOnly = req_opts.textOnly;
+    req.binaryOnly = req_opts.binaryOnly;
+    req.createdAfter = req_opts.createdAfter;
+    req.createdBefore = req_opts.createdBefore;
+    req.modifiedAfter = req_opts.modifiedAfter;
+    req.modifiedBefore = req_opts.modifiedBefore;
+    req.indexedAfter = req_opts.indexedAfter;
+    req.indexedBefore = req_opts.indexedBefore;
+    req.vectorStageTimeoutMs = req_opts.vectorStageTimeoutMs;
+    req.keywordStageTimeoutMs = req_opts.keywordStageTimeoutMs;
+    req.snippetHydrationTimeoutMs = req_opts.snippetHydrationTimeoutMs;
+    req.useSession = req_opts.useSession;
+    req.sessionName = req_opts.sessionName;
+    req.globalSearch = req_opts.globalSearch;
+    req.symbolRank = req_opts.symbolRank;
+    return req;
+}
+
+namespace testing {
+yams::daemon::ClientConfig makeClientConfigForTest(const RetrievalOptions& opts) {
+    return makeClientConfig(opts);
+}
+
+yams::daemon::GetRequest makeGetRequestForTest(const GetOptions& req,
+                                               const RetrievalOptions& opts) {
+    return makeGetRequest(req, opts);
+}
+
+yams::daemon::GrepRequest makeGrepRequestForTest(const GrepOptions& req) {
+    return makeGrepRequest(req);
+}
+
+yams::daemon::ListRequest makeListRequestForTest(const ListOptions& req) {
+    return makeListRequest(req);
+}
+
+yams::daemon::GetInitRequest makeGetInitRequestForTest(const GetInitOptions& req) {
+    return makeGetInitRequest(req);
+}
+
+yams::daemon::SearchRequest makeSearchRequestForTest(const SearchOptions& req) {
+    return makeSearchRequest(req);
+}
+} // namespace testing
+
+static boost::asio::any_io_executor selectExecutor(const RetrievalOptions& opts) {
+    if (opts.executor.has_value()) {
+        return *opts.executor;
+    }
+    return yams::daemon::GlobalIOContext::global_executor();
+}
+
+std::shared_ptr<yams::daemon::DaemonClient>
+RetrievalService::getOrCreateClient(const RetrievalOptions& opts) const {
+    if (client_)
+        return client_;
+    return std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+}
+
+Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_opts,
+                                                        const RetrievalOptions& opts) const {
+    auto req = makeGetRequest(req_opts, opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::GetResponse>> p;
@@ -133,34 +293,7 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     // - Directory hierarchy relationships
 
     // Normal daemon grep request
-    yams::daemon::GrepRequest req;
-    req.pattern = req_opts.pattern;
-    req.paths = req_opts.paths;
-    req.caseInsensitive = req_opts.caseInsensitive;
-    req.invertMatch = req_opts.invertMatch;
-    req.contextLines = req_opts.contextLines;
-    req.maxMatches = req_opts.maxMatches;
-    req.includePatterns = req_opts.includePatterns;
-    req.recursive = req_opts.recursive;
-    req.wholeWord = req_opts.wholeWord;
-    req.showLineNumbers = req_opts.showLineNumbers;
-    req.showFilename = req_opts.showFilename;
-    req.noFilename = req_opts.noFilename;
-    req.countOnly = req_opts.countOnly;
-    req.filesOnly = req_opts.filesOnly;
-    req.filesWithoutMatch = req_opts.filesWithoutMatch;
-    req.pathsOnly = req_opts.pathsOnly;
-    req.literalText = req_opts.literalText;
-    req.regexOnly = req_opts.regexOnly;
-    req.semanticLimit = req_opts.semanticLimit;
-    req.filterTags = req_opts.filterTags;
-    req.matchAllTags = req_opts.matchAllTags;
-    req.colorMode = req_opts.colorMode;
-    req.beforeContext = req_opts.beforeContext;
-    req.afterContext = req_opts.afterContext;
-    req.showDiff = req_opts.showDiff;
-    req.useSession = req_opts.useSession;
-    req.sessionName = req_opts.sessionName;
+    auto req = makeGrepRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::GrepResponse>> p;
@@ -206,44 +339,7 @@ RetrievalService::grep(const GrepOptions& req_opts, const RetrievalOptions& opts
 
 Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req_opts,
                                                           const RetrievalOptions& opts) const {
-    yams::daemon::ListRequest req;
-    req.limit = req_opts.limit;
-    req.tags = req_opts.tags;
-    req.format = req_opts.format;
-    req.sortBy = req_opts.sortBy;
-    req.fileType = req_opts.fileType;
-    req.mimeType = req_opts.mimeType;
-    req.extensions = req_opts.extensions;
-    req.createdAfter = req_opts.createdAfter;
-    req.createdBefore = req_opts.createdBefore;
-    req.modifiedAfter = req_opts.modifiedAfter;
-    req.modifiedBefore = req_opts.modifiedBefore;
-    req.indexedAfter = req_opts.indexedAfter;
-    req.indexedBefore = req_opts.indexedBefore;
-    req.sinceTime = req_opts.sinceTime;
-    req.changeWindow = req_opts.changeWindow;
-    req.filterTags = req_opts.filterTags;
-    req.namePattern = req_opts.namePattern;
-    req.offset = req_opts.offset;
-    req.recentCount = req_opts.recentCount;
-    req.snippetLength = req_opts.snippetLength;
-    req.recent = req_opts.recent;
-    req.reverse = req_opts.reverse;
-    req.verbose = req_opts.verbose;
-    req.showSnippets = req_opts.showSnippets;
-    req.showMetadata = req_opts.showMetadata;
-    req.showTags = req_opts.showTags;
-    req.groupBySession = req_opts.groupBySession;
-    req.noSnippets = req_opts.noSnippets;
-    req.pathsOnly = req_opts.pathsOnly;
-    req.binaryOnly = req_opts.binaryOnly;
-    req.textOnly = req_opts.textOnly;
-    req.showChanges = req_opts.showChanges;
-    req.showDiffTags = req_opts.showDiffTags;
-    req.showDeleted = req_opts.showDeleted;
-    req.matchAllTags = req_opts.matchAllTags;
-    req.metadataFilters = req_opts.metadataFilters;
-    req.matchAllMetadata = req_opts.matchAllMetadata;
+    auto req = makeListRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::ListResponse>> p2;
@@ -285,13 +381,7 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
 
 Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
                                            const RetrievalOptions& opts) const {
-    yams::daemon::GetInitRequest req;
-    req.hash = req_opts.hash;
-    req.name = req_opts.name;
-    req.byName = req_opts.byName;
-    req.metadataOnly = req_opts.metadataOnly;
-    req.maxBytes = req_opts.maxBytes;
-    req.chunkSize = req_opts.chunkSize;
+    auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<void>> p2;
@@ -321,13 +411,7 @@ Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
 Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
                                          const std::filesystem::path& outputPath,
                                          const RetrievalOptions& opts) const {
-    yams::daemon::GetInitRequest req;
-    req.hash = req_opts.hash;
-    req.name = req_opts.name;
-    req.byName = req_opts.byName;
-    req.metadataOnly = req_opts.metadataOnly;
-    req.maxBytes = req_opts.maxBytes;
-    req.chunkSize = req_opts.chunkSize;
+    auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<void>> p2;
@@ -357,13 +441,7 @@ Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
 Result<RetrievalService::ChunkedGetResult>
 RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t capBytes,
                                    const RetrievalOptions& opts) const {
-    yams::daemon::GetInitRequest req;
-    req.hash = req_opts.hash;
-    req.name = req_opts.name;
-    req.byName = req_opts.byName;
-    req.metadataOnly = req_opts.metadataOnly;
-    req.maxBytes = req_opts.maxBytes;
-    req.chunkSize = req_opts.chunkSize;
+    auto req = makeGetInitRequest(req_opts);
 
     // Prefer native chunked protocol; fallback to unary Get on error/timeout
     {
@@ -897,44 +975,7 @@ bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
 
 Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOptions& req_opts,
                                                               const RetrievalOptions& opts) const {
-    yams::daemon::SearchRequest req;
-    req.query = req_opts.query;
-    req.limit = req_opts.limit;
-    req.fuzzy = req_opts.fuzzy;
-    req.literalText = req_opts.literalText;
-    req.similarity = req_opts.similarity;
-    req.searchType = req_opts.searchType;
-    req.pathsOnly = req_opts.pathsOnly;
-    req.showHash = req_opts.showHash;
-    req.verbose = req_opts.verbose;
-    req.jsonOutput = req_opts.jsonOutput;
-    req.showLineNumbers = req_opts.showLineNumbers;
-    req.afterContext = req_opts.afterContext;
-    req.beforeContext = req_opts.beforeContext;
-    req.context = req_opts.context;
-    req.hashQuery = req_opts.hashQuery;
-    req.pathPattern = req_opts.pathPattern;
-    req.pathPatterns = req_opts.pathPatterns;
-    req.tags = req_opts.tags;
-    req.matchAllTags = req_opts.matchAllTags;
-    req.extension = req_opts.extension;
-    req.mimeType = req_opts.mimeType;
-    req.fileType = req_opts.fileType;
-    req.textOnly = req_opts.textOnly;
-    req.binaryOnly = req_opts.binaryOnly;
-    req.createdAfter = req_opts.createdAfter;
-    req.createdBefore = req_opts.createdBefore;
-    req.modifiedAfter = req_opts.modifiedAfter;
-    req.modifiedBefore = req_opts.modifiedBefore;
-    req.indexedAfter = req_opts.indexedAfter;
-    req.indexedBefore = req_opts.indexedBefore;
-    req.vectorStageTimeoutMs = req_opts.vectorStageTimeoutMs;
-    req.keywordStageTimeoutMs = req_opts.keywordStageTimeoutMs;
-    req.snippetHydrationTimeoutMs = req_opts.snippetHydrationTimeoutMs;
-    req.useSession = req_opts.useSession;
-    req.sessionName = req_opts.sessionName;
-    req.globalSearch = req_opts.globalSearch;
-    req.symbolRank = req_opts.symbolRank;
+    auto req = makeSearchRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::SearchResponse>> p;

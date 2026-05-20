@@ -174,9 +174,9 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
   '-Wno-error=missing-field-initializers',
 ])
 
-## Meson-native test discovery via structured subdirs (no shell globs)
-#Build legacy GTest unit tests only when GTest is available.
-# Unit test object library (Catch2-only; may be empty after PBI-068 migration).
+# Meson-native test registration via structured subdirs (no shell globs).
+# Unit tests are now individual Catch2 executables; tests/unit keeps only a
+# compatibility stub for older yams_unit_objs references.
 subdir('unit')
 
 if get_option('build-plugins') and catch2_dep.found()
@@ -197,45 +197,6 @@ stress_srcs = files(
   'stress/storage/concurrent_catch2_test.cpp',
   'stress/mcp_socket_stress_catch2_test.cpp',
 )
-
-common_srcs = []  # currently no .cpp files under tests/common
-sdk_srcs = []     # currently no .cpp files under tests/sdk
-
-#NOTE(PBI 028) : Temporarily disable plugin tests to avoid duplicate plugin
-#symbol definitions in a single aggregated integration binary.
-plugin_test_srcs = []
-
-all_unit = []  # unit sources now provided by 'yams_unit_objs' from tests/unit/meson.build
-all_stress = stress_srcs
-
-#Always rely on tests / unit_main.cpp; do not include tests / test_main.cpp here
-test_main = []
-
-heavy_tests = [
-  'ResourcePoolTest.MaxSizeEnforcement',
-  'StreamingProcessorTest.*',
-  'ZstandardCompressorTest.DecompressionPerformance',
-  'DatabaseTest.Migrations',
-  'ResultRankerTest.RankingResults',
-  'CompressedStorageStatsTest.*',
-  'IntegrityVerifierTest.*',
-  'DaemonTest.*',
-  'StreamingChunkerTest.*',
-  'ChunkValidatorParallel.*',
-  'DownloadManagerExport.*',
-  'StorageBackendTest.*',
-#Temporary skips to stabilize shards(Option A) : vector DB / WAL heavy
-  'VectorDatabaseTest.*',
-  'VectorDatabasePersistenceTest.*',
-  'OnnxRuntimeTest.*',
-  'EmbeddingGeneratorTest.*',
-  'ModelManagementTest.*',
-  'WALDualReadTest.*',
-  'WALManagerComprehensiveTest.*',
-  'WALManagerTest.*',
-]
-
-unit_exclude = '*-' + ':'.join(heavy_tests)
 
 #Prefer Conan CMake config before falling back to system discovery
 onnx_dep = onnxruntime_resolved_dep
@@ -273,12 +234,8 @@ endforeach
 #Prepare LD_LIBRARY_PATH for test environment(needed for transitive TBB dependencies)
 _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 
-# Unit/bench timeouts are still referenced by standalone Catch2 benchmark
-# targets below. The legacy GTest aggregate runner (yams_unit_tests) and its
-# --gtest_filter shards were removed in PBI-068 once all unit tests moved to
-# individual Catch2 executables.
-  unit_timeout = get_option('unit-timeout')
-  bench_timeout = get_option('bench-timeout')
+# Bench timeout is referenced by standalone Catch2 benchmark targets below.
+bench_timeout = get_option('bench-timeout')
 
 
 
@@ -318,12 +275,9 @@ if get_option('build-benchmarks')
   endif
 endif
 
-#Acceptance tests(E2E validation)
-subdir('acceptance')
-
 #Stress tests can be heavy; register but mark as long - running via suite name
-if catch2_dep.found() and get_option('enable-stress-tests') and all_stress.length() > 0
-  stress_exe = executable('yams_stress_tests', all_stress,
+if catch2_dep.found() and get_option('enable-stress-tests') and stress_srcs.length() > 0
+  stress_exe = executable('yams_stress_tests', stress_srcs,
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep, test_deps],
     cpp_args: ['-DYAMS_TESTING=1'],
@@ -1420,6 +1374,8 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
+      'unit/api/raw_text_storage_catch2_test.cpp',
+      'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2065,7 +2021,10 @@ if catch2_dep.found()
   )
 
   service_utilities_exe = executable('service_utilities',
-    files('unit/app/services/service_utilities_test.cpp'),
+    files(
+      'unit/app/services/service_utilities_test.cpp',
+      'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

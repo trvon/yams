@@ -11,11 +11,16 @@ extern "C" {
 }
 
 static yams_onnx_request_v1* load_req_iface(void** handle) {
-#ifdef __APPLE__
-    const char* so = "builddir/plugins/onnx/libyams_onnx_plugin.dylib";
+#ifndef ONNX_PLUGIN_PATH
+#ifdef _WIN32
+#define ONNX_PLUGIN_PATH "builddir/plugins/onnx/yams_onnx_plugin.dll"
+#elif defined(__APPLE__)
+#define ONNX_PLUGIN_PATH "builddir/plugins/onnx/libyams_onnx_plugin.dylib"
 #else
-    const char* so = "builddir/plugins/onnx/libyams_onnx_plugin.so";
+#define ONNX_PLUGIN_PATH "builddir/plugins/onnx/libyams_onnx_plugin.so"
 #endif
+#endif
+    const char* so = ONNX_PLUGIN_PATH;
     *handle = dlopen(so, RTLD_LAZY | RTLD_LOCAL);
     if (!*handle)
         return nullptr;

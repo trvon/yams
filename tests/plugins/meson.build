@@ -1,40 +1,39 @@
-# Dedicated plugin test shard to avoid symbol conflicts.
-# These tests require the tree-sitter symbol extractor plugin binary to exist.
+plugin_build_dir = meson.project_build_root()
+if host_machine.system() == 'windows'
+  plugin_ext = '.dll'
+elif host_machine.system() == 'darwin'
+  plugin_ext = '.dylib'
+else
+  plugin_ext = '.so'
+endif
+
+plugin_test_ld_library_path = ':'.join([
+  join_paths(plugin_build_dir, 'src/daemon/resource'),
+  plugin_build_dir,
+  '/opt/yams/usr/local/lib',
+])
+
+# Dedicated symbol plugin shard to avoid ABI symbol conflicts.
 if get_option('plugin-symbols')
-  plugin_tests = files(
+  symbol_plugin_tests = files(
     'symbol_extractor_all_langs_catch2_test.cpp',
     'symbol_extractor_edge_cases_catch2_test.cpp',
     'symbol_extractor_solidity_catch2_test.cpp',
-    'onnx_request_plugin_catch2_test.cpp',
-    'onnx_provider_plugin_catch2_test.cpp',
   )
 
-  # Define plugin path based on build directory and platform
-  plugin_build_dir = meson.project_build_root()
-  if host_machine.system() == 'windows'
-    plugin_ext = '.dll'
-  elif host_machine.system() == 'darwin'
-    plugin_ext = '.dylib'
-  else
-    plugin_ext = '.so'
-  endif
-  plugin_test_ld_library_path = ':'.join([
-    join_paths(plugin_build_dir, 'src/daemon/resource'),
-    plugin_build_dir,
-    '/opt/yams/usr/local/lib',
-  ])
   plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
 
   plugin_runtime_deps = get_variable('symbol_extractor_plugin_target', [])
 
-  plugin_exe = executable('yams_plugin_tests', plugin_tests,
+  symbol_plugin_exe = executable('yams_symbol_plugin_tests', symbol_plugin_tests,
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: ['-DPLUGIN_PATH="' + plugin_path + '"'],
     install: false,
   )
 
-  test('plugins', plugin_exe,
+  test('symbol_plugins', symbol_plugin_exe,
+    suite: ['plugins', 'symbols', 'catch2'],
     env: {
       'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1',
       'YAMS_SKIP_MODEL_LOADING': '1',
@@ -42,6 +41,48 @@ if get_option('plugin-symbols')
     },
     depends: plugin_runtime_deps,
   )
+endif
+
+# ONNX plugin ABI tests are registered separately from symbol plugin tests so
+# plugin-symbols=false does not hide ONNX coverage when ONNX is available.
+onnx_plugin_runtime_deps = get_variable('yams_onnx_plugin_target', [])
+if get_option('plugin-onnx') and onnx_plugin_runtime_deps.length() > 0
+  if host_machine.system() == 'windows'
+    onnx_plugin_filename = 'yams_onnx_plugin' + plugin_ext
+  else
+    onnx_plugin_filename = 'libyams_onnx_plugin' + plugin_ext
+  endif
+  onnx_plugin_path = join_paths(plugin_build_dir, 'plugins/onnx', onnx_plugin_filename)
+  onnx_plugin_exe = executable('yams_onnx_plugin_tests',
+    files(
+      'onnx_request_plugin_catch2_test.cpp',
+      'onnx_provider_plugin_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: ['-DONNX_PLUGIN_PATH="' + onnx_plugin_path + '"'],
+    install: false,
+  )
+
+  foreach onnx_case : [
+    ['onnx_request_no_inputs', 'OnnxRequestPluginTest.NoInputsError'],
+    ['onnx_request_mock_batch_shape', 'OnnxRequestPluginTest.EmbeddingMockBatchShape'],
+    ['onnx_provider_runtime_info', 'OnnxProviderPluginTest.RuntimeInfoIncludesHints'],
+    ['onnx_provider_missing_runtime', 'OnnxProviderPluginTest.MissingRuntimeReportedViaHealth'],
+    ['onnx_provider_config_preload', 'OnnxProviderPluginTest.ConfigPreloadParsingAndReady'],
+    ['onnx_provider_batch_errors', 'OnnxProviderPluginTest.GenerateEmbeddingBatchErrors'],
+  ]
+    test(onnx_case[0], onnx_plugin_exe,
+      suite: ['plugins', 'onnx', 'catch2'],
+      args: [onnx_case[1], '--allow-running-no-tests'],
+      env: {
+        'YAMS_SKIP_MODEL_LOADING': '1',
+        'LD_LIBRARY_PATH': plugin_test_ld_library_path,
+      },
+      depends: onnx_plugin_runtime_deps,
+      timeout: 120,
+    )
+  endforeach
 endif
 
 # S3 object storage plugin smoke test (networked; skips when env is unset)
@@ -55,6 +96,7 @@ if get_option('build-plugins') and get_option('plugin-s3')
   )
 
   test('s3_plugin_smoke', s3_smoke_exe,
+    suite: ['plugins', 's3', 'smoke'],
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'YAMS_PLUGIN_DIR': s3_plugin_dir,
@@ -78,6 +120,7 @@ if get_option('plugin-zyp')
   )
 
   test('zyp_plugin', zyp_test_exe,
+    suite: ['plugins', 'zyp', 'catch2'],
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,
@@ -99,6 +142,7 @@ if get_option('plugin-glint')
   )
 
   test('glint_plugin', glint_test_exe,
+    suite: ['plugins', 'glint', 'catch2'],
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,

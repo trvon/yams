@@ -80,7 +80,6 @@ jobs:
 
       - name: Run clang-tidy on changed files (PR only)
         if: github.event_name == 'pull_request'
-        continue-on-error: true  # Non-blocking until .clang-tidy baseline is proven on full codebase
         shell: bash
         run: |
           CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
@@ -95,7 +94,7 @@ jobs:
           clang-tidy \
             --warnings-as-errors='bugprone-*,clang-analyzer-*,concurrency-*' \
             $CHANGED \
-            2>&1 | tee clang-tidy-pr.txt || true
+            2>&1 | tee clang-tidy-pr.txt
 
       - name: Upload clang-tidy results
         if: github.event_name == 'pull_request' && always()
@@ -578,7 +577,7 @@ jobs:
       #     fi
       #     scripts/ci/check_mobile_abi.sh "$LIB_PATH"
 
-      
+
 
       - name: Run Tests with Meson (Unix)
         id: meson_tests_unix
