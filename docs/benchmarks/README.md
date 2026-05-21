@@ -2,26 +2,27 @@
 
 This section is the public benchmark index for YAMS.
 
-Each page should answer three things:
+Each page answers three things:
 
 - what workload or dataset was measured,
 - what the latest published results are,
-- how to run the benchmark locally.
+- what the historical comparison or regression signal is.
 
 ## Benchmark Docs
 
-- [Performance Report](performance_report.md) - canonical ingestion, metadata, IPC, tree-builder, and write-coordinator baseline tables plus run commands.
-- [Tree & Coordinator Benchmarks](performance_report.md#tree--coordinator-benchmarks) - tree builder throughput and WriteCoordinator ingest profile.
-- [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics, retrieval-quality baselines, and the benchmark command.
+- [Performance Report](performance_report.md) - canonical local benchmark summary and historical comparisons.
+- [Tree Builder](performance_report.md#tree-builder) - tree construction throughput.
+- [WriteCoordinator](performance_report.md#writecoordinator) - ingest apply profile.
+- [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics and retrieval-quality baselines.
 - [Storage Backends Benchmark](storage_backends.md) - local vs R2 CLI CRUD and multi-client benchmark results.
-- [Multi-Client Optimization Loop](multi_client_optimization_loop.md) - throughput/stability runbook plus summary and regression commands.
+- [Multi-Client Optimization Loop](multi_client_optimization_loop.md) - throughput/stability summary and regression interpretation.
 - [Retrieval Precision Optimization](retrieval_precision_optimization.md) - ranking-quality tuning loop and summary workflow.
 
 ## Scope
 
-- Public benchmark docs focus on benchmark data, workload context, and reproducible commands.
-- Internal harness plumbing and generated artifacts are intentionally omitted from public docs.
+- Public benchmark docs focus on benchmark data, workload context, and historical comparisons.
+- Internal harness plumbing and generated outputs are intentionally omitted from public docs.
 - `tested` means the path is validated in this repository.
 - `supported` means the path exists but is not currently part of automated validation here.
 
-When in doubt, treat tested paths as the default reference point.
+Use tested paths as the default reference point.

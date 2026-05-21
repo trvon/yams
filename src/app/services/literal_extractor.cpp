@@ -149,14 +149,13 @@ size_t BMHSearcher::findFast(std::string_view text, size_t startPos) const {
         return std::string::npos;
     }
 
-    // Delegate to SIMD-accelerated memmem (handles scalar fallback internally).
-    size_t result;
     if (ignoreCase_) {
-        result = simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
-    } else {
-        result = simdMemmem(text.data() + startPos, n - startPos, pattern_.data(), m);
+        const size_t result =
+            simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
+        return (result == kMemmemNpos) ? std::string::npos : startPos + result;
     }
-    return (result == kMemmemNpos) ? std::string::npos : startPos + result;
+
+    return text.find(pattern_, startPos);
 }
 
 size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {
@@ -167,15 +166,13 @@ size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {
         return std::string::npos;
     }
 
-    // Delegate to SIMD-accelerated memmem — the two-byte Lemire technique is
-    // faster than scalar BMH for all practical pattern lengths.
-    size_t result;
     if (ignoreCase_) {
-        result = simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
-    } else {
-        result = simdMemmem(text.data() + startPos, n - startPos, pattern_.data(), m);
+        const size_t result =
+            simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
+        return (result == kMemmemNpos) ? std::string::npos : startPos + result;
     }
-    return (result == kMemmemNpos) ? std::string::npos : startPos + result;
+
+    return text.find(pattern_, startPos);
 }
 
 std::vector<size_t> BMHSearcher::findAll(std::string_view text) const {

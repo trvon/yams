@@ -14,7 +14,7 @@ Use one or more JSONL candidate runs from the same fixed corpus/query slice as b
 
 ## Build a Baseline Summary
 
-Generate a normalized summary artifact from one or more runs:
+Generate a normalized summary from one or more runs:
 
 ```bash
 python3 tests/scripts/summarize_retrieval_opt_jsonl.py \
@@ -101,20 +101,7 @@ YAMS_SEARCH_RRF_K=10 \
   --benchmark_out=run_simeon.jsonl --benchmark_out_format=json
 ```
 
-Matrix both backends in one invocation via the topology harness:
-
-```bash
-tests/scripts/run_topology_retrieval_matrix.sh \
-  --output-dir .artifacts/precision_loop \
-  --scale standard \
-  --embedding-backends daemon,simeon
-```
-
-Each backend’s results land under
-`.artifacts/precision_loop/<backend>/`. Every emitted row carries an
-`embedding_backend` field so downstream summarizers can group without
+Use the topology retrieval matrix helper when promoting a candidate.
+Keep generated rows outside the docs and publish only stable summary tables here.
+Every emitted row carries an `embedding_backend` field so downstream summarizers can group without
 rescanning environment state.
-
-Use the generated rows under `.artifacts/precision_loop/<backend>/` for
-backend-specific comparisons. Public benchmark summaries live in this
-directory as stable snapshots are promoted.
