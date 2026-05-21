@@ -129,9 +129,13 @@ struct SearchFilters {
 
     bool hasFilters() const {
         return !content_types.empty() || !languages.empty() || !categories.empty() ||
-               !tags.empty() || created_after.has_value() || created_before.has_value() ||
-               min_file_size.has_value() || max_file_size.has_value() || !custom_filters.empty() ||
-               custom_predicate != nullptr;
+               !tags.empty() || !authors.empty() || !sources.empty() || created_after.has_value() ||
+               created_before.has_value() || updated_after.has_value() ||
+               updated_before.has_value() || min_file_size.has_value() ||
+               max_file_size.has_value() || min_word_count.has_value() ||
+               max_word_count.has_value() || min_quality_score.has_value() ||
+               min_popularity_score.has_value() || !user_id.empty() || !user_groups.empty() ||
+               !custom_filters.empty() || custom_predicate != nullptr;
     }
 };
 
@@ -307,7 +311,8 @@ struct SearchRequest {
     std::string user_agent;
 
     bool isValid() const {
-        return !query.empty() && results_per_page > 0 && results_per_page <= 100 && page > 0;
+        return query.find_first_not_of(" \t\n\r") != std::string::npos && results_per_page > 0 &&
+               results_per_page <= 100 && page > 0;
     }
 };
 

@@ -1,14 +1,13 @@
 #include <yams/search/relevance_label_store.h>
 
+#include <yams/compat/unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 
 using yams::search::LabeledQuery;
 using yams::search::RelevanceLabel;

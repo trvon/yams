@@ -790,8 +790,14 @@ public:
                                                   std::vector<metadata::GrepCandidateProjection>>>>
                     futures;
 
-                const size_t chunkSize =
-                    std::max<size_t>(10, docs.size() / std::thread::hardware_concurrency());
+                auto concurrency = std::thread::hardware_concurrency();
+                if (concurrency == 0) {
+                    concurrency = 1;
+                }
+                size_t chunkSize = docs.size() / static_cast<size_t>(concurrency);
+                if (chunkSize < 10) {
+                    chunkSize = 10;
+                }
                 futures.reserve((docs.size() + chunkSize - 1) / chunkSize);
 
                 for (size_t i = 0; i < docs.size(); i += chunkSize) {

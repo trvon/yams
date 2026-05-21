@@ -1,5 +1,7 @@
 #include <yams/search/benchmark_history_store.h>
 
+#include <yams/compat/unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdio>

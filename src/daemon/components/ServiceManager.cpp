@@ -1094,6 +1094,10 @@ void ServiceManager::shutdown() {
             &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
         if (postIngestHold) {
             try {
+                if (pluginManager_) {
+                    pluginManager_->setPostIngestQueue(nullptr);
+                }
+                postIngestHold->stop();
                 postIngestHold.reset();
                 spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
             } catch (const std::exception& e) {
@@ -1251,6 +1255,10 @@ void ServiceManager::shutdown() {
         auto postIngestHold = std::atomic_exchange_explicit(
             &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
         if (postIngestHold) {
+            if (pluginManager_) {
+                pluginManager_->setPostIngestQueue(nullptr);
+            }
+            postIngestHold->stop();
             postIngestHold.reset();
             spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
         } else {

@@ -43,6 +43,7 @@ public:
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return Offset of first '\n', or size if not found
+     * Null data with nonzero size is treated as no match.
      */
     static size_t findNewline(const char* data, size_t size);
 
@@ -52,6 +53,7 @@ public:
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return true if buffer contains '\n', false otherwise
+     * Null data with nonzero size is treated as no match.
      */
     static bool containsNewline(const char* data, size_t size);
 
@@ -61,6 +63,7 @@ public:
      * @param data Pointer to buffer to search
      * @param size Size of buffer in bytes
      * @return Number of '\n' characters found
+     * Null data with nonzero size returns 0.
      */
     static size_t countNewlines(const char* data, size_t size);
 

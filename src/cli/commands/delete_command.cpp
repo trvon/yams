@@ -293,6 +293,9 @@ private:
 
         // Collect all hashes to delete based on input method
         std::vector<std::pair<std::string, std::string>> toDelete; // pairs of (hash, name)
+        auto allowMissingDryRun = [this](const Error& error) {
+            return dryRun_ && error.code == ErrorCode::NotFound;
+        };
 
         if (!hash_.empty()) {
             // Direct hash deletion (existing functionality)
@@ -306,23 +309,32 @@ private:
             // Delete by single name
             auto result = resolveNameToHashes(name_);
             if (!result) {
-                return result.error();
+                if (!allowMissingDryRun(result.error())) {
+                    return result.error();
+                }
+            } else {
+                toDelete = result.value();
             }
-            toDelete = result.value();
         } else if (!names_.empty()) {
             // Delete by multiple names
             auto result = resolveNamesToHashes(names_);
             if (!result) {
-                return result.error();
+                if (!allowMissingDryRun(result.error())) {
+                    return result.error();
+                }
+            } else {
+                toDelete = result.value();
             }
-            toDelete = result.value();
         } else if (!pattern_.empty()) {
             // Delete by pattern
             auto result = resolvePatternToHashes(pattern_);
             if (!result) {
-                return result.error();
+                if (!allowMissingDryRun(result.error())) {
+                    return result.error();
+                }
+            } else {
+                toDelete = result.value();
             }
-            toDelete = result.value();
         } else if (!directory_.empty()) {
             // Delete by directory
             if (!recursive_) {
@@ -331,9 +343,12 @@ private:
             }
             auto result = resolveDirectoryToHashes(directory_);
             if (!result) {
-                return result.error();
+                if (!allowMissingDryRun(result.error())) {
+                    return result.error();
+                }
+            } else {
+                toDelete = result.value();
             }
-            toDelete = result.value();
         } else {
             return Error{ErrorCode::InvalidArgument, "No deletion criteria specified"};
         }

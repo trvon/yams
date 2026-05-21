@@ -17,6 +17,8 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/compat/unistd.h>
+
 #if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
 #include <onnxruntime_c_api.h>
 #define YAMS_ORT_API_VERSION ORT_API_VERSION

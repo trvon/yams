@@ -13,6 +13,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <cstdlib>
 #include <windows.h>
 
 static int setenv(const char* name, const char* value, int overwrite) {
@@ -27,7 +28,7 @@ static int setenv(const char* name, const char* value, int overwrite) {
         }
     }
 
-    return SetEnvironmentVariableA(name, value) ? 0 : -1;
+    return _putenv_s(name, value);
 }
 
 static int unsetenv(const char* name) {
@@ -35,7 +36,7 @@ static int unsetenv(const char* name) {
         return -1;
     }
 
-    return SetEnvironmentVariableA(name, nullptr) ? 0 : -1;
+    return _putenv_s(name, "");
 }
 #endif
 

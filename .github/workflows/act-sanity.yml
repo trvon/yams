@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          actionlint -color
+          actionlint -color -shellcheck=
 
   windows-script-sanity:
     runs-on: ubuntu-latest

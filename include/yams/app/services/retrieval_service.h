@@ -254,4 +254,15 @@ private:
     bool isFTS5Ready(const RetrievalOptions& opts) const;
 };
 
+#ifdef YAMS_TESTING
+namespace testing {
+yams::daemon::ClientConfig makeClientConfigForTest(const RetrievalOptions& opts);
+yams::daemon::GetRequest makeGetRequestForTest(const GetOptions& req, const RetrievalOptions& opts);
+yams::daemon::GrepRequest makeGrepRequestForTest(const GrepOptions& req);
+yams::daemon::ListRequest makeListRequestForTest(const ListOptions& req);
+yams::daemon::GetInitRequest makeGetInitRequestForTest(const GetInitOptions& req);
+yams::daemon::SearchRequest makeSearchRequestForTest(const SearchOptions& req);
+} // namespace testing
+#endif
+
 } // namespace yams::app::services

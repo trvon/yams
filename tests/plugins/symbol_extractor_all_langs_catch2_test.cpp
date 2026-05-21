@@ -68,11 +68,11 @@ std::optional<PluginAPI> load_extractor(const char* so_path) {
     return p.api ? std::optional<PluginAPI>(std::move(p)) : std::nullopt;
 }
 
-void assert_has_kind(yams_symbol_extraction_result_v1* out, const char* kind,
+void assert_has_kind(const yams_symbol_extraction_result_v1& out, const char* kind,
                      size_t min_count = 1) {
     size_t n = 0;
-    for (size_t i = 0; i < out->symbol_count; ++i) {
-        if (out->symbols[i].kind && std::strcmp(out->symbols[i].kind, kind) == 0)
+    for (size_t i = 0; i < out.symbol_count; ++i) {
+        if (out.symbols[i].kind && std::strcmp(out.symbols[i].kind, kind) == 0)
             ++n;
     }
     CHECK(n >= min_count);
@@ -186,9 +186,15 @@ TEST_CASE("SymbolExtractorPlugins.RustAndGoAndJS", "[plugin][symbolextractorplug
         fprintf(stderr, "  extract_symbols returned: rc=%d, out=%p\n", rc, (void*)out);
         // Allow environments without grammars to skip gracefully
         PLUGIN_MISSING_SKIP(rc, out, "symbol grammar not available");
-        REQUIRE(rc == 0);
-        REQUIRE(out != nullptr);
-        assert_has_kind(out, c.want_kind, 1);
+        if (rc != 0) {
+            FAIL("extract_symbols failed");
+            continue;
+        }
+        if (out == nullptr) {
+            FAIL("extract_symbols returned null result");
+            continue;
+        }
+        assert_has_kind(*out, c.want_kind, 1);
         api->free_result(api->self, out);
     }
 }
@@ -217,8 +223,14 @@ TEST_CASE("SymbolExtractorPlugins.ExtractMultipleSymbols", "[plugin][symbolextra
                                   "cpp", &out);
 
     PLUGIN_MISSING_SKIP(rc, out, "C++ grammar not available");
-    REQUIRE(rc == 0);
-    REQUIRE(out != nullptr);
+    if (rc != 0) {
+        FAIL("extract_symbols failed");
+        return;
+    }
+    if (out == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
 
     // Should have at least the class and some methods/functions
     INFO("Expected at least 1 symbol");
@@ -261,8 +273,14 @@ class DataProcessor:
                                   "python", &out);
 
     PLUGIN_MISSING_SKIP(rc, out, "Python grammar not available");
-    REQUIRE(rc == 0);
-    REQUIRE(out != nullptr);
+    if (rc != 0) {
+        FAIL("extract_symbols failed");
+        return;
+    }
+    if (out == nullptr) {
+        FAIL("extract_symbols returned null result");
+        return;
+    }
     INFO("No symbols extracted");
     REQUIRE(out->symbol_count > 0u);
 
@@ -310,15 +328,19 @@ TEST_CASE("SymbolExtractorPlugins.ErrorHandling", "[plugin][symbolextractorplugi
 
     // Should either succeed with 0 symbols or return error
     if (rc == 0) {
-        REQUIRE(out != nullptr);
+        if (out == nullptr) {
+            FAIL("extract_symbols returned success with null result");
+            return;
+        }
         // Parser might recover and extract nothing - that's ok
         api->free_result(api->self, out);
     } else {
         // Error is acceptable for invalid syntax
         CHECK(rc != 0);
-        if (out) {
+        if (out != nullptr) {
+            const char* error = out->error;
             INFO("Error code but no error message");
-            CHECK(out->error != nullptr);
+            CHECK(error != nullptr);
             api->free_result(api->self, out);
         }
     }

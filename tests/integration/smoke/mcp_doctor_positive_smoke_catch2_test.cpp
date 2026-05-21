@@ -10,13 +10,14 @@
 #include <thread>
 #include <vector>
 
+#include <yams/app/services/session_service.hpp>
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
-#include <yams/app/services/session_service.hpp>
 #include <yams/mcp/mcp_server.h>
 
 #include "../../common/daemon_preflight.h"
@@ -398,6 +399,16 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon",
             sawExists = true;
         if (text.find("connectable=true") != std::string::npos)
             sawConn = true;
+        auto parsed = json::parse(text, nullptr, false);
+        if (parsed.is_object()) {
+            const auto& details = parsed.contains("details") ? parsed["details"] : parsed;
+            if (details.is_object()) {
+                sawReady = sawReady || details.value("overallStatus", std::string{}) == "ready";
+                sawSocket = sawSocket || details.contains("socketPath");
+                sawExists = sawExists || details.value("socketExists", false);
+                sawConn = sawConn || details.value("connectable", false);
+            }
+        }
     }
     CHECK(sawReady);
     CHECK(sawSocket);

@@ -415,8 +415,11 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine verify detects content has
     {
         std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
         REQUIRE(static_cast<bool>(file));
+        char first = 0;
+        file.read(&first, 1);
+        REQUIRE(static_cast<bool>(file));
         file.seekp(0);
-        const char corrupt = static_cast<char>(0xff);
+        const char corrupt = static_cast<char>(first ^ 0xff);
         file.write(&corrupt, 1);
         REQUIRE(static_cast<bool>(file));
     }
@@ -572,8 +575,12 @@ TEST_CASE_METHOD(StorageEngineFixture,
     {
         std::fstream file(objectPath, std::ios::binary | std::ios::in | std::ios::out);
         REQUIRE(static_cast<bool>(file));
+        file.seekg(10);
+        char original = 0;
+        file.read(&original, 1);
+        REQUIRE(static_cast<bool>(file));
         file.seekp(10);
-        const char corrupt = static_cast<char>(0xfe);
+        const char corrupt = static_cast<char>(original ^ 0xff);
         file.write(&corrupt, 1);
         REQUIRE(static_cast<bool>(file));
     }

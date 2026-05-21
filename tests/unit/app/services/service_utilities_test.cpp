@@ -5,6 +5,7 @@
 #include <string>
 #include "../../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
+#include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/services.hpp>
@@ -232,4 +233,15 @@ TEST_CASE("DownloadService - Factory Construction", "[download][service][factory
 
         CHECK(svc != nullptr);
     }
+}
+
+TEST_CASE("Service factory handles incomplete context", "[service][factory]") {
+    AppContext ctx;
+
+    auto bundle = makeServices(ctx);
+
+    CHECK(bundle.restore == nullptr);
+    CHECK(bundle.graph == nullptr);
+    CHECK_FALSE(bundle.valid());
+    CHECK(makeGraphQueryService(ctx) == nullptr);
 }

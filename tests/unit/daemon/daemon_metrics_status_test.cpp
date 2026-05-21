@@ -857,7 +857,13 @@ for line in sys.stdin:
   "version": "1.0.0",
   "interfaces": ["content_extractor_v1"],
   "entry": {
-    "fallback_cmd": ["/usr/bin/env", "python3", "-u", "${plugin_dir}/plugin.py"],
+    "fallback_cmd": )JSON";
+#ifdef _WIN32
+        manifestFile << R"JSON(["python", "-u", "${plugin_dir}/plugin.py"])JSON";
+#else
+        manifestFile << R"JSON(["/usr/bin/env", "python3", "-u", "${plugin_dir}/plugin.py"])JSON";
+#endif
+        manifestFile << R"JSON(,
     "env": {
       "PYTHONUNBUFFERED": "1"
     }
@@ -1671,6 +1677,10 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
         svc.__test_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+        struct ShutdownBeforeEnvRestore {
+            ServiceManager& svc;
+            ~ShutdownBeforeEnvRestore() { svc.shutdown(); }
+        } shutdownBeforeEnvRestore{svc};
 
         LoadModelRequest req;
         req.modelName = "timeout-clamped-model";
@@ -1686,6 +1696,10 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
         svc.__test_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+        struct ShutdownBeforeEnvRestore {
+            ServiceManager& svc;
+            ~ShutdownBeforeEnvRestore() { svc.shutdown(); }
+        } shutdownBeforeEnvRestore{svc};
 
         LoadModelRequest req;
         req.modelName = "timeout-invalid-model";
@@ -5621,6 +5635,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
     }
 
     SECTION("plugin load recognizes manifest-adjacent executable files") {
+#ifdef _WIN32
+        SKIP("manifest-adjacent executable file semantics are POSIX-specific");
+#else
         auto [state, lifecycleFsm, svc] = makeReadyService();
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
@@ -5654,6 +5671,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
         REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+#endif
     }
 
     SECTION("plugin load falls back after untrusted external file fails") {
@@ -6026,7 +6044,8 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         REQUIRE(written.files.size() == 1);
         CHECK(written.filesRestored == 1);
         const auto writtenPath = writeOut / "deep" / (seeded.hash + ".txt");
-        CHECK(written.files.front().path == writtenPath.string());
+        CHECK(std::filesystem::path(written.files.front().path).lexically_normal() ==
+              writtenPath.lexically_normal());
         REQUIRE(std::filesystem::exists(writtenPath));
         std::ifstream writtenFile(writtenPath, std::ios::binary);
         REQUIRE(writtenFile.good());
@@ -6172,7 +6191,8 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         REQUIRE(written.files.size() == 1);
         CHECK(written.filesRestored == 1);
         const auto writtenPath = writeOut / "deep" / "alpha.txt";
-        CHECK(written.files.front().path == writtenPath.string());
+        CHECK(std::filesystem::path(written.files.front().path).lexically_normal() ==
+              writtenPath.lexically_normal());
         REQUIRE(std::filesystem::exists(writtenPath));
         std::ifstream writtenFile(writtenPath, std::ios::binary);
         REQUIRE(writtenFile.good());

@@ -144,6 +144,7 @@ TEST_CASE("AsioConnectionPool handles server idle close", "[daemon][connection-p
 
     std::atomic<int> connections_accepted{0};
     std::promise<void> first_accepted;
+    std::promise<void> first_closed;
     std::promise<void> second_accepted;
     std::atomic<bool> stop{false};
 
@@ -160,6 +161,7 @@ TEST_CASE("AsioConnectionPool handles server idle close", "[daemon][connection-p
             // Simulate server idle timeout: close after 100ms
             std::this_thread::sleep_for(100ms);
             sock1.close(bec);
+            first_closed.set_value();
         }
 
         // Accept second connection
@@ -198,8 +200,8 @@ TEST_CASE("AsioConnectionPool handles server idle close", "[daemon][connection-p
     REQUIRE(connections_accepted.load() == 1);
     pool->release(conn1);
 
-    // Wait longer than server idle timeout
-    std::this_thread::sleep_for(200ms);
+    // Wait until the server has actually closed the idle socket before reusing the pool.
+    REQUIRE(first_closed.get_future().wait_for(1s) == std::future_status::ready);
 
     // Second connection - should detect stale and create new
     auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),

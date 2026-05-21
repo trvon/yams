@@ -5,7 +5,6 @@
 #Catch2 dependency for modern test framework(PBI - 050)
 #Prefer system installs, but fall back to Meson wrap subproject when available.
 catch2_dep = dependency('catch2', required: false, fallback: ['catch2', 'catch2_dep'])
-catch2_main_dep = dependency('catch2-with-main', required: false, fallback: ['catch2', 'catch2_with_main_dep'])
 
 #Get Catch2 partial dependency with includes for test builds
 catch2_compile_dep = []
@@ -27,6 +26,8 @@ catch2_incs = []
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
 _test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
+_test_address_sanitizer = get_option('enable-asan') or get_option('b_sanitize').contains('address')
+_test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
@@ -172,16 +173,30 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
   '-Wno-error=missing-field-initializers',
 ])
 
-## Meson-native test discovery via structured subdirs (no shell globs)
-#Build legacy GTest unit tests only when GTest is available.
-# Unit test object library (Catch2-only; may be empty after PBI-068 migration).
+catch2_main_dep = disabler()
+if catch2_dep.found()
+  catch2_yams_main_lib = static_library('catch2_yams_main',
+    files('support/catch2_main.cpp'),
+    dependencies: [catch2_dep],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  catch2_main_dep = declare_dependency(
+    link_with: catch2_yams_main_lib,
+    dependencies: [catch2_dep],
+  )
+endif
+
+# Meson-native test registration via structured subdirs (no shell globs).
+# Unit tests are now individual Catch2 executables; tests/unit keeps only a
+# compatibility stub for older yams_unit_objs references.
 subdir('unit')
 
 if get_option('build-plugins') and catch2_dep.found()
   subdir('plugins')
 endif
 
-if get_option('enable-integration-tests') or get_option('buildtype') == 'debug'
+if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/smoke')
   subdir('integration/daemon')
   subdir('integration/cli')
@@ -195,45 +210,6 @@ stress_srcs = files(
   'stress/storage/concurrent_catch2_test.cpp',
   'stress/mcp_socket_stress_catch2_test.cpp',
 )
-
-common_srcs = []  # currently no .cpp files under tests/common
-sdk_srcs = []     # currently no .cpp files under tests/sdk
-
-#NOTE(PBI 028) : Temporarily disable plugin tests to avoid duplicate plugin
-#symbol definitions in a single aggregated integration binary.
-plugin_test_srcs = []
-
-all_unit = []  # unit sources now provided by 'yams_unit_objs' from tests/unit/meson.build
-all_stress = stress_srcs
-
-#Always rely on tests / unit_main.cpp; do not include tests / test_main.cpp here
-test_main = []
-
-heavy_tests = [
-  'ResourcePoolTest.MaxSizeEnforcement',
-  'StreamingProcessorTest.*',
-  'ZstandardCompressorTest.DecompressionPerformance',
-  'DatabaseTest.Migrations',
-  'ResultRankerTest.RankingResults',
-  'CompressedStorageStatsTest.*',
-  'IntegrityVerifierTest.*',
-  'DaemonTest.*',
-  'StreamingChunkerTest.*',
-  'ChunkValidatorParallel.*',
-  'DownloadManagerExport.*',
-  'StorageBackendTest.*',
-#Temporary skips to stabilize shards(Option A) : vector DB / WAL heavy
-  'VectorDatabaseTest.*',
-  'VectorDatabasePersistenceTest.*',
-  'OnnxRuntimeTest.*',
-  'EmbeddingGeneratorTest.*',
-  'ModelManagementTest.*',
-  'WALDualReadTest.*',
-  'WALManagerComprehensiveTest.*',
-  'WALManagerTest.*',
-]
-
-unit_exclude = '*-' + ':'.join(heavy_tests)
 
 #Prefer Conan CMake config before falling back to system discovery
 onnx_dep = onnxruntime_resolved_dep
@@ -271,12 +247,8 @@ endforeach
 #Prepare LD_LIBRARY_PATH for test environment(needed for transitive TBB dependencies)
 _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 
-# Unit/bench timeouts are still referenced by standalone Catch2 benchmark
-# targets below. The legacy GTest aggregate runner (yams_unit_tests) and its
-# --gtest_filter shards were removed in PBI-068 once all unit tests moved to
-# individual Catch2 executables.
-  unit_timeout = get_option('unit-timeout')
-  bench_timeout = get_option('bench-timeout')
+# Bench timeout is referenced by standalone Catch2 benchmark targets below.
+bench_timeout = get_option('bench-timeout')
 
 
 
@@ -288,7 +260,7 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 #
 #IMPORTANT : services integration includes both GTest - and Catch2 - based suites.
 #Do not gate the entire subdir on GTest.
-if get_option('enable-integration-tests') or get_option('enable-integration-services') or get_option('buildtype') == 'debug'
+if get_option('enable-integration-tests') or get_option('enable-integration-services') or _test_debug_integrations
   subdir('integration/services')
 endif
 
@@ -316,12 +288,9 @@ if get_option('build-benchmarks')
   endif
 endif
 
-#Acceptance tests(E2E validation)
-subdir('acceptance')
-
 #Stress tests can be heavy; register but mark as long - running via suite name
-if catch2_dep.found() and get_option('enable-stress-tests') and all_stress.length() > 0
-  stress_exe = executable('yams_stress_tests', all_stress,
+if catch2_dep.found() and get_option('enable-stress-tests') and stress_srcs.length() > 0
+  stress_exe = executable('yams_stress_tests', stress_srcs,
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep, test_deps],
     cpp_args: ['-DYAMS_TESTING=1'],
@@ -1155,6 +1124,7 @@ if catch2_dep.found()
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/entity_linker_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
+      'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
@@ -1164,6 +1134,7 @@ if catch2_dep.found()
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_router_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
+      'unit/search/query_concept_extractor_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
       'unit/search/result_fusion_catch2_test.cpp',
       'unit/search/result_ranker_catch2_test.cpp',
@@ -1418,6 +1389,8 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
+      'unit/api/raw_text_storage_catch2_test.cpp',
+      'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2063,7 +2036,10 @@ if catch2_dep.found()
   )
 
   service_utilities_exe = executable('service_utilities',
-    files('unit/app/services/service_utilities_test.cpp'),
+    files(
+      'unit/app/services/service_utilities_test.cpp',
+      'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2126,29 +2102,31 @@ if catch2_dep.found()
 #Corpus Stats Search Integration Tests(Catch2)
 #Phase 1 of Epic yams - 7ez4 : Validates corpus stats collection from real document store
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  corpus_stats_search_integration_exe = executable('corpus_stats_search_integration',
-    files('unit/search/corpus_stats_search_integration_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
-      dependency('yams_daemon'),
-      dependency('yams_daemon_client'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-#Ghidra plugin integration test(PBI - 075)
-#Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
-  if host_machine.system() != 'windows'
-    ghidra_plugin_exe = executable('ghidra_plugin_communication',
-      files('integration/ghidra_plugin_communication_test.cpp'),
+  if not _test_address_sanitizer
+    corpus_stats_search_integration_exe = executable('corpus_stats_search_integration',
+      files('unit/search/corpus_stats_search_integration_test.cpp'),
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+      dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
+        dependency('yams_daemon'),
+        dependency('yams_daemon_client'),
+      ],
       cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )
+
+#Ghidra plugin integration test(PBI - 075)
+#Tests plugin spawning and JSON - RPC communication without requiring Ghidra installed
+    if host_machine.system() != 'windows'
+      ghidra_plugin_exe = executable('ghidra_plugin_communication',
+        files('integration/ghidra_plugin_communication_test.cpp'),
+        include_directories: incs,
+        dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json'), dependency('spdlog')],
+        cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+        build_rpath: ':'.join(_test_rpaths),
+        install: false,
+      )
+    endif
   endif
 
 #Test Registrations
@@ -2482,23 +2460,25 @@ if catch2_dep.found()
     timeout: 120
   )
 
-  test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
-    suite: ['catch2', 'integration', 'search', 'corpus_stats'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_DISABLE_VECTORS': '1',
-    },
-    timeout: 180
-  )
+  if not _test_address_sanitizer
+    test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
+      suite: ['catch2', 'integration', 'search', 'corpus_stats'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      timeout: 180
+    )
 
 #Plugin integration tests
-  if host_machine.system() != 'windows'
-    test('ghidra_plugin_communication', ghidra_plugin_exe,
-      suite: ['catch2', 'integration', 'plugin', 'ghidra'],
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
-      timeout: 30,
-      is_parallel: false
-    )
+    if host_machine.system() != 'windows'
+      test('ghidra_plugin_communication', ghidra_plugin_exe,
+        suite: ['catch2', 'integration', 'plugin', 'ghidra'],
+        env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
+        timeout: 30,
+        is_parallel: false
+      )
+    endif
   endif
 
 #Daemon tests

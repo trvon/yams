@@ -487,6 +487,7 @@ private:
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
+    std::atomic<std::size_t> callbacksInFlight_{0};
 
     mutable std::mutex lifecycleMutex_;
     std::condition_variable lifecycleCv_;

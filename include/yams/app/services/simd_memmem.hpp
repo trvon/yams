@@ -24,10 +24,12 @@ inline constexpr size_t kMemmemNpos = static_cast<size_t>(-1);
 /// (AVX2 > SSE2 > scalar).  ARM NEON is used unconditionally on aarch64.
 ///
 /// @return Byte offset of the first match, or @c kMemmemNpos if not found.
+/// Null pointers with nonzero lengths are treated as no match.
 size_t simdMemmem(const char* haystack, size_t haystackLen, const char* needle, size_t needleLen);
 
 /// Case-insensitive variant (ASCII tolower during comparison).
 /// Needle is assumed to already be lowercase.
+/// Null pointers with nonzero lengths are treated as no match.
 size_t simdMemmemCI(const char* haystack, size_t haystackLen, const char* needle, size_t needleLen);
 
 /// Convenience overloads accepting string_view.

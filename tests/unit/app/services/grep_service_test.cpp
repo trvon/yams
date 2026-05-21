@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>

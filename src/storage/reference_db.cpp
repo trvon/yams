@@ -214,31 +214,43 @@ public:
         // Use FULLMUTEX for proper thread safety - SQLite will handle internal locking
         int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
 
-        int rc = sqlite3_open_v2(path.string().c_str(), &db_, flags, nullptr);
+        sqlite3* openedDb = nullptr;
+        int rc = sqlite3_open_v2(path.string().c_str(), &openedDb, flags, nullptr);
         if (rc != SQLITE_OK) {
-            std::string errMsg = db_ ? sqlite3_errmsg(db_) : "Failed to open database";
+            std::string errMsg = openedDb ? sqlite3_errmsg(openedDb) : "Failed to open database";
+            if (openedDb) {
+                sqlite3_close(openedDb);
+            }
             throw std::runtime_error(yamsfmt::format("Failed to open database: {}", errMsg));
         }
+        db_ = openedDb;
 
-        // Enable foreign keys
-        execute("PRAGMA foreign_keys = ON");
+        try {
+            // Enable foreign keys
+            execute("PRAGMA foreign_keys = ON");
 
-        // Set busy timeout for concurrent transactions (15 seconds)
-        sqlite3_busy_timeout(db_, 15000);
+            // Set busy timeout for concurrent transactions (15 seconds)
+            sqlite3_busy_timeout(db_, 15000);
 
-        // WAL mode for better concurrency (unless testing)
-        if (const char* test_env = std::getenv("YAMS_TESTING")) {
-            std::string v(test_env);
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return (char)std::tolower(c); });
-            if (v == "1" || v == "true" || v == "yes" || v == "on") {
-                execute("PRAGMA journal_mode = MEMORY");
-                spdlog::debug("Reference DB: using MEMORY journal mode (YAMS_TESTING=1)");
+            // WAL mode for better concurrency (unless testing)
+            if (const char* test_env = std::getenv("YAMS_TESTING")) {
+                std::string v(test_env);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                if (v == "1" || v == "true" || v == "yes" || v == "on") {
+                    execute("PRAGMA journal_mode = MEMORY");
+                    spdlog::debug("Reference DB: using MEMORY journal mode (YAMS_TESTING=1)");
+                } else {
+                    execute("PRAGMA journal_mode = WAL");
+                }
             } else {
                 execute("PRAGMA journal_mode = WAL");
             }
-        } else {
-            execute("PRAGMA journal_mode = WAL");
+        } catch (...) {
+            sqlite3* db = db_;
+            db_ = nullptr;
+            sqlite3_close_v2(db);
+            throw;
         }
 
         trace_reference_db_lifetime("open", this, path_, db_, SQLITE_OK,
@@ -354,16 +366,25 @@ public:
 
     // Backup database
     void backup(const std::filesystem::path& destPath) {
+        const auto dest = destPath.string();
         sqlite3* destDb = nullptr;
-        int rc = sqlite3_open(destPath.string().c_str(), &destDb);
+        int rc = sqlite3_open(dest.c_str(), &destDb);
         if (rc != SQLITE_OK) {
-            throw std::runtime_error("Failed to open backup destination");
+            std::string errMsg =
+                destDb ? sqlite3_errmsg(destDb) : "Failed to open backup destination";
+            if (destDb) {
+                sqlite3_close(destDb);
+            }
+            throw std::runtime_error(
+                yamsfmt::format("Failed to open backup destination '{}': {}", dest, errMsg));
         }
 
         sqlite3_backup* backup = sqlite3_backup_init(destDb, "main", db_, "main");
         if (!backup) {
+            std::string errMsg = sqlite3_errmsg(destDb);
             sqlite3_close(destDb);
-            throw std::runtime_error("Failed to initialize backup");
+            throw std::runtime_error(
+                yamsfmt::format("Failed to initialize backup to '{}': {}", dest, errMsg));
         }
 
         // Copy entire database

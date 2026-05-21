@@ -14,6 +14,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <yams/core/types.h>
 #include <yams/metadata/document_metadata.h>
@@ -309,6 +310,7 @@ private:
     void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,
                            bool error);
+    void wakeWriter();
 
     struct SourceTiming {
         std::uint64_t batches = 0;
@@ -325,6 +327,7 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
     Config config_;
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer_;
 
     mutable std::mutex queueMutex_;
     mutable std::condition_variable drainCv_;
@@ -332,6 +335,7 @@ private:
     std::optional<Error> lastApplyError_;
 
     std::atomic<bool> stop_{false};
+    std::atomic<bool> writerExited_{true};
     std::atomic<std::size_t> inFlight_{0};
 
     mutable std::mutex statsMutex_;

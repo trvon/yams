@@ -3,7 +3,7 @@ project('yams', ['cpp', 'c'],
   default_options: [
     'buildtype=debugoptimized',
     'b_ndebug=if-release',
-    'warning_level=2',
+    'warning_level=3',
     'cpp_std=c++20',
     'c_std=c11',
   ],
@@ -57,7 +57,7 @@ if libcxx_hardening != 'none'
       using_libcxx = true
     endif
   endif
-  
+
   if using_libcxx
     hardening_mode_map = {
       'fast': '_LIBCPP_HARDENING_MODE_FAST',
@@ -143,6 +143,57 @@ if enable_ubsan
     error('UBSan requested but compiler does not support -fsanitize=undefined')
   endif
 endif
+
+
+# --- General Hardening Flags ---
+hardening_cpp_args = []
+hardening_c_args = []
+hardening_link_args = []
+
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  # MSVC security checks: /GS (Stack Buffer Security Check) and /sdl (Additional Security Checks)
+  hardening_cpp_args += ['/GS', '/sdl']
+  hardening_c_args += ['/GS', '/sdl']
+  # Control Flow Guard
+  if cpp.has_argument('/guard:cf')
+    hardening_cpp_args += '/guard:cf'
+    hardening_c_args += '/guard:cf'
+    hardening_link_args += '/guard:cf'
+  endif
+else
+  # GCC/Clang security checks
+
+  # Bounds checking for libstdc++
+  hardening_cpp_args += '-D_GLIBCXX_ASSERTIONS'
+
+  # Stack smashing protection
+  if cpp.has_argument('-fstack-protector-strong')
+    hardening_cpp_args += '-fstack-protector-strong'
+    hardening_c_args += '-fstack-protector-strong'
+  endif
+
+  # Fortify source (only for optimized builds)
+  if get_option('optimization') != '0'
+    if cpp.has_argument('-D_FORTIFY_SOURCE=2')
+      hardening_cpp_args += '-D_FORTIFY_SOURCE=2'
+      hardening_c_args += '-D_FORTIFY_SOURCE=2'
+    endif
+  endif
+endif
+
+if host_machine.system() == 'linux'
+  # Read-only relocations and immediate binding
+  if cpp.has_link_argument('-Wl,-z,relro')
+    hardening_link_args += '-Wl,-z,relro'
+  endif
+  if cpp.has_link_argument('-Wl,-z,now')
+    hardening_link_args += '-Wl,-z,now'
+  endif
+endif
+
+add_project_arguments(hardening_cpp_args, language: 'cpp')
+add_project_arguments(hardening_c_args, language: 'c')
+add_project_link_arguments(hardening_link_args, language: ['cpp', 'c'])
 
 if host_machine.system() == 'darwin' and cpp.get_id() == 'clang'
   # Apple clang + external fmt/spdlog can fail when fmt enables
@@ -800,17 +851,18 @@ if get_option('b_coverage')
     endif
 
     coverage_report_target = custom_target('coverage-report',
-      output: 'coverage-report.stamp',
+      output: 'coverage.html',
       command: [
         gcovr,
         '--root', meson.project_source_root(),
         '--gcov-executable', _gcov_executable,
         '--object-directory', meson.project_build_root(),
+        '--merge-mode-functions', 'merge-use-line-min',
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
         '--html', '--html-details',
-        '--output', join_paths(meson.project_build_root(), 'coverage', 'index.html'),
+        '--output', '@OUTPUT@',
         meson.project_build_root(),
       ],
       build_by_default: false,
@@ -824,6 +876,7 @@ if get_option('b_coverage')
         '--root', meson.project_source_root(),
         '--gcov-executable', _gcov_executable,
         '--object-directory', meson.project_build_root(),
+        '--merge-mode-functions', 'merge-use-line-min',
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -835,7 +888,7 @@ if get_option('b_coverage')
       build_always_stale: true,
     )
 
-    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage-report.stamp')
+    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage.html')
   else
     warning('gcovr not found. Install gcovr to generate coverage reports.')
   endif

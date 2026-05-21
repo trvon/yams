@@ -80,22 +80,34 @@ jobs:
 
       - name: Run clang-tidy on changed files (PR only)
         if: github.event_name == 'pull_request'
-        continue-on-error: true  # Non-blocking until .clang-tidy baseline is proven on full codebase
         shell: bash
         run: |
-          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+          set -euo pipefail
+          COMPILE_DB_DIR=""
+          if [ -f builddir/compile_commands.json ]; then
+            COMPILE_DB_DIR="builddir"
+          elif [ -f compile_commands.json ]; then
+            COMPILE_DB_DIR="."
+          else
+            echo "No compile_commands.json found; skipping clang-tidy." | tee clang-tidy-pr.txt
+            exit 0
+          fi
+
+          mapfile -t CHANGED_FILES < <(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
             | grep -E '\.(cpp|h|hpp|cc|cxx)$' \
             | grep -v -E '(third_party|external|subprojects|\.pb\.(h|cc))' \
             || true)
-          if [ -z "$CHANGED" ]; then
+          if [ "${#CHANGED_FILES[@]}" -eq 0 ]; then
             echo "No C++ files changed in this PR."
             exit 0
           fi
-          echo "Running clang-tidy on: $CHANGED"
+          printf 'Running clang-tidy on:\n'
+          printf '  %s\n' "${CHANGED_FILES[@]}"
           clang-tidy \
+            -p "$COMPILE_DB_DIR" \
             --warnings-as-errors='bugprone-*,clang-analyzer-*,concurrency-*' \
-            $CHANGED \
-            2>&1 | tee clang-tidy-pr.txt || true
+            "${CHANGED_FILES[@]}" \
+            2>&1 | tee clang-tidy-pr.txt
 
       - name: Upload clang-tidy results
         if: github.event_name == 'pull_request' && always()
@@ -156,7 +168,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-asan=true -Db_sanitize=address -Db_lundef=false -Dtest-timeout-scale=2"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-asan=true -Db_sanitize=address -Db_lundef=false -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false"
           - suffix: linux-x86_64-ubsan
             runs_on: ubuntu-24.04
             conan_host_profile: ./conan/profiles/host-linux-clang
@@ -169,8 +181,8 @@ jobs:
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
           # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread
     runs-on: ${{ matrix.runs_on }}
-    # Allow extra time for safety across runners.
-    timeout-minutes: 100
+    # Windows debug builds can consume most of the previous 100-minute budget before tests start.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,11 +237,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          retry_cmd() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$attempts" ]; then
+                return 1
+              fi
+              echo "Command failed (attempt ${attempt}/${attempts}): $*" >&2
+              sleep $((attempt * 10))
+              attempt=$((attempt + 1))
+            done
+          }
+          if [ "$(dpkg --print-architecture)" = "arm64" ]; then
+            source_files="$(sudo grep -RIl '://ports.ubuntu.com/ubuntu-ports' \
+              /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)"
+            if [ -n "$source_files" ]; then
+              printf '%s\n' "$source_files" | xargs sudo sed -i \
+                's|http://ports.ubuntu.com/ubuntu-ports|https://azure.ports.ubuntu.com/ubuntu-ports|g; s|https://ports.ubuntu.com/ubuntu-ports|https://azure.ports.ubuntu.com/ubuntu-ports|g'
+            fi
+          fi
+          retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
           # Provide system Boost as a fallback per docs/BUILD-GCC.md when CMakeDeps resolution
           # is not detected by CMake (module mode will pick this up).
           # Install libbenchmark-dev for Google Benchmark support
-          sudo apt-get install -y --no-install-recommends libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
+          retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
+            install -y --fix-missing --no-install-recommends \
+            libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/bin/python" -m pip install --upgrade pip
@@ -495,7 +530,15 @@ jobs:
           # creates build.dat incompatible with older system meson).
           CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
           if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; source "${CONAN_BUILD_ENV}"; set -u; fi
-          $ARCH_PREFIX meson compile -C builddir
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+            $ARCH_PREFIX meson compile -C builddir \
+              catch2_daemon_metrics \
+              catch2_post_ingest_queue_unit \
+              catch2_storage_submodule \
+              catch2_work_coordinator
+          else
+            $ARCH_PREFIX meson compile -C builddir
+          fi
 
       - name: Configure and Build with Meson (Windows)
         id: build_windows
@@ -547,7 +590,7 @@ jobs:
       #     fi
       #     scripts/ci/check_mobile_abi.sh "$LIB_PATH"
 
-      
+
 
       - name: Run Tests with Meson (Unix)
         id: meson_tests_unix
@@ -584,8 +627,17 @@ jobs:
             source "$CONAN_BUILD_ENV"
             set -u
           fi
-          # Run unit and integration tests (TSAN disabled in CI)
-          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          # Run unit and integration tests (TSAN disabled in CI). ASAN is a sanitizer smoke lane;
+          # build/test selected targets only so hosted runners do not get recycled.
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+            meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
+              daemon_metrics_status \
+              post_ingest_queue_unit \
+              storage_submodule \
+              work_coordinator
+          else
+            meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          fi
 
       - name: Run Tests with Meson (Windows)
         id: meson_tests_windows

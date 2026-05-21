@@ -39,8 +39,8 @@ private:
     static std::vector<std::string> extractAllLiterals(std::string_view pattern);
 };
 
-/// Boyer-Moore-Horspool string search implementation
-/// Uses std::string::find for patterns < 16 chars (benchmark-optimized)
+/// Literal string search helper.
+/// Uses the standard library for case-sensitive search and custom fallback for ignore-case search.
 class BMHSearcher {
 public:
     /// Minimum pattern length for BMH algorithm
@@ -67,7 +67,7 @@ private:
     std::string pattern_;
     std::array<size_t, 256> shift_; ///< Bad character shift table
     bool ignoreCase_;
-    bool useFastPath_; ///< True if using std::string::find for short patterns
+    bool useFastPath_; ///< True for the short-pattern dispatch lane.
 
     void buildShiftTable();
     static unsigned char toLower(unsigned char c);

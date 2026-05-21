@@ -182,15 +182,20 @@ TEST_CASE("C++ version is checked correctly", "[core][cpp23]") {
 }
 
 TEST_CASE("Deprecation macro compiles without errors", "[core][cpp23]") {
-    YAMS_CPP23_DEPRECATED("test message")
-    auto old_function = []() { return 42; };
-
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
 #endif
+    YAMS_CPP23_DEPRECATED("test message")
+    auto old_function = []() { return 42; };
+
     REQUIRE(old_function() == 42);
 #if defined(__clang__)
 #pragma clang diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
 #endif
 }

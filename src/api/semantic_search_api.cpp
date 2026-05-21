@@ -9,6 +9,7 @@
 */
 
 #include <algorithm>
+#include <cctype>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -136,7 +137,8 @@ private:
         std::unordered_map<std::string, size_t> word_freq;
         for (auto it = words_begin; it != words_end; ++it) {
             std::string word = it->str();
-            std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+            std::transform(word.begin(), word.end(), word.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             word_freq[word]++;
         }
 
@@ -656,7 +658,8 @@ std::string normalizeQuery(const std::string& query) {
     std::string normalized = query;
 
     // Convert to lowercase
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     // Normalize whitespace
     std::regex multiple_spaces(R"(\s+)");
@@ -708,24 +711,34 @@ std::vector<Entity> extractEntities(const std::string& query) {
     std::regex email_regex(R"(\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b)");
     std::regex url_regex(R"(https?://[^\s]+)");
 
-    auto emails_begin = std::sregex_iterator(query.begin(), query.end(), email_regex);
-    auto emails_end = std::sregex_iterator();
-    for (auto it = emails_begin; it != emails_end; ++it) {
-        Entity entity;
-        entity.text = it->str();
-        entity.type = "EMAIL";
-        entity.confidence = 0.9f;
-        entity.start_pos = it->position();
-        entity.end_pos = entity.start_pos + entity.text.length();
-        entities.push_back(entity);
-    }
+    auto appendMatches = [&entities, &query](const std::regex& pattern, const std::string& type,
+                                             float confidence) {
+        auto begin = std::sregex_iterator(query.begin(), query.end(), pattern);
+        auto end = std::sregex_iterator();
+        for (auto it = begin; it != end; ++it) {
+            Entity entity;
+            entity.text = it->str();
+            entity.type = type;
+            entity.confidence = confidence;
+            entity.start_pos = static_cast<size_t>(it->position());
+            entity.end_pos = entity.start_pos + entity.text.length();
+            entities.push_back(entity);
+        }
+    };
+
+    appendMatches(email_regex, "EMAIL", 0.9f);
+    appendMatches(url_regex, "URL", 0.85f);
+
+    std::sort(entities.begin(), entities.end(),
+              [](const Entity& lhs, const Entity& rhs) { return lhs.start_pos < rhs.start_pos; });
 
     return entities;
 }
 
 QueryIntent classifyIntent(const std::string& query) {
     std::string lower_query = query;
-    std::transform(lower_query.begin(), lower_query.end(), lower_query.begin(), ::tolower);
+    std::transform(lower_query.begin(), lower_query.end(), lower_query.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     // Simple intent classification based on keywords
     if (lower_query.find("how to") != std::string::npos ||
@@ -776,7 +789,8 @@ float calculateComplexity(const std::string& query) {
 
     // Add complexity for special characters
     for (char c : query) {
-        if (!std::isalnum(c) && !std::isspace(c)) {
+        const auto uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && !std::isspace(uc)) {
             complexity += 0.1f;
         }
     }
@@ -856,10 +870,10 @@ std::vector<TextSnippet> generateSnippets(const std::string& content,
         size_t end = std::min(start + snippet_length, content.length());
 
         // Adjust to word boundaries
-        while (start > 0 && !std::isspace(content[start - 1])) {
+        while (start > 0 && !std::isspace(static_cast<unsigned char>(content[start - 1]))) {
             start--;
         }
-        while (end < content.length() && !std::isspace(content[end])) {
+        while (end < content.length() && !std::isspace(static_cast<unsigned char>(content[end]))) {
             end++;
         }
 

@@ -137,6 +137,20 @@ public:
         return false;
     }
 
+    bool waitForProcessed(std::size_t target,
+                          std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < timeout) {
+            if (auto queue = serviceManager_->getPostIngestQueue()) {
+                if (queue->processed() >= target) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return false;
+    }
+
     // Helper: Create and store a document
     std::string storeDocument(const std::string& filename, const std::string& content) {
         auto fixture = fixtureManager_->createTextFixture(filename, content);
@@ -240,13 +254,8 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
             fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
         }
 
-        // Wait for queue to drain
-        bool drained = fixture.waitForQueueDrain(std::chrono::seconds(30));
-        REQUIRE(drained);
-
-        auto finalProcessed = queue->processed();
         INFO("All documents should be processed");
-        REQUIRE(finalProcessed >= initialProcessed + 5);
+        REQUIRE(fixture.waitForProcessed(initialProcessed + 5, std::chrono::seconds(30)));
     }
 }
 

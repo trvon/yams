@@ -8,6 +8,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>

@@ -17,6 +17,33 @@ struct BackendHandle {
     std::shared_ptr<IObjectStorageBackend> impl;
 };
 
+static int c_create(const char* /*config_json*/, void** out_backend);
+static void c_destroy(void* backend);
+static int c_put(void* backend, const char* key, const void* buf, size_t len,
+                 const char* /*opts_json*/);
+static int c_get(void* backend, const char* key, void** out_buf, size_t* out_len,
+                 const char* /*opts_json*/);
+static int c_head(void* backend, const char* key, char** out_metadata_json,
+                  const char* /*opts_json*/);
+static int c_del(void* backend, const char* key, const char* /*opts_json*/);
+static int c_list(void* backend, const char* prefix, char** out_list_json, const char* opts_json);
+
+yams_object_storage_v1* makeTable() {
+    auto* v = static_cast<yams_object_storage_v1*>(std::malloc(sizeof(yams_object_storage_v1)));
+    if (!v)
+        return nullptr;
+    v->size = sizeof(yams_object_storage_v1);
+    v->version = 1;
+    v->create = c_create;
+    v->destroy = c_destroy;
+    v->put = c_put;
+    v->get = c_get;
+    v->head = c_head;
+    v->del = c_del;
+    v->list = c_list;
+    return v;
+}
+
 static char* dup_cstr(const std::string& s) {
     char* p = static_cast<char*>(std::malloc(s.size() + 1));
     if (!p)
@@ -103,11 +130,9 @@ static std::optional<int> json_get_int(const char* json, const char* key) {
 
 // C ABI shims
 static int c_create(const char* /*config_json*/, void** out_backend) {
-    // Expect the table to have a pre-bound impl in out_backend via our expose helper
-    // Nothing to do here; just ensure non-null
-    if (!out_backend)
-        return -1;
-    return 0;
+    if (out_backend)
+        *out_backend = nullptr;
+    return -1;
 }
 
 static void c_destroy(void* backend) {
@@ -118,7 +143,7 @@ static void c_destroy(void* backend) {
 static int c_put(void* backend, const char* key, const void* buf, size_t len,
                  const char* /*opts_json*/) {
     auto* h = static_cast<BackendHandle*>(backend);
-    if (!h || !key || (!buf && len != 0))
+    if (!h || !h->impl || !key || (!buf && len != 0))
         return -1;
     const auto* data_bytes = reinterpret_cast<const std::byte*>(buf);
     auto r = h->impl->put(key, data_bytes, len, PutOptions{});
@@ -128,7 +153,7 @@ static int c_put(void* backend, const char* key, const void* buf, size_t len,
 static int c_get(void* backend, const char* key, void** out_buf, size_t* out_len,
                  const char* /*opts_json*/) {
     auto* h = static_cast<BackendHandle*>(backend);
-    if (!h || !key || !out_buf || !out_len)
+    if (!h || !h->impl || !key || !out_buf || !out_len)
         return -1;
     auto r = h->impl->get(key, std::nullopt, GetOptions{});
     if (std::holds_alternative<std::vector<std::uint8_t>>(r)) {
@@ -147,7 +172,7 @@ static int c_get(void* backend, const char* key, void** out_buf, size_t* out_len
 static int c_head(void* backend, const char* key, char** out_metadata_json,
                   const char* /*opts_json*/) {
     auto* h = static_cast<BackendHandle*>(backend);
-    if (!h || !key || !out_metadata_json)
+    if (!h || !h->impl || !key || !out_metadata_json)
         return -1;
     auto r = h->impl->head(key, GetOptions{});
     if (std::holds_alternative<ObjectMetadata>(r)) {
@@ -165,15 +190,15 @@ static int c_head(void* backend, const char* key, char** out_metadata_json,
 
 static int c_del(void* backend, const char* key, const char* /*opts_json*/) {
     auto* h = static_cast<BackendHandle*>(backend);
-    if (!h || !key)
+    if (!h || !h->impl || !key)
         return -1;
     auto r = h->impl->remove(key);
-    return r ? 0 : -1;
+    return r ? -1 : 0;
 }
 
 static int c_list(void* backend, const char* prefix, char** out_list_json, const char* opts_json) {
     auto* h = static_cast<BackendHandle*>(backend);
-    if (!h || !out_list_json)
+    if (!h || !h->impl || !out_list_json)
         return -1;
     std::optional<std::string> delim = json_get_string(opts_json, "delimiter");
     auto pageToken = json_get_string(opts_json, "pageToken");
@@ -233,36 +258,12 @@ std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* /*v1_i
     return nullptr;
 }
 
-yams_object_storage_v1* expose_as_c_abi(std::shared_ptr<IObjectStorageBackend> impl) {
-    if (!impl)
-        return nullptr;
-    auto* handle = new BackendHandle{std::move(impl)};
-    // Allocate and populate the interface table
-    auto* v = static_cast<yams_object_storage_v1*>(std::malloc(sizeof(yams_object_storage_v1)));
-    if (!v) {
-        delete handle;
-        return nullptr;
-    }
-    v->size = sizeof(yams_object_storage_v1);
-    v->version = 1;
-    v->create = c_create;   // no-op; backend already bound
-    v->destroy = c_destroy; // frees the BackendHandle
-    v->put = c_put;
-    v->get = c_get;
-    v->head = c_head;
-    v->del = c_del;
-    v->list = c_list;
-    // The caller should pass 'handle' as the backend pointer to these functions.
-    // Ownership: destroy() will delete handle.
-    return v;
-}
-
 std::pair<yams_object_storage_v1*, void*>
 expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl) {
     if (!impl)
         return {nullptr, nullptr};
     auto* handle = new BackendHandle{impl};
-    auto* v = expose_as_c_abi(impl);
+    auto* v = makeTable();
     if (!v) {
         delete handle;
         return {nullptr, nullptr};

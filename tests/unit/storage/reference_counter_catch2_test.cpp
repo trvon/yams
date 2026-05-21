@@ -842,6 +842,7 @@ TEST_CASE("rebuildReferenceDatabase scans storage and populates refs.db",
     REQUIRE(count.has_value());
     CHECK(count.value() >= 1u);
 
+    refCounter.reset();
     cleanup();
 }
 

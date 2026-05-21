@@ -221,13 +221,12 @@ TEST_CASE("BMHSearcher: Real-world patterns", "[bmh]") {
 }
 
 // ---------------------------------------------------------------------------
-// BMHSearcher: Long patterns (exercise SIMD memmem codepath)
+// BMHSearcher: Long patterns
 //
-// When the needle is >= 16 bytes, findBMH delegates to simdMemmem / simdMemmemCI
-// instead of the scalar Boyer-Moore-Horspool loop.
+// Case-sensitive search uses the standard-library path; ignore-case search uses simdMemmemCI.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("BMHSearcher: Long case-sensitive pattern (SIMD path)", "[bmh][simd]") {
+TEST_CASE("BMHSearcher: Long case-sensitive pattern", "[bmh]") {
     // 20-char needle — well above the 16-byte threshold.
     const std::string needle = "namespace yams::app";
 
@@ -266,7 +265,7 @@ TEST_CASE("BMHSearcher: Long case-sensitive pattern (SIMD path)", "[bmh][simd]")
 }
 
 TEST_CASE("BMHSearcher: Long case-insensitive pattern (SIMD CI path)", "[bmh][simd]") {
-    // 24-char needle — exercises simdMemmemCI via findBMH.
+    // 24-char needle exercises simdMemmemCI via findBMH.
     const std::string needle = "The Quick Brown Fox Jump";
 
     SECTION("matches uppercase haystack") {
@@ -303,7 +302,7 @@ TEST_CASE("BMHSearcher: Long case-insensitive pattern (SIMD CI path)", "[bmh][si
 }
 
 TEST_CASE("BMHSearcher: Exactly 16-byte pattern (boundary)", "[bmh][simd]") {
-    // 16 bytes is the exact threshold — should still use the SIMD path.
+    // 16 bytes is the exact threshold between short and long dispatch lanes.
     const std::string needle = "0123456789abcdef"; // exactly 16 bytes
     REQUIRE(needle.size() == 16);
 

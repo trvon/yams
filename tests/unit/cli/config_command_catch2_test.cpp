@@ -378,7 +378,8 @@ TEST_CASE("ConfigCommand - grammar auto download flags update config",
     outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\r'), outputPath.end());
     outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\n'), outputPath.end());
     const bool containsExpectedPath =
-        pathCapture.str().find((fixture.testDataHome / "grammars").string()) != std::string::npos;
+        normalizedPathString(fs::path(outputPath))
+            .find(normalizedPathString(fixture.testDataHome / "grammars")) != std::string::npos;
     const bool matchesNormalizedPath = normalizedPathString(fs::path(outputPath)) ==
                                        normalizedPathString(fixture.testDataHome / "grammars");
     const bool pathMatched = containsExpectedPath || matchesNormalizedPath;

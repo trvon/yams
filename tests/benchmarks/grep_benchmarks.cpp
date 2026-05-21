@@ -123,10 +123,14 @@ public:
         // Generate text with known number of newlines
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
-        size_t charsPerLine = textSize / linesCount;
+        size_t lineCount = linesCount;
+        if (lineCount == 0) {
+            lineCount = 1;
+        }
+        size_t charsPerLine = textSize / lineCount;
 
         text_.reserve(textSize);
-        for (size_t i = 0; i < linesCount; ++i) {
+        for (size_t i = 0; i < lineCount; ++i) {
             for (size_t j = 0; j < charsPerLine; ++j) {
                 text_ += static_cast<char>(charDist(rng));
             }
@@ -164,10 +168,14 @@ public:
         : BenchmarkBase("Grep_MemchrNewline_" + name, config) {
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> charDist('a', 'z');
-        size_t charsPerLine = textSize / linesCount;
+        size_t lineCount = linesCount;
+        if (lineCount == 0) {
+            lineCount = 1;
+        }
+        size_t charsPerLine = textSize / lineCount;
 
         text_.reserve(textSize);
-        for (size_t i = 0; i < linesCount; ++i) {
+        for (size_t i = 0; i < lineCount; ++i) {
             for (size_t j = 0; j < charsPerLine; ++j) {
                 text_ += static_cast<char>(charDist(rng));
             }

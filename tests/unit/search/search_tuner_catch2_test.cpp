@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include <yams/compat/unistd.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>

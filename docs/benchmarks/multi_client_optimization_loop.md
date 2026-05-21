@@ -87,18 +87,20 @@ while using the richer v2 metrics when present.
 
 ## Current contention policy notes
 
-- Peak-load CLI probe failures should now be classified, not treated as opaque harness failures.
+- Peak-load CLI probe failures are classified, not reported as opaque harness failures.
 - `timeout_under_load` is the only accepted CLI failure mode during the saturation window.
 - Post-stress CLI recovery must pass for `status` and `list` before a contention run is considered healthy.
 - In the current reduced contention scenario, `cli_search` now succeeds instead of timing out.
-- Fresh ASAN validation remains the conservative safety lane; current ASAN mixed-workload runs are clean through 48 total clients and first degrade at 56.
+- 2026-05-21 ASAN+coverage: 16-client mixed ops passed with zero failures; ingest scaling
+  degraded at 32 clients.
 
 ## Mixed stress interpretation
 
 - The mixed-client benchmark is a **closed-loop** workload with fixed per-client op budgets.
 - Aggregate ops/s can rise at higher client counts even while the system is under *more* stress.
 - For scaling decisions, use the first appearance of **nonzero failures** and rising **p95/p99 latencies** as the primary boundary markers.
-- In the fresh Debug validation on the tuned defaults, **64 total mixed clients** is the clean tier and **68+** is the first degraded tier.
+- 2026-05-21 ASAN+coverage ingest scaling: clean through **16** clients; **32** clients failed
+  with 416 add failures.
 
 ## Phase1 Daemon Scheduling Defaults
 

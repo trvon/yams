@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <ctime>
 #include <iomanip>
 #include <regex>
 #include <sstream>
@@ -49,36 +50,20 @@ std::string escapeXML(const std::string& str) {
 std::string unescapeXML(const std::string& str) {
     std::string result = str;
 
-    // Replace XML entities
-    size_t pos = 0;
-    while ((pos = result.find("&amp;", pos)) != std::string::npos) {
-        result.replace(pos, 5, "&");
-        pos += 1;
-    }
+    auto replaceAll = [&result](const std::string& entity, const std::string& replacement) {
+        size_t pos = 0;
+        while ((pos = result.find(entity, pos)) != std::string::npos) {
+            result.replace(pos, entity.size(), replacement);
+            pos += replacement.size();
+        }
+    };
 
-    pos = 0;
-    while ((pos = result.find("&lt;", pos)) != std::string::npos) {
-        result.replace(pos, 4, "<");
-        pos += 1;
-    }
-
-    pos = 0;
-    while ((pos = result.find("&gt;", pos)) != std::string::npos) {
-        result.replace(pos, 4, ">");
-        pos += 1;
-    }
-
-    pos = 0;
-    while ((pos = result.find("&quot;", pos)) != std::string::npos) {
-        result.replace(pos, 6, "\"");
-        pos += 1;
-    }
-
-    pos = 0;
-    while ((pos = result.find("&apos;", pos)) != std::string::npos) {
-        result.replace(pos, 6, "'");
-        pos += 1;
-    }
+    // Decode ampersands last so literal escaped entities round-trip correctly.
+    replaceAll("&lt;", "<");
+    replaceAll("&gt;", ">");
+    replaceAll("&quot;", "\"");
+    replaceAll("&apos;", "'");
+    replaceAll("&amp;", "&");
 
     return result;
 }
@@ -94,8 +79,14 @@ std::string serializeMetadata(const RawTextMetadata& metadata) {
     xml << "  <userId>" << escapeXML(metadata.userId) << "</userId>\n";
 
     // Format timestamp as ISO 8601
-    auto time_t = std::chrono::system_clock::to_time_t(metadata.timestamp);
-    xml << "  <timestamp>" << std::put_time(std::gmtime(&time_t), "%FT%TZ") << "</timestamp>\n";
+    auto timeValue = std::chrono::system_clock::to_time_t(metadata.timestamp);
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &timeValue);
+#else
+    gmtime_r(&timeValue, &utc);
+#endif
+    xml << "  <timestamp>" << std::put_time(&utc, "%FT%TZ") << "</timestamp>\n";
 
     xml << "  <contentType>" << escapeXML(metadata.contentType) << "</contentType>\n";
     xml << "  <language>" << escapeXML(metadata.language) << "</language>\n";
@@ -157,40 +148,80 @@ std::string serializeEntry(const RawTextEntry& entry) {
 
 } // namespace xml
 
+namespace {
+
+std::optional<std::string> extractTagText(const std::string& sourceXml, const std::string& tag) {
+    const std::regex tagRegex("<" + tag + ">([\\s\\S]*?)</" + tag + ">");
+    std::smatch match;
+    if (!std::regex_search(sourceXml, match, tagRegex)) {
+        return std::nullopt;
+    }
+    return xml::unescapeXML(match[1].str());
+}
+
+std::vector<std::string> extractRepeatedTagText(const std::string& sourceXml,
+                                                const std::string& tag) {
+    const std::regex tagRegex("<" + tag + ">([\\s\\S]*?)</" + tag + ">");
+    std::vector<std::string> values;
+    for (std::sregex_iterator it(sourceXml.begin(), sourceXml.end(), tagRegex), end; it != end;
+         ++it) {
+        values.push_back(xml::unescapeXML((*it)[1].str()));
+    }
+    return values;
+}
+
+std::unordered_map<std::string, std::string> extractCustomFields(const std::string& sourceXml) {
+    const std::regex fieldRegex("<field\\s+name=\"([^\"]*)\">([\\s\\S]*?)</field>");
+    std::unordered_map<std::string, std::string> fields;
+    for (std::sregex_iterator it(sourceXml.begin(), sourceXml.end(), fieldRegex), end; it != end;
+         ++it) {
+        fields[xml::unescapeXML((*it)[1].str())] = xml::unescapeXML((*it)[2].str());
+    }
+    return fields;
+}
+
+} // namespace
+
 // RawTextMetadata methods
 std::string RawTextMetadata::toXML() const {
     return xml::serializeMetadata(*this);
 }
 
-RawTextMetadata RawTextMetadata::fromXML(const std::string& xml) {
-    // Simple XML parsing - in production, use a proper XML parser
+RawTextMetadata RawTextMetadata::fromXML(const std::string& sourceXml) {
     RawTextMetadata metadata;
 
-    // Extract fields using regex (simplified)
-    std::regex idRegex("<id>(.*?)</id>");
-    std::regex sourceRegex("<source>(.*?)</source>");
-    std::regex titleRegex("<chatTitle>(.*?)</chatTitle>");
-    std::regex sessionRegex("<sessionId>(.*?)</sessionId>");
-    std::regex codebaseRegex("<codebase>(.*?)</codebase>");
+    auto assignText = [&sourceXml](std::string& target, const std::string& tag) {
+        if (auto value = extractTagText(sourceXml, tag)) {
+            target = *value;
+        }
+    };
 
-    std::smatch match;
-    if (std::regex_search(xml, match, idRegex)) {
-        metadata.id = xml::unescapeXML(match[1].str());
-    }
-    if (std::regex_search(xml, match, sourceRegex)) {
-        metadata.source = xml::unescapeXML(match[1].str());
-    }
-    if (std::regex_search(xml, match, titleRegex)) {
-        metadata.chatTitle = xml::unescapeXML(match[1].str());
-    }
-    if (std::regex_search(xml, match, sessionRegex)) {
-        metadata.sessionId = xml::unescapeXML(match[1].str());
-    }
-    if (std::regex_search(xml, match, codebaseRegex)) {
-        metadata.codebase = xml::unescapeXML(match[1].str());
-    }
+    assignText(metadata.id, "id");
+    assignText(metadata.source, "source");
+    assignText(metadata.chatTitle, "chatTitle");
+    assignText(metadata.sessionId, "sessionId");
+    assignText(metadata.userId, "userId");
+    assignText(metadata.contentType, "contentType");
+    assignText(metadata.language, "language");
+    assignText(metadata.codebase, "codebase");
+    assignText(metadata.filePath, "filePath");
+    assignText(metadata.userActivity, "userActivity");
+    assignText(metadata.llmTask, "llmTask");
+    assignText(metadata.parentId, "parentId");
 
-    // TODO: Parse other fields, tags, keywords, etc.
+    metadata.tags = extractRepeatedTagText(sourceXml, "tag");
+    metadata.relatedIds = extractRepeatedTagText(sourceXml, "relatedId");
+    metadata.keywords = extractRepeatedTagText(sourceXml, "keyword");
+    metadata.customFields = extractCustomFields(sourceXml);
+
+    if (auto importance = extractTagText(sourceXml, "importance")) {
+        try {
+            metadata.importance = std::stof(*importance);
+        } catch (const std::exception&) {
+            // Leave the default importance for malformed legacy metadata.
+            metadata.importance = 1.0f;
+        }
+    }
 
     return metadata;
 }
@@ -200,30 +231,30 @@ std::string RawTextEntry::toXML() const {
     return xml::serializeEntry(*this);
 }
 
-RawTextEntry RawTextEntry::fromXML(const std::string& xml) {
+RawTextEntry RawTextEntry::fromXML(const std::string& sourceXml) {
     RawTextEntry entry;
 
     // Extract metadata section
-    std::regex metadataRegex("<metadata>(.*?)</metadata>");
+    std::regex metadataRegex(R"(<metadata>([\s\S]*?)</metadata>)");
     std::smatch match;
-    if (std::regex_search(xml, match, metadataRegex)) {
+    if (std::regex_search(sourceXml, match, metadataRegex)) {
         entry.metadata = RawTextMetadata::fromXML(match[0].str());
     }
 
     // Extract content from CDATA
-    std::regex contentRegex("<content><!\\[CDATA\\[(.*?)\\]\\]></content>");
-    if (std::regex_search(xml, match, contentRegex)) {
+    std::regex contentRegex(R"(<content><!\[CDATA\[([\s\S]*?)\]\]></content>)");
+    if (std::regex_search(sourceXml, match, contentRegex)) {
         entry.content = match[1].str();
     }
 
     // Extract hash and size
     std::regex hashRegex("<contentHash>(.*?)</contentHash>");
-    if (std::regex_search(xml, match, hashRegex)) {
+    if (std::regex_search(sourceXml, match, hashRegex)) {
         entry.contentHash = match[1].str();
     }
 
     std::regex sizeRegex("<contentSize>(\\d+)</contentSize>");
-    if (std::regex_search(xml, match, sizeRegex)) {
+    if (std::regex_search(sourceXml, match, sizeRegex)) {
         entry.contentSize = std::stoull(match[1].str());
     }
 
@@ -354,18 +385,9 @@ public:
             // Serialize to XML
             std::string xmlData = entry.toXML();
 
-            // Compress if needed
-            std::vector<std::byte> dataToStore;
-            if (config_.enableCompression && text.size() > config_.compressionThreshold) {
-                // TODO: Compress xmlData
-                dataToStore.assign(
-                    reinterpret_cast<const std::byte*>(xmlData.data()),
-                    reinterpret_cast<const std::byte*>(xmlData.data() + xmlData.size()));
-            } else {
-                dataToStore.assign(
-                    reinterpret_cast<const std::byte*>(xmlData.data()),
-                    reinterpret_cast<const std::byte*>(xmlData.data() + xmlData.size()));
-            }
+            // TODO: Compress xmlData when compressor integration is available.
+            const auto* xmlBytes = reinterpret_cast<const std::byte*>(xmlData.data());
+            std::vector<std::byte> dataToStore(xmlBytes, xmlBytes + xmlData.size());
 
             // Store in storage engine
             auto storeResult = storage_->store(id, dataToStore);

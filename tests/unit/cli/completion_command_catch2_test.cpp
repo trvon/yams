@@ -97,6 +97,22 @@ std::string lineContaining(const std::string& text, std::string_view needle) {
     return text.substr(pos, lineEnd == std::string::npos ? std::string::npos : lineEnd - pos);
 }
 
+std::string stripCoverageProfilingDiagnostics(const std::string& text) {
+    std::istringstream input(text);
+    std::ostringstream filtered;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("profiling: ", 0) == 0) {
+            continue;
+        }
+        filtered << line;
+        if (!input.eof()) {
+            filtered << '\n';
+        }
+    }
+    return filtered.str();
+}
+
 auto findBuiltYamsCli() -> fs::path {
     std::vector<fs::path> bases;
     std::error_code ec;
@@ -371,9 +387,19 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
     const fs::path tempDir = yams::test::make_temp_dir("yams_zsh_completion_source_");
     const fs::path dataDir = tempDir / "data";
     fs::create_directories(dataDir);
-    const fs::path configPath = tempDir / "missing-config.toml";
+    const fs::path configPath = tempDir / "config.toml";
     const fs::path out = tempDir / "zsh-sourced-registration.out";
     const fs::path err = tempDir / "zsh-sourced-registration.err";
+    {
+        std::ofstream cfg(configPath);
+        cfg << "[core]\n";
+        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+    }
+
+    if (std::system("command -v zsh >/dev/null 2>&1") != 0) {
+        SKIP("zsh completion smoke test requires zsh on PATH");
+    }
+
     const std::string cmd =
         "env YAMS_CONFIG='" + configPath.string() + "' YAMS_DATA_DIR='" + dataDir.string() +
         "' YAMS_NON_INTERACTIVE=1 YAMS_CLI_DISABLE_DAEMON_AUTOSTART=1 "
@@ -383,19 +409,26 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
 
     const int rc = std::system(cmd.c_str());
     REQUIRE(WIFEXITED(rc));
-    REQUIRE((WEXITSTATUS(rc) == 0));
 
-    std::ifstream input(out);
-    REQUIRE(input.good());
-    std::string registered;
-    std::getline(input, registered);
-    CHECK((registered == "_yams"));
-
+    std::ifstream outInput(out);
+    const std::string stdoutOutput((std::istreambuf_iterator<char>(outInput)),
+                                   std::istreambuf_iterator<char>());
     std::ifstream errInput(err);
-    REQUIRE(errInput.good());
     const std::string stderrOutput((std::istreambuf_iterator<char>(errInput)),
                                    std::istreambuf_iterator<char>());
-    CHECK(stderrOutput.empty());
+    const std::string commandStderr = stripCoverageProfilingDiagnostics(stderrOutput);
+    INFO("zsh completion command: " << cmd);
+    INFO("zsh stdout: " << stdoutOutput);
+    INFO("zsh stderr: " << stderrOutput);
+    INFO("zsh stderr without coverage profiling diagnostics: " << commandStderr);
+    REQUIRE((WEXITSTATUS(rc) == 0));
+
+    std::string registered;
+    std::istringstream registeredInput(stdoutOutput);
+    std::getline(registeredInput, registered);
+    CHECK((registered == "_yams"));
+
+    CHECK(commandStderr.empty());
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
