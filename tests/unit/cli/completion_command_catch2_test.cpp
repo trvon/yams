@@ -97,6 +97,22 @@ std::string lineContaining(const std::string& text, std::string_view needle) {
     return text.substr(pos, lineEnd == std::string::npos ? std::string::npos : lineEnd - pos);
 }
 
+std::string stripCoverageProfilingDiagnostics(const std::string& text) {
+    std::istringstream input(text);
+    std::ostringstream filtered;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind("profiling: ", 0) == 0) {
+            continue;
+        }
+        filtered << line;
+        if (!input.eof()) {
+            filtered << '\n';
+        }
+    }
+    return filtered.str();
+}
+
 auto findBuiltYamsCli() -> fs::path {
     std::vector<fs::path> bases;
     std::error_code ec;
@@ -400,9 +416,11 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
     std::ifstream errInput(err);
     const std::string stderrOutput((std::istreambuf_iterator<char>(errInput)),
                                    std::istreambuf_iterator<char>());
+    const std::string commandStderr = stripCoverageProfilingDiagnostics(stderrOutput);
     INFO("zsh completion command: " << cmd);
     INFO("zsh stdout: " << stdoutOutput);
     INFO("zsh stderr: " << stderrOutput);
+    INFO("zsh stderr without coverage profiling diagnostics: " << commandStderr);
     REQUIRE((WEXITSTATUS(rc) == 0));
 
     std::string registered;
@@ -410,7 +428,7 @@ TEST_CASE("CompletionCommand - sourced zsh completion registers compdef",
     std::getline(registeredInput, registered);
     CHECK((registered == "_yams"));
 
-    CHECK(stderrOutput.empty());
+    CHECK(commandStderr.empty());
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);

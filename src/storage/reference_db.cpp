@@ -366,22 +366,25 @@ public:
 
     // Backup database
     void backup(const std::filesystem::path& destPath) {
+        const auto dest = destPath.string();
         sqlite3* destDb = nullptr;
-        int rc = sqlite3_open(destPath.string().c_str(), &destDb);
+        int rc = sqlite3_open(dest.c_str(), &destDb);
         if (rc != SQLITE_OK) {
             std::string errMsg =
                 destDb ? sqlite3_errmsg(destDb) : "Failed to open backup destination";
             if (destDb) {
                 sqlite3_close(destDb);
             }
-            throw std::runtime_error(errMsg);
+            throw std::runtime_error(
+                yamsfmt::format("Failed to open backup destination '{}': {}", dest, errMsg));
         }
 
         sqlite3_backup* backup = sqlite3_backup_init(destDb, "main", db_, "main");
         if (!backup) {
             std::string errMsg = sqlite3_errmsg(destDb);
             sqlite3_close(destDb);
-            throw std::runtime_error(errMsg);
+            throw std::runtime_error(
+                yamsfmt::format("Failed to initialize backup to '{}': {}", dest, errMsg));
         }
 
         // Copy entire database

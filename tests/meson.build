@@ -5,7 +5,6 @@
 #Catch2 dependency for modern test framework(PBI - 050)
 #Prefer system installs, but fall back to Meson wrap subproject when available.
 catch2_dep = dependency('catch2', required: false, fallback: ['catch2', 'catch2_dep'])
-catch2_main_dep = dependency('catch2-with-main', required: false, fallback: ['catch2', 'catch2_with_main_dep'])
 
 #Get Catch2 partial dependency with includes for test builds
 catch2_compile_dep = []
@@ -173,6 +172,20 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
   '-Wno-error=unused-lambda-capture',
   '-Wno-error=missing-field-initializers',
 ])
+
+catch2_main_dep = disabler()
+if catch2_dep.found()
+  catch2_yams_main_lib = static_library('catch2_yams_main',
+    files('support/catch2_main.cpp'),
+    dependencies: [catch2_dep],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  catch2_main_dep = declare_dependency(
+    link_with: catch2_yams_main_lib,
+    dependencies: [catch2_dep],
+  )
+endif
 
 # Meson-native test registration via structured subdirs (no shell globs).
 # Unit tests are now individual Catch2 executables; tests/unit keeps only a
