@@ -69,6 +69,29 @@ TEST_CASE("query_expansion generates anchored subphrases from salient terms",
     }));
 }
 
+TEST_CASE("query_expansion handles empty budgets and short queries",
+          "[search][helpers][query_expansion][catch2]") {
+    CHECK(generateAnchoredSubPhrases("alpha beta gamma", 0, nullptr).empty());
+    CHECK(generateAnchoredSubPhrases("alpha beta", 4, nullptr).empty());
+
+    std::unordered_map<std::string, float> idf;
+    CHECK(generateFallbackQueryConcepts("CD3 receptor", idf, 0).empty());
+    CHECK(generateAggressiveFtsFallbackClauses("CD3 receptor", 0, idf).empty());
+    CHECK(generateAggressiveFtsFallbackClauses("", 4, idf).empty());
+}
+
+TEST_CASE("query_expansion fallback salience rewards biomedical-looking tokens",
+          "[search][helpers][query_expansion][catch2]") {
+    const QueryToken shortToken{"ab", "ab", 0};
+    const QueryToken mediumToken{"kinase", "kinase", 0};
+    const QueryToken longToken{"neuroinflammation", "neuroinflammation", 0};
+    const QueryToken compactSymbol{"CD3", "cd3", 0};
+
+    CHECK(tokenFallbackSalience(mediumToken) > tokenFallbackSalience(shortToken));
+    CHECK(tokenFallbackSalience(longToken) > tokenFallbackSalience(mediumToken));
+    CHECK(tokenFallbackSalience(compactSymbol) > tokenFallbackSalience(longToken));
+}
+
 TEST_CASE("query_expansion drops weak numeric windows and keeps content phrases",
           "[search][helpers][query_expansion][catch2]") {
     auto phrases = generateAnchoredSubPhrases(
@@ -98,6 +121,27 @@ TEST_CASE("query_expansion creates fallback concepts without extractor output",
     CHECK_FALSE(concepts.front().type.empty());
 }
 
+TEST_CASE("query_expansion infers fallback concept types from surface text",
+          "[search][helpers][query_expansion][catch2]") {
+    std::unordered_map<std::string, float> idf = {
+        {"receptor", 2.0f}, {"tumor", 1.8f}, {"activation", 1.6f}, {"monocyte", 1.4f}};
+
+    auto hasType = [](const std::vector<QueryConcept>& concepts, std::string_view type) {
+        return std::any_of(concepts.begin(), concepts.end(),
+                           [&](const auto& item) { return item.type == type; });
+    };
+
+    auto protein = generateFallbackQueryConcepts("CD3 receptor", idf, 4);
+    auto disease = generateFallbackQueryConcepts("tumor disease", idf, 4);
+    auto process = generateFallbackQueryConcepts("immune activation response", idf, 4);
+    auto cell = generateFallbackQueryConcepts("monocyte cell", idf, 4);
+
+    CHECK(hasType(protein, "protein"));
+    CHECK(hasType(disease, "disease"));
+    CHECK(hasType(process, "biological_process"));
+    CHECK(hasType(cell, "cell"));
+}
+
 TEST_CASE("query_expansion aggressive fallback emits bounded weighted clauses",
           "[search][helpers][query_expansion][catch2]") {
     std::unordered_map<std::string, float> idf = {
@@ -113,6 +157,16 @@ TEST_CASE("query_expansion aggressive fallback emits bounded weighted clauses",
     CHECK(std::all_of(clauses.begin(), clauses.end(), [](const auto& clause) {
         return clause.penalty >= 0.1f && clause.penalty <= 1.0f;
     }));
+}
+
+TEST_CASE("query_expansion aggressive fallback emits single-token fallback clauses",
+          "[search][helpers][query_expansion][catch2]") {
+    std::unordered_map<std::string, float> idf = {{"receptor", 2.0f}};
+
+    auto clauses = generateAggressiveFtsFallbackClauses("receptor", 3, idf);
+    REQUIRE(clauses.size() == 1);
+    CHECK(clauses.front().query == "receptor");
+    CHECK(clauses.front().penalty == Approx(0.55f));
 }
 
 TEST_CASE("graph_expansion tokenizes biomedical query terms and weights node types",

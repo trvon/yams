@@ -104,7 +104,15 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
             }
             co_return makeError(r.error().code, r.error().message);
         }
-        // Model is now loaded via provider, embeddings are ready
+        ModelLoadResponse resp;
+        resp.success = true;
+        resp.modelName = req.modelName;
+        resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
+        resp.loadTimeMs = 0;
+
+        // Model is now loaded via provider and the success response is complete. Only schedule
+        // follow-up rebuild work after all response fields have been collected, so late provider
+        // failures do not leave detached background work running during error teardown.
         try {
             if (serviceManager_ && lifecycle_) {
                 lifecycle_->setSubsystemDegraded("embedding", false, "");
@@ -158,11 +166,6 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         } catch (...) {
             // Intentional best-effort path; keep the primary operation unaffected.
         }
-        ModelLoadResponse resp;
-        resp.success = true;
-        resp.modelName = req.modelName;
-        resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
-        resp.loadTimeMs = 0;
         co_return resp;
     } catch (const std::exception& e) {
         co_return makeError(ErrorCode::InternalError,

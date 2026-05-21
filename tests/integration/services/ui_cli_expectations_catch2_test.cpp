@@ -292,6 +292,25 @@ waitForDocumentByExactPath(MetadataRepo& repo, const fs::path& path,
     return std::nullopt;
 }
 
+template <typename WriteFn>
+auto retryKgWriteForTest(WriteFn writeFn,
+                         std::chrono::milliseconds timeout = std::chrono::milliseconds(3000)) {
+    auto result = writeFn();
+    if (result) {
+        return result;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(50ms);
+        result = writeFn();
+        if (result) {
+            return result;
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: grep paths-only honors include and tags",
@@ -1448,47 +1467,47 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes rela
     fileNode.nodeKey = "path:file:" + doc.filePath;
     fileNode.type = std::string("file");
     fileNode.label = doc.fileName;
-    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    auto fileNodeId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(fileNode); });
     REQUIRE(fileNodeId);
 
     yams::metadata::KGNode docNode;
     docNode.nodeKey = "doc:" + doc.sha256Hash;
     docNode.type = std::string("document");
     docNode.label = doc.fileName;
-    auto docNodeId = ctx.kgStore->upsertNode(docNode);
+    auto docNodeId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(docNode); });
     REQUIRE(docNodeId);
 
     yams::metadata::KGNode symbolOne;
     symbolOne.nodeKey = "symbol:cli:json:one:" + doc.sha256Hash;
     symbolOne.type = std::string("symbol");
     symbolOne.label = std::string("CliJsonOne");
-    auto symbolOneId = ctx.kgStore->upsertNode(symbolOne);
+    auto symbolOneId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(symbolOne); });
     REQUIRE(symbolOneId);
 
     yams::metadata::KGNode symbolTwo;
     symbolTwo.nodeKey = "symbol:cli:json:two:" + doc.sha256Hash;
     symbolTwo.type = std::string("symbol");
     symbolTwo.label = std::string("CliJsonTwo");
-    auto symbolTwoId = ctx.kgStore->upsertNode(symbolTwo);
+    auto symbolTwoId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(symbolTwo); });
     REQUIRE(symbolTwoId);
 
     yams::metadata::KGEdge versionEdge;
     versionEdge.srcNodeId = fileNodeId.value();
     versionEdge.dstNodeId = docNodeId.value();
     versionEdge.relation = "has-version";
-    REQUIRE(ctx.kgStore->addEdge(versionEdge));
+    REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(versionEdge); }));
 
     yams::metadata::KGEdge definesOne;
     definesOne.srcNodeId = docNodeId.value();
     definesOne.dstNodeId = symbolOneId.value();
     definesOne.relation = "defines";
-    REQUIRE(ctx.kgStore->addEdge(definesOne));
+    REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(definesOne); }));
 
     yams::metadata::KGEdge definesTwo;
     definesTwo.srcNodeId = docNodeId.value();
     definesTwo.dstNodeId = symbolTwoId.value();
     definesTwo.relation = "defines";
-    REQUIRE(ctx.kgStore->addEdge(definesTwo));
+    REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(definesTwo); }));
 
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     (void)searchSvc->lightIndexForHash(doc.sha256Hash);
@@ -1566,34 +1585,34 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes rel
     fileNode.nodeKey = "path:file:" + doc.filePath;
     fileNode.type = std::string("file");
     fileNode.label = doc.fileName;
-    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    auto fileNodeId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(fileNode); });
     REQUIRE(fileNodeId);
 
     yams::metadata::KGNode docNode;
     docNode.nodeKey = "doc:" + doc.sha256Hash;
     docNode.type = std::string("document");
     docNode.label = doc.fileName;
-    auto docNodeId = ctx.kgStore->upsertNode(docNode);
+    auto docNodeId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(docNode); });
     REQUIRE(docNodeId);
 
     yams::metadata::KGNode symbolNode;
     symbolNode.nodeKey = "symbol:cli:human:" + doc.sha256Hash;
     symbolNode.type = std::string("symbol");
     symbolNode.label = std::string("CliHuman");
-    auto symbolNodeId = ctx.kgStore->upsertNode(symbolNode);
+    auto symbolNodeId = retryKgWriteForTest([&]() { return ctx.kgStore->upsertNode(symbolNode); });
     REQUIRE(symbolNodeId);
 
     yams::metadata::KGEdge versionEdge;
     versionEdge.srcNodeId = fileNodeId.value();
     versionEdge.dstNodeId = docNodeId.value();
     versionEdge.relation = "has-version";
-    REQUIRE(ctx.kgStore->addEdge(versionEdge));
+    REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(versionEdge); }));
 
     yams::metadata::KGEdge definesEdge;
     definesEdge.srcNodeId = docNodeId.value();
     definesEdge.dstNodeId = symbolNodeId.value();
     definesEdge.relation = "defines";
-    REQUIRE(ctx.kgStore->addEdge(definesEdge));
+    REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(definesEdge); }));
 
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     (void)searchSvc->lightIndexForHash(doc.sha256Hash);

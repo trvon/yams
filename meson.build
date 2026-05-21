@@ -851,17 +851,18 @@ if get_option('b_coverage')
     endif
 
     coverage_report_target = custom_target('coverage-report',
-      output: 'coverage-report.stamp',
+      output: 'coverage.html',
       command: [
         gcovr,
         '--root', meson.project_source_root(),
         '--gcov-executable', _gcov_executable,
         '--object-directory', meson.project_build_root(),
+        '--merge-mode-functions', 'merge-use-line-min',
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
         '--html', '--html-details',
-        '--output', join_paths(meson.project_build_root(), 'coverage', 'index.html'),
+        '--output', '@OUTPUT@',
         meson.project_build_root(),
       ],
       build_by_default: false,
@@ -875,6 +876,7 @@ if get_option('b_coverage')
         '--root', meson.project_source_root(),
         '--gcov-executable', _gcov_executable,
         '--object-directory', meson.project_build_root(),
+        '--merge-mode-functions', 'merge-use-line-min',
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -886,7 +888,7 @@ if get_option('b_coverage')
       build_always_stale: true,
     )
 
-    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage-report.stamp')
+    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage.html')
   else
     warning('gcovr not found. Install gcovr to generate coverage reports.')
   endif

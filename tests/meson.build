@@ -1111,6 +1111,7 @@ if catch2_dep.found()
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/entity_linker_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
+      'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
