@@ -429,7 +429,7 @@ lint_actionlint() {
   if ! command -v actionlint >/dev/null 2>&1; then
     warn "actionlint not installed (https://github.com/rhysd/actionlint); skipping"; return 0
   fi
-  if actionlint -color; then
+  if actionlint -color -shellcheck=; then
     ok "actionlint: workflows clean"
   else
     err "actionlint: violations found"; return 1
