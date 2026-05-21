@@ -591,8 +591,9 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
     REQUIRE(sm != nullptr);
     auto ctx = sm->getAppContext();
 
-    bool visible = false;
-    for (int attempt = 0; attempt < 60 && !visible; ++attempt) {
+    bool alphaVisible = false;
+    bool betaVisible = false;
+    for (int attempt = 0; attempt < 60 && (!alphaVisible || !betaVisible); ++attempt) {
         yams::metadata::DocumentQueryOptions queryOpts;
         queryOpts.pathPrefix = (root() / "ingest" / "listmode").string();
         queryOpts.prefixIsDirectory = true;
@@ -600,12 +601,18 @@ TEST_CASE_METHOD(UiCliExpectationsFixture,
         queryOpts.limit = 10;
         auto docsRes = ctx.metadataRepo->queryDocuments(queryOpts);
         REQUIRE(docsRes);
-        visible = !docsRes.value().empty();
-        if (!visible) {
+        alphaVisible = false;
+        betaVisible = false;
+        for (const auto& doc : docsRes.value()) {
+            alphaVisible = alphaVisible || doc.filePath.find("alpha.md") != std::string::npos;
+            betaVisible = betaVisible || doc.filePath.find("beta.txt") != std::string::npos;
+        }
+        if (!alphaVisible || !betaVisible) {
             std::this_thread::sleep_for(50ms);
         }
     }
-    REQUIRE(visible);
+    REQUIRE(alphaVisible);
+    REQUIRE(betaVisible);
 
     ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath().string());
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");

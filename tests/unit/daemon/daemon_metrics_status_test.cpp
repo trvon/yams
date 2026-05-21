@@ -1677,6 +1677,10 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
         svc.__test_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+        struct ShutdownBeforeEnvRestore {
+            ServiceManager& svc;
+            ~ShutdownBeforeEnvRestore() { svc.shutdown(); }
+        } shutdownBeforeEnvRestore{svc};
 
         LoadModelRequest req;
         req.modelName = "timeout-clamped-model";
@@ -1692,6 +1696,10 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
         svc.__test_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+        struct ShutdownBeforeEnvRestore {
+            ServiceManager& svc;
+            ~ShutdownBeforeEnvRestore() { svc.shutdown(); }
+        } shutdownBeforeEnvRestore{svc};
 
         LoadModelRequest req;
         req.modelName = "timeout-invalid-model";

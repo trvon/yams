@@ -58,12 +58,13 @@ TEST_CASE("HotzoneManager decays entries and supports immediate decay",
 
     manager.record("doc-a", 1.0);
     const double initial = manager.getBoost("doc-a");
-    manager.decaySweep(std::chrono::system_clock::now() + std::chrono::hours(2));
-    CHECK(manager.getBoost("doc-a") < initial);
+    const auto decayAt = std::chrono::system_clock::now() + std::chrono::hours(2);
+    manager.decaySweep(decayAt);
+    CHECK(manager.getBoost("doc-a", decayAt) < initial);
 
     cfg.half_life_hours = 0.0;
     manager.setConfig(cfg);
-    manager.decaySweep(std::chrono::system_clock::now() + std::chrono::hours(1));
+    manager.decaySweep(decayAt + std::chrono::hours(1));
     CHECK(manager.size() == 0);
 }
 

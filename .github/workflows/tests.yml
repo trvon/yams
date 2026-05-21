@@ -82,18 +82,31 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+          set -euo pipefail
+          COMPILE_DB_DIR=""
+          if [ -f builddir/compile_commands.json ]; then
+            COMPILE_DB_DIR="builddir"
+          elif [ -f compile_commands.json ]; then
+            COMPILE_DB_DIR="."
+          else
+            echo "No compile_commands.json found; skipping clang-tidy." | tee clang-tidy-pr.txt
+            exit 0
+          fi
+
+          mapfile -t CHANGED_FILES < <(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
             | grep -E '\.(cpp|h|hpp|cc|cxx)$' \
             | grep -v -E '(third_party|external|subprojects|\.pb\.(h|cc))' \
             || true)
-          if [ -z "$CHANGED" ]; then
+          if [ "${#CHANGED_FILES[@]}" -eq 0 ]; then
             echo "No C++ files changed in this PR."
             exit 0
           fi
-          echo "Running clang-tidy on: $CHANGED"
+          printf 'Running clang-tidy on:\n'
+          printf '  %s\n' "${CHANGED_FILES[@]}"
           clang-tidy \
+            -p "$COMPILE_DB_DIR" \
             --warnings-as-errors='bugprone-*,clang-analyzer-*,concurrency-*' \
-            $CHANGED \
+            "${CHANGED_FILES[@]}" \
             2>&1 | tee clang-tidy-pr.txt
 
       - name: Upload clang-tidy results
