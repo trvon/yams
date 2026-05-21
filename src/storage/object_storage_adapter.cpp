@@ -193,7 +193,7 @@ static int c_del(void* backend, const char* key, const char* /*opts_json*/) {
     if (!h || !h->impl || !key)
         return -1;
     auto r = h->impl->remove(key);
-    return r ? 0 : -1;
+    return r ? -1 : 0;
 }
 
 static int c_list(void* backend, const char* prefix, char** out_list_json, const char* opts_json) {
