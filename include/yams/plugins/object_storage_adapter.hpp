@@ -12,15 +12,10 @@ namespace yams::plugins::adapter {
 // Wrap a C ABI v1 object_storage into a C++ IObjectStorageBackend
 std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* v1_iface);
 
-// Expose a C ABI v1 struct from a C++ IObjectStorageBackend implementation.
-// The returned struct holds function pointers that forward into the C++ object.
-// Lifetime: caller owns the returned struct; destroy() will delete the wrapper and release the
-// impl.
-yams_object_storage_v1* expose_as_c_abi(std::shared_ptr<IObjectStorageBackend> impl);
-
-// Variant that also returns an opaque backend handle to pass into the function table
-// when invoking methods directly without calling create(). The caller is responsible
-// for eventually calling destroy(handle) via the function table to free resources.
+// Expose a C ABI v1 struct and an opaque backend handle from a C++ IObjectStorageBackend.
+// The v1 create() callback cannot bind C++ state because it receives no table/user-data pointer,
+// so callers must pass the returned handle directly to table methods and eventually call
+// destroy(handle) via the function table.
 std::pair<yams_object_storage_v1*, void*>
 expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl);
 

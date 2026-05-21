@@ -51,6 +51,10 @@ TEST_CASE("ObjectStorageAdapter list produces prefixes when delimiter provided",
     REQUIRE(table != nullptr);
     REQUIRE(handle != nullptr);
 
+    void* created = reinterpret_cast<void*>(0x1);
+    CHECK(table->create("{}", &created) != 0);
+    CHECK(created == nullptr);
+
     const char* prefix = "a/";
     const char* opts = R"({"delimiter":"/","maxKeys":1000})";
     char* out = nullptr;
