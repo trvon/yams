@@ -6,10 +6,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sqlite3.h>
 #include <chrono>
 #include <filesystem>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 
 using namespace std::chrono_literals;
 using namespace yams::metadata;
@@ -146,6 +148,39 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
     CHECK(total >= 2u);
     CHECK(stats.slowHolderCount >= 1u);
     CHECK(stats.maxHolderMicros >= 50'000u);
+
+    pool.shutdown();
+}
+
+TEST_CASE("Read-only connection pool opens SQLite read-only",
+          "[metadata][connection_pool][readonly]") {
+    const auto dbPath = make_db_path("pool_readonly_");
+
+    {
+        Database seed;
+        REQUIRE(seed.open(dbPath.string(), ConnectionMode::Create).has_value());
+        REQUIRE(seed.execute("CREATE TABLE readonly_probe(id INTEGER PRIMARY KEY)").has_value());
+    }
+
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.readOnly = true;
+
+    ConnectionPool pool(dbPath.string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    {
+        auto conn = pool.acquire();
+        REQUIRE(conn.has_value());
+        auto pooled = std::move(conn).value();
+        auto& db = **pooled;
+        REQUIRE(db.rawHandle() != nullptr);
+        CHECK(sqlite3_db_readonly(db.rawHandle(), "main") == 1);
+
+        auto write = db.execute("CREATE TABLE should_not_write(id INTEGER)");
+        CHECK_FALSE(write.has_value());
+    }
 
     pool.shutdown();
 }

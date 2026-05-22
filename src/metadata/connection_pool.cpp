@@ -559,7 +559,8 @@ Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
     YAMS_ZONE_SCOPED_N("MetadataPool::createConnection");
     auto db = std::make_unique<Database>();
 
-    auto openResult = db->open(dbPath_, ConnectionMode::Create);
+    const auto mode = config_.readOnly ? ConnectionMode::ReadOnly : ConnectionMode::Create;
+    auto openResult = db->open(dbPath_, mode);
     if (!openResult) {
         return openResult.error();
     }
@@ -597,7 +598,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
                                        // from clamped chrono duration, not external SQL.
 
     // Enable WAL mode if requested.
-    if (config_.enableWAL) {
+    if (config_.enableWAL && !config_.readOnly) {
         auto walResult = db.enableWAL();
         if (!walResult) {
             spdlog::warn("WAL enable failed: {}", walResult.error().message);
