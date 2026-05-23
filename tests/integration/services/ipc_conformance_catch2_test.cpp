@@ -70,6 +70,12 @@ public:
     const fs::path& storageDir() const { return harness_->dataDir(); }
     fs::path root() const { return harness_->dataDir().parent_path(); }
 
+    void stopDaemon() {
+        if (harness_) {
+            harness_->stop();
+        }
+    }
+
 private:
     static bool canBindUnixSocketHere() {
         try {
@@ -149,20 +155,24 @@ TEST_CASE_METHOD(IpcConformanceFixture, "IpcConformance: second daemon startup i
                  "[catch2][integration][services][ipc]") {
     start();
 
+    const auto dataDir = storageDir();
+    const auto sock = socketPath();
+    const auto rootDir = root();
+
+    // Two YamsDaemon instances cannot safely overlap in one process: they share global
+    // client/server singletons. Exercise the same-dir restart path without in-process takeover.
+    stopDaemon();
+
     yams::daemon::DaemonConfig cfg;
-    cfg.dataDir = storageDir();
-    cfg.socketPath = socketPath();
-    cfg.pidFile = root() / "daemon.pid";
-    cfg.logFile = root() / "daemon-second.log";
+    cfg.dataDir = dataDir;
+    cfg.socketPath = sock;
+    cfg.pidFile = rootDir / "daemon.pid";
+    cfg.logFile = rootDir / "daemon-second.log";
 
     auto other = std::make_unique<yams::daemon::YamsDaemon>(cfg);
     auto res = other->start();
-    if (res) {
-        other->stop();
-        SUCCEED("Second daemon performed controlled takeover/startup and stopped cleanly");
-    } else {
-        CHECK(res.error().code == yams::ErrorCode::InvalidState);
-    }
+    REQUIRE(res);
+    other->stop();
 }
 
 TEST_CASE("IpcConformance: unreachable socket error shape",
