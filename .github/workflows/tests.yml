@@ -754,6 +754,7 @@ jobs:
             --root "$GITHUB_WORKSPACE"
             --gcov-executable "$GCOV_EXECUTABLE"
             --object-directory "$BUILD_DIR"
+            --exclude-directories "$BUILD_DIR/plugins"
             --merge-mode-functions merge-use-line-min
             --filter "$GITHUB_WORKSPACE/src"
             --filter "$GITHUB_WORKSPACE/include"
