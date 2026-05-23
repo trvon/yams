@@ -1493,6 +1493,185 @@ TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
     CHECK(afterRemove.value()->centroidWeight == 1);
 }
 
+TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
+          "[unit][metadata][repository][path-tree]") {
+    MetadataRepositoryFixture fix;
+
+    auto missingDoc = makeDocumentWithPath("/repair/missing.txt", "path-tree-missing-hash");
+    auto treeDocA = makeDocumentWithPath("/repair/tree/a.txt", "path-tree-a-hash");
+    auto treeDocB = makeDocumentWithPath("/repair/tree/b.txt", "path-tree-b-hash");
+
+    auto missingId = fix.repository_->insertDocument(missingDoc);
+    auto treeAId = fix.repository_->insertDocument(treeDocA);
+    auto treeBId = fix.repository_->insertDocument(treeDocB);
+    REQUIRE(missingId.has_value());
+    REQUIRE(treeAId.has_value());
+    REQUIRE(treeBId.has_value());
+
+    treeDocA.id = treeAId.value();
+    treeDocB.id = treeBId.value();
+    REQUIRE(
+        fix.repository_->upsertPathTreeForDocument(treeDocA, treeDocA.id, true, {}).has_value());
+    REQUIRE(
+        fix.repository_->upsertPathTreeForDocument(treeDocB, treeDocB.id, true, {}).has_value());
+
+    auto missingCount = fix.repository_->countDocsMissingPathTree();
+    REQUIRE(missingCount.has_value());
+    CHECK(missingCount.value() == 1);
+
+    auto missingDocs = fix.repository_->findDocsMissingPathTree(5);
+    REQUIRE(missingDocs.has_value());
+    REQUIRE(missingDocs.value().size() == 1);
+    CHECK(missingDocs.value().front().sha256Hash == missingDoc.sha256Hash);
+
+    auto rootChildren = fix.repository_->listPathTreeChildren("/", 10);
+    REQUIRE(rootChildren.has_value());
+    auto repairIt =
+        std::find_if(rootChildren.value().begin(), rootChildren.value().end(),
+                     [](const PathTreeNode& node) { return node.fullPath == "/repair"; });
+    REQUIRE(repairIt != rootChildren.value().end());
+    CHECK(repairIt->docCount == 2);
+
+    auto repairChildren = fix.repository_->listPathTreeChildren("/repair", 10);
+    REQUIRE(repairChildren.has_value());
+    REQUIRE(repairChildren.value().size() == 1);
+    CHECK(repairChildren.value().front().fullPath == "/repair/tree");
+    CHECK(repairChildren.value().front().docCount == 2);
+
+    auto limitedChildren = fix.repository_->listPathTreeChildren("/repair/tree", 1);
+    REQUIRE(limitedChildren.has_value());
+    REQUIRE(limitedChildren.value().size() == 1);
+    CHECK(limitedChildren.value().front().fullPath == "/repair/tree/a.txt");
+
+    auto missingParentChildren = fix.repository_->listPathTreeChildren("/repair/missing.txt", 10);
+    REQUIRE(missingParentChildren.has_value());
+    CHECK(missingParentChildren.value().empty());
+
+    auto prefixDocs = fix.repository_->findDocumentsByPathTreePrefix("/repair/tree", true, 10);
+    REQUIRE(prefixDocs.has_value());
+    std::vector<std::string> hashes;
+    for (const auto& doc : prefixDocs.value()) {
+        hashes.push_back(doc.sha256Hash);
+    }
+    CHECK(std::find(hashes.begin(), hashes.end(), treeDocA.sha256Hash) != hashes.end());
+    CHECK(std::find(hashes.begin(), hashes.end(), treeDocB.sha256Hash) != hashes.end());
+    CHECK(std::find(hashes.begin(), hashes.end(), missingDoc.sha256Hash) == hashes.end());
+}
+
+TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
+          "[unit][metadata][repository][tree-diff]") {
+    MetadataRepositoryFixture fix;
+
+    TreeSnapshotRecord base;
+    base.snapshotId = "snapshot-base";
+    base.rootTreeHash = "root-base";
+    base.createdTime = 100;
+    base.fileCount = 1;
+    base.metadata["directory_path"] = "/repo";
+    base.metadata["snapshot_label"] = "base";
+    base.metadata["git_commit"] = "abc123";
+    base.metadata["git_branch"] = "main";
+    base.metadata["git_remote"] = "origin";
+
+    TreeSnapshotRecord target = base;
+    target.snapshotId = "snapshot-target";
+    target.rootTreeHash = "root-target";
+    target.createdTime = 200;
+    target.fileCount = 2;
+    target.metadata["snapshot_label"] = "target";
+    target.metadata["git_commit"] = "def456";
+
+    REQUIRE(fix.repository_->upsertTreeSnapshot(base).has_value());
+    REQUIRE(fix.repository_->upsertTreeSnapshot(target).has_value());
+
+    auto snapshots = fix.repository_->listTreeSnapshots(10);
+    REQUIRE(snapshots.has_value());
+    REQUIRE(snapshots.value().size() >= 2);
+    CHECK(snapshots.value().front().snapshotId == "snapshot-target");
+    CHECK(snapshots.value().front().metadata.at("snapshot_label") == "target");
+    CHECK(snapshots.value().front().metadata.at("git_commit") == "def456");
+    CHECK(snapshots.value().front().fileCount == 2);
+
+    TreeDiffDescriptor descriptor;
+    descriptor.baseSnapshotId = base.snapshotId;
+    descriptor.targetSnapshotId = target.snapshotId;
+    descriptor.computedAt = 300;
+    descriptor.status = "pending";
+    auto diffId = fix.repository_->beginTreeDiff(descriptor);
+    REQUIRE(diffId.has_value());
+    REQUIRE(diffId.value() > 0);
+
+    TreeChangeRecord added;
+    added.type = TreeChangeType::Added;
+    added.newPath = "/repo/src/new.cpp";
+    added.newHash = "new-hash";
+    added.mode = 0644;
+    added.contentDeltaHash = "delta-hash";
+
+    TreeChangeRecord moved;
+    moved.type = TreeChangeType::Moved;
+    moved.oldPath = "/repo/src/old.cpp";
+    moved.newPath = "/repo/include/old.hpp";
+    moved.oldHash = "old-hash";
+    moved.newHash = "old-hash";
+
+    TreeChangeRecord deletedDirectory;
+    deletedDirectory.type = TreeChangeType::Deleted;
+    deletedDirectory.oldPath = "/repo/tmp";
+    deletedDirectory.isDirectory = true;
+
+    REQUIRE(fix.repository_->appendTreeChanges(diffId.value(), {added, moved, deletedDirectory})
+                .has_value());
+
+    TreeDiffQuery allChanges;
+    allChanges.baseSnapshotId = base.snapshotId;
+    allChanges.targetSnapshotId = target.snapshotId;
+    allChanges.limit = 10;
+    auto changes = fix.repository_->listTreeChanges(allChanges);
+    REQUIRE(changes.has_value());
+    REQUIRE(changes.value().size() == 3);
+    CHECK(changes.value()[0].type == TreeChangeType::Added);
+    CHECK(changes.value()[1].type == TreeChangeType::Moved);
+    CHECK(changes.value()[2].type == TreeChangeType::Deleted);
+
+    TreeDiffQuery addedUnderSrc;
+    addedUnderSrc.baseSnapshotId = base.snapshotId;
+    addedUnderSrc.targetSnapshotId = target.snapshotId;
+    addedUnderSrc.pathPrefix = "/repo/src";
+    addedUnderSrc.typeFilter = TreeChangeType::Added;
+    auto filtered = fix.repository_->listTreeChanges(addedUnderSrc);
+    REQUIRE(filtered.has_value());
+    REQUIRE(filtered.value().size() == 1);
+    CHECK(filtered.value().front().newPath == added.newPath);
+    REQUIRE(filtered.value().front().mode.has_value());
+    CHECK(filtered.value().front().mode.value() == 0644);
+    REQUIRE(filtered.value().front().contentDeltaHash.has_value());
+    CHECK(filtered.value().front().contentDeltaHash.value() == "delta-hash");
+
+    REQUIRE(fix.repository_->finalizeTreeDiff(diffId.value(), changes.value().size(), "complete")
+                .has_value());
+
+    auto verifyStatus = fix.pool_->withConnection([&](Database& db) -> Result<void> {
+        auto stmtResult = db.prepare(R"(
+            SELECT files_added, files_deleted, files_modified, files_renamed, status
+            FROM tree_diffs WHERE diff_id = ?
+        )");
+        REQUIRE(stmtResult.has_value());
+        auto& stmt = stmtResult.value();
+        REQUIRE(stmt.bind(1, diffId.value()).has_value());
+        auto step = stmt.step();
+        REQUIRE(step.has_value());
+        REQUIRE(step.value());
+        CHECK(stmt.getInt64(0) == 1);
+        CHECK(stmt.getInt64(1) == 0);
+        CHECK(stmt.getInt64(2) == 0);
+        CHECK(stmt.getInt64(3) == 1);
+        CHECK(stmt.getString(4) == "complete");
+        return Result<void>();
+    });
+    REQUIRE(verifyStatus.has_value());
+}
+
 // --- batchInsertContentAndIndex counter accuracy tests ---
 
 TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and indexed counters",

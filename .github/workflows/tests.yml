@@ -524,7 +524,11 @@ jobs:
           export ENABLE_TSAN=false
 
           chmod +x setup.sh
-          $ARCH_PREFIX ./setup.sh Debug
+          SETUP_ARGS=(Debug)
+          if [ "${{ matrix.coverage }}" = "true" ]; then
+            SETUP_ARGS+=(--coverage)
+          fi
+          $ARCH_PREFIX ./setup.sh "${SETUP_ARGS[@]}"
           # Source Conan build env so meson compile uses the same meson version
           # that setup.sh used for meson setup (Conan provides meson 1.10.x which
           # creates build.dat incompatible with older system meson).
@@ -740,24 +744,49 @@ jobs:
         if: matrix.coverage == true
         shell: bash
         run: |
+          set -euo pipefail
           pip3 install gcovr
-          gcovr --root "$GITHUB_WORKSPACE" \
-            --exclude 'tests/*' \
-            --exclude '_deps/*' \
-            --exclude 'build/*' \
+          GCOV_EXECUTABLE="gcov"
+          if command -v llvm-cov >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; then
+            GCOV_EXECUTABLE="llvm-cov gcov -p"
+          fi
+          COMMON_GCOVR_ARGS=(
+            --root "$GITHUB_WORKSPACE"
+            --gcov-executable "$GCOV_EXECUTABLE"
+            --object-directory "$BUILD_DIR"
+            --merge-mode-functions merge-use-line-min
+            --filter "$GITHUB_WORKSPACE/src"
+            --filter "$GITHUB_WORKSPACE/include"
+            --exclude "$GITHUB_WORKSPACE/src/benchmarks"
+            "$BUILD_DIR"
+          )
+          gcovr "${COMMON_GCOVR_ARGS[@]}" \
             --html --html-details \
-            --output "${{ env.BUILD_DIR }}/coverage.html"
-          gcovr --root "$GITHUB_WORKSPACE" \
-            --exclude 'tests/*' \
-            --exclude '_deps/*' \
-            --exclude 'build/*' \
-            --xml --output "${{ env.BUILD_DIR }}/coverage.xml"
+            --output "$BUILD_DIR/coverage.html"
+          gcovr "${COMMON_GCOVR_ARGS[@]}" \
+            --xml --output "$BUILD_DIR/coverage.xml"
+          gcovr "${COMMON_GCOVR_ARGS[@]}" \
+            --print-summary --output "$BUILD_DIR/coverage.txt"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          xml_path = pathlib.Path(os.environ["BUILD_DIR"]) / "coverage.xml"
+          root = ET.parse(xml_path).getroot()
+          lines_valid = int(root.attrib.get("lines-valid", "0"))
+          if lines_valid == 0:
+              raise SystemExit(f"{xml_path} has no instrumented lines")
+          print(f"coverage.xml lines-valid={lines_valid}")
+          PY
       - name: Upload Coverage Report
         if: matrix.coverage == true
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: ${{ env.BUILD_DIR }}/coverage.html
+          path: |
+            ${{ env.BUILD_DIR }}/coverage*.html
+            ${{ env.BUILD_DIR }}/coverage.txt
           if-no-files-found: error
           retention-days: 5
       - name: Upload Coverage XML
