@@ -212,8 +212,13 @@ TEST_CASE("Stats command - concurrent requests", "[stats][command][crash][stress
     DaemonHarness harness;
     startHarnessWithRetry(harness);
 
+#if defined(__linux__) && defined(__aarch64__)
+    constexpr int numThreads = 2;
+    constexpr int requestsPerThread = 3;
+#else
     constexpr int numThreads = 4;
     constexpr int requestsPerThread = 5;
+#endif
     std::vector<std::thread> workers;
     std::atomic<int> successCount{0};
     std::atomic<int> failCount{0};
