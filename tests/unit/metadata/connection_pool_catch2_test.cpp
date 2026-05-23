@@ -7,8 +7,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <sqlite3.h>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
+#include <string>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -131,12 +134,14 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
         auto conn =
             pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "fast_path");
         REQUIRE(conn.has_value());
+        CHECK(conn.value()->holderTag() == "fast_path");
     }
 
     {
         auto conn =
             pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "slow_path");
         REQUIRE(conn.has_value());
+        CHECK(conn.value()->holderTag() == "slow_path");
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
     }
 
@@ -149,6 +154,74 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
     CHECK(stats.slowHolderCount >= 1u);
     CHECK(stats.maxHolderMicros >= 50'000u);
 
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool records source location for untagged acquire",
+          "[metadata][connection_pool][holder-tag]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_holder_tag_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    {
+        auto conn = pool.acquire();
+        REQUIRE(conn.has_value());
+        const auto& tag = conn.value()->holderTag();
+        CHECK_FALSE(tag.empty());
+        CHECK(tag.find("connection_pool_catch2_test.cpp") != std::string::npos);
+        CHECK(tag.find("<untagged>") == std::string::npos);
+    }
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool timeout holder summary includes withConnection call site",
+          "[metadata][connection_pool][holder-tag]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_with_connection_tag_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto enteredFuture = entered.get_future();
+    auto releaseFuture = release.get_future();
+    std::atomic<bool> holderSucceeded{false};
+
+    std::thread holder([&] {
+        auto result = pool.withConnection([&](Database&) -> yams::Result<void> {
+            entered.set_value();
+            releaseFuture.wait();
+            return yams::Result<void>();
+        });
+        holderSucceeded.store(result.has_value(), std::memory_order_relaxed);
+    });
+
+    if (enteredFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        release.set_value();
+        holder.join();
+        FAIL("withConnection holder did not acquire the connection");
+    }
+
+    auto blocked = pool.acquire(std::chrono::milliseconds(50));
+    if (blocked.has_value()) {
+        release.set_value();
+        holder.join();
+        FAIL("second acquire unexpectedly succeeded while withConnection held the only connection");
+    }
+    CHECK(blocked.error().message.find("connection_pool_catch2_test.cpp") != std::string::npos);
+    CHECK(blocked.error().message.find("holders=[<untagged>") == std::string::npos);
+
+    release.set_value();
+    holder.join();
+    CHECK(holderSucceeded.load(std::memory_order_relaxed));
     pool.shutdown();
 }
 

@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <source_location>
 #include <type_traits>
 #include <unordered_set>
 #include <yams/metadata/database.h>
@@ -143,15 +144,19 @@ public:
      */
     Result<std::unique_ptr<PooledConnection>> acquire(
         std::chrono::milliseconds timeout = std::chrono::milliseconds(30000), // 30 seconds default
-        ConnectionPriority priority = ConnectionPriority::Normal, std::string_view callerTag = {});
+        ConnectionPriority priority = ConnectionPriority::Normal, std::string_view callerTag = {},
+        std::source_location callerLocation = std::source_location::current());
 
     /**
      * @brief Execute a function with a connection
      */
     template <typename Func>
     auto withConnection(Func&& func, ConnectionPriority priority = ConnectionPriority::Normal,
-                        std::string_view callerTag = {}) -> std::invoke_result_t<Func, Database&> {
-        auto connResult = acquire(std::chrono::milliseconds(30000), priority, callerTag);
+                        std::string_view callerTag = {},
+                        std::source_location callerLocation = std::source_location::current())
+        -> std::invoke_result_t<Func, Database&> {
+        auto connResult =
+            acquire(std::chrono::milliseconds(30000), priority, callerTag, callerLocation);
         if (!connResult) {
             return Error{ErrorCode::ResourceExhausted, "Failed to acquire database connection"};
         }

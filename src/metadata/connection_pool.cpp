@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <source_location>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -92,6 +93,29 @@ int sqlite_profile_trace_callback(unsigned traceCode, void*, void* ptr, void* da
     const char* sql = sqlite3_sql(statement);
     spdlog::warn("[sql-trace] elapsed_ms={} sql='{}'", elapsedMs, sql ? sql : "(null)");
     return 0;
+}
+
+std::string_view basenameView(std::string_view path) {
+    const auto pos = path.find_last_of("/\\");
+    if (pos == std::string_view::npos) {
+        return path;
+    }
+    return path.substr(pos + 1);
+}
+
+std::string effectiveCallerTag(std::string_view explicitTag,
+                               const std::source_location& callerLocation) {
+    if (!explicitTag.empty()) {
+        return std::string(explicitTag);
+    }
+
+    std::ostringstream out;
+    out << basenameView(callerLocation.file_name()) << ':' << callerLocation.line();
+    const std::string_view function = callerLocation.function_name();
+    if (!function.empty()) {
+        out << ' ' << function;
+    }
+    return out.str();
 }
 
 } // namespace
@@ -227,10 +251,11 @@ void ConnectionPool::shutdown() {
     trace_pool_lifetime("shutdown.end", this, dbPath_, available_.size(), leased_.size(), 0, 0);
 }
 
-Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::milliseconds timeout,
-                                                                  ConnectionPriority priority,
-                                                                  std::string_view callerTag) {
+Result<std::unique_ptr<PooledConnection>>
+ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority priority,
+                        std::string_view callerTag, std::source_location callerLocation) {
     YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
+    const std::string effectiveTag = effectiveCallerTag(callerTag, callerLocation);
     std::unique_lock<std::mutex> lock(mutex_);
 
     if (shutdown_) {
@@ -304,7 +329,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
                     [this](PooledConnection* conn) { returnConnection(conn); },
                     currentGeneration_.load());
 
-                pooledConn->markAcquired(callerTag);
+                pooledConn->markAcquired(effectiveTag);
                 totalConnections_++;
                 activeConnections_++;
                 totalAcquired_++;
@@ -346,7 +371,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             spdlog::error(
                 "[ConnectionPool] timeout acquiring connection tag='{}' priority={} active={} "
                 "available={} total={} waiting={} holders=[{}]",
-                callerTag.empty() ? "<untagged>" : std::string(callerTag),
+                effectiveTag.empty() ? "<untagged>" : effectiveTag,
                 priority == ConnectionPriority::High ? "high" : "normal",
                 activeConnections_.load(std::memory_order_relaxed), available_.size(),
                 totalConnections_.load(std::memory_order_relaxed),
@@ -426,7 +451,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
     }
 
     conn->touch();
-    conn->markAcquired(callerTag);
+    conn->markAcquired(effectiveTag);
     activeConnections_++;
     totalAcquired_++;
     leased_.insert(conn.get());
