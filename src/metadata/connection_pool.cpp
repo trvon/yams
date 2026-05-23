@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <source_location>
 #include <sstream>
 #include <string>
@@ -706,7 +707,10 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
             }
         }
     }
-    int cacheSizeKB = -(defaultCacheMB * 1024); // negative = KiB for SQLite
+    constexpr int kMaxCacheSizeMB = std::numeric_limits<int>::max() / 1024;
+    defaultCacheMB = std::clamp(defaultCacheMB, 1, kMaxCacheSizeMB);
+    const long long cacheSizeKB =
+        -static_cast<long long>(defaultCacheMB) * 1024LL; // negative = KiB for SQLite
     db.execute("PRAGMA cache_size = " +
                std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
                                              // PRAGMA from bounded cache size calculation.

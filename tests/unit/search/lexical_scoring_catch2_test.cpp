@@ -270,3 +270,10 @@ TEST_CASE("scoreLexicalBatch snippet passthrough + debug info", "[search][lexica
     CHECK_FALSE(out.results[1]->snippet.has_value());
     CHECK(out.results[0]->debugInfo.count("score_multiplier") == 1);
 }
+
+TEST_CASE("normalizedBm25Score handles non-positive fallback divisor",
+          "[search][lexical][catch2]") {
+    CHECK(normalizedBm25Score(-2.0, 0.0f, -1.0, -1.0) == Approx(1.0f));
+    CHECK(normalizedBm25Score(0.0, 0.0f, -1.0, -1.0) == Approx(0.0f));
+    CHECK(normalizedBm25Score(-2.0, -5.0f, -1.0, -1.0) == Approx(1.0f));
+}

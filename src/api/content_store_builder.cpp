@@ -41,6 +41,21 @@ template <typename T> std::optional<T> parseIntegralConfig(const std::string& ra
     return value;
 }
 
+int clampCompressionLevel(int level, int minLevel, int maxLevel) {
+    return std::clamp(level, minLevel, maxLevel);
+}
+
+std::chrono::hours daysToHoursClamped(int days) {
+    if (days <= 0) {
+        return std::chrono::hours{0};
+    }
+    using Rep = std::chrono::hours::rep;
+    constexpr Rep kHoursPerDay = 24;
+    constexpr Rep kMaxDays = std::numeric_limits<Rep>::max() / kHoursPerDay;
+    const Rep safeDays = std::min<Rep>(static_cast<Rep>(days), kMaxDays);
+    return std::chrono::hours{safeDays * kHoursPerDay};
+}
+
 } // namespace
 
 // Builder implementation
@@ -187,15 +202,18 @@ struct ContentStoreBuilder::Impl {
         // Load compression levels
         if (auto it = configMap.find("compression.zstd_level"); it != configMap.end()) {
             if (auto level = parseIntegralConfig<int>(it->second)) {
-                rules.defaultZstdLevel = *level;
+                const int zstdLevel = clampCompressionLevel(*level, 1, 22);
+                rules.defaultZstdLevel = static_cast<std::uint8_t>(zstdLevel);
+                const int archiveZstdLevel = zstdLevel <= 19 ? zstdLevel + 3 : 22;
                 rules.archiveZstdLevel =
-                    std::min(22, rules.defaultZstdLevel + 3); // Higher for archives
+                    static_cast<std::uint8_t>(archiveZstdLevel); // Higher for archives
             }
         }
 
         if (auto it = configMap.find("compression.lzma_level"); it != configMap.end()) {
             if (auto level = parseIntegralConfig<int>(it->second)) {
-                rules.defaultLzmaLevel = *level;
+                rules.defaultLzmaLevel =
+                    static_cast<std::uint8_t>(clampCompressionLevel(*level, 0, 9));
             }
         }
 
@@ -224,13 +242,13 @@ struct ContentStoreBuilder::Impl {
         // Load age-based policies
         if (auto it = configMap.find("compression.compress_after_days"); it != configMap.end()) {
             if (auto days = parseIntegralConfig<int>(it->second)) {
-                rules.compressAfterAge = std::chrono::hours(24 * *days);
+                rules.compressAfterAge = daysToHoursClamped(*days);
             }
         }
 
         if (auto it = configMap.find("compression.archive_after_days"); it != configMap.end()) {
             if (auto days = parseIntegralConfig<int>(it->second)) {
-                rules.archiveAfterAge = std::chrono::hours(24 * *days);
+                rules.archiveAfterAge = daysToHoursClamped(*days);
             }
         }
 
