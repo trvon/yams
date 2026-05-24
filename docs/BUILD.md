@@ -32,7 +32,7 @@ Build tools: **Meson**, **Ninja**, **CMake 3.23+**, **pkg-config** (Linux/macOS)
 
 ```bash
 # Ubuntu / Debian
-sudo apt-get install -y build-essential cmake meson ninja-build pkg-config \
+sudo apt-get install -y build-essential cmake meson ninja-build pkg-config libomp-dev libfaiss-dev \
     libssl-dev libcurl4-openssl-dev libsqlite3-dev protobuf-compiler libprotobuf-dev zlib1g-dev
 
 # Fedora
