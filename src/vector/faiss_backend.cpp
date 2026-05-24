@@ -396,7 +396,8 @@ Result<void> FaissBackend::loadOrCreateIndex() {
     auto idxFile = indexFilePath();
     if (std::filesystem::exists(idxFile)) {
         try {
-            auto faissIdx = faiss::read_index_up(idxFile.string().c_str());
+            std::unique_ptr<faiss::Index> faissIdx(
+                faiss::read_index(idxFile.string().c_str()));
             if (faissIdx) {
                 index_ = std::make_unique<FaissIndex>();
                 index_->index = std::move(faissIdx);

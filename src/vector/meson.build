@@ -14,7 +14,12 @@ fs = import('fs')
 faiss_dep = disabler()
 if get_option('enable-faiss')
   faiss_dep = dependency('faiss', required: false, method: 'cmake')
-  if not faiss_dep.found()
+  if faiss_dep.found()
+    # system faiss may be compiled with OpenMP; ensure we link it
+    faiss_dep = declare_dependency(
+      dependencies: [faiss_dep, dependency('openmp', required: true)],
+    )
+  else
     cpp = meson.get_compiler('cpp')
     faiss_lib = cpp.find_library('faiss', required: false)
     if faiss_lib.found()
