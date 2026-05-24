@@ -334,10 +334,11 @@ if onnxruntime_resolved_dep.found()
   endif
 
   if host_machine.system() == 'darwin'
-    brew_onnx_libdir = '/opt/homebrew/opt/onnxruntime/lib'
-    if fs.exists(brew_onnx_libdir)
-      onnxruntime_link_dirs = [brew_onnx_libdir] + onnxruntime_link_dirs
-    endif
+    foreach brew_onnx_prefix : ['/opt/homebrew/opt/onnxruntime/lib', '/usr/local/opt/onnxruntime/lib']
+      if fs.exists(brew_onnx_prefix)
+        onnxruntime_link_dirs = [brew_onnx_prefix] + onnxruntime_link_dirs
+      endif
+    endforeach
   endif
 
   onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
@@ -692,9 +693,14 @@ if not _tl_expected_dep.found()
   _tl_expected_dep = dependency('tl-expected', method: 'pkg-config', required: false)
 endif
 if not _tl_expected_dep.found()
-  # Manual fallback for homebrew installation
-  _tl_expected_inc = include_directories('/opt/homebrew/include', is_system: true)
-  _tl_expected_dep = declare_dependency(include_directories: _tl_expected_inc)
+  # Manual fallback for homebrew installation. Probe both brew prefixes
+  # (Apple Silicon + Intel) guarded by the header actually existing.
+  foreach _brew_prefix : ['/opt/homebrew', '/usr/local']
+    if not _tl_expected_dep.found() and fs.exists(_brew_prefix / 'include' / 'tl' / 'expected.hpp')
+      _tl_expected_inc = include_directories(_brew_prefix / 'include', is_system: true)
+      _tl_expected_dep = declare_dependency(include_directories: _tl_expected_inc)
+    endif
+  endforeach
 endif
 meson.override_dependency('tl-expected', _tl_expected_dep)
 
@@ -716,19 +722,23 @@ meson.override_dependency('tinyfsm', _tinyfsm_dep)
 # in the fallback path — overriding an already-resolved dependency is an error.
 _libarchive_dep = dependency('libarchive', required: false)
 if not _libarchive_dep.found() and host_machine.system() == 'darwin'
-  _brew_libarchive = '/opt/homebrew/opt/libarchive'
-  if fs.exists(_brew_libarchive / 'include' / 'archive.h')
-    _libarchive_lib = cpp.find_library('archive',
-      dirs: [_brew_libarchive / 'lib'],
-      required: false)
-    if _libarchive_lib.found()
-      _libarchive_dep = declare_dependency(
-        dependencies: _libarchive_lib,
-        include_directories: include_directories(_brew_libarchive / 'include', is_system: true),
-      )
-      meson.override_dependency('libarchive', _libarchive_dep)
+  foreach _brew_prefix : ['/opt/homebrew', '/usr/local']
+    if not _libarchive_dep.found()
+      _brew_libarchive = _brew_prefix / 'opt' / 'libarchive'
+      if fs.exists(_brew_libarchive / 'include' / 'archive.h')
+        _libarchive_lib = cpp.find_library('archive',
+          dirs: [_brew_libarchive / 'lib'],
+          required: false)
+        if _libarchive_lib.found()
+          _libarchive_dep = declare_dependency(
+            dependencies: _libarchive_lib,
+            include_directories: include_directories(_brew_libarchive / 'include', is_system: true),
+          )
+          meson.override_dependency('libarchive', _libarchive_dep)
+        endif
+      endif
     endif
-  endif
+  endforeach
 endif
 
 if wasi_enabled
