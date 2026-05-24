@@ -2284,10 +2284,8 @@ public:
 
                 if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
                     if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
-                        r.error =
-                            "Failed to delete vectors: " + ctx_.vectorDatabase->getLastError();
-                        resp.errors.push_back(r);
-                        continue;
+                        spdlog::warn("Failed to delete vectors for document {}: {}", doc.sha256Hash,
+                                     ctx_.vectorDatabase->getLastError());
                     }
                 }
 

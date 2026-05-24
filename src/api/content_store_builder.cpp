@@ -7,6 +7,7 @@
 #include <yams/storage/compressed_storage_engine.h>
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <charconv>
 #include <filesystem>
 #include <fstream>

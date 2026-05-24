@@ -3615,7 +3615,9 @@ MetadataRepository::getExistingDocumentHashes(const std::vector<std::string>& ha
 
             auto& istmt = insertStmt.value();
             for (const auto& hash : uniqueHashes) {
-                istmt.reset();
+                if (auto reset = istmt.reset(); !reset) {
+                    return rollback(reset.error());
+                }
                 if (auto bind = istmt.bind(1, hash); !bind) {
                     return rollback(bind.error());
                 }
