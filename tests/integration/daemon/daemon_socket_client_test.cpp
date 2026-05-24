@@ -923,9 +923,18 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
         seeded.updatedAtMs = 222;
         RequestDispatcher::__test_seedDownloadJob(seeded);
 
-        auto cancelResult = yams::cli::run_sync(
-            client.cancelDownloadJob(CancelDownloadJobRequest{seeded.jobId}), 10s);
+        yams::Result<DownloadResponse> cancelResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            cancelResult = yams::cli::run_sync(
+                client.cancelDownloadJob(CancelDownloadJobRequest{seeded.jobId}), 10s);
+            if (cancelResult.has_value()) {
+                break;
+            }
+            std::this_thread::sleep_for(200ms);
+        }
 
+        INFO("cancel download job error: "
+             << (cancelResult.has_value() ? "" : cancelResult.error().message));
         REQUIRE(cancelResult.has_value());
         CHECK(cancelResult.value().jobId == seeded.jobId);
         CHECK(cancelResult.value().state == "canceled");

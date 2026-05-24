@@ -9,6 +9,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_set>
 #include <utility>
 
@@ -34,6 +35,9 @@ float normalizedBm25Score(double rawScore, float divisor, double minScore, doubl
     if (maxScore > minScore) {
         const double norm = (rawScore - minScore) / (maxScore - minScore);
         return std::clamp(static_cast<float>(1.0 - norm), 0.0f, 1.0f);
+    }
+    if (!std::isfinite(divisor) || divisor <= 0.0f) {
+        return std::clamp(static_cast<float>(-rawScore), 0.0f, 1.0f);
     }
     return std::clamp(static_cast<float>(-rawScore) / divisor, 0.0f, 1.0f);
 }

@@ -1910,3 +1910,85 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     sm->shutdown();
 }
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: completed ghost-success docs still enqueue FTS5 repair",
+                 "[daemon][repair][fts5][ghost-success][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto store = sm->getContentStore();
+    REQUIRE(meta != nullptr);
+    REQUIRE(store != nullptr);
+
+    auto fts5Q = InternalEventBus::instance().get_or_create_channel<InternalEventBus::Fts5Job>(
+        "fts5_jobs", 512);
+    drainQueue(fts5Q);
+    const auto queuedBefore = InternalEventBus::instance().fts5Queued();
+
+    const std::string text = "completed ghost success should be repaired";
+    const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+    auto storeRes = store->storeBytes(textBytes);
+    REQUIRE(storeRes.has_value());
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "completed_ghost_success.txt";
+    doc.filePath = (config_.dataDir / "completed_ghost_success.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = static_cast<int64_t>(text.size());
+    doc.sha256Hash = storeRes.value().contentHash;
+    doc.mimeType = "text/plain";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    REQUIRE(meta->updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success)
+                .has_value());
+    REQUIRE(
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Completed)
+            .has_value());
+
+    auto contentBefore = meta->getContent(docId);
+    REQUIRE(contentBefore.has_value());
+    REQUIRE_FALSE(contentBefore.value().has_value());
+    auto hasFtsBefore = meta->hasFtsEntry(docId);
+    REQUIRE(hasFtsBefore.has_value());
+    REQUIRE_FALSE(hasFtsBefore.value());
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxBatch = 16;
+    auto ctx = makeRepairServiceContext(sm.get());
+    ctx.getPostIngestQueue = {};
+    RepairService repair(std::move(ctx), &state_, []() -> size_t { return 0; }, cfg);
+    repair.start();
+    repair.onDocumentAdded({doc.sha256Hash, doc.filePath});
+
+    const bool queued = waitForCondition(std::chrono::seconds(5), [&]() {
+        return InternalEventBus::instance().fts5Queued() > queuedBefore;
+    });
+    repair.stop();
+
+    CHECK(queued);
+
+    sm->shutdown();
+}

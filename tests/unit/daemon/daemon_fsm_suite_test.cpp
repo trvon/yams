@@ -7,6 +7,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
+
+#include <memory>
+#include <sstream>
+
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/PluginHostFsm.h>
@@ -15,6 +21,37 @@
 #include <yams/daemon/ipc/connection_fsm.h>
 
 using namespace yams::daemon;
+
+namespace {
+
+class SpdlogCaptureGuard {
+public:
+    explicit SpdlogCaptureGuard(spdlog::level::level_enum level)
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("daemon_fsm_capture", sink);
+        logger_->set_level(level);
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(level);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
+};
+
+} // namespace
 
 // =============================================================================
 // ConnectionFSM Tests
@@ -175,6 +212,18 @@ TEST_CASE("DaemonLifecycleFSM: State transitions", "[daemon][fsm][lifecycle]") {
         REQUIRE(snapshot.state == LifecycleState::Failed);
         REQUIRE(snapshot.lastError.find("Critical") != std::string::npos);
     }
+}
+
+TEST_CASE("DaemonLifecycleFSM: clearing degradation is not a warning", "[daemon][fsm][lifecycle]") {
+    SpdlogCaptureGuard capture(spdlog::level::warn);
+    DaemonLifecycleFsm fsm;
+
+    fsm.setSubsystemDegraded("search", false);
+    CHECK(capture.str().find("degraded: false") == std::string::npos);
+
+    fsm.setSubsystemDegraded("search", true, "build_failed");
+    CHECK(capture.str().find("Subsystem 'search' degraded: true reason=build_failed") !=
+          std::string::npos);
 }
 
 // =============================================================================
