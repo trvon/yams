@@ -91,13 +91,15 @@ aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecord
                 record.relevance_score = static_cast<float>(std::min(sum, 1.0));
             } else if (aggStrategy == Agg::TOP_K_AVG || aggStrategy == Agg::WEIGHTED_TOP_K_AVG) {
                 std::sort(scores.begin(), scores.end(), std::greater<>());
-                const size_t k = std::min(scores.size(), config.chunkAggregationTopK);
+                const size_t configuredTopK = std::max<size_t>(1, config.chunkAggregationTopK);
+                const size_t k = std::min(scores.size(), configuredTopK);
                 double sum = 0.0;
                 if (aggStrategy == Agg::TOP_K_AVG) {
                     for (size_t i = 0; i < k; ++i) {
                         sum += scores[i];
                     }
-                    record.relevance_score = static_cast<float>(sum / static_cast<double>(k));
+                    record.relevance_score =
+                        k > 0 ? static_cast<float>(sum / static_cast<double>(k)) : scores.front();
                 } else {
                     const double decay = std::clamp(
                         static_cast<double>(config.chunkAggregationWeightDecay), 0.0, 1.0);

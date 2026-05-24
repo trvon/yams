@@ -537,7 +537,7 @@ Result<void> SocketServer::stop() {
             // Intentional best-effort path; keep the primary operation unaffected.
         }
 
-        // Close all active sockets IMMEDIATELY for deterministic shutdown
+        // Signal all active sockets immediately for deterministic shutdown.
         try {
             std::vector<std::shared_ptr<TrackedSocket>> sockets;
             {
@@ -550,8 +550,8 @@ Result<void> SocketServer::stop() {
                 activeSockets_.clear();
             }
 
-            const auto closed = close_sockets_on_executor(std::move(sockets));
-            spdlog::info("Closed {} active connections", closed);
+            const auto signaled = close_sockets_on_executor(std::move(sockets));
+            spdlog::info("Signaled {} active connections to close", signaled);
 
             auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             {
@@ -1278,12 +1278,12 @@ std::size_t SocketServer::close_sockets_on_executor(
             exec = sock->get_executor();
         }
         try {
-            boost::asio::dispatch(exec, [sock]() mutable {
-                boost::system::error_code ec;
+            boost::asio::post(exec, [sock]() mutable {
                 if (sock->is_open()) {
+                    // shutdown() wakes pending I/O without touching Asio's reactor cancel path;
+                    // cancel() has hit a null descriptor_state under UBSAN during teardown.
                     boost::system::error_code shutdown_ec;
                     sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
-                    sock->cancel(ec);
                 }
             });
         } catch (const std::exception& e) {

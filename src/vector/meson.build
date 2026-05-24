@@ -9,19 +9,36 @@ yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
 tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
+cpp_comp = meson.get_compiler('cpp')
 
 # FAISS HNSW backend (optional, for online/incremental vector index updates)
 faiss_dep = disabler()
 if get_option('enable-faiss')
   faiss_dep = dependency('faiss', required: false, method: 'cmake')
   if not faiss_dep.found()
-    cpp = meson.get_compiler('cpp')
-    faiss_lib = cpp.find_library('faiss', required: false)
+    faiss_lib = cpp_comp.find_library('faiss', required: false)
     if faiss_lib.found()
       faiss_dep = declare_dependency(
-        dependencies: [faiss_lib, cpp.find_library('openblas', required: true),
-                       cpp.find_library('omp', required: true)],
+        dependencies: [faiss_lib, cpp_comp.find_library('openblas', required: true),
+                       cpp_comp.find_library('omp', required: true)],
       )
+    endif
+  endif
+  if faiss_dep.found()
+    faiss_probe_args = []
+    if host_machine.system() == 'darwin'
+      faiss_probe_args += ['-I/opt/homebrew/include']
+    endif
+    faiss_headers_usable = cpp_comp.compiles('''
+#include <faiss/IndexHNSW.h>
+int main() { return 0; }
+''',
+      dependencies: [faiss_dep],
+      args: faiss_probe_args,
+      name: 'FAISS HNSW headers usable')
+    if not faiss_headers_usable
+      warning('FAISS found but HNSW headers are unusable; building without optional FAISS backend. Reconfigure with -Denable-faiss=false to silence this warning.')
+      faiss_dep = disabler()
     endif
   endif
 endif
@@ -74,7 +91,6 @@ sqlite_vec_feature_cppargs = []
 vec_simd_cppargs = []
 
 # Enable SIMD for sqlite-vec-cpp when supported
-cpp_comp = meson.get_compiler('cpp')
 host_cpu = host_machine.cpu_family()
 target_is_x86 = cpp_comp.compiles('''
 #if !defined(__i386__) && !defined(__x86_64__) && !defined(_M_IX86) && !defined(_M_X64)

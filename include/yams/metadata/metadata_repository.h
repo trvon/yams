@@ -743,6 +743,9 @@ public:
     Result<std::unordered_map<std::string, DocumentInfo>>
     batchGetDocumentsByHash(const std::vector<std::string>& hashes) override;
 
+    Result<std::unordered_set<std::string>>
+    getExistingDocumentHashes(const std::vector<std::string>& hashes);
+
     Result<std::unordered_map<int64_t, DocumentContent>>
     batchGetContent(const std::vector<int64_t>& documentIds) override;
 

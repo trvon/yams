@@ -2341,20 +2341,65 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (!config_.embeddedOneShot) {
                     if (auto metadataRepo = getMetadataRepo()) {
                         auto embeddedHashes = vectorDatabase->getEmbeddedDocumentHashes();
+                        std::vector<std::string> reconciledHashes;
+                        reconciledHashes.reserve(embeddedHashes.size());
+                        for (const auto& hash : embeddedHashes) {
+                            reconciledHashes.push_back(hash);
+                        }
+
+                        if (!reconciledHashes.empty()) {
+                            auto existingHashesResult =
+                                metadataRepo->getExistingDocumentHashes(reconciledHashes);
+                            if (!existingHashesResult) {
+                                spdlog::warn(
+                                    "[Embeddings] Failed to check vector hash ownership: {}",
+                                    existingHashesResult.error().message);
+                            } else if (existingHashesResult.value().size() !=
+                                       reconciledHashes.size()) {
+                                const auto& existingHashes = existingHashesResult.value();
+                                std::vector<std::string> retainedHashes;
+                                retainedHashes.reserve(reconciledHashes.size());
+                                std::size_t orphanDocsRemoved = 0;
+                                std::size_t orphanDocsFailed = 0;
+
+                                for (const auto& hash : reconciledHashes) {
+                                    if (existingHashes.find(hash) != existingHashes.end()) {
+                                        retainedHashes.push_back(hash);
+                                        continue;
+                                    }
+
+                                    if (vectorDatabase->deleteVectorsByDocument(hash)) {
+                                        ++orphanDocsRemoved;
+                                    } else {
+                                        ++orphanDocsFailed;
+                                        retainedHashes.push_back(hash);
+                                    }
+                                }
+
+                                if (orphanDocsRemoved > 0) {
+                                    spdlog::info(
+                                        "[Embeddings] Removed {} orphan vector document entries",
+                                        orphanDocsRemoved);
+                                }
+                                if (orphanDocsFailed > 0) {
+                                    spdlog::warn(
+                                        "[Embeddings] Failed to remove {} orphan vector document "
+                                        "entries",
+                                        orphanDocsFailed);
+                                }
+                                reconciledHashes = std::move(retainedHashes);
+                            }
+                        }
+
                         const auto metadataEmbeddedCount =
                             static_cast<int64_t>(metadataRepo->getCachedEmbeddedCount());
                         const auto actualEmbeddedCount =
-                            static_cast<int64_t>(embeddedHashes.size());
+                            static_cast<int64_t>(reconciledHashes.size());
                         if (metadataEmbeddedCount != actualEmbeddedCount) {
                             spdlog::warn("[Embeddings] Metadata/vector status mismatch: "
                                          "documents_embedded={} vector_docs={}. Reconciling "
                                          "document_embeddings_status from vector rows.",
                                          metadataEmbeddedCount, actualEmbeddedCount);
-                            std::vector<std::string> reconciledHashes;
-                            reconciledHashes.reserve(embeddedHashes.size());
-                            for (const auto& hash : embeddedHashes) {
-                                reconciledHashes.push_back(hash);
-                            }
                             auto reconcileResult =
                                 metadataRepo->reconcileDocumentEmbeddingStatusByHashes(
                                     reconciledHashes);
@@ -2812,6 +2857,13 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
 
             auto integrity = database_->checkIntegrity();
             if (!integrity) {
+                if (integrity.error().code == ErrorCode::ResourceBusy) {
+                    spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due "
+                                 "to transient SQLite contention: {}",
+                                 integrity.error().message);
+                    database_->close();
+                    return false;
+                }
                 spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
                               integrity.error().message);
                 database_->close();

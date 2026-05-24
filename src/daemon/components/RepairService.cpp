@@ -878,8 +878,7 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
     }
 
     const auto& d = docRes.value().value();
-    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
-        d.repairStatus == yams::metadata::RepairStatus::Processing) {
+    if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
         return flags;
     }
 
