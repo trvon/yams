@@ -187,10 +187,17 @@ void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degr
     auto it = degraded_.find(name);
     if (it == degraded_.end() || it->second != degraded) {
         degraded_[name] = degraded;
-        if (!reason.empty())
+        if (degraded && !reason.empty()) {
             degradeReasons_[name] = reason;
-        spdlog::warn("Subsystem '{}' degraded: {}{}", name, degraded ? "true" : "false",
-                     reason.empty() ? "" : (std::string{" reason="} + reason));
+        } else if (!degraded) {
+            degradeReasons_.erase(name);
+        }
+        const auto suffix = reason.empty() ? std::string{} : (std::string{" reason="} + reason);
+        if (degraded) {
+            spdlog::warn("Subsystem '{}' degraded: true{}", name, suffix);
+        } else {
+            spdlog::info("Subsystem '{}' degraded: false{}", name, suffix);
+        }
     } else if (degraded && !reason.empty()) {
         degradeReasons_[name] = reason;
     }

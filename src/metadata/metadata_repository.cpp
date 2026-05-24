@@ -3574,6 +3574,93 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
         });
 }
 
+Result<std::unordered_set<std::string>>
+MetadataRepository::getExistingDocumentHashes(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return std::unordered_set<std::string>{};
+    }
+
+    std::vector<std::string> uniqueHashes = hashes;
+    std::sort(uniqueHashes.begin(), uniqueHashes.end());
+    uniqueHashes.erase(std::unique(uniqueHashes.begin(), uniqueHashes.end()), uniqueHashes.end());
+
+    return executeQuery<std::unordered_set<std::string>>(
+        [&](Database& db) -> Result<std::unordered_set<std::string>> {
+            auto beginResult = db.execute("BEGIN");
+            if (!beginResult) {
+                return beginResult.error();
+            }
+
+            auto rollback = [&db](const Error& err) -> Result<std::unordered_set<std::string>> {
+                db.execute("ROLLBACK");
+                return err;
+            };
+
+            if (auto createTemp =
+                    db.execute("CREATE TEMP TABLE IF NOT EXISTS temp_existing_document_hashes ("
+                               "sha256_hash TEXT PRIMARY KEY)");
+                !createTemp) {
+                return rollback(createTemp.error());
+            }
+            if (auto clearTemp = db.execute("DELETE FROM temp_existing_document_hashes");
+                !clearTemp) {
+                return rollback(clearTemp.error());
+            }
+
+            auto insertStmt = db.prepare(
+                "INSERT OR IGNORE INTO temp_existing_document_hashes (sha256_hash) VALUES (?)");
+            if (!insertStmt) {
+                return rollback(insertStmt.error());
+            }
+
+            auto& istmt = insertStmt.value();
+            for (const auto& hash : uniqueHashes) {
+                istmt.reset();
+                if (auto bind = istmt.bind(1, hash); !bind) {
+                    return rollback(bind.error());
+                }
+                if (auto exec = istmt.execute(); !exec) {
+                    return rollback(exec.error());
+                }
+            }
+
+            auto selectStmt = db.prepare(R"(
+                SELECT d.sha256_hash
+                FROM documents d
+                JOIN temp_existing_document_hashes th ON th.sha256_hash = d.sha256_hash
+            )");
+            if (!selectStmt) {
+                return rollback(selectStmt.error());
+            }
+
+            std::unordered_set<std::string> existing;
+            auto& sstmt = selectStmt.value();
+            while (true) {
+                auto step = sstmt.step();
+                if (!step) {
+                    return rollback(step.error());
+                }
+                if (!step.value()) {
+                    break;
+                }
+                existing.insert(sstmt.getString(0));
+            }
+
+            if (auto clearTemp = db.execute("DELETE FROM temp_existing_document_hashes");
+                !clearTemp) {
+                return rollback(clearTemp.error());
+            }
+
+            auto commitResult = db.execute("COMMIT");
+            if (!commitResult) {
+                db.execute("ROLLBACK");
+                return commitResult.error();
+            }
+
+            return existing;
+        });
+}
+
 Result<std::vector<ListDocumentProjection>>
 MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& options) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForListProjection");

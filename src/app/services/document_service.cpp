@@ -1,10 +1,10 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
-#include <yams/metadata/versioning_util.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteBatchCoalescer.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/metadata/versioning_util.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 
@@ -28,6 +28,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <cctype>
@@ -2279,6 +2280,15 @@ public:
                     r.error = "Document not found in store";
                     resp.errors.push_back(r);
                     continue;
+                }
+
+                if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
+                    if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
+                        r.error =
+                            "Failed to delete vectors: " + ctx_.vectorDatabase->getLastError();
+                        resp.errors.push_back(r);
+                        continue;
+                    }
                 }
 
                 // Delete from metadata repository

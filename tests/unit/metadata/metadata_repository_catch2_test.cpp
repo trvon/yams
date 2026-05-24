@@ -307,6 +307,27 @@ TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed has
     CHECK(stats.value().embeddingCount == 1);
 }
 
+TEST_CASE("MetadataRepository: vector hash ownership ignores missing documents",
+          "[unit][metadata][repository][embeddings]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/existing_vector_a.txt", "existing-vector-hash-a");
+    auto docB = makeDocumentWithPath("/tmp/existing_vector_b.txt", "existing-vector-hash-b");
+
+    REQUIRE(fix.repository_->insertDocument(docA).has_value());
+    REQUIRE(fix.repository_->insertDocument(docB).has_value());
+
+    auto existing = fix.repository_->getExistingDocumentHashes(
+        {"existing-vector-hash-a", "orphan-vector-hash", "existing-vector-hash-b",
+         "existing-vector-hash-a"});
+
+    REQUIRE(existing.has_value());
+    CHECK(existing.value().size() == 2);
+    CHECK(existing.value().contains("existing-vector-hash-a"));
+    CHECK(existing.value().contains("existing-vector-hash-b"));
+    CHECK_FALSE(existing.value().contains("orphan-vector-hash"));
+}
+
 TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
           "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;

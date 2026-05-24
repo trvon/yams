@@ -15,6 +15,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
+#include <yams/vector/vector_database.h>
 
 using namespace yams;
 using namespace yams::app::services;
@@ -458,6 +459,41 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
 
         REQUIRE(result);
         CHECK_FALSE(result.value().deleted.empty());
+    }
+
+    SECTION("Delete document removes vector rows") {
+        yams::vector::VectorDatabaseConfig config;
+        config.database_path = ":memory:";
+        config.embedding_dim = 4;
+        config.create_if_missing = true;
+        config.use_in_memory = true;
+
+        auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(config);
+        if (!vectorDb->initialize()) {
+            SKIP(std::string("Vector database unavailable: ") + vectorDb->getLastError());
+        }
+
+        yams::vector::VectorRecord record;
+        record.chunk_id = "delete_cleanup_chunk";
+        record.document_hash = fixture.testHash2_;
+        record.embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+        record.content = "vector cleanup content";
+        record.start_offset = 0;
+        record.end_offset = 22;
+        REQUIRE(vectorDb->insertVector(record));
+        REQUIRE(vectorDb->hasEmbedding(fixture.testHash2_));
+
+        fixture.appContext_.vectorDatabase = vectorDb;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK_FALSE(result.value().deleted.empty());
+        CHECK_FALSE(vectorDb->hasEmbedding(fixture.testHash2_));
     }
 }
 
