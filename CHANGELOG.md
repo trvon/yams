@@ -26,6 +26,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.16.1](https://github.com/trvon/yams/compare/v0.16.0...v0.16.1) (2026-05-24)
+
+
+### Fixed
+
+* **ci:** shrink ASAN smoke build ([65a3cd1](https://github.com/trvon/yams/commit/65a3cd1296a539b776d797756ecf41ead6635085))
+* **ci:** stabilize PR checks ([77cab7f](https://github.com/trvon/yams/commit/77cab7f6e960a7182b450aee52fdb7e885269d50))
+* **ci:** stabilize remaining test lanes ([c051423](https://github.com/trvon/yams/commit/c051423e274122755be0d14b7f9188329df8cf86))
+* **ci:** stabilize sanitizer lanes ([c27b1e7](https://github.com/trvon/yams/commit/c27b1e794694549c1f32e447d8d5c20665359c1d))
+* **ci:** stabilize test matrix ([89a225f](https://github.com/trvon/yams/commit/89a225fdfae04736893ec97927f39a7d30848289))
+* **ci:** stabilize test matrix ([afe5074](https://github.com/trvon/yams/commit/afe5074abb25c76cfd3008286eb52e34e7b54501))
+* **ci:** stabilize tests and coverage ([1315843](https://github.com/trvon/yams/commit/1315843e89c138d1cda9bf63806a0727fdacd4ed))
+* **daemon:** use Windows PID API ([b37b183](https://github.com/trvon/yams/commit/b37b183dc3d358139ebf289949917fde823df6ae))
+* removing hardcoded paths ([6ae1c4f](https://github.com/trvon/yams/commit/6ae1c4f241f0cdc951770545aa9198a91fb9380e))
+* **storage:** close ASAN leak paths ([3e7706a](https://github.com/trvon/yams/commit/3e7706ad72ccda6ab6c5102526c55b0da0d3d572))
+* **storage:** remove unsafe object ABI adapter ([6163da6](https://github.com/trvon/yams/commit/6163da67326485bec50ef1a1b6a74e3e3d27a441))
+* **tests:** stabilize debug suite ([0d0f1ce](https://github.com/trvon/yams/commit/0d0f1cecf268f21576df6570e2b4957193d5a58a))
+* **tests:** use portable getpid shim ([4df44e0](https://github.com/trvon/yams/commit/4df44e0c2f1dee107eafa003942cd4f7d1f52a97))
+* **vector:** use faiss::read_index instead of read_index_up for Faiss 1.13.x compat ([f44722a](https://github.com/trvon/yams/commit/f44722acab8647d64a5b84ae2380d133168c432f))
+
+
+### Performance
+
+* **grep:** speed literal matching ([710ca48](https://github.com/trvon/yams/commit/710ca48d6a0bb8d8dac80f88cc4127b1f4205b21))
+
 ## [0.16.0](https://github.com/trvon/yams/compare/v0.15.0...v0.16.0) (2026-05-17)
 
 
