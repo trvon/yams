@@ -260,6 +260,21 @@ if host_machine.system() == 'windows'
   vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
 endif
 
+# FAISS may need supplemental include dirs on macOS Homebrew (OpenMP transitively).
+# Probe both Homebrew prefixes (Apple Silicon + Intel) guarded by fs.exists()
+# so the build doesn't break on systems without Homebrew.
+faiss_extra_inc = []
+if faiss_dep.found()
+  foreach brew_prefix : ['/opt/homebrew', '/usr/local']
+    if fs.exists(brew_prefix / 'include')
+      faiss_extra_inc += [include_directories(brew_prefix / 'include', is_system: true)]
+    endif
+    if fs.exists(brew_prefix / 'opt' / 'libomp' / 'include')
+      faiss_extra_inc += [include_directories(brew_prefix / 'opt' / 'libomp' / 'include', is_system: true)]
+    endif
+  endforeach
+endif
+
 sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
   ['sqlite_vec_backend.cpp'],
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
@@ -270,7 +285,7 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
 
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + (faiss_dep.found() ? [include_directories('/opt/homebrew/include', is_system: true), include_directories('/opt/homebrew/opt/libomp/include', is_system: true)] : []),
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + faiss_extra_inc,
   dependencies: deps_vec + vector_platform_deps,
   link_with: [simeon_lib, sqlite_vec_backend_lib] + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,
