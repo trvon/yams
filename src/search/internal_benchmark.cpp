@@ -598,7 +598,7 @@ BenchmarkResults InternalBenchmark::aggregateResults(const std::vector<QueryExec
         ++results.queriesSucceeded;
         latencies.push_back(exec.latencyMs);
 
-        if (exec.foundInTopK) {
+        if (exec.foundInTopK && exec.reciprocalRank > 0) {
             ++foundCount;
             sumRR += 1.0 / static_cast<double>(exec.reciprocalRank);
         }
