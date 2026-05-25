@@ -3,6 +3,7 @@
 // create() dispatch for each built-in backend type.
 
 #include <catch2/catch_test_macros.hpp>
+#include <yams/storage/object_storage_plugin_loader.h>
 #include <yams/storage/storage_backend.h>
 
 #include <algorithm>
@@ -373,4 +374,37 @@ TEST_CASE("StorageBackendFactory::registerBackend: mocked remote backend support
     auto existsAfterRemove = backend->exists("docs/a");
     REQUIRE(existsAfterRemove.has_value());
     CHECK_FALSE(existsAfterRemove.value());
+}
+
+TEST_CASE("tryCreatePluginBackendByName: unknown plugin name returns nullptr",
+          "[storage][factory][plugin][dlopen]") {
+    auto backend =
+        tryCreatePluginBackendByName("yams_missing_obj_store_for_unit_test", BackendConfig{});
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("tryCreatePluginBackendByName: empty name returns nullptr",
+          "[storage][factory][plugin][dlopen]") {
+    auto backend = tryCreatePluginBackendByName("", BackendConfig{});
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("tryCreateS3PluginBackend: does not crash with valid config",
+          "[storage][factory][plugin][s3]") {
+    BackendConfig config;
+    config.type = "s3";
+    config.url = "s3://test/prefix";
+    config.requestTimeout = 1;
+    config.maxRetries = 0;
+    auto backend = tryCreateS3PluginBackend(config);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->isRemote());
+}
+
+TEST_CASE("StorageBackendFactory::create: plugin prefix with unknown name returns nullptr",
+          "[storage][factory][create][plugin]") {
+    BackendConfig cfg;
+    cfg.type = "plugin:yams_nonexistent_plugin_name";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
 }
