@@ -530,6 +530,10 @@ public:
         removeResults_[hash] = std::move(result);
     }
 
+    bool hasBlob(const std::string& hash) const { return blobs_.contains(hash); }
+
+    std::vector<std::string> removedHashes() const { return removedHashes_; }
+
     Result<api::StoreResult> storeBytes(std::span<const std::byte> data,
                                         const api::ContentMetadata&) override {
         std::string hash = "stub-hash-" + std::to_string(blobs_.size() + 1);
@@ -607,6 +611,7 @@ public:
         if (auto it = removeResults_.find(hash); it != removeResults_.end()) {
             return it->second;
         }
+        removedHashes_.push_back(hash);
         blobs_.erase(hash);
         return true;
     }
@@ -633,6 +638,7 @@ public:
 private:
     std::unordered_map<std::string, std::vector<std::byte>> blobs_;
     std::unordered_map<std::string, Result<bool>> removeResults_;
+    std::vector<std::string> removedHashes_;
 };
 
 class StubGraphQueryService : public app::services::IGraphQueryService {
@@ -1320,7 +1326,9 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
     auto repo = std::make_shared<StubPruneMetadataRepository>();
+    auto store = std::make_shared<StubContentStore>();
     svc.__test_setMetadataRepo(repo);
+    svc.__test_setContentStore(store);
     RequestDispatcher dispatcher(&lifecycle, &svc, &state);
 
     repo->addDocument(makeDoc(1, "build/output.log", "log", 2048, std::string(64, 'a'), 10));
@@ -1490,10 +1498,38 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
     }
 
+    SECTION("apply mode removes content through the document deletion service") {
+        const auto targetHash = std::string(64, 'a');
+        store->setBlob(targetHash, "indexed log bytes");
+
+        PruneRequest req;
+        req.dryRun = false;
+        req.categories = {"build"};
+        req.extensions = {"log"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.filesDeleted == 1);
+        CHECK(pruneResp.filesFailed == 0);
+        CHECK(pruneResp.totalBytesFreed == 2048);
+        CHECK_FALSE(store->hasBlob(targetHash));
+        CHECK(store->removedHashes() == std::vector<std::string>{targetHash});
+        CHECK(repo->deletedIds() == std::vector<int64_t>{1});
+    }
+
     SECTION("apply mode yields during large prune batches") {
+        auto fullHashFor = [](int i) {
+            static constexpr char kHex[] = "0123456789abcdef";
+            std::string hash(64, 'e');
+            hash[62] = kHex[(i / 16) & 0x0f];
+            hash[63] = kHex[i & 0x0f];
+            return hash;
+        };
         for (int i = 0; i < 105; ++i) {
             repo->addDocument(makeDoc(1000 + i, "cache/bulk_" + std::to_string(i) + ".tmp", "tmp",
-                                      2048, "bulk-hash-" + std::to_string(i), 30));
+                                      2048, fullHashFor(i), 30));
         }
 
         PruneRequest req;

@@ -16,6 +16,67 @@
 
 namespace yams::integrity {
 
+namespace {
+
+std::vector<PruneCandidate> buildPruneCandidates(std::span<const metadata::DocumentInfo> docs,
+                                                 const PruneConfig& config) {
+    std::vector<PruneCandidate> candidates;
+
+    auto matchesCategory = [&](const metadata::DocumentInfo& doc) -> bool {
+        if (config.categories.empty())
+            return true;
+        auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
+        return std::ranges::any_of(config.categories, [category](const auto& cat) {
+            return magic::matchesPruneGroup(category, cat);
+        });
+    };
+
+    auto meetsAgeCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
+        if (config.minAge.count() == 0)
+            return true;
+        auto now = std::chrono::system_clock::now();
+        auto fileAge = std::chrono::duration_cast<std::chrono::seconds>(now - doc.modifiedTime);
+        return fileAge >= config.minAge;
+    };
+
+    auto meetsSizeCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
+        return doc.fileSize >= config.minSize && doc.fileSize <= config.maxSize;
+    };
+
+    auto meetsExtensionCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
+        if (config.extensions.empty())
+            return true;
+        return std::ranges::any_of(config.extensions, [&](const auto& ext) {
+            return doc.fileExtension == ext || doc.fileExtension == ("." + ext);
+        });
+    };
+
+    for (const auto& doc : docs) {
+        if (!matchesCategory(doc))
+            continue;
+        if (!meetsAgeCriteria(doc))
+            continue;
+        if (!meetsSizeCriteria(doc))
+            continue;
+        if (!meetsExtensionCriteria(doc))
+            continue;
+
+        PruneCandidate candidate;
+        candidate.hash = doc.sha256Hash;
+        candidate.path = doc.filePath;
+        candidate.fileSize = doc.fileSize;
+        candidate.modifiedTime = doc.modifiedTime;
+        candidate.category =
+            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension));
+
+        candidates.push_back(std::move(candidate));
+    }
+
+    return candidates;
+}
+
+} // namespace
+
 RepairManager::RepairManager(storage::IStorageEngine& storage, RepairManagerConfig config)
     : storage_(&storage), config_(std::move(config)), repo_(nullptr) {}
 
@@ -133,98 +194,20 @@ std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storag
 std::vector<PruneCandidate>
 RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
                                        const PruneConfig& config) {
-    std::vector<PruneCandidate> candidates;
-
     // Query all documents
     auto docsResult = repo.queryDocuments(metadata::DocumentQueryOptions{});
     if (!docsResult) {
         spdlog::error("Failed to query documents: {}", docsResult.error().message);
-        return candidates;
+        return {};
     }
 
     auto& allDocs = docsResult.value();
     spdlog::debug("Prune query: scanning {} documents", allDocs.size());
 
-    // Filter documents (static helper functions)
-    auto matchesCategory = [&](const metadata::DocumentInfo& doc) -> bool {
-        if (config.categories.empty())
-            return true;
-        auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
-        return std::ranges::any_of(config.categories, [category](const auto& cat) {
-            return magic::matchesPruneGroup(category, cat);
-        });
-    };
-
-    auto meetsAgeCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
-        if (config.minAge.count() == 0)
-            return true;
-        auto now = std::chrono::system_clock::now();
-        auto fileAge = std::chrono::duration_cast<std::chrono::seconds>(now - doc.modifiedTime);
-        return fileAge >= config.minAge;
-    };
-
-    auto meetsSizeCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
-        return doc.fileSize >= config.minSize && doc.fileSize <= config.maxSize;
-    };
-
-    auto meetsExtensionCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
-        if (config.extensions.empty())
-            return true;
-        return std::ranges::any_of(config.extensions, [&](const auto& ext) {
-            return doc.fileExtension == ext || doc.fileExtension == ("." + ext);
-        });
-    };
-
-    // Filter and build candidates
-    for (const auto& doc : allDocs) {
-        if (!matchesCategory(doc))
-            continue;
-        if (!meetsAgeCriteria(doc))
-            continue;
-        if (!meetsSizeCriteria(doc))
-            continue;
-        if (!meetsExtensionCriteria(doc))
-            continue;
-
-        PruneCandidate candidate;
-        candidate.hash = doc.sha256Hash;
-        candidate.path = doc.filePath;
-        candidate.fileSize = doc.fileSize;
-        candidate.modifiedTime = doc.modifiedTime;
-        candidate.category =
-            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension));
-
-        candidates.push_back(std::move(candidate));
-    }
+    auto candidates = buildPruneCandidates(allDocs, config);
 
     spdlog::info("Prune query: found {} candidates", candidates.size());
     return candidates;
-}
-
-bool RepairManager::matchesCategory(const metadata::DocumentInfo& doc,
-                                    std::span<const std::string> categories) const noexcept {
-    if (categories.empty())
-        return true;
-
-    auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
-    return std::ranges::any_of(categories, [category](const auto& cat) {
-        return magic::matchesPruneGroup(category, cat);
-    });
-}
-
-bool RepairManager::meetsAgeCriteria(const metadata::DocumentInfo& doc,
-                                     std::chrono::seconds minAge) const noexcept {
-    if (minAge.count() == 0)
-        return true;
-
-    auto now = std::chrono::system_clock::now();
-    auto fileAge = std::chrono::duration_cast<std::chrono::seconds>(now - doc.modifiedTime);
-    return fileAge >= minAge;
-}
-
-bool RepairManager::meetsSizeCriteria(const metadata::DocumentInfo& doc, int64_t minSize,
-                                      int64_t maxSize) const noexcept {
-    return doc.fileSize >= minSize && doc.fileSize <= maxSize;
 }
 
 Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
@@ -233,7 +216,11 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
         return Error{ErrorCode::InvalidArgument, "MetadataRepository not initialized"};
     }
 
-    // Query all documents
+    if (!config.dryRun) {
+        return Error{ErrorCode::InvalidArgument,
+                     "apply-mode prune must use the document deletion service"};
+    }
+
     auto docsResult = repo_->queryDocuments(metadata::DocumentQueryOptions{});
     if (!docsResult) {
         spdlog::error("Failed to query documents: {}", docsResult.error().message);
@@ -243,56 +230,25 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
     auto& allDocs = docsResult.value();
     spdlog::info("Prune: scanning {} documents", allDocs.size());
 
-    // Filter using std::ranges (lazy evaluation)
-    auto candidates =
-        allDocs |
-        std::views::filter([&](const auto& d) { return matchesCategory(d, config.categories); }) |
-        std::views::filter([&](const auto& d) { return meetsAgeCriteria(d, config.minAge); }) |
-        std::views::filter(
-            [&](const auto& d) { return meetsSizeCriteria(d, config.minSize, config.maxSize); });
-
-    // Materialize candidates for processing
-    std::vector<metadata::DocumentInfo> toProcess;
-    std::ranges::copy(candidates, std::back_inserter(toProcess));
-
-    spdlog::info("Prune: found {} candidates (dry_run={})", toProcess.size(), config.dryRun);
+    auto candidates = buildPruneCandidates(allDocs, config);
+    spdlog::info("Prune: found {} candidates (dry_run={})", candidates.size(), config.dryRun);
 
     PruneResult result;
     uint64_t processed = 0;
-    const uint64_t total = toProcess.size();
+    const uint64_t total = candidates.size();
 
-    for (const auto& doc : toProcess) {
+    for (const auto& candidate : candidates) {
         // Report progress
         if (progress && processed % 100 == 0) {
             progress(processed, total);
         }
 
         // Track category stats
-        auto categoryName = std::string(
-            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension)));
-        result.categoryCounts[categoryName]++;
-        result.categorySizes[categoryName] += doc.fileSize;
+        result.categoryCounts[candidate.category]++;
+        result.categorySizes[candidate.category] += candidate.fileSize;
 
-        if (!config.dryRun) {
-            // Delete from metadata only
-            auto delResult = repo_->deleteDocument(doc.id);
-            if (!delResult) {
-                spdlog::warn("Failed to delete metadata for {}: {}", doc.filePath,
-                             delResult.error().message);
-                result.failedPaths.push_back(doc.filePath);
-                result.filesFailed++;
-                processed++;
-                continue;
-            }
-
-            result.deletedPaths.push_back(doc.filePath);
-            result.filesDeleted++;
-            result.totalBytesFreed += doc.fileSize;
-        } else {
-            // Dry run: just count
-            result.filesDeleted++;
-            result.totalBytesFreed += doc.fileSize;
-        }
+        result.filesDeleted++;
+        result.totalBytesFreed += candidate.fileSize;
 
         processed++;
     }

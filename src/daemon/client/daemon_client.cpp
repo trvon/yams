@@ -2714,16 +2714,8 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
     }
 }
 
-boost::asio::awaitable<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
-    auto h = std::make_shared<daemon::client::UnaryHandler<SuccessResponse>>();
-    auto r = co_await sendRequestStreaming(req, h);
-    if (!r)
-        co_return r.error();
-    if (h->hasError())
-        co_return h->error();
-    if (h->value)
-        co_return *h->value;
-    co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
+boost::asio::awaitable<Result<DeleteResponse>> DaemonClient::remove(const DeleteRequest& req) {
+    co_return co_await call<DeleteRequest>(req);
 }
 
 } // namespace yams::daemon

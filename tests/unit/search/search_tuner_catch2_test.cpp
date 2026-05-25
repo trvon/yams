@@ -512,6 +512,29 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides wit
     CHECK(seeded.graphScoringBudgetMs == 8);
 }
 
+TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.proseRatio = 0.90f;
+
+    SearchTuner tuner(stats);
+
+    SearchEngineConfig config = tuner.getConfig();
+    config.enableReranking = true;
+    config.rerankTopK = 50;
+    config.rerankReplaceScores = false;
+    config.rerankAnchoredMinRelativeScore = 0.37f;
+
+    tuner.seedRuntimeConfig(config);
+    const auto seeded = tuner.getConfig();
+
+    CHECK(seeded.enableReranking == true);
+    CHECK(seeded.rerankTopK == 50);
+    CHECK(seeded.rerankReplaceScores == false);
+    CHECK(seeded.rerankAnchoredMinRelativeScore == Approx(0.37f));
+}
+
 TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][search_tuner][edge]") {
     // Even with code-dominant ratio, minimal size wins
     CorpusStats stats;
@@ -794,7 +817,9 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.weakQueryMinTopTextScore = 0.42f;
     config.enableSubPhraseRescoring = true;
     config.subPhraseScoringPenalty = 0.61f;
+    config.enableReranking = false;
     config.rerankTopK = 11;
+    config.rerankReplaceScores = false;
     config.rerankAnchoredMinRelativeScore = 0.29f;
     config.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
     config.enableGraphRerank = true;
@@ -835,6 +860,11 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     CHECK(roundTrip.fusionEvidenceRescueMinScore == Approx(config.fusionEvidenceRescueMinScore));
     CHECK(roundTrip.enableSubPhraseRescoring == config.enableSubPhraseRescoring);
     CHECK(roundTrip.subPhraseScoringPenalty == Approx(config.subPhraseScoringPenalty));
+    CHECK(roundTrip.enableReranking == config.enableReranking);
+    CHECK(roundTrip.rerankTopK == config.rerankTopK);
+    CHECK(roundTrip.rerankReplaceScores == config.rerankReplaceScores);
+    CHECK(roundTrip.rerankAnchoredMinRelativeScore ==
+          Approx(config.rerankAnchoredMinRelativeScore));
     CHECK(roundTrip.chunkAggregation == config.chunkAggregation);
     CHECK(roundTrip.graphEnablePathEnumeration == config.graphEnablePathEnumeration);
     CHECK(roundTrip.enableGraphQueryExpansion == config.enableGraphQueryExpansion);

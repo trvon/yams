@@ -4,10 +4,12 @@
 #include <cctype>
 #include <filesystem>
 #include <system_error>
+#include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
@@ -113,6 +115,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
         // If not dry-run and user wants to apply, execute prune synchronously
         if (!req.dryRun && !candidates.empty()) {
             spdlog::info("Executing prune operation for {} candidates", candidates.size());
+            auto documentService =
+                app::services::makeDocumentService(serviceManager_->getAppContext());
 
             uint64_t deleted = 0;
             uint64_t failed = 0;
@@ -125,24 +129,73 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     co_await boost::asio::post(boost::asio::use_awaitable);
                 }
                 try {
-                    // Remove from metadata database only (do not delete filesystem files)
-                    auto docResult = metaRepo->getDocumentByHash(candidate.hash);
-                    if (docResult && docResult.value().has_value()) {
-                        auto delResult = metaRepo->deleteDocument(docResult.value()->id);
-                        if (delResult) {
+                    auto docLookup = metaRepo->getDocumentByHash(candidate.hash);
+                    if (!docLookup) {
+                        spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                     docLookup.error().message);
+                        response.failedPaths.push_back(candidate.path);
+                        failed++;
+                        continue;
+                    }
+                    if (!docLookup.value().has_value()) {
+                        deleted++;
+                        response.deletedPaths.push_back(candidate.path);
+                        continue;
+                    }
+
+                    app::services::DeleteByNameRequest deleteReq;
+                    deleteReq.hash = candidate.hash;
+                    deleteReq.force = true;
+
+                    auto deleteResult = documentService->deleteByName(deleteReq);
+                    if (!deleteResult) {
+                        spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                     deleteResult.error().message);
+                        response.failedPaths.push_back(candidate.path);
+                        failed++;
+                        continue;
+                    }
+
+                    const auto& deleteResp = deleteResult.value();
+                    if (!deleteResp.errors.empty()) {
+                        const auto& err = deleteResp.errors.front();
+                        spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                     err.error.value_or("delete failed"));
+                        response.failedPaths.push_back(candidate.path);
+                        failed++;
+                        continue;
+                    }
+
+                    if (!deleteResp.deleted.empty()) {
+                        bool removed = false;
+                        bool contentRemoved = false;
+                        for (const auto& doc : deleteResp.deleted) {
+                            if (doc.deleted) {
+                                removed = true;
+                                contentRemoved = contentRemoved || doc.contentRemoved;
+                                if (lifecycle_ && !doc.hash.empty()) {
+                                    lifecycle_->onDocumentRemoved(doc.hash);
+                                }
+                            }
+                        }
+                        if (removed) {
                             deleted++;
-                            bytesFreed += candidate.fileSize;
+                            if (contentRemoved) {
+                                bytesFreed += candidate.fileSize;
+                            }
+                            response.deletedPaths.push_back(candidate.path);
                         } else {
-                            spdlog::warn("Failed to remove {} from metadata: {}", candidate.path,
-                                         delResult.error().message);
+                            response.failedPaths.push_back(candidate.path);
                             failed++;
                         }
                     } else {
-                        // Nothing to delete in metadata (already gone)
+                        // Candidate disappeared between query and apply; treat as already pruned.
                         deleted++;
+                        response.deletedPaths.push_back(candidate.path);
                     }
                 } catch (const std::exception& e) {
                     spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());
+                    response.failedPaths.push_back(candidate.path);
                     failed++;
                 }
             }

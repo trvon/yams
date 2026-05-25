@@ -8,14 +8,12 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace yams::metadata {
 class MetadataRepository;
-struct DocumentInfo;
 } // namespace yams::metadata
 
 namespace yams::integrity {
@@ -103,7 +101,8 @@ public:
 
     [[nodiscard]] bool canRepair(const std::string& blockHash) const;
 
-    // Prune operations
+    // Prune operations. Apply-mode deletion is owned by the app document service;
+    // this repair helper only supports dry-run candidate accounting.
     [[nodiscard]] Result<PruneResult>
     pruneFiles(const PruneConfig& config,
                std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
@@ -131,20 +130,6 @@ public:
 private:
     [[nodiscard]] bool storeIfValid(const std::string& blockHash,
                                     const Result<std::vector<std::byte>>& fetchResult) const;
-
-    // Prune helpers using modern C++
-    template <typename Predicate>
-    [[nodiscard]] auto filterDocuments(std::span<const metadata::DocumentInfo> docs,
-                                       Predicate&& pred) const;
-
-    [[nodiscard]] bool matchesCategory(const metadata::DocumentInfo& doc,
-                                       std::span<const std::string> categories) const noexcept;
-
-    [[nodiscard]] bool meetsAgeCriteria(const metadata::DocumentInfo& doc,
-                                        std::chrono::seconds minAge) const noexcept;
-
-    [[nodiscard]] bool meetsSizeCriteria(const metadata::DocumentInfo& doc, int64_t minSize,
-                                         int64_t maxSize) const noexcept;
 
     storage::IStorageEngine* storage_{nullptr};
     RepairManagerConfig config_;

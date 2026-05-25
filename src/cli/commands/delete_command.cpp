@@ -1,24 +1,22 @@
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
-#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <future>
-#include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
-#include <type_traits>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
-#include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 
 #include <yams/daemon/ipc/ipc_protocol.h>
-#include <yams/metadata/query_helpers.h>
 
 namespace yams::cli {
 
@@ -164,87 +162,9 @@ public:
             bool forceMode = force_;
             bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
 
-            auto render = [verboseMode, forceMode, jsonMode](const auto& response) -> Result<void> {
-                // Handle both DeleteResponse and SuccessResponse
-                if constexpr (std::is_same_v<std::decay_t<decltype(response)>,
-                                             yams::daemon::DeleteResponse>) {
-                    const auto& resp = response;
-
-                    if (jsonMode) {
-                        nlohmann::json j;
-                        j["dry_run"] = resp.dryRun;
-                        j["success_count"] = resp.successCount;
-                        j["failure_count"] = resp.failureCount;
-                        j["results"] = nlohmann::json::array();
-                        for (const auto& result : resp.results) {
-                            nlohmann::json item;
-                            item["name"] = result.name;
-                            item["hash"] = result.hash;
-                            item["success"] = result.success;
-                            if (!result.error.empty()) {
-                                item["error"] = result.error;
-                            }
-                            j["results"].push_back(item);
-                        }
-                        std::cout << j.dump(2) << std::endl;
-                        return Result<void>();
-                    }
-
-                    if (resp.dryRun) {
-                        std::cout << "[DRY RUN] Documents that would be deleted:\n";
-                        for (const auto& result : resp.results) {
-                            std::cout << "  " << result.name;
-                            if (!result.hash.empty()) {
-                                std::cout << " (" << result.hash.substr(0, 12) << "...)";
-                            }
-                            std::cout << "\n";
-                        }
-                        std::cout << "\nTotal: " << resp.results.size() << " document(s)\n";
-                    } else {
-                        // Report results
-                        if (resp.successCount > 0) {
-                            std::cout << "Successfully deleted " << resp.successCount
-                                      << " document(s)\n";
-                        }
-                        if (resp.failureCount > 0) {
-                            std::cout << "Failed to delete " << resp.failureCount
-                                      << " document(s):\n";
-                            bool hasCorrupted = false;
-                            for (const auto& result : resp.results) {
-                                if (!result.success && !result.error.empty()) {
-                                    std::cout << "  " << result.name << ": " << result.error
-                                              << "\n";
-                                    if (result.error.find("Corrupted data") != std::string::npos) {
-                                        hasCorrupted = true;
-                                    }
-                                }
-                            }
-                            if (hasCorrupted && !forceMode) {
-                                std::cout << "\nHint: Use --force to delete corrupted entries "
-                                             "(removes metadata even if content is corrupted)\n";
-                            }
-                        }
-
-                        // Show details in verbose mode
-                        if (verboseMode && resp.successCount > 0) {
-                            std::cout << "\nDeleted documents:\n";
-                            for (const auto& result : resp.results) {
-                                if (result.success) {
-                                    std::cout << "  " << result.name << " ("
-                                              << result.hash.substr(0, 12) << "...)\n";
-                                }
-                            }
-                        }
-                    }
-                    return Result<void>();
-                } else if constexpr (std::is_same_v<std::decay_t<decltype(response)>,
-                                                    yams::daemon::SuccessResponse>) {
-                    // Handle legacy SuccessResponse
-                    std::cout << "Deleted successfully\n";
-                    return Result<void>();
-                } else {
-                    return Error{ErrorCode::Unknown, "Unexpected response type from daemon"};
-                }
+            auto render = [this, verboseMode, forceMode,
+                           jsonMode](const yams::daemon::DeleteResponse& response) {
+                return renderDeleteResponse(response, verboseMode, forceMode, jsonMode);
             };
 
             try {
@@ -280,115 +200,218 @@ public:
     }
 
 private:
+    Result<void> renderDeleteResponse(const yams::daemon::DeleteResponse& resp, bool verboseMode,
+                                      bool forceMode, bool jsonMode) const {
+        if (jsonMode) {
+            nlohmann::json j;
+            j["dry_run"] = resp.dryRun;
+            j["success_count"] = resp.successCount;
+            j["failure_count"] = resp.failureCount;
+            j["results"] = nlohmann::json::array();
+            for (const auto& result : resp.results) {
+                nlohmann::json item;
+                item["name"] = result.name;
+                item["hash"] = result.hash;
+                item["success"] = result.success;
+                if (!result.error.empty()) {
+                    item["error"] = result.error;
+                }
+                j["results"].push_back(item);
+            }
+            std::cout << j.dump(2) << std::endl;
+            return Result<void>();
+        }
+
+        if (resp.dryRun) {
+            std::cout << "[DRY RUN] Documents that would be deleted:\n";
+            for (const auto& result : resp.results) {
+                std::cout << "  " << result.name;
+                if (!result.hash.empty()) {
+                    std::cout << " (" << result.hash.substr(0, 12) << "...)";
+                }
+                std::cout << "\n";
+            }
+            std::cout << "\nTotal: " << resp.results.size() << " document(s)\n";
+            return Result<void>();
+        }
+
+        if (resp.successCount > 0) {
+            std::cout << "Successfully deleted " << resp.successCount << " document(s)\n";
+        }
+        if (resp.failureCount > 0) {
+            std::cout << "Failed to delete " << resp.failureCount << " document(s):\n";
+            bool hasCorrupted = false;
+            for (const auto& result : resp.results) {
+                if (!result.success && !result.error.empty()) {
+                    std::cout << "  " << result.name << ": " << result.error << "\n";
+                    if (result.error.find("Corrupted data") != std::string::npos) {
+                        hasCorrupted = true;
+                    }
+                }
+            }
+            if (hasCorrupted && !forceMode) {
+                std::cout << "\nHint: Use --force to delete corrupted entries "
+                             "(removes metadata even if content is corrupted)\n";
+            }
+        }
+
+        if (verboseMode && resp.successCount > 0) {
+            std::cout << "\nDeleted documents:\n";
+            for (const auto& result : resp.results) {
+                if (result.success) {
+                    std::cout << "  " << result.name;
+                    if (!result.hash.empty()) {
+                        std::cout << " (" << result.hash.substr(0, 12) << "...)";
+                    }
+                    std::cout << "\n";
+                }
+            }
+        }
+
+        return Result<void>();
+    }
+
+    app::services::DeleteByNameRequest buildServiceDeleteRequest(bool dryRun) const {
+        app::services::DeleteByNameRequest req;
+        req.hash = hash_;
+        req.name = name_;
+
+        if (!names_.empty()) {
+            std::stringstream ss(names_);
+            std::string name;
+            while (std::getline(ss, name, ',')) {
+                yams::config::trim(name);
+                if (!name.empty()) {
+                    req.names.push_back(name);
+                }
+            }
+        }
+
+        req.pattern = pattern_;
+        if (!directory_.empty()) {
+            req.pattern = directory_;
+            if (!req.pattern.empty() && req.pattern.back() != '/') {
+                req.pattern += '/';
+            }
+            req.pattern += "*";
+        }
+
+        req.dryRun = dryRun;
+        req.force = force_;
+        req.keepRefs = keepRefs_;
+        req.recursive = recursive_;
+        req.verbose = verbose_ || (cli_ && cli_->getVerbose());
+        return req;
+    }
+
+    yams::daemon::DeleteResponse
+    toDaemonDeleteResponse(const app::services::DeleteByNameResponse& serviceResp) const {
+        yams::daemon::DeleteResponse response;
+        response.dryRun = serviceResp.dryRun;
+
+        auto appendResult = [&](const app::services::DeleteByNameResult& deleteResult,
+                                bool success) {
+            yams::daemon::DeleteResponse::DeleteResult daemonResult;
+            daemonResult.name = deleteResult.name;
+            daemonResult.hash = deleteResult.hash;
+            daemonResult.success = success;
+            daemonResult.error = deleteResult.error.value_or("");
+            if (success) {
+                response.successCount++;
+            } else {
+                response.failureCount++;
+            }
+            response.results.push_back(std::move(daemonResult));
+        };
+
+        for (const auto& deleteResult : serviceResp.deleted) {
+            appendResult(deleteResult, deleteResult.deleted);
+        }
+        for (const auto& errorResult : serviceResp.errors) {
+            appendResult(errorResult, false);
+        }
+
+        return response;
+    }
+
+    static void printDeleteCandidates(const yams::daemon::DeleteResponse& response) {
+        std::cout << "Documents to be deleted:\n";
+        for (const auto& result : response.results) {
+            std::cout << "  " << result.name;
+            if (!result.hash.empty()) {
+                std::cout << " (" << result.hash.substr(0, 12) << "...)";
+            }
+            std::cout << "\n";
+        }
+    }
+
     Result<void> executeLocal() {
         auto ensured = cli_->ensureStorageInitialized();
         if (!ensured) {
             return ensured;
         }
 
-        auto store = cli_->getContentStore();
-        if (!store) {
-            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
-        }
-
-        // Collect all hashes to delete based on input method
-        std::vector<std::pair<std::string, std::string>> toDelete; // pairs of (hash, name)
-        auto allowMissingDryRun = [this](const Error& error) {
-            return dryRun_ && error.code == ErrorCode::NotFound;
-        };
-
-        if (!hash_.empty()) {
-            // Direct hash deletion (existing functionality)
-            if (hash_.length() != 64 ||
-                hash_.find_first_not_of("0123456789abcdef") != std::string::npos) {
-                return Error{ErrorCode::InvalidArgument,
-                             "Invalid hash format. Expected 64 character hex string."};
-            }
-            toDelete.push_back({hash_, "hash:" + hash_.substr(0, 8) + "..."});
-        } else if (!name_.empty()) {
-            // Delete by single name
-            auto result = resolveNameToHashes(name_);
-            if (!result) {
-                if (!allowMissingDryRun(result.error())) {
-                    return result.error();
-                }
-            } else {
-                toDelete = result.value();
-            }
-        } else if (!names_.empty()) {
-            // Delete by multiple names
-            auto result = resolveNamesToHashes(names_);
-            if (!result) {
-                if (!allowMissingDryRun(result.error())) {
-                    return result.error();
-                }
-            } else {
-                toDelete = result.value();
-            }
-        } else if (!pattern_.empty()) {
-            // Delete by pattern
-            auto result = resolvePatternToHashes(pattern_);
-            if (!result) {
-                if (!allowMissingDryRun(result.error())) {
-                    return result.error();
-                }
-            } else {
-                toDelete = result.value();
-            }
-        } else if (!directory_.empty()) {
-            // Delete by directory
-            if (!recursive_) {
-                return Error{ErrorCode::InvalidArgument,
-                             "Directory deletion requires --recursive flag for safety"};
-            }
-            auto result = resolveDirectoryToHashes(directory_);
-            if (!result) {
-                if (!allowMissingDryRun(result.error())) {
-                    return result.error();
-                }
-            } else {
-                toDelete = result.value();
-            }
-        } else {
+        if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() &&
+            directory_.empty()) {
             return Error{ErrorCode::InvalidArgument, "No deletion criteria specified"};
         }
 
-        if (toDelete.empty()) {
-            std::cout << "No documents found matching the criteria.\n";
-            return Result<void>();
+        if (!directory_.empty() && !recursive_) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Directory deletion requires --recursive flag for safety"};
         }
 
-        // Show what will be deleted in dry-run or verbose mode
-        if (dryRun_ || verbose_) {
-            std::cout << "Documents to be deleted:\n";
-            for (const auto& [hash, name] : toDelete) {
-                std::cout << "  " << name << " (" << hash.substr(0, 12) << "...)\n";
+        auto appContext = cli_->getAppContext();
+        if (!appContext) {
+            return Error{ErrorCode::NotInitialized, "Application context not initialized"};
+        }
+        auto documentService = app::services::makeDocumentService(*appContext);
+
+        const bool verboseMode = verbose_ || (cli_ && cli_->getVerbose());
+        const bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
+        std::optional<yams::daemon::DeleteResponse> previewResponse;
+
+        if (dryRun_ || verboseMode || !force_) {
+            auto previewReq = buildServiceDeleteRequest(true);
+            auto previewResult = documentService->deleteByName(previewReq);
+            if (!previewResult) {
+                return previewResult.error();
             }
-            if (dryRun_) {
-                std::cout << "\n[DRY RUN] Would delete " << toDelete.size() << " document(s)\n";
+            previewResponse = toDaemonDeleteResponse(previewResult.value());
+            if (previewResponse->results.empty()) {
+                if (jsonMode) {
+                    return renderDeleteResponse(*previewResponse, verboseMode, force_, jsonMode);
+                }
+                std::cout << "No documents found matching the criteria.\n";
                 return Result<void>();
             }
-        }
-
-        // Calculate total size if needed for confirmation
-        uint64_t totalSize = 0;
-        if (!force_ || verbose_) {
-            auto metadataRepo = cli_->getMetadataRepository();
-            if (metadataRepo) {
-                for (const auto& [hash, name] : toDelete) {
-                    auto docResult = metadataRepo->getDocumentByHash(hash);
-                    if (docResult && docResult.value()) {
-                        totalSize += docResult.value()->fileSize;
-                    }
-                }
+            if (dryRun_) {
+                return renderDeleteResponse(*previewResponse, verboseMode, force_, jsonMode);
+            }
+            if (verboseMode) {
+                printDeleteCandidates(*previewResponse);
             }
         }
 
         // Confirm deletion unless --force is used
         if (!force_) {
-            std::string prompt = toDelete.size() == 1
+            const auto candidateCount = previewResponse ? previewResponse->results.size() : 0;
+            uint64_t totalSize = 0;
+            if (appContext->metadataRepo && previewResponse) {
+                for (const auto& result : previewResponse->results) {
+                    if (result.hash.empty()) {
+                        continue;
+                    }
+                    auto docResult = appContext->metadataRepo->getDocumentByHash(result.hash);
+                    if (docResult && docResult.value()) {
+                        totalSize += docResult.value()->fileSize;
+                    }
+                }
+            }
+
+            std::string prompt = candidateCount == 1
                                      ? "Delete 1 document"
-                                     : "Delete " + std::to_string(toDelete.size()) + " documents";
+                                     : "Delete " + std::to_string(candidateCount) + " documents";
 
             if (totalSize > 0) {
                 prompt += " (total size: " + ui::format_bytes(totalSize) + ")";
@@ -404,328 +427,38 @@ private:
             }
         }
 
-        // Delete all documents
-        size_t successCount = 0;
-        size_t failCount = 0;
-        std::vector<std::string> failures;
-
-        // Use progress indicator for large deletions
-        ProgressIndicator progress(ProgressIndicator::Style::Percentage);
-        if (toDelete.size() > 100 && !dryRun_) {
-            progress.start("Deleting files");
+        auto deleteReq = buildServiceDeleteRequest(false);
+        auto deleteResult = documentService->deleteByName(deleteReq);
+        if (!deleteResult) {
+            return deleteResult.error();
+        }
+        auto response = toDaemonDeleteResponse(deleteResult.value());
+        if (response.results.empty()) {
+            if (jsonMode) {
+                return renderDeleteResponse(response, verboseMode, force_, jsonMode);
+            }
+            std::cout << "No documents found matching the criteria.\n";
+            return Result<void>();
         }
 
-        for (size_t i = 0; i < toDelete.size(); ++i) {
-            const auto& [hash, name] = toDelete[i];
-
-            if (verbose_) {
-                std::cout << "Deleting " << name << "...\n";
-            }
-
-            // Check if document exists
-            auto existsResult = store->exists(hash);
-            if (!existsResult || !existsResult.value()) {
-                // File doesn't exist in storage, check if we need to clean up metadata
-                if (auto metadataRepo = cli_->getMetadataRepository()) {
-                    auto docResult = metadataRepo->getDocumentByHash(hash);
-                    if (docResult && docResult.value()) {
-                        // Clean up orphaned metadata entry
-                        auto deleteMetaResult = metadataRepo->deleteDocument(docResult.value()->id);
-                        if (deleteMetaResult) {
-                            successCount++;
-                            if (verbose_) {
-                                std::cout << "  Cleaned orphaned metadata for " << name << "\n";
-                            }
-                            continue;
-                        }
-                    }
-                }
-                failures.push_back(name + ": not found in storage");
-                failCount++;
-                continue;
-            }
-
-            // Delete the document from storage
-            auto deleteResult = store->remove(hash);
-            if (!deleteResult) {
-                // If deletion fails due to corruption, and --force is used,
-                // still try to remove the metadata entry.
-                if (deleteResult.error().message.find("Corrupted data") != std::string::npos &&
-                    force_) {
-                    spdlog::warn("Storage data is corrupted for {}. Forcing metadata deletion.",
-                                 name);
-                    if (auto metadataRepo = cli_->getMetadataRepository()) {
-                        auto docResult = metadataRepo->getDocumentByHash(hash);
-                        if (docResult && docResult.value()) {
-                            auto deleteMetaResult =
-                                metadataRepo->deleteDocument(docResult.value()->id);
-                            if (deleteMetaResult) {
-                                successCount++;
-                                if (verbose_) {
-                                    std::cout << "  Force-deleted corrupted metadata for " << name
-                                              << "\n";
-                                }
-                                continue; // Skip adding to failures
-                            }
-                        }
-                    }
-                }
-
-                failures.push_back(name + ": " + deleteResult.error().message);
-                failCount++;
-            } else {
-                successCount++;
-
-                // Also remove from metadata repository
-                if (auto metadataRepo = cli_->getMetadataRepository()) {
-                    auto docResult = metadataRepo->getDocumentByHash(hash);
-                    if (docResult && docResult.value()) {
-                        auto deleteMetaResult = metadataRepo->deleteDocument(docResult.value()->id);
-                        if (!deleteMetaResult) {
-                            spdlog::warn("Failed to delete metadata for {}: {}", hash,
-                                         deleteMetaResult.error().message);
-                        }
-                    }
-                }
-
-                if (verbose_) {
-                    std::cout << "  Deleted " << name << "\n";
-                }
-            }
-
-            // Update progress indicator
-            if (toDelete.size() > 100 && !dryRun_) {
-                progress.update(i + 1, toDelete.size());
-            }
-        }
-
-        // Stop progress indicator
-        progress.stop();
-
-        // Report results
-        if (successCount > 0) {
-            std::cout << "Successfully deleted " << successCount << " document(s)\n";
-        }
-        if (failCount > 0) {
-            std::cout << "Failed to delete " << failCount << " document(s):\n";
-            for (const auto& failure : failures) {
-                std::cout << "  " << failure << "\n";
-            }
+        auto renderResult = renderDeleteResponse(response, verboseMode, force_, jsonMode);
+        if (!renderResult) {
+            return renderResult.error();
         }
 
         // Show storage stats if verbose
-        if (verbose_ && successCount > 0) {
-            auto stats = store->getStats();
+        if (verboseMode && response.successCount > 0 && appContext->store) {
+            auto stats = appContext->store->getStats();
             std::cout << "\nStorage statistics:\n";
             std::cout << "  Total objects: " << stats.totalObjects << "\n";
             std::cout << "  Unique blocks: " << stats.uniqueBlocks << "\n";
             std::cout << "  Storage size: " << ui::format_bytes(stats.totalBytes) << "\n";
         }
 
-        return failCount > 0 && successCount == 0
+        return response.failureCount > 0 && response.successCount == 0
                    ? Error{ErrorCode::InvalidOperation, "All deletions failed"}
                    : Result<void>();
     } // End of executeLocal()
-
-    // Helper method implementations
-    Result<std::vector<std::pair<std::string, std::string>>>
-    resolveNameToHashes(const std::string& name) {
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
-        }
-
-        // Search for documents with matching fileName
-        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
-        if (!documentsResult) {
-            // Try exact match
-            documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
-            if (!documentsResult) {
-                return Error{ErrorCode::NotFound,
-                             "Failed to query documents: " + documentsResult.error().message};
-            }
-        }
-
-        std::vector<std::pair<std::string, std::string>> results;
-        for (const auto& doc : documentsResult.value()) {
-            if (doc.fileName == name || doc.filePath == name) {
-                results.push_back({doc.sha256Hash, doc.fileName});
-            }
-        }
-
-        if (results.empty()) {
-            return Error{ErrorCode::NotFound, "No documents found with name: " + name};
-        }
-
-        // Handle ambiguous names
-        if (results.size() > 1 && !force_) {
-            std::cout << "Multiple documents found with name '" << name << "':\n";
-            for (size_t i = 0; i < results.size(); ++i) {
-                const auto& [hash, fname] = results[i];
-                std::cout << "  " << (i + 1) << ". " << fname << " (" << hash.substr(0, 12)
-                          << "...)\n";
-            }
-            std::cout << "Use --force to delete all matches, or specify the exact hash.\n";
-            return Error{ErrorCode::InvalidOperation, "Multiple documents with same name"};
-        }
-
-        return results;
-    }
-
-    Result<std::vector<std::pair<std::string, std::string>>>
-    resolveNamesToHashes(const std::string& namesList) {
-        std::vector<std::pair<std::string, std::string>> allResults;
-
-        // Split comma-separated names
-        std::vector<std::string> names;
-        std::stringstream ss(namesList);
-        std::string name;
-        while (std::getline(ss, name, ',')) {
-            yams::config::trim(name);
-            if (!name.empty()) {
-                names.push_back(name);
-            }
-        }
-
-        if (names.empty()) {
-            return Error{ErrorCode::InvalidArgument, "No valid names provided"};
-        }
-
-        // Resolve each name
-        for (const auto& n : names) {
-            auto result = resolveNameToHashes(n);
-            if (result) {
-                for (const auto& pair : result.value()) {
-                    allResults.push_back(pair);
-                }
-            } else if (result.error().code != ErrorCode::NotFound) {
-                // Only fail on errors other than NotFound
-                if (!force_) {
-                    return result.error();
-                }
-            }
-        }
-
-        return allResults;
-    }
-
-    Result<std::vector<std::pair<std::string, std::string>>>
-    resolvePatternToHashes(const std::string& pattern) {
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
-        }
-
-        // Convert glob pattern to SQL LIKE pattern
-        std::string sqlPattern = pattern;
-        // Replace * with %
-        size_t pos = 0;
-        while ((pos = sqlPattern.find('*', pos)) != std::string::npos) {
-            sqlPattern.replace(pos, 1, "%");
-            pos++;
-        }
-        // Replace ? with _
-        pos = 0;
-        while ((pos = sqlPattern.find('?', pos)) != std::string::npos) {
-            sqlPattern.replace(pos, 1, "_");
-            pos++;
-        }
-
-        // If pattern contains no slashes, assume it's a filename pattern.
-        // The LIKE query will be broad, and we'll filter with the glob matcher.
-        if (pattern.find('/') == std::string::npos && pattern.find('\\') == std::string::npos) {
-            sqlPattern = "%" + sqlPattern + "%";
-        }
-
-        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, sqlPattern);
-        if (!documentsResult) {
-            return Error{ErrorCode::NotFound,
-                         "Failed to query documents: " + documentsResult.error().message};
-        }
-
-        std::vector<std::pair<std::string, std::string>> results;
-        for (const auto& doc : documentsResult.value()) {
-            // Additional filtering for exact pattern match on fileName
-            if (matchesPattern(doc.fileName, pattern) || matchesPattern(doc.filePath, pattern)) {
-                results.push_back({doc.sha256Hash, doc.fileName});
-            }
-        }
-
-        if (results.empty()) {
-            return Error{ErrorCode::NotFound, "No documents found matching pattern: " + pattern};
-        }
-
-        return results;
-    }
-
-    bool matchesPattern(const std::string& str, const std::string& pattern) {
-        size_t strIdx = 0, patIdx = 0;
-        size_t strLen = str.length(), patLen = pattern.length();
-        size_t lastWildcard = std::string::npos, lastMatch = 0;
-
-        while (strIdx < strLen) {
-            if (patIdx < patLen && (pattern[patIdx] == '?' || pattern[patIdx] == str[strIdx])) {
-                strIdx++;
-                patIdx++;
-            } else if (patIdx < patLen && pattern[patIdx] == '*') {
-                lastWildcard = patIdx;
-                lastMatch = strIdx;
-                patIdx++;
-            } else if (lastWildcard != std::string::npos) {
-                patIdx = lastWildcard + 1;
-                lastMatch++;
-                strIdx = lastMatch;
-            } else {
-                return false;
-            }
-        }
-
-        while (patIdx < patLen && pattern[patIdx] == '*') {
-            patIdx++;
-        }
-
-        return patIdx == patLen;
-    }
-
-    Result<std::vector<std::pair<std::string, std::string>>>
-    resolveDirectoryToHashes(const std::string& directory) {
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
-        }
-
-        // Build pattern for directory contents
-        std::string pattern = directory;
-        if (!pattern.empty() && pattern.back() != '/') {
-            pattern += '/';
-        }
-        pattern += "%";
-
-        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, pattern);
-        if (!documentsResult) {
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to query directory: " + documentsResult.error().message};
-        }
-
-        std::vector<std::pair<std::string, std::string>> results;
-        std::string dirPrefix = directory;
-        if (!dirPrefix.empty() && dirPrefix.back() != '/') {
-            dirPrefix += '/';
-        }
-
-        for (const auto& doc : documentsResult.value()) {
-            // Verify path starts with directory
-            if (doc.filePath.find(dirPrefix) == 0 || doc.filePath == directory) {
-                results.push_back({doc.sha256Hash, doc.filePath});
-            }
-        }
-
-        if (results.empty()) {
-            return Error{ErrorCode::NotFound, "No documents found in directory: " + directory};
-        }
-
-        return results;
-    }
 }; // End of DeleteCommand class
 
 // Factory function

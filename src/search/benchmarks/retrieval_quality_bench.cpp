@@ -2366,20 +2366,42 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
         {"search_engine", metadata.searchEngine},
         {"expected_docs", metadata.expectedDocs},
         {"expected_queries", metadata.expectedQueries},
-        {"corpus_fingerprint", std::to_string(metadata.corpusFingerprint)},
+        {"corpus_fingerprint", metadata.corpusFingerprint},
         {"status", metadata.status},
         {"embedded_docs", metadata.embeddedDocs},
-        {"vector_count", std::to_string(metadata.vectorCount)},
+        {"vector_count", metadata.vectorCount},
         {"vector_index_ready", metadata.vectorIndexReady},
-        {"vectors_db_bytes", std::to_string(metadata.vectorsDbBytes)},
-        {"vectors_wal_bytes", std::to_string(metadata.vectorsWalBytes)},
-        {"persisted_hnsw_nodes", std::to_string(metadata.persistedHnswNodes)},
-        {"persisted_hnsw_meta_rows", std::to_string(metadata.persistedHnswMetaRows)},
-        {"persisted_vec0_tables", std::to_string(metadata.persistedVec0Tables)},
-        {"persisted_vec0_rows", std::to_string(metadata.persistedVec0Rows)},
-        {"persisted_pq_codes", std::to_string(metadata.persistedPqCodes)},
-        {"persisted_pq_meta", std::to_string(metadata.persistedPqMeta)},
+        {"vectors_db_bytes", metadata.vectorsDbBytes},
+        {"vectors_wal_bytes", metadata.vectorsWalBytes},
+        {"persisted_hnsw_nodes", metadata.persistedHnswNodes},
+        {"persisted_hnsw_meta_rows", metadata.persistedHnswMetaRows},
+        {"persisted_vec0_tables", metadata.persistedVec0Tables},
+        {"persisted_vec0_rows", metadata.persistedVec0Rows},
+        {"persisted_pq_codes", metadata.persistedPqCodes},
+        {"persisted_pq_meta", metadata.persistedPqMeta},
     };
+}
+
+static std::uintmax_t jsonUintValue(const json& j, const char* key, std::uintmax_t fallback = 0) {
+    const auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        return fallback;
+    }
+    if (it->is_number_unsigned()) {
+        return it->get<std::uintmax_t>();
+    }
+    if (it->is_number_integer()) {
+        const auto value = it->get<std::intmax_t>();
+        return value >= 0 ? static_cast<std::uintmax_t>(value) : fallback;
+    }
+    if (it->is_string()) {
+        try {
+            return static_cast<std::uintmax_t>(std::stoull(it->get<std::string>()));
+        } catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
 }
 
 static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) {
@@ -2402,19 +2424,19 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
                                      yams::vector::VectorSearchEngine::SimeonPqAdc)));
     metadata.expectedDocs = j.value("expected_docs", 0);
     metadata.expectedQueries = j.value("expected_queries", 0);
-    metadata.corpusFingerprint = j.value("corpus_fingerprint", std::uintmax_t{0});
+    metadata.corpusFingerprint = jsonUintValue(j, "corpus_fingerprint");
     metadata.status = j.value("status", std::string("priming"));
     metadata.embeddedDocs = j.value("embedded_docs", 0);
-    metadata.vectorCount = j.value("vector_count", std::uintmax_t{0});
+    metadata.vectorCount = jsonUintValue(j, "vector_count");
     metadata.vectorIndexReady = j.value("vector_index_ready", false);
-    metadata.vectorsDbBytes = j.value("vectors_db_bytes", std::uintmax_t{0});
-    metadata.vectorsWalBytes = j.value("vectors_wal_bytes", std::uintmax_t{0});
-    metadata.persistedHnswNodes = j.value("persisted_hnsw_nodes", std::uintmax_t{0});
-    metadata.persistedHnswMetaRows = j.value("persisted_hnsw_meta_rows", std::uintmax_t{0});
-    metadata.persistedVec0Tables = j.value("persisted_vec0_tables", std::uintmax_t{0});
-    metadata.persistedVec0Rows = j.value("persisted_vec0_rows", std::uintmax_t{0});
-    metadata.persistedPqCodes = j.value("persisted_pq_codes", std::uintmax_t{0});
-    metadata.persistedPqMeta = j.value("persisted_pq_meta", std::uintmax_t{0});
+    metadata.vectorsDbBytes = jsonUintValue(j, "vectors_db_bytes");
+    metadata.vectorsWalBytes = jsonUintValue(j, "vectors_wal_bytes");
+    metadata.persistedHnswNodes = jsonUintValue(j, "persisted_hnsw_nodes");
+    metadata.persistedHnswMetaRows = jsonUintValue(j, "persisted_hnsw_meta_rows");
+    metadata.persistedVec0Tables = jsonUintValue(j, "persisted_vec0_tables");
+    metadata.persistedVec0Rows = jsonUintValue(j, "persisted_vec0_rows");
+    metadata.persistedPqCodes = jsonUintValue(j, "persisted_pq_codes");
+    metadata.persistedPqMeta = jsonUintValue(j, "persisted_pq_meta");
     return metadata;
 }
 
@@ -2552,8 +2574,6 @@ preferStrongerBenchCacheMetadata(BenchCacheMetadata preferred,
 static BenchCacheMetadata currentBenchCacheMetadata(BenchCacheMetadata metadata,
                                                     const yams::daemon::StatusResponse& status,
                                                     const fs::path& dataDir) {
-    metadata.datasetPath =
-        metadata.datasetPath.empty() ? canonicalPathOrEmpty(dataDir) : metadata.datasetPath;
     auto getCount = [&](std::string_view key) -> std::uintmax_t {
         auto it = status.requestCounts.find(std::string(key));
         return it == status.requestCounts.end() ? 0 : it->second;

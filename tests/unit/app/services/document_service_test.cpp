@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -166,6 +167,104 @@ struct DocumentFixture {
     std::shared_ptr<IDocumentService> documentService_;
     std::string testHash1_;
     std::string testHash2_;
+};
+
+class RemoveFailingContentStore : public IContentStore {
+public:
+    RemoveFailingContentStore(std::shared_ptr<IContentStore> inner, std::string failHash,
+                              Error error)
+        : inner_(std::move(inner)), failHash_(std::move(failHash)), error_(std::move(error)) {}
+
+    Result<StoreResult> store(const std::filesystem::path& path, const ContentMetadata& metadata,
+                              yams::api::ProgressCallback progress) override {
+        return inner_->store(path, metadata, progress);
+    }
+
+    Result<RetrieveResult> retrieve(const std::string& hash,
+                                    const std::filesystem::path& outputPath,
+                                    yams::api::ProgressCallback progress) override {
+        return inner_->retrieve(hash, outputPath, progress);
+    }
+
+    Result<StoreResult> storeStream(std::istream& stream, const ContentMetadata& metadata,
+                                    yams::api::ProgressCallback progress) override {
+        return inner_->storeStream(stream, metadata, progress);
+    }
+
+    Result<RetrieveResult> retrieveStream(const std::string& hash, std::ostream& output,
+                                          yams::api::ProgressCallback progress) override {
+        return inner_->retrieveStream(hash, output, progress);
+    }
+
+    Result<StoreResult> storeBytes(std::span<const std::byte> data,
+                                   const ContentMetadata& metadata) override {
+        return inner_->storeBytes(data, metadata);
+    }
+
+    Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        return inner_->retrieveBytes(hash);
+    }
+
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                       std::size_t maxBytes) override {
+        return inner_->retrieveBytesPrefix(hash, maxBytes);
+    }
+
+    Result<RawContent> retrieveRaw(const std::string& hash) override {
+        return inner_->retrieveRaw(hash);
+    }
+
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string& hash) override {
+        return inner_->retrieveRawAsync(hash);
+    }
+
+    Result<bool> exists(const std::string& hash) const override { return inner_->exists(hash); }
+
+    Result<bool> remove(const std::string& hash) override {
+        if (hash == failHash_) {
+            return error_;
+        }
+        return inner_->remove(hash);
+    }
+
+    Result<ContentMetadata> getMetadata(const std::string& hash) const override {
+        return inner_->getMetadata(hash);
+    }
+
+    Result<void> updateMetadata(const std::string& hash, const ContentMetadata& metadata) override {
+        return inner_->updateMetadata(hash, metadata);
+    }
+
+    std::vector<Result<StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>& paths,
+               const std::vector<ContentMetadata>& metadata) override {
+        return inner_->storeBatch(paths, metadata);
+    }
+
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>& hashes) override {
+        return inner_->removeBatch(hashes);
+    }
+
+    ContentStoreStats getStats() const override { return inner_->getStats(); }
+
+    HealthStatus checkHealth() const override { return inner_->checkHealth(); }
+
+    Result<void> verify(yams::api::ProgressCallback progress) override {
+        return inner_->verify(progress);
+    }
+
+    Result<void> compact(yams::api::ProgressCallback progress) override {
+        return inner_->compact(progress);
+    }
+
+    Result<void> garbageCollect(yams::api::ProgressCallback progress) override {
+        return inner_->garbageCollect(progress);
+    }
+
+private:
+    std::shared_ptr<IContentStore> inner_;
+    std::string failHash_;
+    Error error_;
 };
 
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
@@ -494,6 +593,85 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         REQUIRE(result);
         CHECK_FALSE(result.value().deleted.empty());
         CHECK_FALSE(vectorDb->hasEmbedding(fixture.testHash2_));
+    }
+
+    SECTION("Delete document cleans orphan metadata when content is already missing") {
+        auto removed = fixture.contentStore_->remove(fixture.testHash2_);
+        REQUIRE(removed);
+
+        auto before = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(before);
+        REQUIRE(before.value().has_value());
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK(result.value().errors.empty());
+        REQUIRE(result.value().deleted.size() == 1);
+        CHECK(result.value().deleted.front().deleted);
+
+        auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(after);
+        CHECK_FALSE(after.value().has_value());
+    }
+
+    SECTION("Delete document force-cleans metadata when store removal reports corruption") {
+        auto failingStore = std::make_shared<RemoveFailingContentStore>(
+            fixture.contentStore_, fixture.testHash2_,
+            Error{ErrorCode::IOError, "Corrupted data while removing object"});
+        fixture.appContext_.store = failingStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+
+        auto failed = fixture.documentService_->deleteByName(request);
+        REQUIRE(failed);
+        CHECK(failed.value().deleted.empty());
+        REQUIRE(failed.value().errors.size() == 1);
+
+        auto stillPresent = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(stillPresent);
+        REQUIRE(stillPresent.value().has_value());
+
+        request.force = true;
+        auto forced = fixture.documentService_->deleteByName(request);
+        REQUIRE(forced);
+        CHECK(forced.value().errors.empty());
+        REQUIRE(forced.value().deleted.size() == 1);
+        CHECK(forced.value().deleted.front().deleted);
+
+        auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(after);
+        CHECK_FALSE(after.value().has_value());
+    }
+
+    SECTION("Delete document by raw hash removes content even without metadata") {
+        auto rawPath = fixture.testDir_ / "raw-content.txt";
+        std::ofstream{rawPath} << "raw content without metadata";
+
+        auto stored = fixture.contentStore_->store(rawPath, ContentMetadata{});
+        REQUIRE(stored);
+        const auto hash = stored.value().contentHash;
+        auto existsBefore = fixture.contentStore_->exists(hash);
+        REQUIRE(existsBefore);
+        REQUIRE(existsBefore.value());
+
+        DeleteByNameRequest request;
+        request.hash = hash;
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK(result.value().errors.empty());
+        REQUIRE(result.value().deleted.size() == 1);
+        CHECK(result.value().deleted.front().deleted);
+        auto removedAgain = fixture.contentStore_->remove(hash);
+        REQUIRE(removedAgain);
+        CHECK_FALSE(removedAgain.value());
     }
 }
 

@@ -1,9 +1,12 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <string_view>
@@ -53,7 +56,25 @@ int count_live_statements(sqlite3* db) {
     return count;
 }
 
+bool is_sqlite_busy_or_locked(int rc) {
+    return rc == SQLITE_BUSY || rc == SQLITE_LOCKED;
+}
+
+bool is_transient_integrity_check_message(std::string_view message) {
+    std::string lower;
+    lower.reserve(message.size());
+    std::transform(message.begin(), message.end(), std::back_inserter(lower),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return lower.find("database is locked") != std::string::npos ||
+           lower.find("database table is locked") != std::string::npos ||
+           lower.find("database is busy") != std::string::npos;
+}
+
 } // namespace
+
+bool testing_isTransientIntegrityCheckMessage(std::string_view message) {
+    return is_transient_integrity_check_message(message);
+}
 
 // Statement implementation
 Statement::Statement(sqlite3* db, const std::string& sql) {
@@ -609,6 +630,9 @@ Result<void> Database::checkIntegrity() {
     int rc = sqlite3_prepare_v2(db_, "PRAGMA quick_check", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         std::string err = sqlite3_errmsg(db_);
+        if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
+            return Error{ErrorCode::ResourceBusy, "quick_check prepare failed: " + err};
+        }
         return Error{ErrorCode::DatabaseError, "quick_check prepare failed: " + err};
     }
 
@@ -634,11 +658,17 @@ Result<void> Database::checkIntegrity() {
 
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         std::string err = sqlite3_errmsg(db_);
+        if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
+            return Error{ErrorCode::ResourceBusy, "quick_check step failed: " + err};
+        }
         return Error{ErrorCode::DatabaseError, "quick_check step failed: " + err};
     }
 
     if (rowCount == 1 && firstLine == "ok") {
         return {};
+    }
+    if (is_transient_integrity_check_message(allLines)) {
+        return Error{ErrorCode::ResourceBusy, "quick_check reported: " + allLines};
     }
     return Error{ErrorCode::DatabaseError, "quick_check reported: " + allLines};
 }
