@@ -214,6 +214,28 @@ public:
         auto manifestStoreResult =
             storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
         if (!manifestStoreResult) {
+            if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
+                                                manifestStoreResult.error())) {
+                auto commitResult2 = transaction->commit();
+                if (!commitResult2) {
+                    transaction->rollback();
+                    cleanupStoredObject(manifestHash);
+                    cleanupStoredObjects(storedChunks);
+                    return Result<StoreResult>(commitResult2.error());
+                }
+                {
+                    std::unique_lock lock(metadataMutex_);
+                    metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
+                }
+                updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+                auto endTime = std::chrono::steady_clock::now();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+                return StoreResult{.contentHash = fileHash,
+                                   .bytesStored = fileSize,
+                                   .bytesDeduped = bytesDeduped,
+                                   .duration = duration};
+            }
             rollbackStore();
             return Result<StoreResult>(manifestStoreResult.error());
         }
@@ -515,6 +537,28 @@ public:
         auto manifestStoreResult =
             storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
         if (!manifestStoreResult) {
+            if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
+                                                manifestStoreResult.error())) {
+                auto commitResult2 = transaction->commit();
+                if (!commitResult2) {
+                    transaction->rollback();
+                    cleanupStoredObject(manifestHash);
+                    cleanupStoredObjects(storedChunks);
+                    return Result<StoreResult>(commitResult2.error());
+                }
+                {
+                    std::unique_lock lock(metadataMutex_);
+                    metadataStore_[dataHash] = metadata;
+                }
+                updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+                auto endTime = std::chrono::steady_clock::now();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+                return StoreResult{.contentHash = dataHash,
+                                   .bytesStored = data.size(),
+                                   .bytesDeduped = bytesDeduped,
+                                   .duration = duration};
+            }
             rollbackStore();
             return Result<StoreResult>(manifestStoreResult.error());
         }
@@ -1096,6 +1140,29 @@ private:
             spdlog::warn("Failed to clean up partial store object {}: {}", hash,
                          removed.error().message);
         }
+    }
+
+    bool reconcileAmbiguousManifestStore(const std::string& manifestHash,
+                                         const std::vector<std::byte>& intendedBytes,
+                                         const Error& storeError) {
+        if (storeError.code != ErrorCode::NetworkError && storeError.code != ErrorCode::Timeout) {
+            return false;
+        }
+
+        auto retrieved = storage_->retrieve(manifestHash);
+        if (!retrieved) {
+            return false;
+        }
+
+        if (retrieved.value().size() != intendedBytes.size() ||
+            !std::equal(retrieved.value().begin(), retrieved.value().end(),
+                        intendedBytes.begin())) {
+            cleanupStoredObject(manifestHash);
+            return false;
+        }
+
+        spdlog::info("Reconciled ambiguous manifest store for {}", manifestHash);
+        return true;
     }
 };
 

@@ -70,6 +70,7 @@ class ScriptedStorageEngine final : public yams::storage::IStorageEngine {
 public:
     bool failStoresAsNotInitialized{false};
     bool failManifestStore{false};
+    bool failManifestStoreAmbiguously{false};
     size_t storeCalls{0};
     size_t removeCalls{0};
     std::vector<std::string> removedKeys;
@@ -81,6 +82,10 @@ public:
             return Error{ErrorCode::NotInitialized, "scripted storage is not ready"};
         }
         if (failManifestStore && key.ends_with(".manifest")) {
+            if (failManifestStoreAmbiguously) {
+                objects_[key] = std::vector<std::byte>(data.begin(), data.end());
+                return Error{ErrorCode::NetworkError, "scripted ambiguous manifest write"};
+            }
             return Error{ErrorCode::WriteError, "scripted manifest write failure"};
         }
         objects_[key] = std::vector<std::byte>(data.begin(), data.end());
@@ -904,6 +909,89 @@ TEST_CASE("ContentStore: File add commit failure reconciles partial remote state
         CHECK(stats.totalObjects == 0);
         CHECK(stats.uniqueBlocks == 0);
         CHECK(stats.totalUncompressedBytes == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Ambiguous manifest store is reconciled without rollback",
+          "[api][content-store][readiness][reconcile]") {
+    auto tempDir = makeTempDir("content_store_ambiguous_manifest");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+    storage->failManifestStoreAmbiguously = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 13) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto stored = store->storeBytes(data, ContentMetadata{});
+        REQUIRE(stored.has_value());
+        CHECK(stored.value().contentHash == hash);
+        CHECK(stored.value().bytesStored > 0);
+
+        CHECK(storage->storeCalls > 0);
+        CHECK_FALSE(storage->empty());
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE(metadata.has_value());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 1);
+        CHECK(stats.totalObjects > 0);
+        CHECK(stats.uniqueBlocks > 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls back",
+          "[api][content-store][readiness][reconcile]") {
+    auto tempDir = makeTempDir("content_store_ambiguous_mismatch");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+    storage->failManifestStoreAmbiguously = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 17) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        storage->failManifestStoreAmbiguously = false;
+
+        auto stored = store->storeBytes(data, ContentMetadata{});
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::WriteError);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
     }
 
     std::error_code ec;
