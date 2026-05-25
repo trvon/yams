@@ -124,6 +124,10 @@ std::optional<CommandRegistration> findRegistration(std::string_view commandName
 } // namespace
 
 void CommandRegistry::registerAllCommands(YamsCLI* cli) {
+    if (cli == nullptr) {
+        return;
+    }
+
     registerCommandSet(cli, kCoreCommandRegistrations);
     registerCommandSet(cli, kConfigCommandRegistrations);
     registerCommandSet(cli, kWorkflowCommandRegistrations);
@@ -133,6 +137,10 @@ void CommandRegistry::registerAllCommands(YamsCLI* cli) {
 }
 
 bool CommandRegistry::registerMinimalCommandSet(YamsCLI* cli, std::string_view commandName) {
+    if (cli == nullptr) {
+        return false;
+    }
+
     if (const auto entry = findRegistration(commandName, kMinimalCommandRegistrations)) {
         cli->registerCommand(entry->factory());
         return true;
