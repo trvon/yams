@@ -491,3 +491,62 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         // Statement won't be returned to cache since it was released
     }
 }
+
+TEST_CASE("Database: operations after close return errors", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    REQUIRE(db.execute("CREATE TABLE post_close(id INTEGER PRIMARY KEY)").has_value());
+    db.close();
+    CHECK_FALSE(db.isOpen());
+
+    auto execAfter = db.execute("CREATE TABLE should_fail(id INTEGER PRIMARY KEY)");
+    CHECK_FALSE(execAfter.has_value());
+
+    auto prepareAfter = db.prepare("SELECT 1");
+    CHECK_FALSE(prepareAfter.has_value());
+
+    auto tableAfter = db.tableExists("post_close");
+    CHECK_FALSE(tableAfter.has_value());
+}
+
+TEST_CASE("Database: open nonexistent file without Create mode fails",
+          "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    auto nonexistent =
+        fix.dbPath_.parent_path() /
+        ("nonexistent_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+
+    Database db;
+    auto result = db.open(nonexistent.string(), ConnectionMode::ReadWrite);
+    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(db.isOpen());
+}
+
+TEST_CASE("Database: close clears statement cache", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    REQUIRE(db.execute("CREATE TABLE cache_clear(id INTEGER PRIMARY KEY, val TEXT)").has_value());
+
+    {
+        auto stmt = db.prepareCached("INSERT INTO cache_clear VALUES (?, ?)");
+        REQUIRE(stmt.has_value());
+        stmt.value()->bind(1, 1);
+        stmt.value()->bind(2, std::string_view{"a"});
+        REQUIRE(stmt.value()->execute().has_value());
+    }
+
+    auto stats = db.getStatementCacheStats();
+    CHECK(stats.currentSize > 0);
+
+    db.close();
+
+    auto statsAfter = db.getStatementCacheStats();
+    CHECK(statsAfter.currentSize == 0);
+}
