@@ -175,7 +175,14 @@ public:
 
     yams::storage::StorageStats getStats() const noexcept override { return {}; }
 
-    Result<std::vector<std::string>> list(std::string_view = "") const override { return {}; }
+    Result<std::vector<std::string>> list(std::string_view = "") const override {
+        std::lock_guard lock(mutex_);
+        std::vector<std::string> keys;
+        for (const auto& [k, _] : objects_) {
+            keys.push_back(k);
+        }
+        return keys;
+    }
 
     Result<uint64_t> getStorageSize() const override {
         std::lock_guard lock(mutex_);
@@ -695,4 +702,41 @@ TEST_CASE("CompressedStorageEngine shutdown clears queued async compression jobs
     auto rejected = engine.testing_enqueueCompressionJob(std::string(64, '3'));
     REQUIRE_FALSE(rejected.has_value());
     CHECK(rejected.error().code == ErrorCode::SystemShutdown);
+}
+
+TEST_CASE("CompressedStorageEngine triggerCompressionScan queues uncompressed objects",
+          "[storage][compressed][scan][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = true;
+    config.maxAsyncQueue = 100;
+    config.compressionThreshold = 0;
+    config.policyRules.neverCompressBelow = 0;
+    config.policyRules.neverCompressBefore = std::chrono::hours{0};
+    config.policyRules.defaultZstdLevel = 3;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data1 = generateCompressibleData(4096);
+    auto hash1 = crypto::createSHA256Hasher()->hash(data1);
+    auto data2 = generateCompressibleData(8192);
+    auto hash2 = crypto::createSHA256Hasher()->hash(data2);
+
+    REQUIRE(capturing->store(hash1, data1).has_value());
+    REQUIRE(capturing->store(hash2, data2).has_value());
+
+    auto queued = engine.triggerCompressionScan();
+    REQUIRE(queued.has_value());
+    CHECK(queued.value() == 2);
+
+    bool finished = engine.waitForAsyncOperations(std::chrono::seconds{5});
+    CHECK(finished);
+
+    auto uploaded1 = capturing->captured(hash1);
+    CHECK(CompressionHeader::parse(uploaded1).has_value());
+
+    auto uploaded2 = capturing->captured(hash2);
+    CHECK(CompressionHeader::parse(uploaded2).has_value());
 }
