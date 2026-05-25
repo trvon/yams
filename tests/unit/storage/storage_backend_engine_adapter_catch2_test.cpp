@@ -47,7 +47,12 @@ public:
     bool failRetrieve{false};
     bool failRemove{false};
     bool failList{false};
+    bool failStats{false};
     bool throwExists{false};
+    bool remote{false};
+    mutable size_t retrieveCalls{0};
+    mutable size_t listCalls{0};
+    mutable size_t statsCalls{0};
 
     yams::Result<void> initialize(const yams::storage::BackendConfig&) override { return {}; }
 
@@ -60,6 +65,7 @@ public:
     }
 
     yams::Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
+        ++retrieveCalls;
         if (failRetrieve) {
             return yams::Error{yams::ErrorCode::NotFound, "scripted retrieve failure"};
         }
@@ -86,6 +92,7 @@ public:
     }
 
     yams::Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
+        ++listCalls;
         if (failList) {
             return yams::Error{yams::ErrorCode::NetworkError, "scripted list failure"};
         }
@@ -100,6 +107,10 @@ public:
     }
 
     yams::Result<::yams::StorageStats> getStats() const override {
+        ++statsCalls;
+        if (failStats) {
+            return yams::Error{yams::ErrorCode::NetworkError, "scripted stats failure"};
+        }
         ::yams::StorageStats stats;
         stats.totalObjects = objects_.size();
         for (const auto& [_, value] : objects_) {
@@ -124,7 +135,7 @@ public:
     }
 
     std::string getType() const override { return "scripted"; }
-    bool isRemote() const override { return true; }
+    bool isRemote() const override { return remote; }
     yams::Result<void> flush() override { return {}; }
 
 private:
@@ -278,6 +289,32 @@ TEST_CASE("Storage backend engine adapter propagates size aggregation failures",
     auto retrieveFailure = engine->getStorageSize();
     REQUIRE_FALSE(retrieveFailure.has_value());
     CHECK(retrieveFailure.error().code == yams::ErrorCode::NotFound);
+}
+
+TEST_CASE("Storage backend engine adapter uses remote stats for aggregate size",
+          "[storage][adapter][remote][catch2]") {
+    auto backend = std::make_unique<ScriptedBackend>();
+    auto* scripted = backend.get();
+    scripted->remote = true;
+    auto engine = yams::storage::createStorageEngineFromBackend(std::move(backend));
+    REQUIRE(engine != nullptr);
+
+    auto payload = bytesFromString("remote-size-from-stats");
+    REQUIRE(engine->store("stored", payload).has_value());
+
+    scripted->failList = true;
+    scripted->failRetrieve = true;
+    auto size = engine->getStorageSize();
+    REQUIRE(size.has_value());
+    CHECK(size.value() == payload.size());
+    CHECK(scripted->statsCalls == 1);
+    CHECK(scripted->listCalls == 0);
+    CHECK(scripted->retrieveCalls == 0);
+
+    scripted->failStats = true;
+    auto statsFailure = engine->getStorageSize();
+    REQUIRE_FALSE(statsFailure.has_value());
+    CHECK(statsFailure.error().code == yams::ErrorCode::NetworkError);
 }
 
 TEST_CASE("Storage backend engine adapter converts exists exceptions to typed errors",
