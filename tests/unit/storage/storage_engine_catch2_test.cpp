@@ -4,9 +4,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <random>
 #include <thread>
 #include <vector>
@@ -401,6 +405,212 @@ TEST_CASE("StorageEngine rejects path traversal storage keys", "[storage][securi
     auto manifestResult = engine.store(manifestTraversalKey, data);
     CHECK_FALSE(manifestResult.has_value());
     CHECK(manifestResult.error().code == ErrorCode::InvalidArgument);
+
+    cleanup();
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine rejects invalid keys for every operation",
+                 "[storage][engine][invalid][catch2]") {
+    const std::vector<std::string> invalidKeys{
+        "abc123",
+        std::string(64, 'g'),
+        std::string("..") + std::string(62, 'a'),
+        std::string(64, 'b') + ".manifest.extra",
+        std::string("..") + std::string(62, 'c') + ".manifest",
+    };
+    std::vector<std::byte> data{std::byte{0x01}, std::byte{0x02}};
+
+    for (const auto& key : invalidKeys) {
+        INFO("key=" << key);
+
+        auto storeResult = storage->store(key, data);
+        REQUIRE_FALSE(storeResult.has_value());
+        CHECK(storeResult.error().code == ErrorCode::InvalidArgument);
+
+        auto retrieveResult = storage->retrieve(key);
+        REQUIRE_FALSE(retrieveResult.has_value());
+        CHECK(retrieveResult.error().code == ErrorCode::InvalidArgument);
+
+        auto rawResult = storage->retrieveRaw(key);
+        REQUIRE_FALSE(rawResult.has_value());
+        CHECK(rawResult.error().code == ErrorCode::InvalidArgument);
+
+        auto existsResult = storage->exists(key);
+        REQUIRE_FALSE(existsResult.has_value());
+        CHECK(existsResult.error().code == ErrorCode::InvalidArgument);
+
+        auto removeResult = storage->remove(key);
+        REQUIRE_FALSE(removeResult.has_value());
+        CHECK(removeResult.error().code == ErrorCode::InvalidArgument);
+
+        auto sizeResult = storage->getBlockSize(key);
+        REQUIRE_FALSE(sizeResult.has_value());
+        CHECK(sizeResult.error().code == ErrorCode::InvalidArgument);
+    }
+
+    CHECK_FALSE(std::filesystem::exists(storagePath.parent_path() / std::string(62, 'a')));
+    CHECK_FALSE(std::filesystem::exists(storagePath.parent_path() / std::string(62, 'c')));
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine ignores and cleans stale temp files",
+                 "[storage][engine][temp][catch2]") {
+    auto tempDir = storagePath / "temp";
+    std::filesystem::create_directories(tempDir);
+
+    const auto staleTemp = tempDir / "stale-corrupt.tmp";
+    const auto recentTemp = tempDir / "recent-corrupt.tmp";
+    std::ofstream(staleTemp, std::ios::binary) << "not an object";
+    std::ofstream(recentTemp, std::ios::binary) << "also not an object";
+    std::filesystem::last_write_time(staleTemp, std::filesystem::file_time_type::clock::now() -
+                                                    std::chrono::hours(2));
+
+    auto [hash, data] = generateTestData(2048);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto verifyResult = storage->verify();
+    REQUIRE(verifyResult.has_value());
+
+    auto sizeResult = storage->getStorageSize();
+    REQUIRE(sizeResult.has_value());
+    CHECK(sizeResult.value() == data.size());
+
+    auto cleanupResult = storage->cleanupTempFiles();
+    REQUIRE(cleanupResult.has_value());
+    CHECK_FALSE(std::filesystem::exists(staleTemp));
+    CHECK(std::filesystem::exists(recentTemp));
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine same-key write collision stays atomic",
+                 "[storage][engine][concurrent][collision][catch2]") {
+    const std::string key = std::string(64, 'a');
+    const std::vector<std::byte> first(64 * 1024, std::byte{0x11});
+    const std::vector<std::byte> second(64 * 1024, std::byte{0x22});
+
+    constexpr int kThreadCount = 24;
+    std::vector<std::thread> threads;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::atomic<int> successCount{0};
+
+    for (int i = 0; i < kThreadCount; ++i) {
+        threads.emplace_back([&, i]() {
+            ready.fetch_add(1, std::memory_order_relaxed);
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            const auto& payload = (i % 2 == 0) ? first : second;
+            auto result = storage->store(key, payload);
+            if (result.has_value()) {
+                successCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_relaxed) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    CHECK(successCount.load() == kThreadCount);
+    auto retrieved = storage->retrieve(key);
+    REQUIRE(retrieved.has_value());
+    CHECK((retrieved.value() == first || retrieved.value() == second));
+
+    auto stats = storage->getStats();
+    CHECK(stats.totalObjects.load() == 1u);
+    CHECK(stats.totalBytes.load() == first.size());
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine remove during reads returns complete data or typed errors",
+                 "[storage][engine][concurrent][remove][catch2]") {
+    auto [hash, data] = generateTestData(2 * 1024 * 1024);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    constexpr int kReaderCount = 6;
+    constexpr int kReadsPerThread = 20;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::atomic<int> completeReads{0};
+    std::atomic<int> typedFailures{0};
+    std::atomic<int> partialReads{0};
+
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaderCount; ++i) {
+        readers.emplace_back([&]() {
+            ready.fetch_add(1, std::memory_order_relaxed);
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int j = 0; j < kReadsPerThread; ++j) {
+                auto result = storage->retrieve(hash);
+                if (result.has_value()) {
+                    if (result.value() == data) {
+                        completeReads.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        partialReads.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else if (result.error().code == ErrorCode::ChunkNotFound ||
+                           result.error().code == ErrorCode::PermissionDenied ||
+                           result.error().code == ErrorCode::CorruptedData) {
+                    typedFailures.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    partialReads.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_relaxed) != kReaderCount) {
+        std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+    while (completeReads.load(std::memory_order_relaxed) == 0) {
+        std::this_thread::yield();
+    }
+
+    auto removeResult = storage->remove(hash);
+    if (!removeResult.has_value()) {
+        CHECK((removeResult.error().code == ErrorCode::ChunkNotFound ||
+               removeResult.error().code == ErrorCode::PermissionDenied));
+    }
+
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(completeReads.load() > 0);
+    CHECK(typedFailures.load() >= 0);
+    CHECK(partialReads.load() == 0);
+}
+
+TEST_CASE("AtomicFileWriter removes temp file when rename fails",
+          "[storage][atomic-writer][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_atomic_writer_catch2_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    };
+
+    const auto targetDir = testDir / "target";
+    std::filesystem::create_directory(targetDir);
+    std::vector<std::byte> data{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
+
+    AtomicFileWriter writer;
+    auto result = writer.write(targetDir, data);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto tempPrefix = targetDir.filename().string() + ".tmp.";
+    for (const auto& entry : std::filesystem::directory_iterator(testDir)) {
+        CHECK(entry.path().filename().string().rfind(tempPrefix, 0) != 0);
+    }
 
     cleanup();
 }
