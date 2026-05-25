@@ -3,7 +3,34 @@
 Test infrastructure, current measured coverage, and the storage-readiness gate
 for distributed corpus work.
 
-## Build Status
+## Current Coverage (storage subset: src/storage/*.cpp + src/api/content_store_impl.cpp)
+
+| Metric | Overall baseline | Storage-readiness baseline | **Current** |
+|--------|:---:|:---:|:---:|
+| Lines | 29.9% | 48.1% | **71.8%** |
+| Functions | — | — | **78.7%** |
+| Branches | 18.8% | 23.4% | **37.3%** |
+
+### Per-file line coverage
+
+| File | Lines | % |
+|------|------|--|
+| `compressed_storage_engine.cpp` | 389/486 | 80% |
+| `s3_signer.cpp` | 187/224 | 83% |
+| `storage_backend_factory.cpp` | 202/255 | 79% |
+| `reference_counter.cpp` | 346/426 | 81% |
+| `reference_db.cpp` | 178/228 | 78% |
+| `garbage_collector.cpp` | 139/180 | 77% |
+| `object_storage_plugin_loader.cpp` | 106/137 | 77% |
+| `object_storage_adapter.cpp` | 169/223 | 75% |
+| `url_backend.cpp` | 316/447 | 70% |
+| `storage_backend_engine_adapter.cpp` | 88/125 | 70% |
+| `storage_engine.cpp` | 353/509 | 69% |
+| `content_store_impl.cpp` | 517/740 | 69% |
+| `storage_runtime_resolver.cpp` | 315/551 | 57% |
+| `posix_storage.cpp` | 0/72 | 0% * |
+
+\* `posix_storage.cpp` is unreferenced dead code (no header declares its functions).
 
 **Status**: All modules compile on Windows, Linux, and macOS.
 
