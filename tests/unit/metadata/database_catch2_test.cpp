@@ -345,6 +345,61 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: failed migration reports error", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    MigrationManager mm(db);
+    REQUIRE(mm.initialize().has_value());
+
+    Migration broken;
+    broken.version = 1;
+    broken.name = "broken_migration";
+    broken.upSQL = "INVALID SQL THAT WILL FAIL";
+    broken.wrapInTransaction = true;
+    mm.registerMigration(broken);
+
+    auto needsBefore = mm.needsMigration();
+    REQUIRE(needsBefore.has_value());
+    CHECK(needsBefore.value());
+
+    auto result = mm.migrate();
+    CHECK_FALSE(result.has_value());
+
+    auto needsAfter = mm.needsMigration();
+    REQUIRE(needsAfter.has_value());
+    CHECK(needsAfter.value());
+
+    auto version = mm.getCurrentVersion();
+    REQUIRE(version.has_value());
+    CHECK(version.value() == 0);
+}
+
+TEST_CASE("Database: migration rollback restores previous version", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    MigrationManager mm(db);
+    REQUIRE(mm.initialize().has_value());
+
+    Migration good;
+    good.version = 1;
+    good.name = "create_test_table";
+    good.upSQL = "CREATE TABLE rollback_test (id INTEGER PRIMARY KEY, name TEXT)";
+    good.downSQL = "DROP TABLE IF EXISTS rollback_test";
+    mm.registerMigration(good);
+
+    REQUIRE(mm.migrate().has_value());
+    CHECK(db.tableExists("rollback_test").value());
+
+    REQUIRE(mm.rollbackTo(0).has_value());
+    CHECK_FALSE(db.tableExists("rollback_test").value());
+}
+
 TEST_CASE("Database: Concurrent access", "[unit][metadata][database][.slow]") {
     DatabaseFixture fix;
 
