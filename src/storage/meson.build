@@ -35,6 +35,7 @@ yams_storage_engine = static_library('yams_storage_engine',
   ] + platform_src,
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, threads_dep, curl_dep, yams_core, yams_crypto, yams_compression, dl_dep] + apple_security_deps,
+  cpp_args: ['-DYAMS_STORAGE_ENGINE_BUILD=1'],
   install: true,
 )
 

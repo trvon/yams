@@ -140,6 +140,12 @@ public:
     [[nodiscard]] bool
     waitForAsyncOperations(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
 
+#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+    [[nodiscard]] Result<void> testing_enqueueCompressionJob(std::string_view hash);
+    [[nodiscard]] size_t testing_asyncQueueDepth();
+    void testing_shutdownAsyncWorkers();
+#endif
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;

@@ -5,7 +5,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <future>
@@ -22,6 +24,8 @@
 #include <yams/crypto/hasher.h>
 #include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/storage_engine.h>
+
+#include "src/compression/zstandard_compressor.h"
 
 using namespace yams;
 using namespace yams::storage;
@@ -188,6 +192,19 @@ public:
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::vector<std::byte>> objects_;
+};
+
+struct ScopedZstdUnavailable {
+    ScopedZstdUnavailable() {
+        CompressionRegistry::instance().registerCompressor(CompressionAlgorithm::Zstandard,
+                                                           [] { return nullptr; });
+    }
+
+    ~ScopedZstdUnavailable() {
+        CompressionRegistry::instance().registerCompressor(CompressionAlgorithm::Zstandard, [] {
+            return std::make_unique<ZstandardCompressor>();
+        });
+    }
 };
 
 } // namespace
@@ -600,4 +617,80 @@ TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unch
     auto readBack = engine.retrieve(hash);
     REQUIRE(readBack.has_value());
     CHECK(readBack.value() == raw);
+}
+
+TEST_CASE("CompressedStorageEngine stores raw bytes when compressor is unavailable",
+          "[storage][compressed][backend][registry][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    {
+        ScopedZstdUnavailable unavailable;
+        REQUIRE(engine.store(hash, data).has_value());
+    }
+
+    auto uploaded = capturing->captured(hash);
+    CHECK(uploaded == data);
+    CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
+}
+
+TEST_CASE("CompressedStorageEngine rejects compressed bytes when decompressor is unavailable",
+          "[storage][compressed][backend][registry][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+    auto uploaded = capturing->captured(hash);
+    REQUIRE(CompressionHeader::parse(uploaded).has_value());
+
+    {
+        ScopedZstdUnavailable unavailable;
+        auto readBack = engine.retrieve(hash);
+        REQUIRE_FALSE(readBack.has_value());
+        CHECK(readBack.error().code == ErrorCode::InvalidArgument);
+    }
+}
+
+TEST_CASE("CompressedStorageEngine shutdown clears queued async compression jobs",
+          "[storage][compressed][async][shutdown][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.maxAsyncQueue = 4;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '1')).has_value());
+    REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '2')).has_value());
+    CHECK(engine.testing_asyncQueueDepth() == 2);
+
+    engine.testing_shutdownAsyncWorkers();
+
+    CHECK(engine.testing_asyncQueueDepth() == 0);
+    CHECK(engine.waitForAsyncOperations(std::chrono::milliseconds{0}));
+    auto rejected = engine.testing_enqueueCompressionJob(std::string(64, '3'));
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::SystemShutdown);
 }

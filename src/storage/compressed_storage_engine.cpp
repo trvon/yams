@@ -319,6 +319,36 @@ public:
                                  [this] { return asyncQueue_.empty() && activeJobs_ == 0; });
     }
 
+#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+    Result<void> testing_enqueueCompressionJob(std::string_view hash) {
+        size_t queuedJobs = 0;
+        {
+            std::lock_guard lock(asyncMutex_);
+            if (shutdownFlag_) {
+                return Error{ErrorCode::SystemShutdown, "Async compression workers are shut down"};
+            }
+            if (asyncQueue_.size() >= config_.maxAsyncQueue) {
+                return Error{ErrorCode::ResourceExhausted, "Async compression queue is full"};
+            }
+            asyncQueue_.push(AsyncJob{AsyncJob::Type::Compress, std::string(hash)});
+            queuedJobs = asyncQueue_.size();
+        }
+
+        updateStats([queuedJobs](compression::CompressionStats& stats) {
+            stats.queuedCompressions = queuedJobs;
+        });
+        asyncCV_.notify_one();
+        return {};
+    }
+
+    size_t testing_asyncQueueDepth() {
+        std::lock_guard lock(asyncMutex_);
+        return asyncQueue_.size();
+    }
+
+    void testing_shutdownAsyncWorkers() { shutdown(); }
+#endif
+
 private:
     struct AsyncJob {
         enum class Type { Compress, Decompress };
@@ -574,7 +604,12 @@ private:
     }
 
     void shutdown() {
-        shutdownFlag_ = true;
+        {
+            std::lock_guard lock(asyncMutex_);
+            shutdownFlag_ = true;
+            std::queue<AsyncJob> empty;
+            asyncQueue_.swap(empty);
+        }
         asyncCV_.notify_all();
 
         for (auto& worker : workers_) {
@@ -582,6 +617,11 @@ private:
                 worker.join();
             }
         }
+
+        updateStats([](compression::CompressionStats& stats) {
+            stats.queuedCompressions = 0;
+            stats.currentWorkerThreads = 0;
+        });
     }
 };
 
@@ -710,5 +750,19 @@ Result<size_t> CompressedStorageEngine::triggerCompressionScan() {
 bool CompressedStorageEngine::waitForAsyncOperations(std::chrono::milliseconds timeout) {
     return pImpl->waitForAsyncOperations(timeout);
 }
+
+#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+Result<void> CompressedStorageEngine::testing_enqueueCompressionJob(std::string_view hash) {
+    return pImpl->testing_enqueueCompressionJob(hash);
+}
+
+size_t CompressedStorageEngine::testing_asyncQueueDepth() {
+    return pImpl->testing_asyncQueueDepth();
+}
+
+void CompressedStorageEngine::testing_shutdownAsyncWorkers() {
+    pImpl->testing_shutdownAsyncWorkers();
+}
+#endif
 
 } // namespace yams::storage
