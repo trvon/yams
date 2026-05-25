@@ -173,6 +173,14 @@ public:
         return totalBytes;
     }
 
+    Result<std::vector<std::string>> list(std::string_view = "") const override {
+        std::vector<std::string> keys;
+        for (const auto& [k, _] : objects_) {
+            keys.push_back(k);
+        }
+        return keys;
+    }
+
     bool empty() const { return objects_.empty(); }
 
 private:

@@ -101,6 +101,8 @@ public:
 
     storage::StorageStats getStats() const noexcept override { return storage::StorageStats{}; }
 
+    Result<std::vector<std::string>> list(std::string_view = "") const override { return {}; }
+
     Result<uint64_t> getStorageSize() const override {
         uint64_t total = 0;
         for (const auto& [_, data] : storage_) {

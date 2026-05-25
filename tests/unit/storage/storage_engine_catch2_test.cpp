@@ -810,3 +810,44 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine stats track delete operati
     auto stats = storage->getStats();
     CHECK(stats.deleteOperations > 0);
 }
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine partial write failure cleans up and returns typed error",
+                 "[storage][engine][write-failure][catch2]") {
+    auto [hash, data] = generateTestData(4096);
+    StorageEngine::testing_setAtomicWriteFailureAfterBytes(data.size() / 2);
+
+    auto result = storage->store(hash, data);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::WriteError);
+
+    StorageEngine::testing_clearAtomicWriteFailure();
+
+    CHECK_FALSE(storage->exists(hash).value());
+
+    auto retry = storage->store(hash, data);
+    REQUIRE(retry.has_value());
+
+    auto stats = storage->getStats();
+    CHECK(stats.totalObjects.load() == 1u);
+    CHECK(stats.failedOperations.load() == 1u);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine rejects removal of non-regular-file paths",
+                 "[storage][engine][edge][catch2]") {
+    auto [hash, data] = generateTestData(256);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    auto objectPath = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2);
+    REQUIRE(std::filesystem::exists(objectPath));
+
+    std::error_code ec;
+    std::filesystem::remove(objectPath, ec);
+    std::filesystem::create_directory(objectPath, ec);
+
+    auto removeResult = storage->remove(hash);
+    REQUIRE_FALSE(removeResult.has_value());
+    CHECK(removeResult.error().code == ErrorCode::IOError);
+
+    std::filesystem::remove_all(objectPath, ec);
+}

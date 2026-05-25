@@ -78,6 +78,7 @@ public:
     // Statistics and maintenance
     StorageStats getStats() const noexcept override;
     Result<uint64_t> getStorageSize() const override;
+    Result<std::vector<std::string>> list(std::string_view prefix = "") const override;
 
     // Compression-specific methods
 

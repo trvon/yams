@@ -154,6 +154,14 @@ public:
         return total;
     }
 
+    Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
+        auto backend = withBackend();
+        if (!backend) {
+            return backend.error();
+        }
+        return backend.value()->list(prefix);
+    }
+
 private:
     Result<std::shared_ptr<IStorageBackend>> withBackend() const {
         std::lock_guard<std::mutex> lock(backendMutex_);

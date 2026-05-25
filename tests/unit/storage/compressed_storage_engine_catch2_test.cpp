@@ -175,6 +175,8 @@ public:
 
     yams::storage::StorageStats getStats() const noexcept override { return {}; }
 
+    Result<std::vector<std::string>> list(std::string_view = "") const override { return {}; }
+
     Result<uint64_t> getStorageSize() const override {
         std::lock_guard lock(mutex_);
         uint64_t total = 0;

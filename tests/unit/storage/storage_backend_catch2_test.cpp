@@ -771,7 +771,7 @@ TEST_CASE("FilesystemBackend - Edge Cases", "[storage][backend][filesystem][edge
     }
 }
 
-TEST_CASE("URLBackend - Initialization and bounded unsupported operations",
+TEST_CASE("URLBackend - Initialization and bounded explicit until protocol-specific",
           "[storage][backend][url][failure]") {
     SECTION("Rejects unsupported URL schemes with a typed error") {
         URLBackend backend;
@@ -796,8 +796,8 @@ TEST_CASE("URLBackend - Initialization and bounded unsupported operations",
         REQUIRE(backend.initialize(config).has_value());
 
         auto listed = backend.list("prefix/");
-        REQUIRE(listed.has_value());
-        CHECK(listed.value().empty());
+        CHECK_FALSE(listed.has_value());
+        CHECK(listed.error().code == ErrorCode::NetworkError);
 
         auto stats = backend.getStats();
         REQUIRE(stats.has_value());
@@ -949,6 +949,102 @@ TEST_CASE("URLBackend - Retry and timeout behavior", "[storage][backend][url][re
         REQUIRE_FALSE(result.has_value());
         CHECK(result.error().code == ErrorCode::NetworkError);
         CHECK(server.requestCount() == 1);
+    }
+}
+
+// =============================================================================
+// URLBackend - HTTP Listing
+// =============================================================================
+
+TEST_CASE("URLBackend - HTTP listing with prefix", "[storage][backend][url][list]") {
+    SECTION("Lists newline-delimited keys from GET response") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 200, .body = "alpha\nbeta\ngamma\n"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        REQUIRE(listed.value().size() == 3);
+        CHECK(listed.value()[0] == "alpha");
+        CHECK(listed.value()[1] == "beta");
+        CHECK(listed.value()[2] == "gamma");
+        CHECK(server.requestCount() == 1);
+    }
+
+    SECTION("CRLF line endings are handled") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 200, .body = "a\r\nb\r\nc\r\n"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().size() == 3);
+    }
+
+    SECTION("404 returns empty list without error") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 404}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().empty());
+    }
+}
+
+TEST_CASE("URLBackend - Authenticated provider header", "[storage][backend][url][auth]") {
+    SECTION("GET with authorization header succeeds after 401 without") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 401},
+             LocalHttpServer::Response{.status = 200, .body = "authenticated-key"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto unauth = backend.retrieve("any-key");
+        REQUIRE_FALSE(unauth.has_value());
+        CHECK(unauth.error().code == ErrorCode::NetworkError);
+
+        REQUIRE(backend.flush().has_value());
+
+        URLBackend authBackend;
+        BackendConfig authConfig;
+        authConfig.type = "http";
+        authConfig.url = server.baseUrl();
+        authConfig.maxRetries = 0;
+        authConfig.requestTimeout = 2;
+        authConfig.credentials["authorization"] = "Basic dXNlcjpwYXNz";
+        REQUIRE(authBackend.initialize(authConfig).has_value());
+
+        auto authed = authBackend.retrieve("any-key");
+        REQUIRE(authed.has_value());
+        CHECK(authed.value() == bytesOf("authenticated-key"));
+        CHECK(server.requestCount() == 2);
     }
 }
 

@@ -334,6 +334,14 @@ public:
                 curl_easy_setopt(curl, CURLOPT_USERNAME, userIt->second.c_str());
                 curl_easy_setopt(curl, CURLOPT_PASSWORD, passIt->second.c_str());
             }
+
+            auto authIt = config.credentials.find("authorization");
+            if (authIt != config.credentials.end() && !authIt->second.empty()) {
+                auto slist = curl_slist_append(nullptr, authIt->second.c_str());
+                if (slist != nullptr) {
+                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, slist);
+                }
+            }
         }
 
         // Check for .netrc file
@@ -585,14 +593,78 @@ auto URLBackend::remove(std::string_view key) -> Result<void> {
 }
 
 auto URLBackend::list(std::string_view prefix) const -> Result<std::vector<std::string>> {
-    (void)prefix; // not yet used
-    // This would need protocol-specific implementation
-    // For S3: use ListObjects API
-    // For HTTP: might need directory listing support
-    // For FTP: use LIST command
+    if (pImpl->scheme != "http" && pImpl->scheme != "https") {
+        spdlog::warn("List operation not implemented for URL backend scheme '{}'", pImpl->scheme);
+        return std::vector<std::string>{};
+    }
 
-    spdlog::warn("List operation not fully implemented for URL backend");
-    return std::vector<std::string>{};
+    std::string url = pImpl->scheme + "://" + pImpl->host + pImpl->basePath;
+    if (!url.empty() && url.back() != '/') {
+        url += '/';
+    }
+    if (!prefix.empty()) {
+        url += "?prefix=";
+        CURL* esc = curl_easy_init();
+        if (esc != nullptr) {
+            char* escaped = curl_easy_escape(esc, prefix.data(), static_cast<int>(prefix.size()));
+            if (escaped != nullptr) {
+                url += escaped;
+                curl_free(escaped);
+            }
+            curl_easy_cleanup(esc);
+        }
+    }
+
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return Error{ErrorCode::NetworkError, "Failed to initialize CURL for listing"};
+    }
+
+    std::vector<uint8_t> buffer;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(pImpl->config.requestTimeout));
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    pImpl->configureAuth(curl);
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return Error{ErrorCode::NetworkError, curl_easy_strerror(res)};
+    }
+    if (httpCode == 404) {
+        return std::vector<std::string>{};
+    }
+    if (!isHttpSuccess(httpCode)) {
+        return Error{ErrorCode::NetworkError, "List HTTP error: " + std::to_string(httpCode)};
+    }
+
+    std::vector<std::string> keys;
+    std::string_view body(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t nl = body.find('\n', pos);
+        std::string_view line;
+        if (nl == std::string_view::npos) {
+            line = body.substr(pos);
+            pos = body.size();
+        } else {
+            line = body.substr(pos, nl - pos);
+            pos = nl + 1;
+        }
+        while (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        if (!line.empty()) {
+            keys.emplace_back(line);
+        }
+    }
+
+    return keys;
 }
 
 auto URLBackend::getStats() const -> Result<::yams::StorageStats> {
