@@ -851,3 +851,21 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine rejects removal of non-reg
 
     std::filesystem::remove_all(objectPath, ec);
 }
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns success",
+                 "[storage][compact][smoke][catch2]") {
+    auto [hash, data] = generateTestData(512);
+    REQUIRE(storage->store(hash, data).has_value());
+    auto result = storage->compact();
+    REQUIRE(result.has_value());
+    CHECK(storage->exists(hash).value());
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanupTempFiles with no stale files",
+                 "[storage][cleanup][edge][catch2]") {
+    auto tempDir = storagePath / "temp";
+    std::filesystem::create_directories(tempDir);
+
+    auto result = storage->cleanupTempFiles();
+    REQUIRE(result.has_value());
+}

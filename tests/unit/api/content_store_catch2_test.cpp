@@ -1437,4 +1437,51 @@ TEST_CASE("ContentStore: Edge cases", "[api][content-store][edge]") {
     }
 }
 
+TEST_CASE("ContentStore: Health check reports status", "[api][content-store][health]") {
+    ContentStoreFixture fixture;
+
+    auto health = fixture.store_->checkHealth();
+    CHECK(health.isHealthy);
+    CHECK(health.status.find("Healthy") != std::string::npos);
+}
+
+TEST_CASE("ContentStore: Compact operation succeeds", "[api][content-store][compact]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("compact_test.txt", "compact me");
+    auto stored = fixture.store_->store(file);
+    REQUIRE(stored.has_value());
+
+    auto result = fixture.store_->compact(nullptr);
+    CHECK(result.has_value());
+}
+
+TEST_CASE("ContentStore: GarbageCollect operates on stored content", "[api][content-store][gc]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("gc_test.txt", "content for garbage collection");
+    ContentMetadata metadata;
+    metadata.name = "gc_test.txt";
+
+    auto stored = fixture.store_->store(file, metadata);
+    REQUIRE(stored.has_value());
+    auto hash = stored.value().contentHash;
+
+    REQUIRE(fixture.store_->remove(hash).has_value());
+
+    auto result = fixture.store_->garbageCollect(nullptr);
+    CHECK(result.has_value());
+}
+
+TEST_CASE("ContentStore: Verify reports success on clean store", "[api][content-store][verify]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("verify_test.txt", "verify me");
+    auto stored = fixture.store_->store(file);
+    REQUIRE(stored.has_value());
+
+    auto result = fixture.store_->verify(nullptr);
+    CHECK(result.has_value());
+}
+
 } // namespace yams::api::test
