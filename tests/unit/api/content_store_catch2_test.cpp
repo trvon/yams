@@ -179,6 +179,109 @@ private:
     std::unordered_map<std::string, std::vector<std::byte>> objects_;
 };
 
+class FailingFileChunker final : public yams::chunking::IChunker {
+public:
+    size_t chunkFileCalls{0};
+
+    const yams::chunking::ChunkingConfig& getConfig() const override { return config_; }
+
+    std::vector<yams::chunking::Chunk> chunkFile(const fs::path&) override {
+        ++chunkFileCalls;
+        throw std::runtime_error("scripted file chunk failure");
+    }
+
+    std::vector<yams::chunking::Chunk> chunkData(yams::span<const std::byte> data) override {
+        std::vector<std::byte> copy(data.begin(), data.end());
+        return {yams::chunking::Chunk{.data = std::move(copy),
+                                      .hash = yams::crypto::SHA256Hasher::hash(data),
+                                      .offset = 0,
+                                      .size = data.size()}};
+    }
+
+    std::vector<yams::chunking::Chunk> chunkDataLazy(yams::span<const std::byte> data) override {
+        return chunkData(data);
+    }
+
+    std::future<Result<std::vector<yams::chunking::Chunk>>>
+    chunkFileAsync(const fs::path&) override {
+        return std::async(std::launch::deferred,
+                          []() -> Result<std::vector<yams::chunking::Chunk>> {
+                              return Error{ErrorCode::InternalError, "scripted file chunk failure"};
+                          });
+    }
+
+    void setProgressCallback(ProgressCallback) override {}
+
+private:
+    yams::chunking::ChunkingConfig config_{};
+};
+
+class ScriptedReferenceCounter final : public yams::storage::IReferenceCounter {
+    class Transaction;
+
+public:
+    bool failCommit{false};
+    size_t beginCalls{0};
+    size_t commitCalls{0};
+    size_t rollbackCalls{0};
+    size_t queuedIncrements{0};
+
+    Result<void> increment(std::string_view, size_t, size_t) override { return {}; }
+    Result<void> decrement(std::string_view) override { return {}; }
+    Result<uint64_t> getRefCount(std::string_view) const override { return uint64_t{0}; }
+    Result<bool> hasReferences(std::string_view) const override { return false; }
+
+    Result<yams::storage::RefCountStats> getStats() const override {
+        return yams::storage::RefCountStats{};
+    }
+
+    std::unique_ptr<ITransaction> beginTransaction() override;
+
+private:
+    class Transaction final : public ITransaction {
+    public:
+        explicit Transaction(ScriptedReferenceCounter& parent) : parent_(parent) {}
+
+        void increment(std::string_view, size_t, size_t) override {
+            if (!active_) {
+                throw std::runtime_error("scripted transaction inactive");
+            }
+            ++parent_.queuedIncrements;
+        }
+
+        void decrement(std::string_view) override {}
+
+        Result<void> commit() override {
+            ++parent_.commitCalls;
+            if (parent_.failCommit) {
+                return Error{ErrorCode::TransactionFailed, "scripted commit failure"};
+            }
+            active_ = false;
+            return {};
+        }
+
+        void rollback() override {
+            if (!active_) {
+                return;
+            }
+            ++parent_.rollbackCalls;
+            active_ = false;
+        }
+
+        bool isActive() const override { return active_; }
+
+    private:
+        ScriptedReferenceCounter& parent_;
+        bool active_{true};
+    };
+};
+
+std::unique_ptr<yams::storage::IReferenceCounter::ITransaction>
+ScriptedReferenceCounter::beginTransaction() {
+    ++beginCalls;
+    return std::make_unique<Transaction>(*this);
+}
+
 fs::path makeTempDir(std::string_view prefix) {
     auto path = fs::temp_directory_path() /
                 (std::string(prefix) + "_" + std::to_string(std::random_device{}()));
@@ -690,6 +793,99 @@ TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
         CHECK(storage->removeCalls > 0);
         CHECK(std::none_of(storage->removedKeys.begin(), storage->removedKeys.end(),
                            [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+        CHECK(metadata.error().code == ErrorCode::FileNotFound);
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+        CHECK(stats.totalUncompressedBytes == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: File chunker failures return typed errors without durable writes",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_file_chunk_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto chunker = std::make_shared<FailingFileChunker>();
+
+    {
+        ContentStoreBuilder builder;
+        auto built = builder.withConfig(readinessConfig(tempDir))
+                         .withStorageEngine(storage)
+                         .withChunker(chunker)
+                         .build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        auto path = tempDir / "input.bin";
+        std::ofstream file(path, std::ios::binary);
+        file << "chunker failure input";
+        file.close();
+
+        auto stored = store->store(path);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::InternalError);
+        CHECK(chunker->chunkFileCalls == 1);
+        CHECK(storage->storeCalls == 0);
+        CHECK(storage->empty());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: File add commit failure reconciles partial remote state",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_file_commit_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+    refCounter->failCommit = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built = builder.withConfig(readinessConfig(tempDir))
+                         .withStorageEngine(storage)
+                         .withReferenceCounter(refCounter)
+                         .build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 17) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto path = tempDir / "commit-fail.bin";
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()),
+                   static_cast<std::streamsize>(data.size()));
+        file.close();
+
+        auto stored = store->store(path);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::TransactionFailed);
+        CHECK(refCounter->beginCalls == 1);
+        CHECK(refCounter->commitCalls == 1);
+        CHECK(refCounter->rollbackCalls == 1);
+        CHECK(refCounter->queuedIncrements > 0);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+        CHECK(std::any_of(storage->removedKeys.begin(), storage->removedKeys.end(),
+                          [](const std::string& key) { return key.ends_with(".manifest"); }));
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());

@@ -11,8 +11,8 @@
 
 #include <spdlog/spdlog.h>
 
-#include <fstream>
 #include <charconv>
+#include <fstream>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -117,7 +117,18 @@ public:
                               metadata.name.empty() ? path.filename().string() : metadata.name};
 
         // Chunk the file
-        auto chunks = chunker_->chunkFile(path);
+        std::vector<chunking::Chunk> chunks;
+        try {
+            chunks = chunker_->chunkFile(path);
+        } catch (const std::exception& e) {
+            spdlog::error("Failed to chunk file {}: {}", path.string(), e.what());
+            return Result<StoreResult>(
+                Error{ErrorCode::InternalError, "Failed to chunk file: " + std::string(e.what())});
+        } catch (...) {
+            spdlog::error("Failed to chunk file {}: unknown error", path.string());
+            return Result<StoreResult>(
+                Error{ErrorCode::InternalError, "Failed to chunk file: unknown error"});
+        }
         spdlog::debug("File chunked into {} chunks", chunks.size());
 
         // Store chunks and track deduplication
@@ -210,6 +221,7 @@ public:
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
+            transaction->rollback();
             cleanupStoredObject(manifestHash);
             cleanupStoredObjects(storedChunks);
             return Result<StoreResult>(commitResult.error());
@@ -510,6 +522,7 @@ public:
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
+            transaction->rollback();
             cleanupStoredObject(manifestHash);
             cleanupStoredObjects(storedChunks);
             return Result<StoreResult>(commitResult.error());
