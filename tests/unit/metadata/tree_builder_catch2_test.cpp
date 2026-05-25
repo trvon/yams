@@ -572,3 +572,24 @@ TEST_CASE("TreeBuilder: getTree for nonexistent tree fails", "[unit][metadata][t
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == ErrorCode::NotFound);
 }
+
+TEST_CASE("TreeBuilder: snapshot root stability — same dir produces same root hash",
+          "[unit][metadata][tree_builder]") {
+    TreeBuilderFixture fix;
+    fix.createFile(fix.tempDir_ / "a.txt", "stable content");
+    fix.createFile(fix.tempDir_ / "b" / "c.txt", "nested");
+
+    auto result1 = fix.builder_->buildFromDirectory(fix.tempDir_.string());
+    REQUIRE(result1.has_value());
+
+    auto result2 = fix.builder_->buildFromDirectory(fix.tempDir_.string());
+    REQUIRE(result2.has_value());
+
+    CHECK(result1.value() == result2.value());
+
+    auto tree1 = fix.builder_->getTree(result1.value());
+    auto tree2 = fix.builder_->getTree(result2.value());
+    REQUIRE(tree1.has_value());
+    REQUIRE(tree2.has_value());
+    CHECK(tree1.value().size() == tree2.value().size());
+}
