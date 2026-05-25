@@ -22,9 +22,38 @@ namespace yams::storage {
 
 namespace {
 constexpr long HTTP_NOT_FOUND = 404;
-constexpr long HTTP_CLIENT_ERROR_LO = 400;
+constexpr long HTTP_REQUEST_TIMEOUT = 408;
+constexpr long HTTP_TOO_MANY_REQUESTS = 429;
 constexpr long HTTP_SUCCESS_LO = 200;
 constexpr long HTTP_SUCCESS_HI = 299; // inclusive upper bound
+constexpr long HTTP_SERVER_ERROR_LO = 500;
+
+auto isHttpSuccess(long statusCode) noexcept -> bool {
+    return statusCode >= HTTP_SUCCESS_LO && statusCode <= HTTP_SUCCESS_HI;
+}
+
+auto isRetryableHttpStatus(long statusCode) noexcept -> bool {
+    return statusCode == HTTP_REQUEST_TIMEOUT || statusCode == HTTP_TOO_MANY_REQUESTS ||
+           statusCode >= HTTP_SERVER_ERROR_LO;
+}
+
+auto parseHttpStatusFromError(std::string_view message) -> std::optional<long> {
+    constexpr std::string_view prefix = "HTTP error: ";
+    const auto pos = message.find(prefix);
+    if (pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    long status = 0;
+    for (size_t i = pos + prefix.size(); i < message.size(); ++i) {
+        const char ch = message[i];
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        status = status * 10 + (ch - '0');
+    }
+    return status == 0 ? std::nullopt : std::optional<long>{status};
+}
 } // namespace
 
 // LRU cache for remote reads
@@ -147,7 +176,11 @@ public:
 
     // Retry helpers
     static auto isRetryable(const Error& err) -> bool {
-        return err.code == ErrorCode::NetworkError;
+        if (err.code != ErrorCode::NetworkError) {
+            return false;
+        }
+        auto statusCode = parseHttpStatusFromError(err.message);
+        return !statusCode || isRetryableHttpStatus(*statusCode);
     }
 
     void backoff(int attempt) const {
@@ -193,7 +226,7 @@ public:
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, &result);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.requestTimeout);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
         configureAuth(curl);
         CURLcode res = curl_easy_perform(curl);
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.statusCode);
@@ -204,6 +237,15 @@ public:
             lastError = curl_easy_strerror(res);
             return {Error{ErrorCode::NetworkError, lastError}};
         }
+
+        if (result.statusCode != 0 && result.statusCode != HTTP_NOT_FOUND &&
+            !isHttpSuccess(result.statusCode)) {
+            healthy.store(false);
+            ++errorCount;
+            lastError = "HTTP error: " + std::to_string(result.statusCode);
+            return {Error{ErrorCode::NetworkError, lastError}};
+        }
+
         healthy.store(true);
         return result;
     }
@@ -310,7 +352,7 @@ public:
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.requestTimeout);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
         configureAuth(curl);
@@ -328,7 +370,7 @@ public:
             return {Error{ErrorCode::ChunkNotFound}};
         }
 
-        if (httpCode >= HTTP_CLIENT_ERROR_LO) {
+        if (httpCode != 0 && !isHttpSuccess(httpCode)) {
             return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
@@ -353,7 +395,7 @@ public:
         curl_easy_setopt(curl, CURLOPT_READFUNCTION, readCallback);
         curl_easy_setopt(curl, CURLOPT_READDATA, &readData);
         curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(data.size()));
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.requestTimeout);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
 
         configureAuth(curl);
 
@@ -366,7 +408,7 @@ public:
             return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
         }
 
-        if (httpCode >= HTTP_CLIENT_ERROR_LO) {
+        if (httpCode != 0 && !isHttpSuccess(httpCode)) {
             return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
@@ -381,7 +423,7 @@ public:
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.requestTimeout);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
 
         configureAuth(curl);
 
@@ -394,7 +436,7 @@ public:
             return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
         }
 
-        if (httpCode >= HTTP_CLIENT_ERROR_LO && httpCode != HTTP_NOT_FOUND) {
+        if (httpCode != 0 && httpCode != HTTP_NOT_FOUND && !isHttpSuccess(httpCode)) {
             return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
         }
 
