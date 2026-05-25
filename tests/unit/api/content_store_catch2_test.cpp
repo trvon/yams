@@ -1472,7 +1472,6 @@ TEST_CASE("ContentStore: GarbageCollect operates on stored content", "[api][cont
     auto result = fixture.store_->garbageCollect(nullptr);
     CHECK(result.has_value());
 }
-
 TEST_CASE("ContentStore: Verify reports success on clean store", "[api][content-store][verify]") {
     ContentStoreFixture fixture;
 
@@ -1482,6 +1481,60 @@ TEST_CASE("ContentStore: Verify reports success on clean store", "[api][content-
 
     auto result = fixture.store_->verify(nullptr);
     CHECK(result.has_value());
+}
+
+TEST_CASE("ContentStore: Retrieve bytes with non-existent hash returns error",
+          "[api][content-store][memory]") {
+    ContentStoreFixture fixture;
+
+    std::string nonExistentHash(64, '0');
+    auto result = fixture.store_->retrieveBytes(nonExistentHash);
+    CHECK_FALSE(result.has_value());
+}
+
+TEST_CASE("ContentStore: Retrieve bytes prefix returns subset", "[api][content-store][memory]") {
+    ContentStoreFixture fixture;
+
+    std::string content = "Hello, prefix test content!";
+    std::vector<std::byte> data;
+    data.reserve(content.size());
+    for (char c : content) {
+        data.push_back(static_cast<std::byte>(c));
+    }
+
+    ContentMetadata metadata;
+    metadata.name = "prefix.bin";
+
+    auto storeResult = fixture.store_->storeBytes(data, metadata);
+    REQUIRE(storeResult.has_value());
+
+    auto partial = fixture.store_->retrieveBytesPrefix(storeResult.value().contentHash, 5);
+    REQUIRE(partial.has_value());
+    CHECK(partial.value().size() == 5);
+}
+
+TEST_CASE("ContentStore: Retrieve stream with progress callback", "[api][content-store][stream]") {
+    ContentStoreFixture fixture;
+
+    std::string content = "stream with progress";
+    std::istringstream input(content);
+    ContentMetadata metadata;
+    metadata.name = "progress_stream.txt";
+
+    auto storeResult = fixture.store_->storeStream(input, metadata);
+    REQUIRE(storeResult.has_value());
+
+    std::atomic<int> progressCalls{0};
+    ProgressCallback progressCallback = [&](const Progress& p) {
+        progressCalls++;
+        (void)p;
+    };
+
+    auto outPath = fixture.testDir_ / "progress_out.txt";
+    auto retrieveResult =
+        fixture.store_->retrieve(storeResult.value().contentHash, outPath, progressCallback);
+    REQUIRE(retrieveResult.has_value());
+    CHECK(retrieveResult.value().found);
 }
 
 } // namespace yams::api::test

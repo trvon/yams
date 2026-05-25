@@ -153,6 +153,8 @@ public:
 #if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
     static void testing_setAtomicWriteFailureAfterBytes(size_t bytes);
     static void testing_clearAtomicWriteFailure();
+    static void testing_setFileOpenFailure(bool v);
+    static void testing_setRenameFailure(bool v);
 #endif
 
 private:

@@ -885,3 +885,42 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanupTempFiles with no s
     auto result = storage->cleanupTempFiles();
     REQUIRE(result.has_value());
 }
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine atomicWrite file open failure returns typed error",
+                 "[storage][engine][write-failure][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+
+    StorageEngine::testing_setFileOpenFailure(true);
+    auto result = storage->store(hash, data);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::PermissionDenied);
+    StorageEngine::testing_setFileOpenFailure(false);
+
+    REQUIRE(storage->store(hash, data).has_value());
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine atomicWrite rename failure with existing target succeeds",
+                 "[storage][engine][write-edge][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+    REQUIRE(storage->store(hash, data).has_value());
+
+    StorageEngine::testing_setRenameFailure(true);
+    auto result = storage->store(hash, data);
+    REQUIRE(result.has_value());
+    StorageEngine::testing_setRenameFailure(false);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine atomicWrite rename failure without target returns unknown error",
+                 "[storage][engine][write-edge][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+
+    StorageEngine::testing_setRenameFailure(true);
+    auto result = storage->store(hash, data);
+    StorageEngine::testing_setRenameFailure(false);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::Unknown);
+}

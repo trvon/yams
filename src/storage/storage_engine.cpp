@@ -113,6 +113,8 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
 
 #if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
 std::atomic<size_t> gAtomicWriteFailureAfterBytes{std::numeric_limits<size_t>::max()};
+std::atomic<bool> gFileOpenFailure{false};
+std::atomic<bool> gRenameFailure{false};
 #endif
 
 } // namespace
@@ -239,6 +241,12 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     // Write to temporary file
     auto tempPath = getTempPath();
 
+#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+    if (gFileOpenFailure.load(std::memory_order_relaxed)) {
+        return Error{ErrorCode::PermissionDenied, "Injected file open failure"};
+    }
+#endif
+
     {
         std::ofstream file(tempPath, std::ios::binary);
         if (!file) {
@@ -268,7 +276,15 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
 
     // Atomic rename
     std::error_code ec;
+#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+    if (gRenameFailure.load(std::memory_order_relaxed)) {
+        ec = std::make_error_code(std::errc::permission_denied);
+    } else {
+        std::filesystem::rename(tempPath, path, ec);
+    }
+#else
     std::filesystem::rename(tempPath, path, ec);
+#endif
 
     if (ec) {
         // Clean up temp file
@@ -852,6 +868,14 @@ void StorageEngine::testing_setAtomicWriteFailureAfterBytes(size_t bytes) {
 void StorageEngine::testing_clearAtomicWriteFailure() {
     gAtomicWriteFailureAfterBytes.store(std::numeric_limits<size_t>::max(),
                                         std::memory_order_relaxed);
+}
+
+void StorageEngine::testing_setFileOpenFailure(bool v) {
+    gFileOpenFailure.store(v, std::memory_order_relaxed);
+}
+
+void StorageEngine::testing_setRenameFailure(bool v) {
+    gRenameFailure.store(v, std::memory_order_relaxed);
 }
 #endif
 
