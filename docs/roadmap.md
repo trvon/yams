@@ -98,7 +98,7 @@
 - [ ] Local LLM hosting (Gemma) for on-device inference
 
 ### P2P Corpus Sync
-- [ ] Peer-to-peer corpus synchronization protocol
+- [ ] Peer-to-peer corpus synchronization protocol ([draft design](design/sync-protocol.md))
 - [ ] Cross-device corpus replication
 - [ ] Conflict resolution for concurrent edits
 - [ ] Selective sync (collection/tag-based filtering)

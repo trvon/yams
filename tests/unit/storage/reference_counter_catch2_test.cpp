@@ -241,26 +241,55 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction commit",
     auto count2 = refCounter->getRefCount(hash2);
     REQUIRE(count2.has_value());
     CHECK(count2.value() == 1u);
+
+    auto stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().transactions == 1u);
+    CHECK(stats.value().rollbacks == 0u);
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction rollback",
                  "[storage][refcount][transaction][catch2]") {
-    const std::string hash = generateHash(300);
+    const std::string incrementedHash = generateHash(300);
+    const std::string decrementedHash = generateHash(301);
+    const std::string newHash = generateHash(302);
+
+    REQUIRE(refCounter->increment(incrementedHash, 1024).has_value());
+    REQUIRE(refCounter->increment(decrementedHash, 2048).has_value());
+    REQUIRE(refCounter->increment(decrementedHash, 2048).has_value());
+
+    auto beforeStats = refCounter->getStats();
+    REQUIRE(beforeStats.has_value());
 
     auto txn = refCounter->beginTransaction();
     REQUIRE(txn != nullptr);
 
-    // Add operation to transaction
-    txn->increment(hash, 1024);
+    txn->increment(incrementedHash, 1024);
+    txn->decrement(decrementedHash);
+    txn->increment(newHash, 4096);
 
     // Rollback transaction
     txn->rollback();
     CHECK_FALSE(txn->isActive());
 
-    // Count should still be zero
-    auto count = refCounter->getRefCount(hash);
-    REQUIRE(count.has_value());
-    CHECK(count.value() == 0u);
+    auto incrementedCount = refCounter->getRefCount(incrementedHash);
+    REQUIRE(incrementedCount.has_value());
+    CHECK(incrementedCount.value() == 1u);
+
+    auto decrementedCount = refCounter->getRefCount(decrementedHash);
+    REQUIRE(decrementedCount.has_value());
+    CHECK(decrementedCount.value() == 2u);
+
+    auto newCount = refCounter->getRefCount(newHash);
+    REQUIRE(newCount.has_value());
+    CHECK(newCount.value() == 0u);
+
+    auto afterStats = refCounter->getStats();
+    REQUIRE(afterStats.has_value());
+    CHECK(afterStats.value().totalBlocks == beforeStats.value().totalBlocks);
+    CHECK(afterStats.value().totalReferences == beforeStats.value().totalReferences);
+    CHECK(afterStats.value().transactions == beforeStats.value().transactions);
+    CHECK(afterStats.value().rollbacks == beforeStats.value().rollbacks + 1);
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction auto rollback",
@@ -297,6 +326,51 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-s
 
     REQUIRE_THROWS_AS(txn->increment(hash, 1024), std::runtime_error);
     REQUIRE_THROWS_AS(txn->decrement(hash), std::runtime_error);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter failed transaction commit leaves no partial writes",
+                 "[storage][refcount][transaction][edge][catch2]") {
+    const std::string existingHash = generateHash(460);
+    const std::string newHash = generateHash(461);
+
+    REQUIRE(refCounter->increment(existingHash, 1024).has_value());
+
+    auto backupPath = std::filesystem::temp_directory_path() /
+                      std::format("yams_refcount_stale_txn_backup_{}.db",
+                                  std::chrono::system_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove(backupPath, ec);
+    std::filesystem::remove(backupPath.string() + "-wal", ec);
+    std::filesystem::remove(backupPath.string() + "-shm", ec);
+
+    auto backupResult = refCounter->backup(backupPath);
+    REQUIRE(backupResult.has_value());
+
+    auto txn = refCounter->beginTransaction();
+    REQUIRE(txn != nullptr);
+    txn->increment(existingHash, 1024);
+    txn->increment(newHash, 2048);
+
+    auto restoreResult = refCounter->restore(backupPath);
+    REQUIRE(restoreResult.has_value());
+
+    auto commitResult = txn->commit();
+    CHECK_FALSE(commitResult.has_value());
+    CHECK(commitResult.error().code == yams::ErrorCode::TransactionFailed);
+    CHECK_FALSE(txn->isActive());
+
+    auto existingCount = refCounter->getRefCount(existingHash);
+    REQUIRE(existingCount.has_value());
+    CHECK(existingCount.value() == 1u);
+
+    auto newCount = refCounter->getRefCount(newHash);
+    REQUIRE(newCount.has_value());
+    CHECK(newCount.value() == 0u);
+
+    std::filesystem::remove(backupPath, ec);
+    std::filesystem::remove(backupPath.string() + "-wal", ec);
+    std::filesystem::remove(backupPath.string() + "-shm", ec);
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter get unreferenced blocks",
@@ -360,6 +434,30 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter statistics",
     CHECK(stats.totalBytes == numBlocks * blockSize);
     CHECK(stats.unreferencedBlocks == 3u);
     CHECK(stats.unreferencedBytes == 3u * blockSize);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter statistics reconcile corrupt counters",
+                 "[storage][refcount][stats][edge][catch2]") {
+    const std::string referencedHash = generateHash(650);
+    const std::string unreferencedHash = generateHash(651);
+
+    REQUIRE(refCounter->increment(referencedHash, 512, 1024).has_value());
+    REQUIRE(refCounter->increment(unreferencedHash, 2048, 4096).has_value());
+    REQUIRE(refCounter->decrement(unreferencedHash).has_value());
+
+    REQUIRE(refCounter->updateStatistics("total_blocks", -100).has_value());
+    REQUIRE(refCounter->updateStatistics("total_references", 50).has_value());
+
+    auto statsResult = refCounter->getStats();
+    REQUIRE(statsResult.has_value());
+
+    const auto& stats = statsResult.value();
+    CHECK(stats.totalBlocks == 2u);
+    CHECK(stats.totalReferences == 1u);
+    CHECK(stats.totalBytes == 2560u);
+    CHECK(stats.totalUncompressedBytes == 5120u);
+    CHECK(stats.unreferencedBlocks == 1u);
+    CHECK(stats.unreferencedBytes == 2048u);
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter concurrent operations",
@@ -533,6 +631,41 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter backup restore error
     CHECK(restoreResult.error().code == yams::ErrorCode::DatabaseError);
 }
 
+TEST_CASE("ReferenceCounter restore rejects corrupt database image",
+          "[storage][refcount][backup][edge][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_corrupt_restore_{}.db", stamp);
+    auto corruptPath = tempDir / std::format("yams_refcount_corrupt_restore_src_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+        std::filesystem::remove(corruptPath, ec);
+    };
+    cleanup();
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        {
+            std::ofstream corrupt(corruptPath.string(), std::ios::binary | std::ios::trunc);
+            REQUIRE(corrupt.good());
+            corrupt << "not a sqlite database";
+        }
+
+        auto restoreResult = counter.restore(corruptPath);
+        CHECK_FALSE(restoreResult.has_value());
+        CHECK(restoreResult.error().code == yams::ErrorCode::DatabaseError);
+    }
+
+    cleanup();
+}
+
 TEST_CASE("ReferenceCounter factory returns null for invalid database path",
           "[storage][refcount][factory][edge][catch2]") {
     auto tempRoot = std::filesystem::temp_directory_path();
@@ -640,9 +773,11 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
                  "[storage][gc][catch2]") {
     // Store some unreferenced blocks
     std::vector<std::byte> data(1024, std::byte{42});
+    std::vector<std::string> hashes;
 
     for (int i = 0; i < 3; ++i) {
         auto hash = generateHash(100 + i);
+        hashes.push_back(hash);
 
         // Store in storage engine
         storageEngine->store(hash, data);
@@ -653,8 +788,14 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
     }
 
     // Run dry-run collection
-    GCOptions options{
-        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
+    std::vector<std::string> progressHashes;
+    GCOptions options{.maxBlocksPerRun = 10,
+                      .minAgeSeconds = 0,
+                      .dryRun = true,
+                      .progressCallback = [&progressHashes](const std::string& hash, size_t count) {
+                          progressHashes.push_back(hash);
+                          CHECK(count == progressHashes.size());
+                      }};
 
     auto result = gc->collect(options);
     REQUIRE(result.has_value());
@@ -663,13 +804,104 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
     CHECK(stats.blocksScanned == 3u);
     CHECK(stats.blocksDeleted == 3u); // Counted but not actually deleted
     CHECK(stats.bytesReclaimed == 3u * data.size());
+    CHECK(stats.errors.empty());
+    CHECK(progressHashes.size() == hashes.size());
 
     // Verify blocks still exist (dry run)
-    for (int i = 0; i < 3; ++i) {
-        auto exists = storageEngine->exists(generateHash(100 + i));
+    for (const auto& hash : hashes) {
+        auto exists = storageEngine->exists(hash);
         REQUIRE(exists.has_value());
         CHECK(exists.value());
+
+        auto count = refCounter->getRefCount(hash);
+        REQUIRE(count.has_value());
+        CHECK(count.value() == 0u);
     }
+
+    auto lastStats = gc->getLastStats();
+    CHECK(lastStats.blocksScanned == stats.blocksScanned);
+    CHECK(lastStats.blocksDeleted == stats.blocksDeleted);
+    CHECK(lastStats.bytesReclaimed == stats.bytesReclaimed);
+}
+
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector respects minimum age horizon",
+                 "[storage][gc][edge][catch2]") {
+    std::vector<std::byte> data(1024, std::byte{42});
+    auto hash = generateHash(150);
+
+    REQUIRE(storageEngine->store(hash, data).has_value());
+    REQUIRE(refCounter->increment(hash, data.size()).has_value());
+    REQUIRE(refCounter->decrement(hash).has_value());
+
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 3600, .dryRun = false, .progressCallback = nullptr};
+
+    auto result = gc->collect(options);
+    REQUIRE(result.has_value());
+
+    const auto& stats = result.value();
+    CHECK(stats.blocksScanned == 0u);
+    CHECK(stats.blocksDeleted == 0u);
+    CHECK(stats.bytesReclaimed == 0u);
+    CHECK(stats.errors.empty());
+
+    auto exists = storageEngine->exists(hash);
+    REQUIRE(exists.has_value());
+    CHECK(exists.value());
+
+    auto count = refCounter->getRefCount(hash);
+    REQUIRE(count.has_value());
+    CHECK(count.value() == 0u);
+}
+
+TEST_CASE_METHOD(GarbageCollectorFixture,
+                 "GarbageCollector preserves failure evidence and continues after missing block",
+                 "[storage][gc][edge][catch2]") {
+    std::vector<std::byte> data(1024, std::byte{42});
+    auto presentHash = generateHash(175);
+    auto missingHash = generateHash(176);
+
+    REQUIRE(storageEngine->store(presentHash, data).has_value());
+
+    REQUIRE(refCounter->increment(presentHash, data.size()).has_value());
+    REQUIRE(refCounter->decrement(presentHash).has_value());
+
+    REQUIRE(refCounter->increment(missingHash, data.size()).has_value());
+    REQUIRE(refCounter->decrement(missingHash).has_value());
+
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
+
+    auto result = gc->collect(options);
+    REQUIRE(result.has_value());
+
+    const auto& stats = result.value();
+    CHECK(stats.blocksScanned == 2u);
+    CHECK(stats.blocksDeleted == 1u);
+    CHECK(stats.bytesReclaimed == data.size());
+    REQUIRE(stats.errors.size() == 1u);
+    CHECK(stats.errors.front().find(missingHash) != std::string::npos);
+
+    auto presentExists = storageEngine->exists(presentHash);
+    REQUIRE(presentExists.has_value());
+    CHECK_FALSE(presentExists.value());
+
+    auto missingExists = storageEngine->exists(missingHash);
+    REQUIRE(missingExists.has_value());
+    CHECK_FALSE(missingExists.value());
+
+    auto presentCount = refCounter->getRefCount(presentHash);
+    REQUIRE(presentCount.has_value());
+    CHECK(presentCount.value() == 0u);
+
+    auto missingCount = refCounter->getRefCount(missingHash);
+    REQUIRE(missingCount.has_value());
+    CHECK(missingCount.value() == 0u);
+
+    auto lastStats = gc->getLastStats();
+    CHECK(lastStats.blocksScanned == stats.blocksScanned);
+    CHECK(lastStats.blocksDeleted == stats.blocksDeleted);
+    CHECK(lastStats.errors == stats.errors);
 }
 
 TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector async collection",
