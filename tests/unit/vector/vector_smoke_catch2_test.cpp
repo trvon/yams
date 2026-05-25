@@ -181,3 +181,59 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][s
     count = db.getVectorCount();
     CHECK(count == 1);
 }
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke operations before initialize return false",
+                 "[vector][smoke][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+
+    std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    VectorRecord rec;
+    rec.chunk_id = "pre_init";
+    rec.document_hash = "pre_init_doc";
+    rec.embedding = embedding;
+    rec.content = "pre-init";
+    rec.start_offset = 0;
+    rec.end_offset = 7;
+
+    CHECK_FALSE(db.isInitialized());
+    CHECK_FALSE(db.insertVector(rec));
+    CHECK(db.getVectorCount() == 0);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke operations after close return false",
+                 "[vector][smoke][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    std::vector<float> embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    VectorRecord rec;
+    rec.chunk_id = "post_close";
+    rec.document_hash = "post_close_doc";
+    rec.embedding = embedding;
+    rec.content = "post-close";
+    rec.start_offset = 0;
+    rec.end_offset = 9;
+
+    REQUIRE(db.insertVector(rec));
+
+    db.close();
+
+    CHECK_FALSE(db.isInitialized());
+    CHECK_FALSE(db.insertVector(rec));
+}
