@@ -635,6 +635,42 @@ TEST_CASE("FilesystemBackend - Edge Cases", "[storage][backend][filesystem][edge
     }
 }
 
+TEST_CASE("URLBackend - Initialization and bounded unsupported operations",
+          "[storage][backend][url][failure]") {
+    SECTION("Rejects unsupported URL schemes with a typed error") {
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = "gopher://example.invalid/storage";
+
+        auto result = backend.initialize(config);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::InvalidArgument);
+        CHECK(result.error().message.find("Unsupported URL scheme") != std::string::npos);
+    }
+
+    SECTION("List is bounded and explicit until protocol-specific listing exists") {
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = "http://example.invalid/storage";
+        config.maxRetries = 0;
+        config.requestTimeout = 1;
+
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("prefix/");
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().empty());
+
+        auto stats = backend.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalObjects == 0);
+        CHECK(stats.value().totalBytes == 0);
+        CHECK(backend.flush().has_value());
+    }
+}
+
 // =============================================================================
 // StorageBackendFactory - URL Parsing
 // =============================================================================

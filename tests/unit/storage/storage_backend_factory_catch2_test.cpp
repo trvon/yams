@@ -129,6 +129,66 @@ TEST_CASE("StorageBackendFactory::create: unknown backend type returns nullptr",
     CHECK(backend == nullptr);
 }
 
+TEST_CASE("StorageBackendFactory::create: missing explicit plugin returns nullptr",
+          "[storage][factory][create][plugin]") {
+    BackendConfig cfg;
+    cfg.type = "plugin:yams_missing_plugin_for_test";
+    cfg.url = "s3://bucket/prefix";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("StorageBackendFactory::create: registered backend init failure returns nullptr",
+          "[storage][factory][create]") {
+    struct FailingInitBackend : IStorageBackend {
+        yams::Result<void> initialize(const BackendConfig&) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "init failed"};
+        }
+        yams::Result<void> store(std::string_view, std::span<const std::byte>) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<std::vector<std::byte>> retrieve(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<bool> exists(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<void> remove(std::string_view) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<std::vector<std::string>> list(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<yams::StorageStats> getStats() const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        std::future<yams::Result<void>> storeAsync(std::string_view,
+                                                   std::span<const std::byte>) override {
+            std::promise<yams::Result<void>> p;
+            p.set_value(yams::Error{yams::ErrorCode::InvalidState, "not initialized"});
+            return p.get_future();
+        }
+        std::future<yams::Result<std::vector<std::byte>>>
+        retrieveAsync(std::string_view) const override {
+            std::promise<yams::Result<std::vector<std::byte>>> p;
+            p.set_value(yams::Error{yams::ErrorCode::InvalidState, "not initialized"});
+            return p.get_future();
+        }
+        std::string getType() const override { return "yams_test_failing_init"; }
+        bool isRemote() const override { return true; }
+        yams::Result<void> flush() override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+    };
+
+    StorageBackendFactory::registerBackendType<FailingInitBackend>("yams_test_failing_init");
+
+    BackendConfig cfg;
+    cfg.type = "yams_test_failing_init";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
+}
+
 TEST_CASE("StorageBackendFactory::create: URL and S3 backends initialize without network I/O",
           "[storage][factory][remote][url][s3]") {
     for (const auto& [type, url] : {

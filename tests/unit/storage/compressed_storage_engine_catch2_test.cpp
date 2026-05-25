@@ -106,7 +106,12 @@ public:
         out.data = it->second;
         auto parsed = CompressionHeader::parse(out.data);
         if (parsed) {
-            out.header = parsed.value();
+            const auto& header = parsed.value();
+            if (header.compressedSize <= out.data.size() &&
+                out.data.size() ==
+                    CompressionHeader::SIZE + static_cast<size_t>(header.compressedSize)) {
+                out.header = header;
+            }
         }
         return out;
     }
@@ -539,4 +544,60 @@ TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for gen
     auto uploaded = capturing->captured(hash);
     CHECK(uploaded == data);
     CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
+}
+
+TEST_CASE("CompressedStorageEngine rejects corrupted compressed payload from generic backend",
+          "[storage][compressed][backend][corrupt][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+    auto corrupted = capturing->captured(hash);
+    REQUIRE(corrupted.size() > CompressionHeader::SIZE);
+    corrupted[CompressionHeader::SIZE] ^= std::byte{0x01};
+    REQUIRE(capturing->store(hash, corrupted).has_value());
+
+    auto readBack = engine.retrieve(hash);
+    REQUIRE_FALSE(readBack.has_value());
+    CHECK(readBack.error().code == ErrorCode::HashMismatch);
+}
+
+TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unchanged",
+          "[storage][compressed][backend][corrupt][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    CompressionHeader header;
+    header.algorithm = static_cast<uint8_t>(CompressionAlgorithm::Zstandard);
+    header.level = 3;
+    header.uncompressedSize = 100;
+    header.compressedSize = 10;
+
+    auto raw = header.serialize();
+    raw.resize(CompressionHeader::SIZE + 5, std::byte{0x5a});
+    std::string hash(64, 'f');
+    REQUIRE(capturing->store(hash, raw).has_value());
+
+    auto rawObject = engine.retrieveRaw(hash);
+    REQUIRE(rawObject.has_value());
+    CHECK_FALSE(rawObject.value().header.has_value());
+
+    auto readBack = engine.retrieve(hash);
+    REQUIRE(readBack.has_value());
+    CHECK(readBack.value() == raw);
 }

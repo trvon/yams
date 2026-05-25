@@ -3,6 +3,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -84,6 +85,42 @@ static std::string libExtension() {
 #endif
 }
 
+static bool endsWith(const std::string& value, const std::string& suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static void addUnique(std::vector<std::string>& values, std::string value) {
+    if (value.empty()) {
+        return;
+    }
+    if (std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(std::move(value));
+    }
+}
+
+static std::vector<std::string> candidatePluginFileNames(const std::vector<std::string>& names) {
+    std::vector<std::string> files;
+    const std::string extension = "." + libExtension();
+
+    for (const auto& name : names) {
+        addUnique(files, name);
+        if (!endsWith(name, extension)) {
+            addUnique(files, name + extension);
+        }
+#ifndef _WIN32
+        if (!name.starts_with("lib")) {
+            addUnique(files, "lib" + name);
+            if (!endsWith(name, extension)) {
+                addUnique(files, "lib" + name + extension);
+            }
+        }
+#endif
+    }
+
+    return files;
+}
+
 static std::vector<fs::path> defaultPluginDirs() { // unchanged
     std::vector<fs::path> dirs;
     if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
@@ -101,52 +138,56 @@ static std::vector<fs::path> defaultPluginDirs() { // unchanged
     return dirs;
 }
 
-static fs::path resolveS3PluginPath() {
-    std::string base = "libyams_object_storage_s3." + libExtension();
-#ifndef _WIN32
-    std::vector<std::string> candidates{base};
-#else
-    std::vector<std::string> candidates{"yams_object_storage_s3." + libExtension()};
-#endif
+static fs::path resolvePluginPath(const std::vector<std::string>& names) {
+    for (const auto& name : candidatePluginFileNames(names)) {
+        fs::path direct{name};
+        if ((direct.is_absolute() || direct.has_parent_path()) && fs::exists(direct)) {
+            return direct;
+        }
 
-    for (const auto& name : candidates) {
         // Prefer repo-local build artifacts first to avoid loading an older globally-installed
         // plugin when running from a development checkout.
         fs::path local = fs::path("plugins") / "object_storage_s3" / name;
-        if (fs::exists(local))
+        if (fs::exists(local)) {
             return local;
+        }
 
         fs::path buildPlugin = fs::path("build") / "plugins" / "object_storage_s3" / name;
-        if (fs::exists(buildPlugin))
+        if (fs::exists(buildPlugin)) {
             return buildPlugin;
+        }
 
         fs::path builddirPlugin = fs::path("builddir") / "plugins" / "object_storage_s3" / name;
-        if (fs::exists(builddirPlugin))
+        if (fs::exists(builddirPlugin)) {
             return builddirPlugin;
+        }
 
         fs::path buildFlat = fs::path("build") / name;
-        if (fs::exists(buildFlat))
+        if (fs::exists(buildFlat)) {
             return buildFlat;
+        }
 
         fs::path builddirFlat = fs::path("builddir") / name;
-        if (fs::exists(builddirFlat))
+        if (fs::exists(builddirFlat)) {
             return builddirFlat;
+        }
 
         for (const auto& dir : defaultPluginDirs()) {
             fs::path p = dir / name;
-            if (fs::exists(p))
+            if (fs::exists(p)) {
                 return p;
+            }
         }
     }
     return {};
 }
 
-static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
-                                                     const char* /*destroySym*/,
-                                                     const std::vector<std::string>& /*names*/) {
-    fs::path path = resolveS3PluginPath();
-    if (path.empty())
+static std::unique_ptr<IStorageBackend> loadSpecific(const char* createSym, const char* destroySym,
+                                                     const std::vector<std::string>& names) {
+    fs::path path = resolvePluginPath(names);
+    if (path.empty()) {
         return nullptr;
+    }
 
 #ifdef _WIN32
     HMODULE handle = LoadLibraryA(path.string().c_str());
@@ -155,10 +196,8 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
         return nullptr;
     }
 
-    auto create =
-        reinterpret_cast<CreateFn>(GetProcAddress(handle, "yams_plugin_create_object_storage"));
-    auto destroy =
-        reinterpret_cast<DestroyFn>(GetProcAddress(handle, "yams_plugin_destroy_object_storage"));
+    auto create = reinterpret_cast<CreateFn>(GetProcAddress(handle, createSym));
+    auto destroy = reinterpret_cast<DestroyFn>(GetProcAddress(handle, destroySym));
 #else
     void* handle = dlopen(path.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
@@ -166,8 +205,8 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
         return nullptr;
     }
     dlerror();
-    auto create = reinterpret_cast<CreateFn>(dlsym(handle, "yams_plugin_create_object_storage"));
-    auto destroy = reinterpret_cast<DestroyFn>(dlsym(handle, "yams_plugin_destroy_object_storage"));
+    auto create = reinterpret_cast<CreateFn>(dlsym(handle, createSym));
+    auto destroy = reinterpret_cast<DestroyFn>(dlsym(handle, destroySym));
 #endif
 
     if (!create || !destroy) {
