@@ -263,6 +263,7 @@ private:
         }
 
         void decrement(std::string_view) override {}
+        void pruneReference(std::string_view) override {}
 
         Result<void> commit() override {
             ++parent_.commitCalls;

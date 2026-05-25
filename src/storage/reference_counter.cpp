@@ -43,6 +43,7 @@ struct ReferenceCounter::Impl {
     // Prepared statement keys
     static constexpr auto INCREMENT_STMT = "increment";
     static constexpr auto DECREMENT_STMT = "decrement";
+    static constexpr auto PRUNE_REF_STMT = "prune_reference";
     static constexpr auto GET_REF_COUNT_STMT = "get_ref_count";
     static constexpr auto GET_UNREFERENCED_STMT = "get_unreferenced";
     static constexpr auto UPDATE_STATS_STMT = "update_stats";
@@ -479,6 +480,11 @@ Result<void> ReferenceCounter::initializeDatabase() {
             WHERE block_hash = ? AND ref_count > 0
         )");
 
+        pImpl->stmtCache->get(Impl::PRUNE_REF_STMT, R"(
+            DELETE FROM block_references
+            WHERE block_hash = ? AND ref_count = 0
+        )");
+
         pImpl->stmtCache->get(Impl::GET_REF_COUNT_STMT,
                               "SELECT ref_count FROM block_references WHERE block_hash = ?");
 
@@ -790,6 +796,14 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
     // Database writes will occur only during commit() for true atomic behavior
 }
 
+void ReferenceCounter::Transaction::pruneReference(std::string_view blockHash) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    if (!active_) {
+        throw std::runtime_error("Transaction is not active");
+    }
+    prunedHashes_.emplace_back(blockHash);
+}
+
 // Commit transaction
 Result<void> ReferenceCounter::Transaction::commit() {
     std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -818,6 +832,16 @@ Result<void> ReferenceCounter::Transaction::commit() {
                         counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::DECREMENT_STMT, "");
                     stmt.bind(1, op.blockHash);
                     stmt.execute();
+                }
+            }
+
+            // Prune reference rows for blocks garbage-collected from storage
+            if (!prunedHashes_.empty()) {
+                for (const auto& hash : prunedHashes_) {
+                    auto pruneStmt = counter_->pImpl->db->prepare(
+                        "DELETE FROM block_references WHERE block_hash = ? AND ref_count = 0");
+                    pruneStmt.bind(1, std::string_view{hash});
+                    pruneStmt.execute();
                 }
             }
 
@@ -900,6 +924,7 @@ void ReferenceCounter::Transaction::rollback() {
         // Log and clear queued operations, then mark as inactive
         size_t operationCount = operations_.size();
         operations_.clear();
+        prunedHashes_.clear();
         active_ = false;
 
         spdlog::debug("Rolled back transaction {} (cleared {} queued operations)", transactionId_,
