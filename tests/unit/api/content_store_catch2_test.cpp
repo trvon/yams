@@ -12,14 +12,19 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
+#include <yams/crypto/hasher.h>
+#include <yams/storage/storage_engine.h>
 
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace yams::api::test {
 
@@ -60,6 +65,134 @@ struct ContentStoreFixture {
         return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     }
 };
+
+class ScriptedStorageEngine final : public yams::storage::IStorageEngine {
+public:
+    bool failStoresAsNotInitialized{false};
+    bool failManifestStore{false};
+    size_t storeCalls{0};
+    size_t removeCalls{0};
+    std::vector<std::string> removedKeys;
+
+    Result<void> store(std::string_view hash, std::span<const std::byte> data) override {
+        ++storeCalls;
+        const std::string key(hash);
+        if (failStoresAsNotInitialized) {
+            return Error{ErrorCode::NotInitialized, "scripted storage is not ready"};
+        }
+        if (failManifestStore && key.ends_with(".manifest")) {
+            return Error{ErrorCode::WriteError, "scripted manifest write failure"};
+        }
+        objects_[key] = std::vector<std::byte>(data.begin(), data.end());
+        return {};
+    }
+
+    Result<std::vector<std::byte>> retrieve(std::string_view hash) const override {
+        auto it = objects_.find(std::string(hash));
+        if (it == objects_.end()) {
+            return Error{ErrorCode::NotFound, "scripted object missing"};
+        }
+        return it->second;
+    }
+
+    Result<RawObject> retrieveRaw(std::string_view hash) const override {
+        auto data = retrieve(hash);
+        if (!data) {
+            return data.error();
+        }
+        RawObject raw;
+        raw.data = std::move(data).value();
+        return raw;
+    }
+
+    Result<bool> exists(std::string_view hash) const noexcept override {
+        return objects_.contains(std::string(hash));
+    }
+
+    Result<void> remove(std::string_view hash) override {
+        ++removeCalls;
+        removedKeys.emplace_back(hash.data(), hash.size());
+        objects_.erase(std::string(hash));
+        return {};
+    }
+
+    Result<uint64_t> getBlockSize(std::string_view hash) const override {
+        auto it = objects_.find(std::string(hash));
+        if (it == objects_.end()) {
+            return Error{ErrorCode::NotFound, "scripted object missing"};
+        }
+        return static_cast<uint64_t>(it->second.size());
+    }
+
+    std::future<Result<void>> storeAsync(std::string_view hash,
+                                         std::span<const std::byte> data) override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash),
+                           copy = std::vector<std::byte>(data.begin(), data.end())]() {
+                              return store(key, copy);
+                          });
+    }
+
+    std::future<Result<std::vector<std::byte>>>
+    retrieveAsync(std::string_view hash) const override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash)]() { return retrieve(key); });
+    }
+
+    std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash)]() { return retrieveRaw(key); });
+    }
+
+    std::vector<Result<void>>
+    storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
+        std::vector<Result<void>> results;
+        results.reserve(items.size());
+        for (const auto& [hash, data] : items) {
+            results.push_back(store(hash, data));
+        }
+        return results;
+    }
+
+    yams::storage::StorageStats getStats() const noexcept override {
+        yams::storage::StorageStats stats;
+        stats.totalObjects = objects_.size();
+        uint64_t totalBytes = 0;
+        for (const auto& [_, data] : objects_) {
+            totalBytes += data.size();
+        }
+        stats.totalBytes = totalBytes;
+        return stats;
+    }
+
+    Result<uint64_t> getStorageSize() const override {
+        uint64_t totalBytes = 0;
+        for (const auto& [_, data] : objects_) {
+            totalBytes += data.size();
+        }
+        return totalBytes;
+    }
+
+    bool empty() const { return objects_.empty(); }
+
+private:
+    std::unordered_map<std::string, std::vector<std::byte>> objects_;
+};
+
+fs::path makeTempDir(std::string_view prefix) {
+    auto path = fs::temp_directory_path() /
+                (std::string(prefix) + "_" + std::to_string(std::random_device{}()));
+    fs::create_directories(path);
+    return path;
+}
+
+ContentStoreConfig readinessConfig(const fs::path& path) {
+    ContentStoreConfig config;
+    config.storagePath = path;
+    config.chunkSize = MIN_CHUNK_SIZE;
+    config.enableCompression = false;
+    return config;
+}
 
 // =============================================================================
 // Basic Store and Retrieve Tests
@@ -487,6 +620,90 @@ TEST_CASE("ContentStore: Error handling", "[api][content-store][error]") {
         // This test is platform-specific and may not work on all systems
         // Just verify we handle errors gracefully
     }
+}
+
+TEST_CASE("ContentStore: Storage readiness failures", "[api][content-store][readiness]") {
+    SECTION("Injected not-ready storage is used and not replaced by local fallback") {
+        auto tempDir = makeTempDir("content_store_injected_not_ready");
+        auto storage = std::make_shared<ScriptedStorageEngine>();
+        storage->failStoresAsNotInitialized = true;
+
+        {
+            ContentStoreBuilder builder;
+            auto built =
+                builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+            REQUIRE(built.has_value());
+            auto store = std::move(built).value();
+
+            std::vector<std::byte> data(128, std::byte{0x61});
+            auto stored = store->storeBytes(data);
+            REQUIRE_FALSE(stored.has_value());
+            CHECK(stored.error().code == ErrorCode::NotInitialized);
+            CHECK(storage->storeCalls == 1);
+            CHECK(storage->empty());
+        }
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
+    }
+
+    SECTION("Explicit null storage injection is rejected") {
+        auto tempDir = makeTempDir("content_store_null_storage");
+        {
+            ContentStoreBuilder builder;
+            auto built = builder.withConfig(readinessConfig(tempDir))
+                             .withStorageEngine(std::shared_ptr<yams::storage::IStorageEngine>{})
+                             .build();
+            REQUIRE_FALSE(built.has_value());
+            CHECK(built.error().code == ErrorCode::InvalidArgument);
+        }
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
+    }
+}
+
+TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_partial_rollback");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 1024);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>(i & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto stored = store->storeBytes(data);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::WriteError);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+        CHECK(std::none_of(storage->removedKeys.begin(), storage->removedKeys.end(),
+                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+        CHECK(metadata.error().code == ErrorCode::FileNotFound);
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+        CHECK(stats.totalUncompressedBytes == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
 }
 
 // =============================================================================
