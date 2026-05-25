@@ -159,7 +159,7 @@ struct SearchEngineConfig {
         COMB_MNZ,
         CONVEX,
         WEIGHTED_LINEAR_ZSCORE
-    } fusionStrategy = FusionStrategy::RECIPROCAL_RANK;
+    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
 
     size_t weightedLinearZScorePoolSize = 500;
     float weightedLinearZScoreAlpha = 0.75f;

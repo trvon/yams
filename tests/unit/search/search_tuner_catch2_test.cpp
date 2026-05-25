@@ -413,7 +413,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     CHECK(config.pathTreeWeight == Approx(0.00f));
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
-    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 }
 
 TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
@@ -918,7 +918,7 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     CHECK(params.enableSubPhraseRescoring == true);
 
     // fusionStrategy: adopted from SCIENTIFIC
-    CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 
     // chunkAggregation: adopted from SCIENTIFIC
     CHECK(params.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
@@ -1479,7 +1479,7 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
     CHECK(p.semanticRescueSlots.value == 3);
     CHECK(p.enableSubPhraseRescoring == true);
-    CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
@@ -1891,7 +1891,7 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     // SCIENTIFIC profile characteristics preserved
     CHECK(p.weights.vector.value > 0.30f);
     CHECK(p.weights.text.value > 0.35f);
-    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 }
 
 TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",

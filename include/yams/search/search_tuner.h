@@ -104,7 +104,7 @@ struct TunedParams {
     // SearchEngineConfig default is preserved when no profile, mode, or env
     // layer explicitly overrides it. Default mirrors SearchEngineConfig.
     TuningSlot<SearchEngineConfig::FusionStrategy> fusionStrategy{
-        SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK, TuningLayer::Default};
+        SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL, TuningLayer::Default};
     size_t weightedLinearZScorePoolSize = 500;
     float weightedLinearZScoreAlpha = 0.75f;
     bool weightedLinearZScoreUseZScore = true;
@@ -505,7 +505,7 @@ struct TunedParams {
             // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
             // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
             params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
-            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK,
+            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL,
                                            TuningLayer::Profile);
             // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
             // sub-phrase queries. This is the only mechanism that helps when base FTS5

@@ -5,13 +5,13 @@
 #include <spdlog/spdlog.h>
 #include <simeon/bm25.hpp>
 #include <simeon/concept_mining.hpp>
+#include <simeon/corpus_adapter.hpp>
 #include <simeon/fragment_geometry.hpp>
 #include <simeon/fusion.hpp>
 #include <simeon/pmi.hpp>
 #include <simeon/prf.hpp>
 #include <simeon/query_router.hpp>
 #include <simeon/retrieval_strategy.hpp>
-#include <simeon/corpus_adapter.hpp>
 #include <simeon/simeon.hpp>
 
 #if defined(__APPLE__)
@@ -378,9 +378,13 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             }
             rawCorpusBytes += rawDocBytes;
             processedCorpusBytes += buildDocBytes;
-            primary->add_doc(buildText.view);
+            std::string leadText;
+            if (cfg_.strategy_router_enabled) {
+                leadText = simeon::extract_lead_tokens(buildText.view, 64);
+            }
+            primary->add_doc(buildText.view, leadText);
             if (atire) {
-                atire->add_doc(buildText.view);
+                atire->add_doc(buildText.view, leadText);
             }
             if (considerFragmentGeometry) {
                 const bool sampleDocsOk =
@@ -675,7 +679,10 @@ SimeonLexicalBackend::score(std::string_view query,
             continue;
         }
         const auto di = it->second;
-        const float score = std::isfinite(full[di]) ? full[di] : lexical[di];
+        const float score =
+            std::isfinite(full[di])
+                ? full[di]
+                : (di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f);
         out.push_back(score);
     }
     return out;
@@ -775,7 +782,10 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
             continue;
         }
         const auto di = it->second;
-        const float score = std::isfinite(full[di]) ? full[di] : lexical[di];
+        const float score =
+            std::isfinite(full[di])
+                ? full[di]
+                : (di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f);
         decision.scores.push_back(score);
     }
     return decision;

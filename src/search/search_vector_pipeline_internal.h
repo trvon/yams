@@ -36,4 +36,9 @@ queryEntityVectorsPipeline(const std::shared_ptr<yams::metadata::MetadataReposit
                            const std::vector<float>& embedding, const SearchEngineConfig& config,
                            size_t limit);
 
+#ifdef YAMS_TESTING
+size_t testingVectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
+                                      bool narrowedSearch) noexcept;
+#endif
+
 } // namespace yams::search::detail

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 
 namespace yams::search::detail {
@@ -21,6 +22,24 @@ std::string truncateSearchSnippet(const std::string& content, size_t maxLen) {
     std::string out = content.substr(0, maxLen);
     out.append("...");
     return out;
+}
+
+size_t vectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
+                               bool narrowedSearch) noexcept {
+    if (limit == 0 || narrowedSearch) {
+        return limit;
+    }
+
+    using Agg = SearchEngineConfig::ChunkAggregation;
+    if (config.chunkAggregation == Agg::MAX) {
+        return limit;
+    }
+
+    const size_t multiplier = std::max<size_t>(2, config.chunkAggregationTopK);
+    if (limit > std::numeric_limits<size_t>::max() / multiplier) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return limit * multiplier;
 }
 
 template <typename RecordRange>
@@ -174,7 +193,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 
     try {
         vector::VectorSearchParams params;
-        params.k = limit;
+        params.k = vectorRawCandidateLimit(config, limit, candidates != nullptr);
         params.similarity_threshold = config.similarityThreshold;
         if (candidates != nullptr) {
             params.candidate_hashes = *candidates;
@@ -232,6 +251,11 @@ queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepositor
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
                          size_t limit) {
     return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, nullptr);
+}
+
+size_t testingVectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
+                                      bool narrowedSearch) noexcept {
+    return vectorRawCandidateLimit(config, limit, narrowedSearch);
 }
 
 Result<std::vector<ComponentResult>>

@@ -1142,6 +1142,7 @@ if catch2_dep.found()
       'unit/search/search_tracing_catch2_test.cpp',
       'unit/search/search_smoke_catch2_test.cpp',
       'unit/search/query_literal_extractor_catch2_test.cpp',
+      'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_filters_catch2_test.cpp',
       'unit/search/search_results_catch2_test.cpp',
     ),

@@ -147,6 +147,59 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     CHECK(routes.value().front().clusterId == pairClusterIt->clusterId);
 }
 
+TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
+          "[unit][topology][baseline]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "aaa",
+            .filePath = "/repo/a.md",
+            .embedding = {1.0F, 0.0F},
+            .neighbors = {{.documentHash = "bbb", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .embedding = {0.9F, 0.1F},
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ccc",
+            .filePath = "/repo/c.md",
+            .embedding = {0.0F, 1.0F},
+            .neighbors = {{.documentHash = "ddd", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ddd",
+            .filePath = "/repo/d.md",
+            .embedding = {0.1F, 0.9F},
+            .neighbors = {{.documentHash = "ccc", .score = 0.9F, .reciprocal = true}}},
+    };
+
+    auto result = engine.buildArtifacts(docs, config);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().clusters.size() == 2U);
+    for (const auto& cluster : result.value().clusters) {
+        REQUIRE(cluster.centroidEmbedding.size() == 2U);
+    }
+
+    SparseGuidedClusterRouter router;
+    auto routes = router.route(TopologyRouteRequest{.queryText = "find y-axis docs",
+                                                    .seedDocumentHashes = {},
+                                                    .limit = 1,
+                                                    .preferStableClusters = true,
+                                                    .weakQueryOnly = true,
+                                                    .scoringMode = RouteScoringMode::Current,
+                                                    .queryEmbedding = {0.0F, 1.0F},
+                                                    .sparseDenseAlpha = 0.0F},
+                               result.value());
+    REQUIRE(routes.has_value());
+    REQUIRE(routes.value().size() == 1U);
+    REQUIRE(routes.value().front().medoidDocumentHash.has_value());
+    CHECK(routes.value().front().medoidDocumentHash.value() == "ccc");
+}
+
 TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
           "[unit][topology][store]") {
     TopologyFixture fix;

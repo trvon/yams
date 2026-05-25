@@ -332,7 +332,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
     CHECK(cfg.enableTieredExecution == true);
-    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
     CHECK(cfg.symbolRank == true);

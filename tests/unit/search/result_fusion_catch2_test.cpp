@@ -110,6 +110,26 @@ TEST_CASE("Weighted reciprocal favors lexical over pure vector at equal rank",
     CHECK(results[0].document.sha256Hash.compare("doc-text") == 0);
 }
 
+TEST_CASE("ResultFusion default strategy honors component weights", "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 10;
+    cfg.rrfK = 1.0f;
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+    cfg.vectorBoostFactor = 0.0f;
+    cfg.textWeight = 0.10f;
+    cfg.vectorWeight = 1.00f;
+
+    ResultFusion fusion(cfg);
+    std::vector<ComponentResult> components;
+    components.push_back(makeComponent("doc-text", 1.00f, ComponentResult::Source::Text, 0));
+    components.push_back(makeComponent("doc-vector", 1.00f, ComponentResult::Source::Vector, 0));
+
+    auto results = fusion.fuse(components);
+    REQUIRE(results.size() == 2U);
+    CHECK(results[0].document.sha256Hash == "doc-vector");
+}
+
 TEST_CASE("ResultFusion COMB_MNZ backfills snippet from later anchored component",
           "[search][fusion][catch2]") {
     SearchEngineConfig cfg;
