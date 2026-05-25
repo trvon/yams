@@ -260,6 +260,9 @@ struct SearchEngineConfig {
     size_t rerankTopK = 5;
     float rerankAnchoredMinRelativeScore = 0.0f;
     bool rerankReplaceScores = true;
+    float rerankBlendWeight = 0.60f;
+    float rerankScoreGapThreshold = 0.0f;
+    size_t rerankSnippetMaxChars = 256;
     size_t fusionCandidateLimit = 0;
 
     bool enableGraphRerank = false;

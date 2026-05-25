@@ -231,3 +231,103 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK(debug.at("topology_weak_query_added_candidates") == "2");
     CHECK(debug.at("topology_weak_query_total_candidates") == "2");
 }
+
+TEST_CASE("SearchEngine stage trace reports reranker flags as booleans",
+          "[search][trace][rerank][catch2]") {
+    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
+    yams::test::ScopedEnvVar traceTopN("YAMS_SEARCH_STAGE_TRACE_TOP_N",
+                                       std::optional<std::string>("4"));
+
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.enableTieredExecution = false;
+    config.textWeight = 1.0F;
+    config.simeonTextWeight = 0.0F;
+    config.pathTreeWeight = 0.0F;
+    config.kgWeight = 0.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.tagWeight = 0.0F;
+    config.metadataWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 5;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 2;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    REQUIRE(debug.contains("trace_enabled"));
+    CHECK(debug.at("trace_enabled") == "1");
+    REQUIRE(debug.contains("trace_cross_rerank_applied"));
+    CHECK(debug.at("trace_cross_rerank_applied") == "0");
+    REQUIRE(debug.contains("trace_turboquant_rerank_applied"));
+    CHECK(debug.at("trace_turboquant_rerank_applied") == "0");
+    REQUIRE(debug.contains("trace_rerank_guard_score_gap"));
+    CHECK(debug.at("trace_rerank_guard_score_gap") == "0.000000");
+}
+
+TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
+          "[search][rerank][catch2]") {
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.enableTieredExecution = false;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+    config.textWeight = 1.0F;
+    config.simeonTextWeight = 0.0F;
+    config.pathTreeWeight = 0.0F;
+    config.kgWeight = 0.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.tagWeight = 0.0F;
+    config.metadataWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 2;
+    config.rerankReplaceScores = true;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    engine.setCrossReranker(
+        [](const std::string&,
+           const std::vector<std::string>& documents) -> Result<std::vector<float>> {
+            std::vector<float> scores;
+            scores.reserve(documents.size());
+            for (const auto& doc : documents) {
+                scores.push_back(doc.find("x2") != std::string::npos ? 1.0F : 0.1F);
+            }
+            return scores;
+        });
+
+    SearchParams params;
+    params.limit = 2;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 2);
+
+    CHECK(response.value().results.front().document.sha256Hash == "x2");
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("cross_rerank_available") == "1");
+    CHECK(debug.at("cross_rerank_skip_reason").empty());
+    CHECK(debug.at("cross_rerank_replace_scores") == "1");
+}

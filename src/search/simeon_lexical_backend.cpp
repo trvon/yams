@@ -24,12 +24,14 @@
 #include <sys/resource.h>
 #endif
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -282,6 +284,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         fragment_encoder_.reset();
         doc_frags_.clear();
         doc_id_to_index_.clear();
+        index_to_doc_id_.clear();
         doc_count_ = 0;
         ready_.store(true, std::memory_order_release);
         building_.store(false, std::memory_order_release);
@@ -621,6 +624,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         strategies_ = std::move(strategies);
         strategy_router_ = std::move(strategyRouter);
         doc_id_to_index_ = std::move(mapping);
+        index_to_doc_id_ = std::move(dense_doc_ids);
         doc_count_ = dense;
         ready_.store(true, std::memory_order_release);
         building_.store(false, std::memory_order_release);
@@ -970,6 +974,63 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
         decision.scores.push_back(score);
     }
     return decision;
+}
+
+Result<SimeonLexicalBackend::TopCandidateDecision>
+SimeonLexicalBackend::searchTop(std::string_view query, std::size_t limit,
+                                std::string_view arm_name) const {
+    if (!ready_.load(std::memory_order_acquire) || !index_) {
+        return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
+    }
+
+    TopCandidateDecision out;
+    if (limit == 0 || index_to_doc_id_.empty()) {
+        return out;
+    }
+
+    auto decision = [&]() -> Result<RescoreDecision> {
+        if (!arm_name.empty()) {
+            return scoreBanditRouted(query, arm_name, index_to_doc_id_);
+        }
+        if (hasStrategyRouter()) {
+            return scoreStrategyRouted(query, index_to_doc_id_);
+        }
+        return scoreRouted(query, index_to_doc_id_);
+    }();
+    if (!decision) {
+        return Error{decision.error().code, decision.error().message};
+    }
+
+    out.recipe_name = decision.value().recipe_name;
+    const auto& scores = decision.value().scores;
+    if (scores.size() != index_to_doc_id_.size()) {
+        return Error{ErrorCode::InternalError, "SimeonLexicalBackend: direct score size mismatch"};
+    }
+
+    std::vector<std::size_t> order(scores.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    const std::size_t topN = std::min(limit, order.size());
+    std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(topN), order.end(),
+                      [&](std::size_t lhs, std::size_t rhs) {
+                          const float left = std::isfinite(scores[lhs]) ? scores[lhs] : 0.0f;
+                          const float right = std::isfinite(scores[rhs]) ? scores[rhs] : 0.0f;
+                          if (left != right) {
+                              return left > right;
+                          }
+                          return index_to_doc_id_[lhs] < index_to_doc_id_[rhs];
+                      });
+
+    out.candidates.reserve(topN);
+    for (std::size_t i = 0; i < topN; ++i) {
+        const std::size_t idx = order[i];
+        const float score = std::isfinite(scores[idx]) ? scores[idx] : 0.0f;
+        if (score <= 0.0f) {
+            continue;
+        }
+        out.candidates.push_back(
+            TopCandidate{.document_id = index_to_doc_id_[idx], .score = score});
+    }
+    return out;
 }
 
 } // namespace yams::search

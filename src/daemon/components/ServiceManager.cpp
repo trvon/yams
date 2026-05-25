@@ -3053,6 +3053,24 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     } else {
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
     }
+
+    auto modelProvider = loadModelProvider();
+    if (modelProvider && modelProvider->isAvailable()) {
+        std::weak_ptr<IModelProvider> weakProvider = modelProvider;
+        engine->setCrossReranker(
+            [weakProvider](const std::string& query, const std::vector<std::string>& documents)
+                -> Result<std::vector<float>> {
+                auto provider = weakProvider.lock();
+                if (!provider || !provider->isAvailable()) {
+                    return Error{ErrorCode::NotInitialized, "model provider unavailable"};
+                }
+                return provider->scoreDocuments(query, documents);
+            });
+        spdlog::debug("[{}] model-provider reranker wired to search engine", contextLabel);
+    } else {
+        engine->setCrossReranker({});
+        spdlog::debug("[{}] model-provider reranker unavailable", contextLabel);
+    }
 }
 
 boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {

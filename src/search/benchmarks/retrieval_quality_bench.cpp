@@ -686,6 +686,15 @@ struct RetrievalMetrics {
     int numQueries = 0;
 };
 
+struct StageMetricAccumulator {
+    double totalMRR = 0.0;
+    double totalRecall = 0.0;
+    double totalPrecision = 0.0;
+    double totalNDCG = 0.0;
+    double totalMAP = 0.0;
+    std::uint64_t queryCount = 0;
+};
+
 struct QueryDiagnosticsSummary {
     std::uint64_t queryCount = 0;
     std::uint64_t queryWithResultsCount = 0;
@@ -767,6 +776,7 @@ struct QueryDiagnosticsSummary {
     std::unordered_map<std::string, std::vector<double>> fusionSourceFinalDocSamples;
     std::unordered_map<std::string, std::vector<double>> stageUniqueDocCountSamples;
     std::unordered_map<std::string, std::vector<double>> stageRelevantDocCountSamples;
+    std::map<std::string, StageMetricAccumulator> stageRetrievalMetrics;
     std::unordered_map<std::string, std::vector<double>> tunerSignalSamples;
     std::unordered_map<std::string, std::uint64_t> tunerDecisionCounts;
     std::unordered_map<std::string, std::uint64_t> zoomLevelCounts;
@@ -795,6 +805,27 @@ static std::unordered_set<std::string> splitTabSet(const std::string& value) {
         const size_t len = (end == std::string::npos) ? (value.size() - start) : (end - start);
         if (len > 0) {
             out.insert(value.substr(start, len));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return out;
+}
+
+static std::vector<std::string> splitTabList(const std::string& value, size_t limit) {
+    std::vector<std::string> out;
+    if (value.empty() || limit == 0) {
+        return out;
+    }
+
+    size_t start = 0;
+    while (start <= value.size() && out.size() < limit) {
+        const size_t end = value.find('\t', start);
+        const size_t len = (end == std::string::npos) ? (value.size() - start) : (end - start);
+        if (len > 0) {
+            out.push_back(value.substr(start, len));
         }
         if (end == std::string::npos) {
             break;
@@ -1193,6 +1224,51 @@ static json summarizeSamples(const std::vector<double>& samples) {
     out["p50"] = computePercentile(samples, 0.50);
     out["p95"] = computePercentile(samples, 0.95);
     out["max"] = *std::max_element(samples.begin(), samples.end());
+    return out;
+}
+
+static RetrievalMetrics finalizeStageMetrics(const StageMetricAccumulator& acc) {
+    RetrievalMetrics metrics;
+    metrics.numQueries = static_cast<int>(acc.queryCount);
+    if (acc.queryCount == 0) {
+        return metrics;
+    }
+
+    const double count = static_cast<double>(acc.queryCount);
+    metrics.mrr = acc.totalMRR / count;
+    metrics.recallAtK = acc.totalRecall / count;
+    metrics.precisionAtK = acc.totalPrecision / count;
+    metrics.ndcgAtK = acc.totalNDCG / count;
+    metrics.map = acc.totalMAP / count;
+    return metrics;
+}
+
+static json
+stageRetrievalMetricsToJson(const std::map<std::string, StageMetricAccumulator>& stageMetrics) {
+    json out = json::object();
+    if (stageMetrics.empty()) {
+        return out;
+    }
+
+    std::optional<RetrievalMetrics> finalMetrics;
+    if (auto finalIt = stageMetrics.find("final"); finalIt != stageMetrics.end()) {
+        finalMetrics = finalizeStageMetrics(finalIt->second);
+    }
+
+    for (const auto& [stage, acc] : stageMetrics) {
+        const auto metrics = finalizeStageMetrics(acc);
+        json item = {
+            {"num_queries", metrics.numQueries}, {"mrr", metrics.mrr},
+            {"recall_at_k", metrics.recallAtK},  {"precision_at_k", metrics.precisionAtK},
+            {"ndcg_at_k", metrics.ndcgAtK},      {"map", metrics.map},
+        };
+        if (finalMetrics.has_value()) {
+            item["mrr_delta_vs_final"] = metrics.mrr - finalMetrics->mrr;
+            item["recall_delta_vs_final"] = metrics.recallAtK - finalMetrics->recallAtK;
+            item["ndcg_delta_vs_final"] = metrics.ndcgAtK - finalMetrics->ndcgAtK;
+        }
+        out[stage] = std::move(item);
+    }
     return out;
 }
 
@@ -1727,6 +1803,7 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"turboquant_packed_candidates_scored",
          summarizeSamples(summary.turboQuantPackedCandidatesScoredSamples)},
         {"turboquant_skip_reasons", summary.turboQuantSkipReasonCounts},
+        {"stage_metrics", stageRetrievalMetricsToJson(summary.stageRetrievalMetrics)},
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
@@ -4200,6 +4277,52 @@ static std::string summarizeStageTradeoffs(const json& hybridDiag) {
     return out.str();
 }
 
+static std::string summarizeStageMetricGaps(const json& hybridDiag) {
+    if (!hybridDiag.is_object()) {
+        return "stage_metrics=unavailable";
+    }
+    const auto metricsIt = hybridDiag.find("stage_metrics");
+    if (metricsIt == hybridDiag.end() || !metricsIt->is_object() || metricsIt->empty()) {
+        return "stage_metrics=unavailable";
+    }
+
+    static const std::vector<std::string> kStageOrder = {
+        "pre_fusion", "graphless_post_fusion", "post_fusion", "post_graph", "final",
+    };
+
+    std::vector<std::string> parts;
+    for (const auto& stage : kStageOrder) {
+        auto stageIt = metricsIt->find(stage);
+        if (stageIt == metricsIt->end() || !stageIt->is_object()) {
+            continue;
+        }
+        const double mrr = stageIt->value("mrr", 0.0);
+        const double recall = stageIt->value("recall_at_k", 0.0);
+        const double ndcg = stageIt->value("ndcg_at_k", 0.0);
+        const double mrrDelta = stageIt->value("mrr_delta_vs_final", 0.0);
+        const double ndcgDelta = stageIt->value("ndcg_delta_vs_final", 0.0);
+        std::ostringstream oss;
+        oss << stage << ":mrr=" << std::fixed << std::setprecision(3) << mrr
+            << "(d=" << std::showpos << mrrDelta << std::noshowpos << ")"
+            << ",rec=" << recall << ",ndcg=" << ndcg << "(d=" << std::showpos << ndcgDelta
+            << std::noshowpos << ")";
+        parts.push_back(oss.str());
+    }
+
+    if (parts.empty()) {
+        return "stage_metrics=unavailable";
+    }
+
+    std::ostringstream out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) {
+            out << "  ";
+        }
+        out << parts[i];
+    }
+    return out.str();
+}
+
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
                                            const RetrievalMetrics& keyword,
                                            const QueryDiagnosticsSummary& hybridDiagnostics,
@@ -4365,6 +4488,102 @@ double computeDCG(const std::vector<int>& grades, int k) {
 double computeIDCG(std::vector<int> grades, int k) {
     std::sort(grades.begin(), grades.end(), std::greater<int>());
     return computeDCG(grades, k);
+}
+
+static bool isRelevantDocForQuery(const TestQuery& tq, const std::string& docId) {
+    if (docId.empty()) {
+        return false;
+    }
+    if (tq.useDocIds) {
+        return tq.relevantDocIds.count(docId) > 0;
+    }
+    return tq.relevantFiles.count(docId) > 0 || tq.relevantFiles.count(docId + ".txt") > 0;
+}
+
+static int relevanceGradeForQuery(const TestQuery& tq, const std::string& docId) {
+    if (auto it = tq.relevanceGrades.find(docId); it != tq.relevanceGrades.end()) {
+        return it->second;
+    }
+    if (!tq.useDocIds) {
+        if (auto it = tq.relevanceGrades.find(docId + ".txt"); it != tq.relevanceGrades.end()) {
+            return it->second;
+        }
+    }
+    return 0;
+}
+
+static void addStageMetricSample(StageMetricAccumulator& acc,
+                                 const std::vector<std::string>& rankedDocIds, const TestQuery& tq,
+                                 const std::vector<int>& allGrades, int k) {
+    acc.queryCount++;
+
+    int firstRelevantRank = -1;
+    int numRelevantInTopK = 0;
+    int numRelevantSeen = 0;
+    double avgPrecision = 0.0;
+    std::vector<int> retrievedGrades;
+    std::unordered_set<std::string> seenDocIds;
+    const size_t metricK = static_cast<size_t>(std::max(0, k));
+    retrievedGrades.reserve(std::min<std::size_t>(metricK, rankedDocIds.size()));
+    seenDocIds.reserve(std::min<std::size_t>(metricK, rankedDocIds.size()));
+
+    const size_t topK = std::min<std::size_t>(metricK, rankedDocIds.size());
+    for (size_t i = 0; i < topK; ++i) {
+        const auto& docId = rankedDocIds[i];
+        const bool isDuplicate = !seenDocIds.insert(docId).second;
+        const bool isRelevant = !isDuplicate && isRelevantDocForQuery(tq, docId);
+        if (isRelevant) {
+            numRelevantInTopK++;
+            if (firstRelevantRank < 0) {
+                firstRelevantRank = static_cast<int>(i + 1);
+            }
+            numRelevantSeen++;
+            avgPrecision += static_cast<double>(numRelevantSeen) / static_cast<double>(i + 1);
+        }
+        retrievedGrades.push_back(isDuplicate ? 0 : relevanceGradeForQuery(tq, docId));
+    }
+
+    if (firstRelevantRank > 0) {
+        acc.totalMRR += 1.0 / static_cast<double>(firstRelevantRank);
+    }
+
+    const auto relevantTotal = tq.useDocIds ? tq.relevantDocIds.size() : tq.relevantFiles.size();
+    if (relevantTotal > 0) {
+        acc.totalRecall +=
+            static_cast<double>(numRelevantInTopK) / static_cast<double>(relevantTotal);
+    }
+    if (topK > 0) {
+        acc.totalPrecision += static_cast<double>(numRelevantInTopK) / static_cast<double>(topK);
+    }
+    if (numRelevantSeen > 0) {
+        acc.totalMAP += avgPrecision / static_cast<double>(numRelevantSeen);
+    }
+
+    const double dcg = computeDCG(retrievedGrades, k);
+    const double idcg = computeIDCG(allGrades, k);
+    acc.totalNDCG += (idcg > 0.0) ? dcg / idcg : 0.0;
+}
+
+static void ingestStageRetrievalMetrics(QueryDiagnosticsSummary& summary,
+                                        const std::map<std::string, std::string>& searchStats,
+                                        const TestQuery& tq, const std::vector<int>& allGrades,
+                                        int k) {
+    static const std::vector<std::pair<std::string, std::string>> kStageDocIdStats = {
+        {"pre_fusion", "trace_pre_fusion_doc_ids"},
+        {"graphless_post_fusion", "trace_graphless_post_fusion_doc_ids"},
+        {"post_fusion", "trace_post_fusion_doc_ids"},
+        {"post_graph", "trace_post_graph_doc_ids"},
+        {"final", "trace_final_doc_ids"},
+    };
+
+    for (const auto& [stage, statKey] : kStageDocIdStats) {
+        auto it = searchStats.find(statKey);
+        if (it == searchStats.end() || it->second.empty()) {
+            continue;
+        }
+        auto rankedDocIds = splitTabList(it->second, static_cast<size_t>(std::max(0, k)));
+        addStageMetricSample(summary.stageRetrievalMetrics[stage], rankedDocIds, tq, allGrades, k);
+    }
 }
 
 RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::path& corpusDir,
@@ -4573,6 +4792,12 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             debugEntry.relevantDocIds, debugEntry.returnedDocIds, debugEntry.searchStats);
         debugEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
 
+        std::vector<int> allGrades;
+        allGrades.reserve(tq.relevanceGrades.size());
+        for (const auto& [fn, grade] : tq.relevanceGrades) {
+            allGrades.push_back(grade);
+        }
+
         if (benchDiagEnabled && results.empty() && tq.useDocIds && !tq.relevantDocIds.empty()) {
             // Opt-in diagnostic: show a snippet of the relevant BEIR doc file(s).
             std::size_t printed = 0;
@@ -4681,6 +4906,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats,
                                    relevantDecisionTrace, false, !results.empty(), hadTopKDuplicate,
                                    firstRelevantRank);
+            ingestStageRetrievalMetrics(*diagnostics, run.value().response.searchStats, tq,
+                                        allGrades, k);
         }
 
         if (firstRelevantRank > 0)
@@ -4697,9 +4924,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         if (numRelevantSeen > 0)
             totalMAP += avgPrecision / numRelevantSeen;
 
-        std::vector<int> allGrades;
-        for (const auto& [fn, grade] : tq.relevanceGrades)
-            allGrades.push_back(grade);
         double dcg = computeDCG(retrievedGrades, k);
         double idcg = computeIDCG(allGrades, k);
         totalNDCG += (idcg > 0.0) ? dcg / idcg : 0.0;
@@ -7871,6 +8095,7 @@ static int runOptimizationLoop() {
                   << "\n";
         std::cout << "    tq_skip_reasons=" << hybridDiag["turboquant_skip_reasons"].dump() << "\n";
         std::cout << "    stage_tradeoffs=" << summarizeStageTradeoffs(hybridDiag) << "\n";
+        std::cout << "    stage_quality=" << summarizeStageMetricGaps(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
             std::cout << "    trace_top_n=" << result.traceTopN
                       << "  trace_component_top_n=" << result.traceComponentTopN << "\n";
@@ -8023,6 +8248,8 @@ int main(int argc, char** argv) {
               << hybridDiag["turboquant_apply_rate"].get<double>() << "\n";
     std::cout << "  TurboQuant packed cand mean:    " << std::setw(10)
               << hybridDiag["turboquant_packed_candidates_scored"]["mean"].get<double>() << "\n";
+    std::cout << "  Stage quality gaps:             " << summarizeStageMetricGaps(hybridDiag)
+              << "\n";
     std::cout << "  vectors.db bytes:                " << std::setw(10)
               << g_final_vector_index_state.vectorsDbBytes << "\n";
     std::cout << "  vectors.db-wal bytes:            " << std::setw(10)

@@ -32,6 +32,8 @@ struct QueryExpansionStats {
     size_t graphExpansionFtsHitCount = 0;
     size_t graphExpansionFtsAddedCount = 0;
     size_t graphTextBlockedLowScoreCount = 0;
+    size_t simeonDirectRawHitCount = 0;
+    size_t simeonDirectAddedCount = 0;
 };
 } // namespace yams::search
 

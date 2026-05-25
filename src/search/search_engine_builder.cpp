@@ -501,6 +501,24 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.rerankReplaceScores);
         }
 
+        if (auto rerankWeight = getEnvFloat("YAMS_SEARCH_RERANK_WEIGHT")) {
+            cfg.rerankBlendWeight = std::clamp(*rerankWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine rerankBlendWeight overridden to {:.3f} via env",
+                         cfg.rerankBlendWeight);
+        }
+
+        if (auto rerankGap = getEnvFloat("YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD")) {
+            cfg.rerankScoreGapThreshold = std::max(0.0f, *rerankGap);
+            spdlog::info("SearchEngine rerankScoreGapThreshold overridden to {:.6f} via env",
+                         cfg.rerankScoreGapThreshold);
+        }
+
+        if (auto rerankSnippetChars = getEnvInt("YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS")) {
+            cfg.rerankSnippetMaxChars = static_cast<size_t>(std::max(0, *rerankSnippetChars));
+            spdlog::info("SearchEngine rerankSnippetMaxChars overridden to {} via env",
+                         cfg.rerankSnippetMaxChars);
+        }
+
         if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {
             cfg.enableGraphRerank = *graphRerankEnabled;
             spdlog::info("SearchEngine enableGraphRerank overridden to {} via env",

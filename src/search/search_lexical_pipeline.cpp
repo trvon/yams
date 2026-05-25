@@ -142,6 +142,79 @@ void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend* ba
                              expansionStats, simeonRankBase);
 }
 
+std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::string& query, SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe,
+    const SearchEngineConfig& config, size_t limit, QueryExpansionStats* expansionStats) {
+    if (!metadataRepo || !backend || !backend->ready() || limit == 0) {
+        return std::nullopt;
+    }
+
+    auto decision = backend->searchTop(query, limit, config.simeonBanditArm);
+    if (!decision) {
+        spdlog::debug("[simeon-lexical] direct candidate search failed: {}",
+                      decision.error().message);
+        return std::nullopt;
+    }
+    if (lastSimeonRouteRecipe != nullptr) {
+        *lastSimeonRouteRecipe = decision.value().recipe_name;
+    }
+    if (expansionStats != nullptr) {
+        expansionStats->simeonDirectRawHitCount += decision.value().candidates.size();
+    }
+
+    yams::metadata::SearchResults direct;
+    direct.query = query;
+    direct.results.reserve(decision.value().candidates.size());
+    for (const auto& candidate : decision.value().candidates) {
+        auto docResult = metadataRepo->getDocument(candidate.document_id);
+        if (!docResult || !docResult.value()) {
+            continue;
+        }
+
+        yams::metadata::SearchResult row;
+        row.document = *docResult.value();
+        row.score = -static_cast<double>(candidate.score);
+
+        auto contentResult = metadataRepo->getContent(candidate.document_id);
+        if (contentResult && contentResult.value()) {
+            const auto& text = contentResult.value()->contentText;
+            constexpr size_t kSnippetChars = 240;
+            row.snippet = text.substr(0, std::min(kSnippetChars, text.size()));
+        }
+        direct.results.push_back(std::move(row));
+    }
+
+    std::sort(direct.results.begin(), direct.results.end(),
+              [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
+                  return a.score < b.score;
+              });
+    direct.totalCount = static_cast<int64_t>(direct.results.size());
+    return direct;
+}
+
+void appendDirectSimeonLexicalBatch(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const std::string& query, SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe,
+    QueryIntent queryIntent, const SearchEngineConfig& config, size_t limit,
+    std::unordered_set<std::string>& seenHashes, std::vector<ComponentResult>& results,
+    QueryExpansionStats* expansionStats) {
+    auto directResults = makeDirectSimeonLexicalResults(
+        metadataRepo, query, backend, lastSimeonRouteRecipe, config, limit, expansionStats);
+    if (!directResults || directResults->results.empty()) {
+        return;
+    }
+
+    const size_t beforeAppend = results.size();
+    appendLexicalBatchAtRank(query, queryIntent, config, *directResults, 1.0f, true, &seenHashes,
+                             ComponentResult::Source::SimeonText, results, expansionStats,
+                             results.size());
+    if (expansionStats != nullptr) {
+        expansionStats->simeonDirectAddedCount +=
+            results.size() > beforeAppend ? results.size() - beforeAppend : 0;
+    }
+}
+
 Fts5CandidatePoolStats fetchFts5CandidatePool(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
     SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe, const std::string& query,
@@ -498,6 +571,14 @@ std::vector<ComponentResult> queryFullTextPipeline(
                                                   results, seenHashes, subPhraseGenerator);
     const size_t baseFtsHitCount = poolStats.baseFtsHitCount;
     const bool baseFtsSucceeded = poolStats.baseFtsSucceeded;
+
+    const bool weakLexicalPool = baseFtsHitCount < config.weakQueryMinTextHits ||
+                                 results.size() < config.weakQueryMinTextHits;
+    if (weakLexicalPool) {
+        appendDirectSimeonLexicalBatch(metadataRepo, query, backend, lastSimeonRouteRecipe,
+                                       queryIntent, config, limit, seenHashes, results,
+                                       expansionStats);
+    }
 
     if (config.enableSubPhraseRescoring && !results.empty()) {
         applySubPhraseRescoring(metadataRepo, query, config, limit, results, subPhraseGenerator);
