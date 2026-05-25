@@ -333,6 +333,9 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.enableParallelExecution == true);
     CHECK(cfg.enableTieredExecution == true);
     CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK(cfg.enableTopologyWeakQueryRouting == false);
+    CHECK(cfg.topologyMaxClusters == 2U);
+    CHECK(cfg.topologyMaxDocs == 64U);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
     CHECK(cfg.symbolRank == true);

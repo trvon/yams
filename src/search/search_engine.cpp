@@ -7,20 +7,20 @@
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/concept_resolver.h>
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
 #include <yams/search/lexical_scoring.h>
 #include <yams/search/meta_path_router.h>
 #include <yams/search/query_expansion.h>
-#include <yams/search/concept_resolver.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
-#include <yams/search/tuner_mab.h>
 #include <yams/search/simeon_lexical_backend.h>
+#include <yams/search/tuner_mab.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
 #include <yams/topology/topology_baseline.h>
@@ -1430,6 +1430,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     std::vector<ComponentResult> allComponentResults;
     std::unordered_set<std::string> topologyMedoidHashes;
+    bool topologyWeakQueryRoutingApplied = false;
+    bool topologyWeakQueryNarrowApplied = false;
+    size_t topologyWeakQueryRoutedClusters = 0;
+    size_t topologyWeakQueryRoutedDocs = 0;
+    size_t topologyWeakQueryAddedCandidates = 0;
     size_t estimatedResults = 0;
     if (workingConfig.textWeight > 0.0f || workingConfig.simeonTextWeight > 0.0f)
         estimatedResults += workingConfig.textMaxResults;
@@ -1677,7 +1682,78 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // post-fusion steps are not blocked by adaptive lexical skipping.
             awaitEmbedding();
 
-            const std::unordered_set<std::string>* vectorSearchNarrowSet = nullptr;
+            if (workingConfig.enableTopologyWeakQueryRouting && weakTier1Query &&
+                freshness.topologyReady && metadataRepo_ && kgStore_) {
+                auto routeStart = std::chrono::steady_clock::now();
+                yams::topology::MetadataKgTopologyArtifactStore topologyStore(metadataRepo_,
+                                                                              kgStore_);
+                auto latestTopology = topologyStore.loadLatest();
+                if (latestTopology && latestTopology.value().has_value()) {
+                    std::vector<std::string> seedHashes;
+                    seedHashes.reserve(tier1Candidates.size());
+                    for (const auto& hash : tier1Candidates) {
+                        seedHashes.push_back(hash);
+                    }
+
+                    yams::topology::TopologyRouteRequest routeRequest;
+                    routeRequest.queryText = query;
+                    routeRequest.seedDocumentHashes = std::move(seedHashes);
+                    routeRequest.limit = workingConfig.topologyMaxClusters;
+                    routeRequest.weakQueryOnly = true;
+                    routeRequest.scoringMode = yams::topology::RouteScoringMode::Current;
+                    routeRequest.sparseDenseAlpha = 0.5F;
+                    if (queryEmbedding.has_value()) {
+                        routeRequest.queryEmbedding = queryEmbedding.value();
+                    }
+
+                    yams::topology::SparseGuidedClusterRouter router;
+                    auto routes = router.route(routeRequest, latestTopology.value().value());
+                    if (routes) {
+                        topologyWeakQueryRoutedClusters = routes.value().size();
+                        for (const auto& route : routes.value()) {
+                            if (route.medoidDocumentHash.has_value()) {
+                                topologyMedoidHashes.insert(route.medoidDocumentHash.value());
+                            }
+                            const auto clusterIt = std::find_if(
+                                latestTopology.value()->clusters.begin(),
+                                latestTopology.value()->clusters.end(),
+                                [&route](const yams::topology::ClusterArtifact& cluster) {
+                                    return cluster.clusterId == route.clusterId;
+                                });
+                            if (clusterIt == latestTopology.value()->clusters.end()) {
+                                continue;
+                            }
+                            for (const auto& hash : clusterIt->memberDocumentHashes) {
+                                if (topologyWeakQueryRoutedDocs >= workingConfig.topologyMaxDocs) {
+                                    break;
+                                }
+                                ++topologyWeakQueryRoutedDocs;
+                                if (tier2Candidates.insert(hash).second) {
+                                    ++topologyWeakQueryAddedCandidates;
+                                }
+                            }
+                            if (topologyWeakQueryRoutedDocs >= workingConfig.topologyMaxDocs) {
+                                break;
+                            }
+                        }
+                        topologyWeakQueryRoutingApplied = topologyWeakQueryRoutedClusters > 0;
+                        topologyWeakQueryNarrowApplied = topologyWeakQueryAddedCandidates > 0;
+                    } else {
+                        spdlog::debug("Topology weak-query routing failed: {}",
+                                      routes.error().message);
+                    }
+                } else if (!latestTopology) {
+                    spdlog::debug("Topology weak-query snapshot load failed: {}",
+                                  latestTopology.error().message);
+                }
+                response.componentTimingMicros["topology_weak_query"] =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - routeStart)
+                        .count();
+            }
+
+            const std::unordered_set<std::string>* vectorSearchNarrowSet =
+                topologyWeakQueryNarrowApplied ? &tier2Candidates : nullptr;
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -1687,6 +1763,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             response.debugStats["topology_weak_query_total_candidates"] =
                 std::to_string(tier2Candidates.size());
+            response.debugStats["topology_weak_query_enabled"] =
+                workingConfig.enableTopologyWeakQueryRouting ? "1" : "0";
+            response.debugStats["topology_weak_query_applied"] =
+                topologyWeakQueryRoutingApplied ? "1" : "0";
+            response.debugStats["topology_weak_query_narrow_applied"] =
+                topologyWeakQueryNarrowApplied ? "1" : "0";
+            response.debugStats["topology_weak_query_routed_clusters"] =
+                std::to_string(topologyWeakQueryRoutedClusters);
+            response.debugStats["topology_weak_query_routed_docs"] =
+                std::to_string(topologyWeakQueryRoutedDocs);
+            response.debugStats["topology_weak_query_added_candidates"] =
+                std::to_string(topologyWeakQueryAddedCandidates);
 
             traceCollector.recordStageCounter("vector", "budget_guard_skip", 0);
             traceCollector.recordStageCounter("vector", "budget_guard_cap_applied",
@@ -2449,6 +2537,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     if (!response.results.empty()) {
         postFusionSnapshot = response.results;
+    }
+    if (!topologyMedoidHashes.empty() && workingConfig.topologyMedoidBoost > 0.0f &&
+        !response.results.empty()) {
+        bool needsSort = false;
+        size_t boostedMedoids = 0;
+        const double boost = 1.0 + static_cast<double>(workingConfig.topologyMedoidBoost);
+        for (auto& result : response.results) {
+            if (topologyMedoidHashes.contains(result.document.sha256Hash)) {
+                result.score *= boost;
+                needsSort = true;
+                ++boostedMedoids;
+            }
+        }
+        if (needsSort) {
+            std::stable_sort(response.results.begin(), response.results.end(),
+                             [](const auto& a, const auto& b) { return a.score > b.score; });
+        }
+        response.debugStats["topology_medoid_boosted"] = std::to_string(boostedMedoids);
     }
     // Phase Y: multi-meta-path post-fusion boost (PathSim-style fixed weights).
     // Each enabled meta-path scores candidates independently; sum contributes a

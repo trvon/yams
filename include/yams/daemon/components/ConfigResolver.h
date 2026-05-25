@@ -66,6 +66,10 @@ public:
     };
 
     struct TopologyRoutingPolicy {
+        std::optional<bool> enableWeakQueryRouting;
+        std::optional<std::size_t> maxClusters;
+        std::optional<std::size_t> maxDocs;
+        std::optional<float> medoidBoost;
         std::optional<float> rrfK;
     };
 
@@ -372,13 +376,7 @@ public:
      * - search.topology.max_clusters = int
      * - search.topology.max_docs = int
      * - search.topology.medoid_boost = float
-     * - search.topology.bridge_boost = float
-     * - search.topology.routed_base_multiplier = float
-     * - search.topology.routing_variant = baseline|vector_seed|kg_walk|score_replace|medoid_promote
-     * - search.topology.integration = boost|recall_expand|rrf|both
-     * - search.topology.recall_expand_per_cluster = int
      * - search.topology.rrf_k = float
-     * - search.topology.route_scoring = current|size_weighted|seed_coverage
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
 

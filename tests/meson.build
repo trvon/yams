@@ -1129,6 +1129,7 @@ if catch2_dep.found()
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
       'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
+      'unit/search/search_engine_topology_catch2_test.cpp',
       'unit/search/simeon_bandit_catch2_test.cpp',
       'unit/search/simeon_bandit_backend_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',

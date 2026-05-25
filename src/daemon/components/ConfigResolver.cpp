@@ -10,9 +10,9 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
-#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -845,23 +845,56 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
     try {
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
-            return policy;
-        }
-
-        auto kv = parseSimpleTomlFlat(cfgPath);
-        auto parseFloat = [](const std::string& s) -> std::optional<float> {
-            try {
-                return std::stof(s);
-            } catch (const std::exception&) {
-                return std::nullopt;
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto parseFloat = [](const std::string& s) -> std::optional<float> {
+                try {
+                    return std::stof(s);
+                } catch (const std::exception&) {
+                    return std::nullopt;
+                }
+            };
+            if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
+                policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
-        };
-        if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
-            policy.rrfK = parseFloat(it->second);
+            if (auto it = kv.find("search.topology.max_clusters"); it != kv.end()) {
+                policy.maxClusters = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
+                policy.maxDocs = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
+                policy.medoidBoost = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
+                policy.rrfK = parseFloat(it->second);
+            }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());
+    }
+
+    auto readEnv = [](const char* name) -> const char* { return std::getenv(name); };
+    if (const char* env = readEnv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING")) {
+        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
+            policy.enableWeakQueryRouting = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS")) {
+        if (auto parsed = parseSize(env); parsed.has_value()) {
+            policy.maxClusters = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_DOCS")) {
+        if (auto parsed = parseSize(env); parsed.has_value()) {
+            policy.maxDocs = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST")) {
+        try {
+            policy.medoidBoost = std::stof(env);
+        } catch (const std::exception&) {
+        }
     }
 
     return policy;
