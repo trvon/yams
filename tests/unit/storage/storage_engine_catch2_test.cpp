@@ -861,6 +861,22 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns success",
     CHECK(storage->exists(hash).value());
 }
 
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine getBlockSize invalid key",
+                 "[storage][blockSize][invalid][catch2]") {
+    auto result = storage->getBlockSize("not-a-hex-key");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::InvalidArgument);
+}
+
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine verify empty objects dir",
+                 "[storage][integrity][edge][catch2]") {
+    std::error_code ec;
+    std::filesystem::remove_all(storagePath / "objects", ec);
+    auto result = storage->verify();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::ChunkNotFound);
+}
+
 TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanupTempFiles with no stale files",
                  "[storage][cleanup][edge][catch2]") {
     auto tempDir = storagePath / "temp";

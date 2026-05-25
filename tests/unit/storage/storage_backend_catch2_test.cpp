@@ -1011,7 +1011,6 @@ TEST_CASE("URLBackend - HTTP listing with prefix", "[storage][backend][url][list
         CHECK(listed.value().empty());
     }
 }
-
 TEST_CASE("URLBackend - Authenticated provider header", "[storage][backend][url][auth]") {
     SECTION("GET with authorization header succeeds after 401 without") {
         LocalHttpServer server(
@@ -1044,6 +1043,48 @@ TEST_CASE("URLBackend - Authenticated provider header", "[storage][backend][url]
         auto authed = authBackend.retrieve("any-key");
         REQUIRE(authed.has_value());
         CHECK(authed.value() == bytesOf("authenticated-key"));
+        CHECK(server.requestCount() == 2);
+    }
+}
+
+TEST_CASE("URLBackend - PUT and DELETE retry retryable failures",
+          "[storage][backend][url][retry]") {
+    SECTION("PUT retries on server error") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 500},
+                                LocalHttpServer::Response{.status = 200, .body = "stored"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 1;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto payload = bytesOf("test-payload");
+        auto result = backend.store("key", payload);
+        REQUIRE(result.has_value());
+        CHECK(server.requestCount() == 2);
+    }
+
+    SECTION("DELETE retries on server error") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 503}, LocalHttpServer::Response{.status = 204}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 1;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto result = backend.remove("key");
+        REQUIRE(result.has_value());
         CHECK(server.requestCount() == 2);
     }
 }
