@@ -207,7 +207,6 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'prf.cpp'),
   join_paths(simeon_dir, 'src', 'concept_mining.cpp'),
   join_paths(simeon_dir, 'src', 'aho_corasick.cpp'),
-  join_paths(simeon_dir, 'src', 'aho_corasick_da.cpp'),
   join_paths(simeon_dir, 'src', 'text_rank.cpp'),
   join_paths(simeon_dir, 'src', 'fragment_geometry.cpp'),
   join_paths(simeon_dir, 'src', 'persistent_homology.cpp'),
