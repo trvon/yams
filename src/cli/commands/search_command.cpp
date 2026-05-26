@@ -136,6 +136,7 @@ private:
     int chunkSize_ = 64 * 1024;
 
     YamsCLI* cli_ = nullptr;
+    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
     std::string query_;
     bool readStdin_ = false;
     std::string queryFile_;
@@ -362,14 +363,12 @@ private:
             doc["snippet"] = *snippet;
         if (item.relationCount > 0)
             doc["relation_count"] = item.relationCount;
-        if (!item.relationSummary.empty())
-            doc["relations"] = item.relationSummary;
-        if (!item.path.empty()) {
-            auto topRel = extractTopRelation(item.relationSummary);
-            auto hint = buildGraphExploreHint(item.path, topRel, 2);
-            if (!hint.empty()) {
-                doc["graph_explore_hint"] = hint;
-            }
+        const auto filePresentation =
+            describeFileForCli(item.path, item.relationSummary, invocationCwd_);
+        if (!filePresentation.relationSummary.empty())
+            doc["relations"] = filePresentation.relationSummary;
+        if (!filePresentation.graphExploreHint.empty()) {
+            doc["graph_explore_hint"] = filePresentation.graphExploreHint;
         }
 
         if (verbose_ &&
@@ -418,8 +417,9 @@ private:
 
     void renderFlatHumanResults(const std::vector<UnifiedItem>& items) {
         for (const auto& item : items) {
-            std::string displayPath = item.getDisplayPath();
-            std::cout << ui::colorize(displayPath, ui::Ansi::MAGENTA);
+            const auto filePresentation =
+                describeFileForCli(item.getDisplayPath(), item.relationSummary, invocationCwd_);
+            std::cout << ui::colorize(filePresentation.displayPath, ui::Ansi::MAGENTA);
 
             const char* scoreColor = ui::Ansi::DIM;
             if (item.score >= 0.8)
@@ -434,15 +434,15 @@ private:
             if (auto snippet = buildSnippet(item, 200)) {
                 std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << *snippet << "\n";
             }
-            if (!item.relationSummary.empty()) {
-                std::cout << ui::colorize("  rel: " + item.relationSummary, ui::Ansi::DIM) << "\n";
+            if (!filePresentation.relationSummary.empty()) {
+                std::cout << ui::colorize("  rel: " + filePresentation.relationSummary,
+                                          ui::Ansi::DIM)
+                          << "\n";
             }
-            if (showTools_ && !item.path.empty()) {
-                auto topRel = extractTopRelation(item.relationSummary);
-                auto hint = buildGraphExploreHint(item.path, topRel, 2);
-                if (!hint.empty()) {
-                    std::cout << ui::colorize("  hint: " + hint, ui::Ansi::DIM) << "\n";
-                }
+            if (showTools_ && !filePresentation.graphExploreHint.empty()) {
+                std::cout << ui::colorize("  hint: " + filePresentation.graphExploreHint,
+                                          ui::Ansi::DIM)
+                          << "\n";
             }
             std::cout << "\n";
         }
@@ -459,7 +459,8 @@ private:
                 return a.score > b.score;
             });
 
-            std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
+            const auto groupPresentation = describeFileForCli(path, {}, invocationCwd_);
+            std::cout << ui::colorize(groupPresentation.displayPath, ui::Ansi::MAGENTA);
             if (vec.size() > 1) {
                 std::cout << " "
                           << ui::colorize("(" + std::to_string(vec.size()) + " versions)",
@@ -494,20 +495,21 @@ private:
                                                             : ui::colorize("  1:", ui::Ansi::DIM);
                     std::cout << linePrefix << " " << *snippet << "\n";
                 }
-                if (!v.relationSummary.empty()) {
+                const auto versionPresentation =
+                    describeFileForCli(v.path, v.relationSummary, invocationCwd_);
+                if (!versionPresentation.relationSummary.empty()) {
                     const std::string relIndent = vec.size() > 1 ? "     " : "  ";
-                    std::cout << ui::colorize(relIndent + std::string("rel: ") + v.relationSummary,
+                    std::cout << ui::colorize(relIndent + std::string("rel: ") +
+                                                  versionPresentation.relationSummary,
                                               ui::Ansi::DIM)
                               << "\n";
                 }
-                if (showTools_ && !v.path.empty() && i == 0) {
-                    auto topRel = extractTopRelation(v.relationSummary);
-                    auto hint = buildGraphExploreHint(v.path, topRel, 2);
-                    if (!hint.empty()) {
-                        const std::string hintIndent = vec.size() > 1 ? "       " : "     ";
-                        std::cout << ui::colorize(hintIndent + "hint: " + hint, ui::Ansi::DIM)
-                                  << "\n";
-                    }
+                if (showTools_ && !versionPresentation.graphExploreHint.empty() && i == 0) {
+                    const std::string hintIndent = vec.size() > 1 ? "       " : "     ";
+                    std::cout << ui::colorize(hintIndent +
+                                                  "hint: " + versionPresentation.graphExploreHint,
+                                              ui::Ansi::DIM)
+                              << "\n";
                 }
 
                 if (showTools_ && !hash8.empty() && i == 0) {
@@ -567,7 +569,9 @@ private:
                 emitTagHint();
             } else {
                 for (const auto& item : deduplicated) {
-                    std::cout << item.getDisplayPath() << std::endl;
+                    std::cout
+                        << describeFileForCli(item.getDisplayPath(), {}, invocationCwd_).displayPath
+                        << std::endl;
                 }
             }
             return Result<void>();
@@ -597,6 +601,16 @@ private:
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             return Result<void>();
+        }
+
+        std::string concreteGraphNextHint;
+        if (!deduplicated.empty()) {
+            const auto topPresentation =
+                describeFileForCli(deduplicated.front().getDisplayPath(),
+                                   deduplicated.front().relationSummary, invocationCwd_);
+            if (!topPresentation.graphExploreHint.empty()) {
+                concreteGraphNextHint = "Next: " + topPresentation.graphExploreHint;
+            }
         }
 
         if (verbose_ && !ctx.traceId.empty()) {
@@ -632,8 +646,11 @@ private:
                                   ui::Ansi::DIM)
                   << std::endl;
         if (!pathsOnly_ && !jsonOutput_ && !deduplicated.empty()) {
-            std::cout << "\n"
-                      << ui::colorize(
+            std::cout << "\n";
+            if (!concreteGraphNextHint.empty()) {
+                std::cout << ui::colorize(concreteGraphNextHint, ui::Ansi::DIM) << std::endl;
+            }
+            std::cout << ui::colorize(
                              "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
                              ui::Ansi::DIM)
                       << std::endl;
@@ -834,6 +851,8 @@ private:
         return tags;
     }
 
+    bool shouldUseSessionScope() const { return !noSession_ && sessionOverride_.has_value(); }
+
     yams::daemon::SearchRequest
     makeDaemonSearchRequest(const std::vector<std::string>& includeGlobsExpanded) const {
         yams::daemon::SearchRequest dreq;
@@ -879,9 +898,9 @@ private:
         dreq.modifiedBefore = modifiedBefore_;
         dreq.indexedAfter = indexedAfter_;
         dreq.indexedBefore = indexedBefore_;
-        dreq.globalSearch = noSession_;
-        dreq.useSession = !noSession_;
-        if (!noSession_ && sessionOverride_) {
+        dreq.globalSearch = !shouldUseSessionScope();
+        dreq.useSession = shouldUseSessionScope();
+        if (shouldUseSessionScope()) {
             dreq.sessionName = *sessionOverride_;
         }
         return dreq;
@@ -918,6 +937,11 @@ private:
         sreq.tags = parsedFilterTags();
         if (!sreq.tags.empty()) {
             sreq.matchAllTags = matchAllTags_;
+        }
+        sreq.useSession = shouldUseSessionScope();
+        sreq.globalSearch = !shouldUseSessionScope();
+        if (shouldUseSessionScope()) {
+            sreq.sessionName = *sessionOverride_;
         }
         return sreq;
     }
@@ -1211,6 +1235,7 @@ public:
         YAMS_ZONE_SCOPED_N("SearchCommand::execute");
 
         try {
+            invocationCwd_ = std::filesystem::current_path();
             // Resolve base query from flags/stdin/file
             if (query_.empty()) {
                 if (!queryFile_.empty() && queryFile_ != "-") {
@@ -1311,32 +1336,12 @@ public:
             }
             // Normalize include globs (split commas)
             auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
-            // Session-aware scoping: merge active session include patterns unless disabled
-            if (!noSession_) {
-                auto sessionName = (sessionOverride_ ? std::optional<std::string>(*sessionOverride_)
-                                                     : std::optional<std::string>{});
-                auto sessPatterns = yams::cli::session_store::active_include_patterns(sessionName);
-                bool includeSessionPatterns = false;
-                if (sessionOverride_) {
-                    includeSessionPatterns = true;
-                } else if (!sessPatterns.empty()) {
-                    std::error_code ec;
-                    auto cwd = std::filesystem::current_path(ec);
-                    if (!ec) {
-                        std::string cwdStr = cwd.string();
-                        std::replace(cwdStr.begin(), cwdStr.end(), '\\', '/');
-                        if (!cwdStr.empty() && cwdStr.back() != '/') {
-                            cwdStr += '/';
-                        }
-                        includeSessionPatterns = matchAnyGlob(cwdStr, sessPatterns);
-                    }
-                }
-                if (includeSessionPatterns) {
-                    includeGlobsExpanded.insert(includeGlobsExpanded.end(), sessPatterns.begin(),
-                                                sessPatterns.end());
-                } else if (!sessPatterns.empty()) {
-                    spdlog::debug("[CLI] Skipping session include patterns outside CWD");
-                }
+            // Default search is global; only explicit --session opt-ins add session selectors.
+            if (shouldUseSessionScope()) {
+                auto sessPatterns =
+                    yams::cli::session_store::active_include_patterns(sessionOverride_);
+                includeGlobsExpanded.insert(includeGlobsExpanded.end(), sessPatterns.begin(),
+                                            sessPatterns.end());
             }
             if (includeGlobsExpanded.empty() && !pathFilter_.empty()) {
                 includeGlobsExpanded.push_back(pathFilter_);
@@ -1702,7 +1707,7 @@ public:
 
         // Includes/session scoping
         auto includeGlobsExpanded = splitCommaPatterns(includeGlobs_);
-        if (!noSession_) {
+        if (shouldUseSessionScope()) {
             auto sess = yams::cli::session_store::active_include_patterns(sessionOverride_);
             includeGlobsExpanded.insert(includeGlobsExpanded.end(), sess.begin(), sess.end());
         }

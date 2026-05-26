@@ -27,3 +27,27 @@ TEST_CASE("Graph helpers: absolute path is preserved", "[cli][graph]") {
     REQUIRE_FALSE(candidates.empty());
     CHECK(candidates.front() == abs);
 }
+
+TEST_CASE("Graph helpers: low-signal relations are omitted from explore hints", "[cli][graph]") {
+    const std::string path = "src/cli/commands/search_command.cpp";
+
+    CHECK(yams::cli::buildGraphExploreHint(path, "blob_at_path", 2) ==
+          "yams graph --name \"src/cli/commands/search_command.cpp\" --depth 2");
+    CHECK(yams::cli::buildGraphExploreHint(path, "has_version", 2) ==
+          "yams graph --name \"src/cli/commands/search_command.cpp\" --depth 2");
+    CHECK(yams::cli::buildGraphExploreHint(path, "calls", 2) ==
+          "yams graph --name \"src/cli/commands/search_command.cpp\" -r calls --depth 2");
+}
+
+TEST_CASE("Graph helpers: file presentation bundles display path and hint", "[cli][graph]") {
+    const auto cwd = std::filesystem::current_path();
+    const auto path = (cwd / "src" / "cli" / "commands" / "search_command.cpp").string();
+
+    const auto presentation = yams::cli::describeFileForCli(path, "calls(3), includes(2)", cwd);
+
+    CHECK(presentation.rawPath == path);
+    CHECK(presentation.displayPath == "src/cli/commands/search_command.cpp");
+    CHECK(presentation.relationSummary == "calls(3), includes(2)");
+    CHECK(presentation.graphExploreHint ==
+          "yams graph --name \"src/cli/commands/search_command.cpp\" -r calls --depth 2");
+}

@@ -105,6 +105,7 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             using namespace yams::daemon;
+            invocationCwd_ = std::filesystem::current_path();
 
             // yams-66h: Handle --list-types mode (show available node types)
             if (listTypes_) {
@@ -1586,7 +1587,7 @@ private:
 
         // If --name is provided, try to resolve it to a file node in the KG first
         if (!name_.empty()) {
-            auto candidates = build_graph_file_node_candidates(name_);
+            auto candidates = build_graph_file_node_candidates(name_, invocationCwd_);
             for (const auto& candidate : candidates) {
                 std::string fileNodeKey = buildPathFileNodeKey(candidate);
 
@@ -1731,9 +1732,34 @@ private:
             // Table format using ui_helpers
             std::cout << yams::cli::ui::section_header("Knowledge Graph Query") << "\n\n";
 
+            const auto& cwd = invocationCwd_;
+            auto isStorageNode = [](const yams::daemon::GraphNode& node) {
+                return node.type == "blob" || node.type == "document" || node.type == "file" ||
+                       node.type == "directory" || node.type == "path";
+            };
+            auto nodeLabelForDisplay = [&](const yams::daemon::GraphNode& node) {
+                if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
+                    return projectPathForCli(nodePath, cwd);
+                }
+                return projectPathForCli(node.label, cwd);
+            };
+
+            std::vector<const yams::daemon::GraphNode*> visibleNodes;
+            visibleNodes.reserve(resp.connectedNodes.size());
+            const bool hasCodeNodes =
+                std::any_of(resp.connectedNodes.begin(), resp.connectedNodes.end(),
+                            [&](const auto& node) { return !isStorageNode(node); });
+            for (const auto& node : resp.connectedNodes) {
+                if (!verbose_ && hasCodeNodes && isStorageNode(node)) {
+                    continue;
+                }
+                visibleNodes.push_back(&node);
+            }
+
             // Origin node info
             std::cout << yams::cli::ui::colorize("Origin: ", yams::cli::ui::Ansi::BOLD)
-                      << resp.originNode.label << " (" << resp.originNode.type << ")\n";
+                      << projectPathForCli(resp.originNode.label, cwd) << " ("
+                      << resp.originNode.type << ")\n";
             std::cout << yams::cli::ui::key_value("  Node Key", resp.originNode.nodeKey) << "\n";
             std::cout << yams::cli::ui::key_value("  Node ID",
                                                   std::to_string(resp.originNode.nodeId))
@@ -1741,10 +1767,18 @@ private:
 
             // Summary
             std::string summary =
-                "Connected: " + yams::cli::ui::format_number(resp.connectedNodes.size()) + " of " +
+                "Connected: " + yams::cli::ui::format_number(visibleNodes.size()) + " of " +
                 yams::cli::ui::format_number(resp.totalNodesFound) + " nodes, " +
                 yams::cli::ui::format_number(resp.totalEdgesTraversed) + " edges";
-            std::cout << yams::cli::ui::status_info(summary) << "\n\n";
+            std::cout << yams::cli::ui::status_info(summary) << "\n";
+            if (!verbose_ && hasCodeNodes && visibleNodes.size() != resp.connectedNodes.size()) {
+                std::cout
+                    << yams::cli::ui::status_info(
+                           "Showing code-oriented relationships; rerun with --verbose for storage "
+                           "and structural nodes")
+                    << "\n";
+            }
+            std::cout << "\n";
 
             // Build table
             yams::cli::ui::Table table;
@@ -1756,29 +1790,37 @@ private:
             }
             table.has_header = true;
 
-            for (const auto& node : resp.connectedNodes) {
+            for (const auto* node : visibleNodes) {
                 std::vector<std::string> row;
-                row.push_back(yams::cli::ui::truncate_to_width(node.label, 35));
-                row.push_back(node.type.empty() ? "-" : node.type);
-                row.push_back(std::to_string(node.distance));
+                row.push_back(yams::cli::ui::truncate_to_width(nodeLabelForDisplay(*node), 35));
+                row.push_back(node->type.empty() ? "-" : node->type);
+                row.push_back(std::to_string(node->distance));
                 std::string viaDisplay = "-";
-                if (auto it = traversalHints.find(node.nodeId); it != traversalHints.end()) {
+                if (auto it = traversalHints.find(node->nodeId); it != traversalHints.end()) {
                     viaDisplay = it->second;
                 }
                 row.push_back(yams::cli::ui::truncate_to_width(viaDisplay, 34));
                 if (verbose_) {
-                    auto nodePath = displayNodePath(node);
-                    row.push_back(
-                        nodePath.empty() ? "-" : yams::cli::ui::truncate_to_width(nodePath, 42));
-                    row.push_back(yams::cli::ui::truncate_to_width(node.nodeKey, 25));
+                    auto nodePath = displayNodePath(*node);
+                    row.push_back(nodePath.empty() ? "-"
+                                                   : yams::cli::ui::truncate_to_width(
+                                                         projectPathForCli(nodePath, cwd), 42));
+                    row.push_back(yams::cli::ui::truncate_to_width(node->nodeKey, 25));
                     std::string hashDisplay =
-                        node.documentHash.empty() ? "-" : node.documentHash.substr(0, 12) + "...";
+                        node->documentHash.empty() ? "-" : node->documentHash.substr(0, 12) + "...";
                     row.push_back(hashDisplay);
                 }
                 table.add_row(row);
             }
 
-            yams::cli::ui::render_table(std::cout, table);
+            if (visibleNodes.empty()) {
+                std::cout << yams::cli::ui::status_info(
+                                 "No code-oriented relationships found. Rerun with --verbose to "
+                                 "inspect storage and structural nodes")
+                          << "\n";
+            } else {
+                yams::cli::ui::render_table(std::cout, table);
+            }
 
             // Properties in verbose mode
             if (verbose_) {
@@ -1827,13 +1869,26 @@ private:
             std::cout << yams::cli::ui::key_value("Hash", hashDisplay) << "\n";
         }
         if (!resp.path.empty())
-            std::cout << yams::cli::ui::key_value("Path", resp.path) << "\n";
+            std::cout << yams::cli::ui::key_value("Path",
+                                                  projectPathForCli(resp.path, invocationCwd_))
+                      << "\n";
 
         if (!resp.graphEnabled) {
             std::cout << "\n"
                       << yams::cli::ui::status_warning(
-                             "Graph data unavailable (graph disabled or empty)")
+                             "Graph data unavailable (graph disabled or not indexed yet). "
+                             "Retry after indexing completes.")
                       << "\n";
+            const auto displayPath = projectPathForCli(resp.path, invocationCwd_);
+            if (!displayPath.empty()) {
+                std::cout << yams::cli::ui::status_info("If this file is new, run: yams add \"" +
+                                                        displayPath + "\" --sync")
+                          << "\n";
+                std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
+                                                        displayPath + "\" --depth " +
+                                                        std::to_string(depth_))
+                          << "\n";
+            }
             return Result<void>();
         }
 
@@ -1867,6 +1922,7 @@ private:
     }
 
     YamsCLI* cli_{nullptr};
+    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
     std::string hash_;
     std::string name_;
     std::string nodeKey_;

@@ -1,13 +1,22 @@
 #pragma once
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace yams::cli {
 
-std::vector<std::string> build_graph_file_node_candidates(const std::string& name);
+std::vector<std::string> build_graph_file_node_candidates(
+    const std::string& name, const std::filesystem::path& cwd = std::filesystem::current_path());
+
+struct CliFilePresentation {
+    std::string rawPath;
+    std::string displayPath;
+    std::string relationSummary;
+    std::string graphExploreHint;
+};
 
 // Extract the top relation name from a human-readable summary like "calls(3), includes(2)".
 // Returns empty string if the summary is empty or malformed.
@@ -43,11 +52,23 @@ inline std::string formatRelationCounts(const std::unordered_map<std::string, st
     return out;
 }
 
+// Render a path for CLI display relative to cwd when possible.
+std::string projectPathForCli(const std::string& rawPath,
+                              const std::filesystem::path& cwd = std::filesystem::current_path());
+
 // Build a graph explore hint string for a file path.
-// If topRelation is empty, suggests --depth <depth>.
-// If topRelation is set, suggests -r <topRelation> --depth <depth>.
+// Low-signal structural/storage relations are omitted from the suggested command.
 // Returns empty string if path is empty.
-std::string buildGraphExploreHint(const std::string& filePath, const std::string& topRelation = {},
-                                  int depth = 2);
+std::string
+buildGraphExploreHint(const std::string& filePath, const std::string& topRelation = {},
+                      int depth = 2,
+                      const std::filesystem::path& cwd = std::filesystem::current_path());
+
+// Bundle the common CLI presentation details for a file: repo-relative path when possible,
+// relation summary, and graph explore hint.
+CliFilePresentation
+describeFileForCli(const std::string& rawPath, std::string relationSummary = {},
+                   const std::filesystem::path& cwd = std::filesystem::current_path(),
+                   int depth = 2);
 
 } // namespace yams::cli
