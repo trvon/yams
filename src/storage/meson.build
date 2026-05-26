@@ -6,6 +6,11 @@ yams_core = dependency('yams_core', required: false)
 yams_crypto = dependency('yams_crypto', required: false)
 yams_compression = dependency('yams_compression', required: false)
 
+storage_testing_cpp_args = []
+if get_option('build-tests') or (get_option('buildtype') == 'debug' and not get_option('build-fuzzers'))
+  storage_testing_cpp_args += ['-DYAMS_TESTING=1']
+endif
+
 cc = meson.get_compiler('cpp')
 dl_dep = cc.find_library('dl', required: host_machine.system() == 'linux')
 apple_security_deps = []
@@ -32,9 +37,10 @@ yams_storage_engine = static_library('yams_storage_engine',
     's3_signer.cpp',
     'object_storage_plugin_loader.cpp',
     '../storage/object_storage_adapter.cpp',
-  ] + platform_src,
+  ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, threads_dep, curl_dep, yams_core, yams_crypto, yams_compression, dl_dep] + apple_security_deps,
+  cpp_args: storage_testing_cpp_args,
   install: true,
 )
 

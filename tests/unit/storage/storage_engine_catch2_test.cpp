@@ -15,6 +15,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
 
@@ -923,4 +927,92 @@ TEST_CASE_METHOD(StorageEngineFixture,
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == ErrorCode::Unknown);
+}
+
+TEST_CASE("initializeStorage creates expected directory structure", "[storage][utility][catch2]") {
+    const auto basePath =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_init_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(basePath, ec);
+    };
+
+    auto result = yams::storage::initializeStorage(basePath);
+    REQUIRE(result.has_value());
+
+    CHECK(std::filesystem::exists(basePath / "objects"));
+    CHECK(std::filesystem::exists(basePath / "temp"));
+    CHECK(std::filesystem::exists(basePath / "manifests"));
+
+    cleanup();
+}
+
+TEST_CASE("initializeStorage returns error when parent is read-only",
+          "[storage][utility][catch2]") {
+    const auto testRoot =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_init_ro_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testRoot);
+    ::chmod(testRoot.c_str(), 0500); // read+execute only, no write
+
+    auto result = yams::storage::initializeStorage(testRoot / "storage");
+    REQUIRE_FALSE(result.has_value());
+
+    ::chmod(testRoot.c_str(), 0700);
+    std::error_code ec;
+    std::filesystem::remove_all(testRoot, ec);
+}
+
+TEST_CASE("validateStorageIntegrity returns true for valid structure",
+          "[storage][utility][catch2]") {
+    const auto basePath =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_val_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(basePath, ec);
+    };
+
+    std::filesystem::create_directories(basePath / "objects");
+    std::filesystem::create_directories(basePath / "temp");
+
+    auto result = yams::storage::validateStorageIntegrity(basePath);
+    REQUIRE(result.has_value());
+    CHECK(result.value());
+
+    cleanup();
+}
+
+TEST_CASE("validateStorageIntegrity returns false when objects dir is missing",
+          "[storage][utility][catch2]") {
+    const auto basePath = std::filesystem::temp_directory_path() /
+                          std::format("yams_val_missing_{}",
+                                      std::chrono::steady_clock::now().time_since_epoch().count());
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(basePath, ec);
+    };
+
+    std::filesystem::create_directories(basePath);
+    // Create temp but NOT objects
+    std::filesystem::create_directories(basePath / "temp");
+
+    auto result = yams::storage::validateStorageIntegrity(basePath);
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result.value());
+
+    cleanup();
+}
+
+TEST_CASE("validateStorageIntegrity returns false for non-existent base path",
+          "[storage][utility][catch2]") {
+    const auto basePath = std::filesystem::temp_directory_path() /
+                          std::format("yams_val_noexist_{}",
+                                      std::chrono::steady_clock::now().time_since_epoch().count());
+    // Do not create the directory.
+
+    auto result = yams::storage::validateStorageIntegrity(basePath);
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result.value());
 }

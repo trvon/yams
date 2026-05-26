@@ -407,15 +407,35 @@ tasks:
         cp -v "$RPM" "${ART_DIR}/yams.rpm"
       fi
       echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
-      # Fallback for CI branches: if no artifacts were collected (packaging gated),
-      # compress the staged install to provide a basic artifact for inspection.
+      # Fallback for CI branches: if no release artifacts were collected (e.g. non-tag
+      # feature branches), create a runtime-pruned tarball from the staged install.
+      # A raw stage archive is often too large for SourceHut artifact limits because it
+      # includes headers, pkg-config metadata, and static archives.
       if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
-        if [ -d "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" ]; then
-          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" >&2
-          tar -C "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
+        STAGE_ROOT="${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}"
+        if [ -d "${STAGE_ROOT}" ]; then
+          TMP_STAGE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "${TMP_STAGE_ROOT}"' EXIT
+          echo "No release artifacts; creating runtime-pruned CI tarball from ${STAGE_ROOT}" >&2
+          cp -a "${STAGE_ROOT}/." "${TMP_STAGE_ROOT}/"
+
+          PRUNE_ROOT=""
+          for candidate in "${TMP_STAGE_ROOT}/usr" "${TMP_STAGE_ROOT}/usr/local" "${TMP_STAGE_ROOT}/opt/homebrew"; do
+            if [ -d "${candidate}" ]; then
+              PRUNE_ROOT="${candidate}"
+              break
+            fi
+          done
+          if [ -n "${PRUNE_ROOT}" ] && [ -x "${REPO_DIR}/scripts/prune-runtime-install.sh" ]; then
+            bash "${REPO_DIR}/scripts/prune-runtime-install.sh" "${PRUNE_ROOT}"
+          fi
+
+          tar -C "${TMP_STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
+          rm -rf "${TMP_STAGE_ROOT}"
+          trap - EXIT
           ls -l "${ART_DIR}" || true
         else
-          echo "WARNING: Stage dir ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
+          echo "WARNING: Stage dir ${STAGE_ROOT} missing; no artifacts to publish" >&2
         fi
       fi
 
