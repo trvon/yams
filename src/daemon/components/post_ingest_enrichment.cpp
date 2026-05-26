@@ -52,7 +52,6 @@ namespace {
 
 constexpr float kMinNlEntityConfidence = 0.45f;
 constexpr float kMinTitleConfidence = 0.55f;
-constexpr size_t kMaxGlinerChars = 2000;
 
 bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
     const std::string normEntity = search::normalizeEntityTextForKey(entityText);

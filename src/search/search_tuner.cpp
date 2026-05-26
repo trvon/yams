@@ -394,11 +394,9 @@ bool applyVectorOnlyGuardrailAdjustments(TunedParams& candidate, const RuntimeTe
     return changed;
 }
 
-constexpr size_t kMinVectorMaxResults = 16;
 constexpr size_t kMaxVectorMaxResults = 500;
 constexpr size_t kVectorMaxResultsStep = 16;
 constexpr size_t kMinTextMaxResults = 50;
-constexpr size_t kMaxTextMaxResults = 500;
 constexpr size_t kTextMaxResultsStep = 25;
 
 bool applyResultPoolAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
@@ -434,7 +432,6 @@ bool applyResultPoolAdjustments(TunedParams& candidate, const RuntimeTelemetry& 
     return changed;
 }
 
-constexpr size_t kMinRerankTopK = 5;
 constexpr size_t kMaxRerankTopK = 30;
 constexpr size_t kRerankTopKStep = 2;
 constexpr float kRerankAnchoredMinStep = 0.05f;
