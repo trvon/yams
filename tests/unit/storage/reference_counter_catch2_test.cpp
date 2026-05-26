@@ -1101,3 +1101,276 @@ TEST_CASE("rebuildReferenceDatabase handles empty storage gracefully",
 
     cleanup();
 }
+
+TEST_CASE("ReferenceCounter recovery after forced close preserves committed data",
+          "[storage][refcount][crash][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_crash_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    std::string committedHash;
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        committedHash = std::format("{:064x}", 1);
+        REQUIRE(counter.increment(committedHash, 1024, 1024).has_value());
+    }
+
+    REQUIRE(std::filesystem::exists(dbPath));
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        auto count = counter.getRefCount(committedHash);
+        REQUIRE(count.has_value());
+        CHECK(count.value() >= 1u);
+
+        auto integrity = counter.verifyIntegrity();
+        REQUIRE(integrity.has_value());
+        CHECK(integrity.value());
+    }
+
+    cleanup();
+}
+
+TEST_CASE("ReferenceCounter recovers from uncommitted transaction after forced close",
+          "[storage][refcount][crash][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_crash2_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    std::string committedHash;
+    std::string uncommittedHash;
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        committedHash = std::format("{:064x}", 10);
+        REQUIRE(counter.increment(committedHash, 512, 512).has_value());
+
+        uncommittedHash = std::format("{:064x}", 11);
+        auto txn = counter.beginTransaction();
+        REQUIRE(txn != nullptr);
+        txn->increment(uncommittedHash, 256, 256);
+    }
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        auto count = counter.getRefCount(committedHash);
+        REQUIRE(count.has_value());
+        CHECK(count.value() >= 1u);
+
+        auto orphanCount = counter.getRefCount(uncommittedHash);
+        REQUIRE(orphanCount.has_value());
+        CHECK(orphanCount.value() == 0u);
+
+        auto integrity = counter.verifyIntegrity();
+        REQUIRE(integrity.has_value());
+        CHECK(integrity.value());
+    }
+
+    cleanup();
+}
+
+TEST_CASE("ReferenceCounter rejects corrupted database file on open",
+          "[storage][refcount][crash][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_corrupt_open_{}_invalid.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    {
+        std::ofstream corrupt(dbPath.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(corrupt.good());
+        corrupt << "not a valid sqlite3 database file";
+        corrupt.close();
+    }
+
+    ReferenceCounter::Config config{
+        .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+    REQUIRE_THROWS_AS(ReferenceCounter(std::move(config)), std::exception);
+
+    cleanup();
+}
+
+TEST_CASE("ReferenceCounter returns consistent stats after interrupted commit recovery",
+          "[storage][refcount][crash][stats][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_crash3_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        for (int i = 0; i < 10; ++i) {
+            REQUIRE(counter.increment(std::format("{:064x}", 100 + i), 1024, 1024).has_value());
+        }
+
+        auto txn = counter.beginTransaction();
+        REQUIRE(txn != nullptr);
+        txn->increment(std::format("{:064x}", 200), 512, 512);
+        txn->decrement(std::format("{:064x}", 100));
+    }
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        auto stats = counter.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 10u);
+
+        auto block0 = counter.hasReferences(std::format("{:064x}", 100));
+        REQUIRE(block0.has_value());
+        CHECK(block0.value());
+
+        auto block200 = counter.hasReferences(std::format("{:064x}", 200));
+        REQUIRE(block200.has_value());
+        CHECK_FALSE(block200.value());
+    }
+
+    cleanup();
+}
+
+TEST_CASE("ReferenceCounter multiple PENDING transactions survive force close",
+          "[storage][refcount][crash][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_crash4_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    const std::string baseline = std::format("{:064x}", 500);
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        REQUIRE(counter.increment(baseline, 8192, 8192).has_value());
+
+        std::vector<std::unique_ptr<IReferenceCounter::ITransaction>> pending;
+        for (int i = 0; i < 5; ++i) {
+            auto txn = counter.beginTransaction();
+            REQUIRE(txn != nullptr);
+            txn->increment(std::format("{:064x}", 600 + i), 256, 256);
+            pending.push_back(std::move(txn));
+        }
+    }
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        auto count = counter.getRefCount(baseline);
+        REQUIRE(count.has_value());
+        CHECK(count.value() >= 1u);
+
+        for (int i = 0; i < 5; ++i) {
+            auto orphan = counter.getRefCount(std::format("{:064x}", 600 + i));
+            REQUIRE(orphan.has_value());
+            CHECK(orphan.value() == 0u);
+        }
+
+        auto stats = counter.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 1u);
+    }
+
+    cleanup();
+}
+
+TEST_CASE("ReferenceCounter survives WAL-only checkpoint after forced close",
+          "[storage][refcount][crash][wal][catch2]") {
+    auto tempDir = std::filesystem::temp_directory_path();
+    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / std::format("yams_refcount_crash5_{}.db", stamp);
+
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    };
+    cleanup();
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        for (int i = 0; i < 20; ++i) {
+            REQUIRE(counter.increment(std::format("{:064x}", 700 + i), 512, 512).has_value());
+        }
+
+        REQUIRE(counter.checkpoint().has_value());
+    }
+
+    REQUIRE(std::filesystem::exists(dbPath));
+
+    {
+        ReferenceCounter::Config config{
+            .databasePath = dbPath, .enableWAL = true, .enableStatistics = true};
+        ReferenceCounter counter(std::move(config));
+
+        for (int i = 0; i < 20; ++i) {
+            auto count = counter.getRefCount(std::format("{:064x}", 700 + i));
+            REQUIRE(count.has_value());
+            CHECK(count.value() >= 1u);
+        }
+
+        auto integrity = counter.verifyIntegrity();
+        REQUIRE(integrity.has_value());
+        CHECK(integrity.value());
+    }
+
+    cleanup();
+}
