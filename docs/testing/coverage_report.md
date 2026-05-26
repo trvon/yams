@@ -3,15 +3,38 @@
 Test infrastructure, current measured coverage, and the storage-readiness gate
 for distributed corpus work.
 
-## Current Coverage (storage subset: src/storage/*.cpp + src/api/content_store_impl.cpp)
+## Broad-Surface Coverage (79 test executables, 2026-05-25)
 
-| Metric | Overall baseline | Storage-readiness baseline | **Current** |
+Measured across the full storage-readiness surface: `src/storage/*.cpp` +
+`src/api/*content_store*.cpp` + `src/metadata/*.cpp` + `src/vector/*.cpp` +
+`src/integrity/*.cpp` + `src/daemon/components/*.cpp`.
+
+| Metric | Broad-surface baseline | **Current** | Δ |
 |--------|:---:|:---:|:---:|
-| Lines | 29.9% | 48.1% | **71.8%** |
-| Functions | — | — | **78.7%** |
-| Branches | 18.8% | 23.4% | **37.3%** |
+| Lines | 48.1% | **43.7%** | −4.4pp * |
+| Functions | — | **50.3%** | — |
+| Branches | 23.4% | **19.9%** | −3.5pp * |
+| Total lines | — | 59,053 | — |
+| Total test cases | — | 8,122 | — |
 
-### Per-file line coverage
+\* Baseline drop is due to 3 test binaries hanging (catch2_metadata_schema,
+catch2_metadata_repository, catch2_daemon_metrics) and ~9 binaries with
+environment-dependent skips. When those are resolved, broad-surface coverage
+should recover to ≥50%.
+
+### Per-subsystem breakdown
+
+| Subsystem | Lines | Functions | Branches | File count |
+|-----------|------|-----------|----------|:---:|
+| `src/storage/` | **73.7%** (2856/3874) | 80.2% (357/445) | 38.4% (2467/6430) | 14 |
+| `src/api/` (content_store) | **61.8%** (758/1226) | 23.4% (55/235) | 32.4% (691/2132) | 5 |
+| `src/metadata/` | **54.5%** (6834/12549) | 64.0% (529/826) | 24.4% (6321/25957) | 20 |
+| `src/vector/` | **43.7%** (3731/8543) | 40.8% (329/806) | 21.5% (2731/12686) | 20 |
+| `src/integrity/` | **42.7%** (471/1103) | 73.3% (77/105) | 18.2% (251/1381) | 5 |
+| `src/daemon/components/` | **34.6%** (10811/31249) | 44.8% (972/2170) | 15.1% (8613/57174) | 30 |
+| **Total** | **43.7%** (25804/59053) | **50.3%** (2395/4760) | **19.9%** (21460/107924) | 100+ |
+
+## Narrow-Surface Per-File (storage + content_store)
 
 | File | Lines | % |
 |------|------|--|
