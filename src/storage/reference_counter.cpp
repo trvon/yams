@@ -837,9 +837,9 @@ Result<void> ReferenceCounter::Transaction::commit() {
 
             // Prune reference rows for blocks garbage-collected from storage
             if (!prunedHashes_.empty()) {
+                auto pruneStmt =
+                    counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::PRUNE_REF_STMT, "");
                 for (const auto& hash : prunedHashes_) {
-                    auto pruneStmt = counter_->pImpl->db->prepare(
-                        "DELETE FROM block_references WHERE block_hash = ? AND ref_count = 0");
                     pruneStmt.bind(1, std::string_view{hash});
                     pruneStmt.execute();
                 }

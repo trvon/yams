@@ -141,7 +141,7 @@ public:
     [[nodiscard]] bool
     waitForAsyncOperations(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
     [[nodiscard]] Result<void> testing_enqueueCompressionJob(std::string_view hash);
     [[nodiscard]] size_t testing_asyncQueueDepth();
     void testing_shutdownAsyncWorkers();

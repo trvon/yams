@@ -256,6 +256,14 @@ public:
     std::string host;
     std::string basePath;
     std::unique_ptr<LRUCache> cache;
+    curl_slist* authHeaders_{nullptr};
+
+    ~Impl() {
+        if (authHeaders_) {
+            curl_slist_free_all(authHeaders_);
+            authHeaders_ = nullptr;
+        }
+    }
 
     auto parseURL(const std::string& url) -> Result<void> {
         // Parse URL: scheme://[user:pass@]host[:port]/path
@@ -337,172 +345,180 @@ public:
 
             auto authIt = config.credentials.find("authorization");
             if (authIt != config.credentials.end() && !authIt->second.empty()) {
-                auto slist = curl_slist_append(nullptr, authIt->second.c_str());
-                if (slist != nullptr) {
-                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, slist);
+                std::string headerValue = authIt->second;
+                if (headerValue.find(": ") == std::string::npos) {
+                    headerValue = "Authorization: " + headerValue;
+                }
+                if (authHeaders_) {
+                    curl_slist_free_all(authHeaders_);
+                }
+                authHeaders_ = curl_slist_append(nullptr, headerValue.c_str());
+                if (authHeaders_) {
+                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, authHeaders_);
                 }
             }
         }
-
-        // Check for .netrc file
-        curl_easy_setopt(curl, CURLOPT_NETRC, CURL_NETRC_OPTIONAL);
-
-        return {};
     }
+
+    // Check for .netrc file
+    curl_easy_setopt(curl, CURLOPT_NETRC, CURL_NETRC_OPTIONAL);
+
+    return {};
+}
 
     auto performGETOnce(const std::string& url) -> Result<std::vector<std::byte>> {
-        CURL* curl = curl_easy_init();
-        if (curl == nullptr) {
-            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
-        }
-
-        std::vector<uint8_t> buffer;
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        configureAuth(curl);
-
-        CURLcode res = curl_easy_perform(curl);
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK) {
-            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
-        }
-
-        if (httpCode == HTTP_NOT_FOUND) {
-            return {Error{ErrorCode::ChunkNotFound}};
-        }
-
-        if (httpCode != 0 && !isHttpSuccess(httpCode)) {
-            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
-        }
-
-        // Convert to std::byte vector
-        std::vector<std::byte> result(buffer.size());
-        std::ranges::transform(buffer, result.begin(),
-                               [](uint8_t byteVal) { return std::byte{byteVal}; });
-
-        return result;
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
     }
 
-    auto performPUTOnce(const std::string& url, std::span<const std::byte> data) -> Result<void> {
-        CURL* curl = curl_easy_init();
-        if (curl == nullptr) {
-            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
-        }
+    std::vector<uint8_t> buffer;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-        ReadData readData{.data = data.data(), .size = data.size(), .offset = 0};
+    configureAuth(curl);
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-        curl_easy_setopt(curl, CURLOPT_READFUNCTION, readCallback);
-        curl_easy_setopt(curl, CURLOPT_READDATA, &readData);
-        curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(data.size()));
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
 
-        configureAuth(curl);
-
-        CURLcode res = curl_easy_perform(curl);
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK) {
-            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
-        }
-
-        if (httpCode != 0 && !isHttpSuccess(httpCode)) {
-            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
-        }
-
-        return {};
+    if (res != CURLE_OK) {
+        return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
     }
 
-    auto performDELETEOnce(const std::string& url) -> Result<void> {
-        CURL* curl = curl_easy_init();
-        if (curl == nullptr) {
-            return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
-        }
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
-
-        configureAuth(curl);
-
-        CURLcode res = curl_easy_perform(curl);
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK) {
-            return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
-        }
-
-        if (httpCode != 0 && httpCode != HTTP_NOT_FOUND && !isHttpSuccess(httpCode)) {
-            return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
-        }
-
-        return {};
+    if (httpCode == HTTP_NOT_FOUND) {
+        return {Error{ErrorCode::ChunkNotFound}};
     }
 
-    // ---- retry wrappers ----
-    auto performGET(const std::string& url) -> Result<std::vector<std::byte>> {
-        for (int attempt = 0;; ++attempt) {
-            auto result = performGETOnce(url);
-            if (result) {
-                return result;
-            }
-            if (attempt >= config.maxRetries || !isRetryable(result.error())) {
-                return result;
-            }
-            backoff(attempt);
-        }
+    if (httpCode != 0 && !isHttpSuccess(httpCode)) {
+        return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
     }
 
-    auto performPUT(const std::string& url, std::span<const std::byte> data) -> Result<void> {
-        for (int attempt = 0;; ++attempt) {
-            auto res = performPUTOnce(url, data);
-            if (res) {
-                return res;
-            }
-            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
-                return res;
-            }
-            backoff(attempt);
-        }
+    // Convert to std::byte vector
+    std::vector<std::byte> result(buffer.size());
+    std::ranges::transform(buffer, result.begin(),
+                           [](uint8_t byteVal) { return std::byte{byteVal}; });
+
+    return result;
+}
+
+auto performPUTOnce(const std::string& url, std::span<const std::byte> data) -> Result<void> {
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
     }
 
-    auto performDELETE(const std::string& url) -> Result<void> {
-        for (int attempt = 0;; ++attempt) {
-            auto res = performDELETEOnce(url);
-            if (res) {
-                return res;
-            }
-            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
-                return res;
-            }
-            backoff(attempt);
-        }
+    ReadData readData{.data = data.data(), .size = data.size(), .offset = 0};
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+    curl_easy_setopt(curl, CURLOPT_READFUNCTION, readCallback);
+    curl_easy_setopt(curl, CURLOPT_READDATA, &readData);
+    curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(data.size()));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
+
+    configureAuth(curl);
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
     }
 
-    auto performHEAD(const std::string& url) -> Result<HeadResult> {
-        for (int attempt = 0;; ++attempt) {
-            auto res = performHEADOnce(url);
-            if (res) {
-                return res;
-            }
-            if (attempt >= config.maxRetries || !isRetryable(res.error())) {
-                return res;
-            }
-            backoff(attempt);
-        }
+    if (httpCode != 0 && !isHttpSuccess(httpCode)) {
+        return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
     }
+
+    return {};
+}
+
+auto performDELETEOnce(const std::string& url) -> Result<void> {
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return {Error{ErrorCode::Unknown, "Failed to initialize CURL"}};
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(config.requestTimeout));
+
+    configureAuth(curl);
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return {Error{ErrorCode::NetworkError, curl_easy_strerror(res)}};
+    }
+
+    if (httpCode != 0 && httpCode != HTTP_NOT_FOUND && !isHttpSuccess(httpCode)) {
+        return {Error{ErrorCode::NetworkError, "HTTP error: " + std::to_string(httpCode)}};
+    }
+
+    return {};
+}
+
+// ---- retry wrappers ----
+auto performGET(const std::string& url) -> Result<std::vector<std::byte>> {
+    for (int attempt = 0;; ++attempt) {
+        auto result = performGETOnce(url);
+        if (result) {
+            return result;
+        }
+        if (attempt >= config.maxRetries || !isRetryable(result.error())) {
+            return result;
+        }
+        backoff(attempt);
+    }
+}
+
+auto performPUT(const std::string& url, std::span<const std::byte> data) -> Result<void> {
+    for (int attempt = 0;; ++attempt) {
+        auto res = performPUTOnce(url, data);
+        if (res) {
+            return res;
+        }
+        if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+            return res;
+        }
+        backoff(attempt);
+    }
+}
+
+auto performDELETE(const std::string& url) -> Result<void> {
+    for (int attempt = 0;; ++attempt) {
+        auto res = performDELETEOnce(url);
+        if (res) {
+            return res;
+        }
+        if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+            return res;
+        }
+        backoff(attempt);
+    }
+}
+
+auto performHEAD(const std::string& url) -> Result<HeadResult> {
+    for (int attempt = 0;; ++attempt) {
+        auto res = performHEADOnce(url);
+        if (res) {
+            return res;
+        }
+        if (attempt >= config.maxRetries || !isRetryable(res.error())) {
+            return res;
+        }
+        backoff(attempt);
+    }
+}
 };
 
 URLBackend::URLBackend() : pImpl(std::make_unique<Impl>()) {}

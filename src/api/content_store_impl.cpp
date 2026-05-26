@@ -141,7 +141,7 @@ public:
 
         auto rollbackStore = [&]() {
             transaction->rollback();
-            cleanupStoredObjects(storedChunks);
+            // Chunk objects are content-addressed — do not delete by hash on rollback.
         };
 
         for (const auto& chunk : chunks) {
@@ -245,7 +245,6 @@ public:
         if (!commitResult) {
             transaction->rollback();
             cleanupStoredObject(manifestHash);
-            cleanupStoredObjects(storedChunks);
             return Result<StoreResult>(commitResult.error());
         }
 
@@ -460,7 +459,7 @@ public:
 
         auto rollbackStore = [&]() {
             transaction->rollback();
-            cleanupStoredObjects(storedChunks);
+            // Chunk objects are content-addressed — do not delete by hash on rollback.
         };
 
         for (const auto& chunk : chunks) {
@@ -568,7 +567,6 @@ public:
         if (!commitResult) {
             transaction->rollback();
             cleanupStoredObject(manifestHash);
-            cleanupStoredObjects(storedChunks);
             return Result<StoreResult>(commitResult.error());
         }
 

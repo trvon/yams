@@ -367,7 +367,7 @@ public:
                                  [this] { return asyncQueue_.empty() && activeJobs_ == 0; });
     }
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
     Result<void> testing_enqueueCompressionJob(std::string_view hash) {
         size_t queuedJobs = 0;
         {
@@ -803,7 +803,7 @@ bool CompressedStorageEngine::waitForAsyncOperations(std::chrono::milliseconds t
     return pImpl->waitForAsyncOperations(timeout);
 }
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
 Result<void> CompressedStorageEngine::testing_enqueueCompressionJob(std::string_view hash) {
     return pImpl->testing_enqueueCompressionJob(hash);
 }

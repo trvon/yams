@@ -111,7 +111,7 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
     return std::move(decompressed.value());
 }
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
 std::atomic<size_t> gAtomicWriteFailureAfterBytes{std::numeric_limits<size_t>::max()};
 std::atomic<bool> gFileOpenFailure{false};
 std::atomic<bool> gRenameFailure{false};
@@ -241,7 +241,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     // Write to temporary file
     auto tempPath = getTempPath();
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
     if (gFileOpenFailure.load(std::memory_order_relaxed)) {
         return Error{ErrorCode::PermissionDenied, "Injected file open failure"};
     }
@@ -254,7 +254,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
             return Result<void>(ErrorCode::PermissionDenied);
         }
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
         const auto failAfter = gAtomicWriteFailureAfterBytes.load(std::memory_order_relaxed);
         if (failAfter != std::numeric_limits<size_t>::max() && failAfter < data.size()) {
             file.write(reinterpret_cast<const char*>(data.data()),
@@ -276,7 +276,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
 
     // Atomic rename
     std::error_code ec;
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
     if (gRenameFailure.load(std::memory_order_relaxed)) {
         ec = std::make_error_code(std::errc::permission_denied);
     } else {
@@ -446,21 +446,23 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     std::lock_guard<std::mutex> lock(hashMutex);
 
     std::error_code ec;
-    if (!std::filesystem::exists(objectPath, ec)) {
-        return Result<void>(ErrorCode::ChunkNotFound);
-    }
+    bool pathExists = std::filesystem::exists(objectPath, ec);
     if (ec) {
         pImpl->stats.failedOperations.fetch_add(1);
         return Error{ErrorCode::IOError, "Failed to check object path: " + ec.message()};
     }
-
-    if (!std::filesystem::is_regular_file(objectPath, ec)) {
-        pImpl->stats.failedOperations.fetch_add(1);
-        return Error{ErrorCode::IOError, "Object path is not a regular file"};
+    if (!pathExists) {
+        return Result<void>(ErrorCode::ChunkNotFound);
     }
+
+    bool isFile = std::filesystem::is_regular_file(objectPath, ec);
     if (ec) {
         pImpl->stats.failedOperations.fetch_add(1);
         return Error{ErrorCode::IOError, "Failed to stat object path: " + ec.message()};
+    }
+    if (!isFile) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Error{ErrorCode::IOError, "Object path is not a regular file"};
     }
 
     // Get file size before deletion
@@ -860,7 +862,7 @@ auto validateStorageIntegrity(const std::filesystem::path& basePath) -> Result<b
     }
 }
 
-#if defined(YAMS_TESTING) || defined(YAMS_STORAGE_ENGINE_BUILD)
+#ifdef YAMS_TESTING
 void StorageEngine::testing_setAtomicWriteFailureAfterBytes(size_t bytes) {
     gAtomicWriteFailureAfterBytes.store(bytes, std::memory_order_relaxed);
 }
