@@ -58,6 +58,9 @@ packages:
   - pkg-config
   - libboost-all-dev
   - liburing-dev # enables io_uring async path instead of fallback
+  - libomp-dev # OpenMP runtime for FAISS parallel compute
+  - libfaiss-dev # FAISS vector similarity library
+  - libopenblas-dev # optimized BLAS for FAISS/vector math
   - libarchive-dev # enables archive extraction features
   - libacl1-dev # required for libarchive ACL support
   - libtag1-dev # enables taglib (audio metadata) detection
