@@ -2,29 +2,28 @@
 
 Storage-readiness coverage gate for distributed corpus work.
 
-## Broad-Surface Coverage (measured 2026-05-25)
+## Broad-Surface Coverage (106 test executables, 2026-05-25)
 
-| Metric | Original baseline | **Current** |
-|--------|:---:|:---:|
-| Lines (broad) | 48.1% | **43.7%** * |
-| Branches (broad) | 23.4% | **19.9%** * |
-| Lines (narrow: storage + content_store) | — | **73.2%** |
-| Functions (narrow) | — | **79.8%** |
-| Branches (narrow) | — | **37.7%** |
-
-\* Broad numbers are a lower bound: 3 test binaries hung and ~9 had env-dependent skips
-when measured. With all tests passing, broad-surface lines should recover to ≥50%.
+| Metric | Original baseline | Previous (79 tests) | **Current (106 tests)** |
+|--------|:---:|:---:|:---:|
+| Lines (broad) | 48.1% | 43.7% | **59.8%** |
+| Functions (broad) | — | 50.3% | **68.3%** |
+| Branches (broad) | 23.4% | 19.9% | **29.7%** |
+| Lines (narrow) | — | 73.2% | **74.3%** |
+| Functions (narrow) | — | 79.8% | **80.2%** |
+| Branches (narrow) | — | 37.7% | **38.6%** |
+| Total test cases | — | — | **8,346** |
 
 ### Per-Subsystem Breakdown
 
 | Subsystem | Lines | Functions | Branches |
 |-----------|------|-----------|----------|
-| `src/storage/` | **73.7%** | 80.2% | 38.4% |
-| `src/api/` (content_store) | **61.8%** | 23.4% | 32.4% |
-| `src/metadata/` | **54.5%** | 64.0% | 24.4% |
-| `src/integrity/` | **46.4%** | 74.3% | 20.3% |
-| `src/vector/` | **43.7%** | 40.8% | 21.5% |
-| `src/daemon/components/` | **34.6%** | 44.8% | 15.1% |
+| `src/storage/` | **74.0%** | 81.3% | 39.0% |
+| `src/api/` (content_store) | **62.5%** | 24.0% | 33.1% |
+| `src/metadata/` | **64.2%** | 75.3% | 32.5% |
+| `src/integrity/` | **55.8%** | 80.0% | 28.1% |
+| `src/vector/` | **50.3%** | 62.9% | 31.0% |
+| `src/daemon/components/` | **43.9%** | 58.3% | 21.8% |
 
 ### Narrow-Surface Per-File (storage + content_store)
 
@@ -58,7 +57,7 @@ when measured. With all tests passing, broad-surface lines should recover to ≥
 | Hash/integrity invariant | CAS and repair tests reject wrong hashes, preserve valid data. |
 | Remote invariant | Object-store paths test retryable failure, missing plugin, bounded listing. |
 | Readiness propagation | Daemon components expose false/degraded readiness until dependencies usable. |
-| Coverage baseline | Narrow-surface must not regress from 73.2% lines / 37.7% branches. |
+| Coverage baseline | Narrow-surface must not regress from 74.3% lines / 38.6% branches. |
 
 ## Class Matrix
 
