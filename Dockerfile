@@ -15,7 +15,7 @@ RUN set -eux; \
   python3 python3-venv python3-pip \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \
-  liburing-dev \
+  liburing-dev ccache \
   gfortran libomp-18-dev wget \
   libopenblas-dev \
   cmake && \
@@ -98,9 +98,11 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote add conancenter https://center2.conan.io; \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
-  export YAMS_COMPILER=gcc; \
-  export YAMS_CPPSTD=${YAMS_CPPSTD}; \
-  export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \
+   export YAMS_COMPILER=gcc; \
+   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
+   export CC=/usr/bin/gcc; \
+   export CXX=/usr/bin/g++; \
+   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \
   export YAMS_DISABLE_FAISS=1; \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   for attempt in 1 2 3; do \
