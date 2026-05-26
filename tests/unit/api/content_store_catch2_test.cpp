@@ -521,6 +521,28 @@ TEST_CASE("ContentStore: Metadata operations", "[api][content-store][metadata]")
         REQUIRE(retrieved.has_value());
         CHECK(retrieved.value().tags.at("unicode_tag") == "日本語");
     }
+
+    SECTION("Internal hash hint tags are stripped from persisted file metadata") {
+        const std::string content = "trusted hash hint";
+        auto file = fixture.createTestFile("trusted.txt", content);
+
+        ContentMetadata metadata;
+        metadata.name = "trusted.txt";
+        metadata.tags["visible"] = "keep";
+        metadata.tags["__yams_trusted_hash_hint"] = "1";
+        metadata.tags["__yams_hash_hint_mtime_ns"] = "123";
+
+        auto result = fixture.store_->store(file, metadata);
+        REQUIRE(result.has_value());
+
+        auto retrieved = fixture.store_->getMetadata(result.value().contentHash);
+        REQUIRE(retrieved.has_value());
+        CHECK(retrieved.value().tags.contains("visible"));
+        CHECK_FALSE(retrieved.value().tags.contains("__yams_trusted_hash_hint"));
+        CHECK_FALSE(retrieved.value().tags.contains("__yams_hash_hint_mtime_ns"));
+        CHECK(retrieved.value().contentHash == result.value().contentHash);
+        CHECK(retrieved.value().size == content.size());
+    }
 }
 
 // =============================================================================
@@ -606,6 +628,51 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
         CHECK(retrieved.value().size() == 6);
         CHECK(retrieved.value()[0] == std::byte{0x00});
         CHECK(retrieved.value()[3] == std::byte{0xFF});
+    }
+
+    SECTION("Retrieve raw returns stored direct bytes without compression header") {
+        const std::string content = "raw direct bytes";
+        std::vector<std::byte> data;
+        data.reserve(content.size());
+        for (char c : content) {
+            data.push_back(static_cast<std::byte>(c));
+        }
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto raw = fixture.store_->retrieveRaw(stored.value().contentHash);
+        REQUIRE(raw.has_value());
+        CHECK(raw.value().data == data);
+        CHECK_FALSE(raw.value().header.has_value());
+    }
+
+    SECTION("Retrieve raw async returns stored direct bytes") {
+        const std::string content = "async raw bytes";
+        std::vector<std::byte> data;
+        data.reserve(content.size());
+        for (char c : content) {
+            data.push_back(static_cast<std::byte>(c));
+        }
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto rawFuture = fixture.store_->retrieveRawAsync(stored.value().contentHash);
+        auto raw = rawFuture.get();
+        REQUIRE(raw.has_value());
+        CHECK(raw.value().data == data);
+        CHECK_FALSE(raw.value().header.has_value());
+    }
+
+    SECTION("Retrieve bytes prefix returns empty vector when max bytes is zero") {
+        std::vector<std::byte> data = {std::byte{0x41}, std::byte{0x42}, std::byte{0x43}};
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto prefix = fixture.store_->retrieveBytesPrefix(stored.value().contentHash, 0);
+        REQUIRE(prefix.has_value());
+        CHECK(prefix.value().empty());
     }
 }
 

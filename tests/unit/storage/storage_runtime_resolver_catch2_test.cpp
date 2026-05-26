@@ -279,3 +279,41 @@ TEST_CASE("Storage runtime resolver keychain helper is platform-aware",
     CHECK(store.error().code == yams::ErrorCode::NotSupported);
 #endif
 }
+
+TEST_CASE("parseRemoteFallbackPolicy returns Strict for empty or strict input",
+          "[storage][runtime][resolver][policy][catch2]") {
+    CHECK(yams::storage::parseRemoteFallbackPolicy("") ==
+          yams::storage::RemoteFallbackPolicy::Strict);
+    CHECK(yams::storage::parseRemoteFallbackPolicy("strict") ==
+          yams::storage::RemoteFallbackPolicy::Strict);
+    CHECK(yams::storage::parseRemoteFallbackPolicy("  strict  ") ==
+          yams::storage::RemoteFallbackPolicy::Strict);
+    CHECK(yams::storage::parseRemoteFallbackPolicy("STRICT") ==
+          yams::storage::RemoteFallbackPolicy::Strict);
+}
+
+TEST_CASE("parseRemoteFallbackPolicy returns FallbackLocalIfConfigured",
+          "[storage][runtime][resolver][policy][catch2]") {
+    CHECK(yams::storage::parseRemoteFallbackPolicy("fallback_local_if_configured") ==
+          yams::storage::RemoteFallbackPolicy::FallbackLocalIfConfigured);
+    CHECK(yams::storage::parseRemoteFallbackPolicy("  fallback_local_if_configured  ") ==
+          yams::storage::RemoteFallbackPolicy::FallbackLocalIfConfigured);
+    CHECK(yams::storage::parseRemoteFallbackPolicy("FALLBACK_LOCAL_IF_CONFIGURED") ==
+          yams::storage::RemoteFallbackPolicy::FallbackLocalIfConfigured);
+}
+
+TEST_CASE("parseRemoteFallbackPolicy returns nullopt for unknown values",
+          "[storage][runtime][resolver][policy][catch2]") {
+    CHECK_FALSE(yams::storage::parseRemoteFallbackPolicy("garbage").has_value());
+    CHECK_FALSE(yams::storage::parseRemoteFallbackPolicy("strict_mode").has_value());
+    CHECK_FALSE(yams::storage::parseRemoteFallbackPolicy("fallback").has_value());
+}
+
+TEST_CASE("toString round-trips RemoteFallbackPolicy values",
+          "[storage][runtime][resolver][policy][catch2]") {
+    CHECK(std::string(yams::storage::toString(yams::storage::RemoteFallbackPolicy::Strict)) ==
+          "strict");
+    CHECK(std::string(yams::storage::toString(
+              yams::storage::RemoteFallbackPolicy::FallbackLocalIfConfigured)) ==
+          "fallback_local_if_configured");
+}

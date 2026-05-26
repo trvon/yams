@@ -18,14 +18,6 @@ if host_machine.system() == 'darwin'
   apple_security_deps += dependency('appleframeworks', modules: ['Security', 'CoreFoundation'])
 endif
 
-# Platform sources
-platform_src = []
-if host_machine.system() != 'windows'
-  platform_src += files('platform/posix_storage.cpp')
-else
-  platform_src += files('platform/windows_storage.cpp')
-endif
-
 yams_storage_engine = static_library('yams_storage_engine',
   [
     'storage_engine.cpp',
