@@ -263,8 +263,8 @@ tasks:
       # Run setup.sh (Release build) - it now respects all YAMS_* environment variables
       ./setup.sh Release
 
-      # Build the project
-      meson compile -C build/release
+      # Build the project (single-job: prevents OOM on large files like mcp_server.cpp)
+      meson compile -C build/release -j1
 
       # Install the built artifacts into build-local staging directory (BUILD_DIR/STAGE_DIR).
       meson install -C build/release --destdir "${STAGE_DIR}"
