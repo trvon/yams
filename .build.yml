@@ -41,7 +41,6 @@ packages:
   - meson
   - ninja-build
   - zip
-  - ccache
   - dpkg-dev
   - fakeroot
   - rpm
@@ -253,9 +252,6 @@ tasks:
       # Set install prefix to /usr for Linux packages (matches GitHub workflow)
       export YAMS_INSTALL_PREFIX="/usr"
       
-      # Disable ccache — interferes with Conan/OpenBLAS ASM compilation
-      export CCACHE_DISABLE=1
-
       # Run setup.sh (Release build) - it now respects all YAMS_* environment variables
       ./setup.sh Release
 

@@ -15,7 +15,7 @@ RUN set -eux; \
   python3 python3-venv python3-pip \
   gcc g++ ninja-build openssl lld llvm clang \
   libc++-dev libc++abi-dev \
-  liburing-dev ccache \
+  liburing-dev \
   gfortran libomp-18-dev wget \
   libopenblas-dev \
   cmake && \
