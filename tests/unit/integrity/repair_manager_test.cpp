@@ -148,3 +148,30 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
         }
     }
 }
+
+TEST_CASE("RepairManager rejects P2P data with wrong hash", "[integrity][repair]") {
+    TempDir tempDir;
+    StorageConfig storageConfig;
+    storageConfig.basePath = tempDir.path / "storage";
+    std::filesystem::create_directories(storageConfig.basePath);
+    StorageEngine storage(storageConfig);
+
+    const std::string targetHash =
+        "a1b2c3d4e5f60001112223334444555566667777888899990000aaaabbbbcccc";
+    std::string wrongData = "wrong data that produces a different hash";
+
+    RepairManagerConfig config;
+    config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
+    };
+    config.p2pFetcher = [&wrongData](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return toBytes(wrongData);
+    };
+    config.defaultOrder = {RepairStrategy::FromP2P};
+
+    RepairManager manager(storage, config);
+    auto repaired = manager.attemptRepair(targetHash);
+    CHECK_FALSE(repaired);
+
+    CHECK_FALSE(storage.exists(targetHash).value());
+}

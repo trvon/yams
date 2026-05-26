@@ -5,6 +5,7 @@
 #include <yams/search/search_result_fusion.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,9 @@ class SimeonLexicalBackend;
 
 class SearchEngine {
 public:
+    using CrossRerankScorer = std::function<Result<std::vector<float>>(
+        const std::string& query, const std::vector<std::string>& documents)>;
+
     struct SimeonLexicalStatus {
         bool configured{false};
         bool ready{false};
@@ -92,6 +96,7 @@ public:
     void setConceptExtractor(EntityExtractionFunc extractor);
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend);
+    void setCrossReranker(CrossRerankScorer scorer);
     std::shared_ptr<SearchTuner> getSearchTuner() const;
     SimeonLexicalStatus getSimeonLexicalStatus() const;
 

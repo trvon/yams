@@ -397,6 +397,56 @@ socket_path = "/tmp/test.sock"
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
+                 "[daemon][components][config][topology_routing][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+enable_weak_query_routing = true
+max_clusters = 3
+max_docs = 42
+medoid_boost = 0.2
+rrf_k = 33
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+
+    REQUIRE(policy.enableWeakQueryRouting.has_value());
+    CHECK(*policy.enableWeakQueryRouting == true);
+    REQUIRE(policy.maxClusters.has_value());
+    CHECK(*policy.maxClusters == 3U);
+    REQUIRE(policy.maxDocs.has_value());
+    CHECK(*policy.maxDocs == 42U);
+    REQUIRE(policy.medoidBoost.has_value());
+    CHECK(*policy.medoidBoost > 0.19f);
+    CHECK(*policy.medoidBoost < 0.21f);
+    REQUIRE(policy.rrfK.has_value());
+    CHECK(*policy.rrfK == 33.0f);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy honors legacy env overlays",
+                 "[daemon][components][config][topology_routing][catch2]") {
+    EnvGuard cfg("YAMS_CONFIG_PATH", "");
+    EnvGuard enable("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING", "1");
+    EnvGuard clusters("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", "5");
+    EnvGuard docs("YAMS_SEARCH_TOPOLOGY_MAX_DOCS", "17");
+    EnvGuard medoid("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST", "0.15");
+
+    auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+
+    REQUIRE(policy.enableWeakQueryRouting.has_value());
+    CHECK(*policy.enableWeakQueryRouting == true);
+    REQUIRE(policy.maxClusters.has_value());
+    CHECK(*policy.maxClusters == 5U);
+    REQUIRE(policy.maxDocs.has_value());
+    CHECK(*policy.maxDocs == 17U);
+    REQUIRE(policy.medoidBoost.has_value());
+    CHECK(*policy.medoidBoost > 0.14f);
+    CHECK(*policy.medoidBoost < 0.16f);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveEmbeddingSelectionPolicy reads semantic graph ingest flag",
                  "[daemon][components][config][embeddings][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(

@@ -1,17 +1,17 @@
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_sgc.h>
 
+#include <spdlog/spdlog.h>
 #include <Hdbscan/hdbscan.hpp>
 #include <Runner/hdbscanParameters.hpp>
 #include <Runner/hdbscanResult.hpp>
 #include <Runner/hdbscanRunner.hpp>
-#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -46,6 +46,34 @@ std::string makeSnapshotId(std::uint64_t unixMillis) {
 
 std::string makeClusterId(const std::string& anchorHash) {
     return "topology.cluster." + anchorHash;
+}
+
+std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> documents,
+                                 const std::vector<std::size_t>& members) {
+    std::vector<float> centroid;
+    std::size_t count = 0;
+    for (std::size_t idx : members) {
+        if (idx >= documents.size() || documents[idx].embedding.empty()) {
+            continue;
+        }
+        const auto& emb = documents[idx].embedding;
+        if (centroid.empty()) {
+            centroid.assign(emb.size(), 0.0F);
+        } else if (centroid.size() != emb.size()) {
+            continue;
+        }
+        for (std::size_t i = 0; i < emb.size(); ++i) {
+            centroid[i] += emb[i];
+        }
+        ++count;
+    }
+    if (count == 0) {
+        return {};
+    }
+    for (auto& v : centroid) {
+        v /= static_cast<float>(count);
+    }
+    return centroid;
 }
 
 struct TimeStamps {
@@ -213,6 +241,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                                .documentHash = documents[medoidIdx].documentHash,
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
+        cluster.centroidEmbedding = meanEmbedding(documents, members);
         cluster.memberDocumentHashes.reserve(members.size());
         for (std::size_t idx : members) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);

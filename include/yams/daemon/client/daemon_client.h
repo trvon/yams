@@ -246,7 +246,7 @@ public:
     boost::asio::awaitable<Result<CatResponse>> cat(const CatRequest& req) {
         return call<CatRequest>(req);
     }
-    boost::asio::awaitable<Result<SuccessResponse>> remove(const DeleteRequest& req);
+    boost::asio::awaitable<Result<DeleteResponse>> remove(const DeleteRequest& req);
     // Returns a lightweight snapshot; does not request detailed (no heavy scans)
     boost::asio::awaitable<Result<StatusResponse>> status(bool detailed = false);
     boost::asio::awaitable<Result<void>> shutdown(bool graceful = true);

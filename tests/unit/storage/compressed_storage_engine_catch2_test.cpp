@@ -5,7 +5,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <future>
@@ -22,6 +24,8 @@
 #include <yams/crypto/hasher.h>
 #include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/storage_engine.h>
+
+#include "src/compression/zstandard_compressor.h"
 
 using namespace yams;
 using namespace yams::storage;
@@ -106,7 +110,12 @@ public:
         out.data = it->second;
         auto parsed = CompressionHeader::parse(out.data);
         if (parsed) {
-            out.header = parsed.value();
+            const auto& header = parsed.value();
+            if (header.compressedSize <= out.data.size() &&
+                out.data.size() ==
+                    CompressionHeader::SIZE + static_cast<size_t>(header.compressedSize)) {
+                out.header = header;
+            }
         }
         return out;
     }
@@ -166,6 +175,15 @@ public:
 
     yams::storage::StorageStats getStats() const noexcept override { return {}; }
 
+    Result<std::vector<std::string>> list(std::string_view = "") const override {
+        std::lock_guard lock(mutex_);
+        std::vector<std::string> keys;
+        for (const auto& [k, _] : objects_) {
+            keys.push_back(k);
+        }
+        return keys;
+    }
+
     Result<uint64_t> getStorageSize() const override {
         std::lock_guard lock(mutex_);
         uint64_t total = 0;
@@ -183,6 +201,19 @@ public:
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::vector<std::byte>> objects_;
+};
+
+struct ScopedZstdUnavailable {
+    ScopedZstdUnavailable() {
+        CompressionRegistry::instance().registerCompressor(CompressionAlgorithm::Zstandard,
+                                                           [] { return nullptr; });
+    }
+
+    ~ScopedZstdUnavailable() {
+        CompressionRegistry::instance().registerCompressor(CompressionAlgorithm::Zstandard, [] {
+            return std::make_unique<ZstandardCompressor>();
+        });
+    }
 };
 
 } // namespace
@@ -539,4 +570,173 @@ TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for gen
     auto uploaded = capturing->captured(hash);
     CHECK(uploaded == data);
     CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
+}
+
+TEST_CASE("CompressedStorageEngine rejects corrupted compressed payload from generic backend",
+          "[storage][compressed][backend][corrupt][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+    auto corrupted = capturing->captured(hash);
+    REQUIRE(corrupted.size() > CompressionHeader::SIZE);
+    corrupted[CompressionHeader::SIZE] ^= std::byte{0x01};
+    REQUIRE(capturing->store(hash, corrupted).has_value());
+
+    auto readBack = engine.retrieve(hash);
+    REQUIRE_FALSE(readBack.has_value());
+    CHECK(readBack.error().code == ErrorCode::HashMismatch);
+}
+
+TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unchanged",
+          "[storage][compressed][backend][corrupt][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    CompressionHeader header;
+    header.algorithm = static_cast<uint8_t>(CompressionAlgorithm::Zstandard);
+    header.level = 3;
+    header.uncompressedSize = 100;
+    header.compressedSize = 10;
+
+    auto raw = header.serialize();
+    raw.resize(CompressionHeader::SIZE + 5, std::byte{0x5a});
+    std::string hash(64, 'f');
+    REQUIRE(capturing->store(hash, raw).has_value());
+
+    auto rawObject = engine.retrieveRaw(hash);
+    REQUIRE(rawObject.has_value());
+    CHECK_FALSE(rawObject.value().header.has_value());
+
+    auto readBack = engine.retrieve(hash);
+    REQUIRE(readBack.has_value());
+    CHECK(readBack.value() == raw);
+}
+
+TEST_CASE("CompressedStorageEngine stores raw bytes when compressor is unavailable",
+          "[storage][compressed][backend][registry][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    {
+        ScopedZstdUnavailable unavailable;
+        REQUIRE(engine.store(hash, data).has_value());
+    }
+
+    auto uploaded = capturing->captured(hash);
+    CHECK(uploaded == data);
+    CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
+}
+
+TEST_CASE("CompressedStorageEngine rejects compressed bytes when decompressor is unavailable",
+          "[storage][compressed][backend][registry][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.compressionThreshold = 64;
+    config.policyRules.neverCompressBelow = 64;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data = generateCompressibleData(8192);
+    auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
+
+    REQUIRE(engine.store(hash, data).has_value());
+    auto uploaded = capturing->captured(hash);
+    REQUIRE(CompressionHeader::parse(uploaded).has_value());
+
+    {
+        ScopedZstdUnavailable unavailable;
+        auto readBack = engine.retrieve(hash);
+        REQUIRE_FALSE(readBack.has_value());
+        CHECK(readBack.error().code == ErrorCode::InvalidArgument);
+    }
+}
+
+TEST_CASE("CompressedStorageEngine shutdown clears queued async compression jobs",
+          "[storage][compressed][async][shutdown][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = false;
+    config.maxAsyncQueue = 4;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '1')).has_value());
+    REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '2')).has_value());
+    CHECK(engine.testing_asyncQueueDepth() == 2);
+
+    engine.testing_shutdownAsyncWorkers();
+
+    CHECK(engine.testing_asyncQueueDepth() == 0);
+    CHECK(engine.waitForAsyncOperations(std::chrono::milliseconds{0}));
+    auto rejected = engine.testing_enqueueCompressionJob(std::string(64, '3'));
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::SystemShutdown);
+}
+
+TEST_CASE("CompressedStorageEngine triggerCompressionScan queues uncompressed objects",
+          "[storage][compressed][scan][catch2]") {
+    auto capturing = std::make_shared<CapturingStorageEngine>();
+
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.asyncCompression = true;
+    config.maxAsyncQueue = 100;
+    config.compressionThreshold = 0;
+    config.policyRules.neverCompressBelow = 0;
+    config.policyRules.neverCompressBefore = std::chrono::hours{0};
+    config.policyRules.defaultZstdLevel = 3;
+
+    CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
+
+    auto data1 = generateCompressibleData(4096);
+    auto hash1 = crypto::createSHA256Hasher()->hash(data1);
+    auto data2 = generateCompressibleData(8192);
+    auto hash2 = crypto::createSHA256Hasher()->hash(data2);
+
+    REQUIRE(capturing->store(hash1, data1).has_value());
+    REQUIRE(capturing->store(hash2, data2).has_value());
+
+    auto queued = engine.triggerCompressionScan();
+    REQUIRE(queued.has_value());
+    CHECK(queued.value() == 2);
+
+    bool finished = engine.waitForAsyncOperations(std::chrono::seconds{5});
+    CHECK(finished);
+
+    auto uploaded1 = capturing->captured(hash1);
+    CHECK(CompressionHeader::parse(uploaded1).has_value());
+
+    auto uploaded2 = capturing->captured(hash2);
+    CHECK(CompressionHeader::parse(uploaded2).has_value());
 }

@@ -338,7 +338,7 @@ float AdvancedRanker::calculateBM25Score(const SearchResultItem& item,
     float score = 0.0f;
 
     for ([[maybe_unused]] const auto& term : queryTerms) {
-        float tf = item.termFrequency;
+        float tf = std::max(0.0f, item.termFrequency);
         // Simplified IDF - in production, use corpus statistics
         float idf = std::log((100.0f + 1.0f) / (1.0f + 1.0f));
 

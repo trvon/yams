@@ -853,8 +853,9 @@ std::vector<TextSnippet> generateSnippets(const std::string& content,
         // Skip if this position is too close to an existing snippet
         bool too_close = false;
         for (size_t used_pos : used_positions) {
-            if (std::abs(static_cast<int>(match_pos) - static_cast<int>(used_pos)) <
-                static_cast<int>(snippet_length / 2)) {
+            const size_t distance =
+                match_pos > used_pos ? match_pos - used_pos : used_pos - match_pos;
+            if (distance < snippet_length / 2) {
                 too_close = true;
                 break;
             }

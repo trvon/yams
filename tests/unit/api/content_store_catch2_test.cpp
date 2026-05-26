@@ -12,14 +12,19 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
+#include <yams/crypto/hasher.h>
+#include <yams/storage/storage_engine.h>
 
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace yams::api::test {
 
@@ -60,6 +65,251 @@ struct ContentStoreFixture {
         return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     }
 };
+
+class ScriptedStorageEngine final : public yams::storage::IStorageEngine {
+public:
+    bool failStoresAsNotInitialized{false};
+    bool failManifestStore{false};
+    bool failManifestStoreAmbiguously{false};
+    size_t storeCalls{0};
+    size_t removeCalls{0};
+    std::vector<std::string> removedKeys;
+
+    Result<void> store(std::string_view hash, std::span<const std::byte> data) override {
+        ++storeCalls;
+        const std::string key(hash);
+        if (failStoresAsNotInitialized) {
+            return Error{ErrorCode::NotInitialized, "scripted storage is not ready"};
+        }
+        if (failManifestStore && key.ends_with(".manifest")) {
+            if (failManifestStoreAmbiguously) {
+                objects_[key] = std::vector<std::byte>(data.begin(), data.end());
+                return Error{ErrorCode::NetworkError, "scripted ambiguous manifest write"};
+            }
+            return Error{ErrorCode::WriteError, "scripted manifest write failure"};
+        }
+        objects_[key] = std::vector<std::byte>(data.begin(), data.end());
+        return {};
+    }
+
+    Result<std::vector<std::byte>> retrieve(std::string_view hash) const override {
+        auto it = objects_.find(std::string(hash));
+        if (it == objects_.end()) {
+            return Error{ErrorCode::NotFound, "scripted object missing"};
+        }
+        return it->second;
+    }
+
+    Result<RawObject> retrieveRaw(std::string_view hash) const override {
+        auto data = retrieve(hash);
+        if (!data) {
+            return data.error();
+        }
+        RawObject raw;
+        raw.data = std::move(data).value();
+        return raw;
+    }
+
+    Result<bool> exists(std::string_view hash) const noexcept override {
+        return objects_.contains(std::string(hash));
+    }
+
+    Result<void> remove(std::string_view hash) override {
+        ++removeCalls;
+        removedKeys.emplace_back(hash.data(), hash.size());
+        objects_.erase(std::string(hash));
+        return {};
+    }
+
+    Result<uint64_t> getBlockSize(std::string_view hash) const override {
+        auto it = objects_.find(std::string(hash));
+        if (it == objects_.end()) {
+            return Error{ErrorCode::NotFound, "scripted object missing"};
+        }
+        return static_cast<uint64_t>(it->second.size());
+    }
+
+    std::future<Result<void>> storeAsync(std::string_view hash,
+                                         std::span<const std::byte> data) override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash),
+                           copy = std::vector<std::byte>(data.begin(), data.end())]() {
+                              return store(key, copy);
+                          });
+    }
+
+    std::future<Result<std::vector<std::byte>>>
+    retrieveAsync(std::string_view hash) const override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash)]() { return retrieve(key); });
+    }
+
+    std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const override {
+        return std::async(std::launch::deferred,
+                          [this, key = std::string(hash)]() { return retrieveRaw(key); });
+    }
+
+    std::vector<Result<void>>
+    storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
+        std::vector<Result<void>> results;
+        results.reserve(items.size());
+        for (const auto& [hash, data] : items) {
+            results.push_back(store(hash, data));
+        }
+        return results;
+    }
+
+    yams::storage::StorageStats getStats() const noexcept override {
+        yams::storage::StorageStats stats;
+        stats.totalObjects = objects_.size();
+        uint64_t totalBytes = 0;
+        for (const auto& [_, data] : objects_) {
+            totalBytes += data.size();
+        }
+        stats.totalBytes = totalBytes;
+        return stats;
+    }
+
+    Result<uint64_t> getStorageSize() const override {
+        uint64_t totalBytes = 0;
+        for (const auto& [_, data] : objects_) {
+            totalBytes += data.size();
+        }
+        return totalBytes;
+    }
+
+    Result<std::vector<std::string>> list(std::string_view = "") const override {
+        std::vector<std::string> keys;
+        for (const auto& [k, _] : objects_) {
+            keys.push_back(k);
+        }
+        return keys;
+    }
+
+    bool empty() const { return objects_.empty(); }
+
+private:
+    std::unordered_map<std::string, std::vector<std::byte>> objects_;
+};
+
+class FailingFileChunker final : public yams::chunking::IChunker {
+public:
+    size_t chunkFileCalls{0};
+
+    const yams::chunking::ChunkingConfig& getConfig() const override { return config_; }
+
+    std::vector<yams::chunking::Chunk> chunkFile(const fs::path&) override {
+        ++chunkFileCalls;
+        throw std::runtime_error("scripted file chunk failure");
+    }
+
+    std::vector<yams::chunking::Chunk> chunkData(yams::span<const std::byte> data) override {
+        std::vector<std::byte> copy(data.begin(), data.end());
+        return {yams::chunking::Chunk{.data = std::move(copy),
+                                      .hash = yams::crypto::SHA256Hasher::hash(data),
+                                      .offset = 0,
+                                      .size = data.size()}};
+    }
+
+    std::vector<yams::chunking::Chunk> chunkDataLazy(yams::span<const std::byte> data) override {
+        return chunkData(data);
+    }
+
+    std::future<Result<std::vector<yams::chunking::Chunk>>>
+    chunkFileAsync(const fs::path&) override {
+        return std::async(std::launch::deferred,
+                          []() -> Result<std::vector<yams::chunking::Chunk>> {
+                              return Error{ErrorCode::InternalError, "scripted file chunk failure"};
+                          });
+    }
+
+    void setProgressCallback(ProgressCallback) override {}
+
+private:
+    yams::chunking::ChunkingConfig config_{};
+};
+
+class ScriptedReferenceCounter final : public yams::storage::IReferenceCounter {
+    class Transaction;
+
+public:
+    bool failCommit{false};
+    size_t beginCalls{0};
+    size_t commitCalls{0};
+    size_t rollbackCalls{0};
+    size_t queuedIncrements{0};
+
+    Result<void> increment(std::string_view, size_t, size_t) override { return {}; }
+    Result<void> decrement(std::string_view) override { return {}; }
+    Result<uint64_t> getRefCount(std::string_view) const override { return uint64_t{0}; }
+    Result<bool> hasReferences(std::string_view) const override { return false; }
+
+    Result<yams::storage::RefCountStats> getStats() const override {
+        return yams::storage::RefCountStats{};
+    }
+
+    std::unique_ptr<ITransaction> beginTransaction() override;
+
+private:
+    class Transaction final : public ITransaction {
+    public:
+        explicit Transaction(ScriptedReferenceCounter& parent) : parent_(parent) {}
+
+        void increment(std::string_view, size_t, size_t) override {
+            if (!active_) {
+                throw std::runtime_error("scripted transaction inactive");
+            }
+            ++parent_.queuedIncrements;
+        }
+
+        void decrement(std::string_view) override {}
+        void pruneReference(std::string_view) override {}
+
+        Result<void> commit() override {
+            ++parent_.commitCalls;
+            if (parent_.failCommit) {
+                return Error{ErrorCode::TransactionFailed, "scripted commit failure"};
+            }
+            active_ = false;
+            return {};
+        }
+
+        void rollback() override {
+            if (!active_) {
+                return;
+            }
+            ++parent_.rollbackCalls;
+            active_ = false;
+        }
+
+        bool isActive() const override { return active_; }
+
+    private:
+        ScriptedReferenceCounter& parent_;
+        bool active_{true};
+    };
+};
+
+std::unique_ptr<yams::storage::IReferenceCounter::ITransaction>
+ScriptedReferenceCounter::beginTransaction() {
+    ++beginCalls;
+    return std::make_unique<Transaction>(*this);
+}
+
+fs::path makeTempDir(std::string_view prefix) {
+    auto path = fs::temp_directory_path() /
+                (std::string(prefix) + "_" + std::to_string(std::random_device{}()));
+    fs::create_directories(path);
+    return path;
+}
+
+ContentStoreConfig readinessConfig(const fs::path& path) {
+    ContentStoreConfig config;
+    config.storagePath = path;
+    config.chunkSize = MIN_CHUNK_SIZE;
+    config.enableCompression = false;
+    return config;
+}
 
 // =============================================================================
 // Basic Store and Retrieve Tests
@@ -487,6 +737,266 @@ TEST_CASE("ContentStore: Error handling", "[api][content-store][error]") {
         // This test is platform-specific and may not work on all systems
         // Just verify we handle errors gracefully
     }
+}
+
+TEST_CASE("ContentStore: Storage readiness failures", "[api][content-store][readiness]") {
+    SECTION("Injected not-ready storage is used and not replaced by local fallback") {
+        auto tempDir = makeTempDir("content_store_injected_not_ready");
+        auto storage = std::make_shared<ScriptedStorageEngine>();
+        storage->failStoresAsNotInitialized = true;
+
+        {
+            ContentStoreBuilder builder;
+            auto built =
+                builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+            REQUIRE(built.has_value());
+            auto store = std::move(built).value();
+
+            std::vector<std::byte> data(128, std::byte{0x61});
+            auto stored = store->storeBytes(data);
+            REQUIRE_FALSE(stored.has_value());
+            CHECK(stored.error().code == ErrorCode::NotInitialized);
+            CHECK(storage->storeCalls == 1);
+            CHECK(storage->empty());
+        }
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
+    }
+
+    SECTION("Explicit null storage injection is rejected") {
+        auto tempDir = makeTempDir("content_store_null_storage");
+        {
+            ContentStoreBuilder builder;
+            auto built = builder.withConfig(readinessConfig(tempDir))
+                             .withStorageEngine(std::shared_ptr<yams::storage::IStorageEngine>{})
+                             .build();
+            REQUIRE_FALSE(built.has_value());
+            CHECK(built.error().code == ErrorCode::InvalidArgument);
+        }
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
+    }
+}
+
+TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_partial_rollback");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 1024);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>(i & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto stored = store->storeBytes(data);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::WriteError);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+        CHECK(std::none_of(storage->removedKeys.begin(), storage->removedKeys.end(),
+                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+        CHECK(metadata.error().code == ErrorCode::FileNotFound);
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+        CHECK(stats.totalUncompressedBytes == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: File chunker failures return typed errors without durable writes",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_file_chunk_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto chunker = std::make_shared<FailingFileChunker>();
+
+    {
+        ContentStoreBuilder builder;
+        auto built = builder.withConfig(readinessConfig(tempDir))
+                         .withStorageEngine(storage)
+                         .withChunker(chunker)
+                         .build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        auto path = tempDir / "input.bin";
+        std::ofstream file(path, std::ios::binary);
+        file << "chunker failure input";
+        file.close();
+
+        auto stored = store->store(path);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::InternalError);
+        CHECK(chunker->chunkFileCalls == 1);
+        CHECK(storage->storeCalls == 0);
+        CHECK(storage->empty());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: File add commit failure reconciles partial remote state",
+          "[api][content-store][readiness][rollback]") {
+    auto tempDir = makeTempDir("content_store_file_commit_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+    refCounter->failCommit = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built = builder.withConfig(readinessConfig(tempDir))
+                         .withStorageEngine(storage)
+                         .withReferenceCounter(refCounter)
+                         .build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 17) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto path = tempDir / "commit-fail.bin";
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()),
+                   static_cast<std::streamsize>(data.size()));
+        file.close();
+
+        auto stored = store->store(path);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::TransactionFailed);
+        CHECK(refCounter->beginCalls == 1);
+        CHECK(refCounter->commitCalls == 1);
+        CHECK(refCounter->rollbackCalls == 1);
+        CHECK(refCounter->queuedIncrements > 0);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+        CHECK(std::any_of(storage->removedKeys.begin(), storage->removedKeys.end(),
+                          [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+        CHECK(metadata.error().code == ErrorCode::FileNotFound);
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+        CHECK(stats.uniqueBlocks == 0);
+        CHECK(stats.totalUncompressedBytes == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Ambiguous manifest store is reconciled without rollback",
+          "[api][content-store][readiness][reconcile]") {
+    auto tempDir = makeTempDir("content_store_ambiguous_manifest");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+    storage->failManifestStoreAmbiguously = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 13) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        auto stored = store->storeBytes(data, ContentMetadata{});
+        REQUIRE(stored.has_value());
+        CHECK(stored.value().contentHash == hash);
+        CHECK(stored.value().bytesStored > 0);
+
+        CHECK(storage->storeCalls > 0);
+        CHECK_FALSE(storage->empty());
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE(metadata.has_value());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 1);
+        CHECK(stats.totalObjects > 0);
+        CHECK(stats.uniqueBlocks > 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls back",
+          "[api][content-store][readiness][reconcile]") {
+    auto tempDir = makeTempDir("content_store_ambiguous_mismatch");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    storage->failManifestStore = true;
+    storage->failManifestStoreAmbiguously = true;
+
+    {
+        ContentStoreBuilder builder;
+        auto built =
+            builder.withConfig(readinessConfig(tempDir)).withStorageEngine(storage).build();
+        REQUIRE(built.has_value());
+        auto store = std::move(built).value();
+
+        std::vector<std::byte> data(MIN_CHUNK_SIZE + 2048);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<std::byte>((i * 17) & 0xff);
+        }
+        const auto hash =
+            yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+
+        storage->failManifestStoreAmbiguously = false;
+
+        auto stored = store->storeBytes(data, ContentMetadata{});
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::WriteError);
+        CHECK(storage->empty());
+        CHECK(storage->removeCalls > 0);
+
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+
+        auto stats = store->getStats();
+        CHECK(stats.storeOperations == 0);
+        CHECK(stats.totalObjects == 0);
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
 }
 
 // =============================================================================
@@ -925,6 +1435,106 @@ TEST_CASE("ContentStore: Edge cases", "[api][content-store][edge]") {
             CHECK(hash == hashes.front());
         }
     }
+}
+
+TEST_CASE("ContentStore: Health check reports status", "[api][content-store][health]") {
+    ContentStoreFixture fixture;
+
+    auto health = fixture.store_->checkHealth();
+    CHECK(health.isHealthy);
+    CHECK(health.status.find("Healthy") != std::string::npos);
+}
+
+TEST_CASE("ContentStore: Compact operation succeeds", "[api][content-store][compact]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("compact_test.txt", "compact me");
+    auto stored = fixture.store_->store(file);
+    REQUIRE(stored.has_value());
+
+    auto result = fixture.store_->compact(nullptr);
+    CHECK(result.has_value());
+}
+
+TEST_CASE("ContentStore: GarbageCollect operates on stored content", "[api][content-store][gc]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("gc_test.txt", "content for garbage collection");
+    ContentMetadata metadata;
+    metadata.name = "gc_test.txt";
+
+    auto stored = fixture.store_->store(file, metadata);
+    REQUIRE(stored.has_value());
+    auto hash = stored.value().contentHash;
+
+    REQUIRE(fixture.store_->remove(hash).has_value());
+
+    auto result = fixture.store_->garbageCollect(nullptr);
+    CHECK(result.has_value());
+}
+TEST_CASE("ContentStore: Verify reports success on clean store", "[api][content-store][verify]") {
+    ContentStoreFixture fixture;
+
+    auto file = fixture.createTestFile("verify_test.txt", "verify me");
+    auto stored = fixture.store_->store(file);
+    REQUIRE(stored.has_value());
+
+    auto result = fixture.store_->verify(nullptr);
+    CHECK(result.has_value());
+}
+
+TEST_CASE("ContentStore: Retrieve bytes with non-existent hash returns error",
+          "[api][content-store][memory]") {
+    ContentStoreFixture fixture;
+
+    std::string nonExistentHash(64, '0');
+    auto result = fixture.store_->retrieveBytes(nonExistentHash);
+    CHECK_FALSE(result.has_value());
+}
+
+TEST_CASE("ContentStore: Retrieve bytes prefix returns subset", "[api][content-store][memory]") {
+    ContentStoreFixture fixture;
+
+    std::string content = "Hello, prefix test content!";
+    std::vector<std::byte> data;
+    data.reserve(content.size());
+    for (char c : content) {
+        data.push_back(static_cast<std::byte>(c));
+    }
+
+    ContentMetadata metadata;
+    metadata.name = "prefix.bin";
+
+    auto storeResult = fixture.store_->storeBytes(data, metadata);
+    REQUIRE(storeResult.has_value());
+
+    auto partial = fixture.store_->retrieveBytesPrefix(storeResult.value().contentHash, 5);
+    REQUIRE(partial.has_value());
+    CHECK(partial.value().size() == 5);
+}
+
+TEST_CASE("ContentStore: Retrieve stream with progress callback", "[api][content-store][stream]") {
+    ContentStoreFixture fixture;
+
+    std::string content = "stream with progress";
+    std::istringstream input(content);
+    ContentMetadata metadata;
+    metadata.name = "progress_stream.txt";
+
+    auto storeResult = fixture.store_->storeStream(input, metadata);
+    REQUIRE(storeResult.has_value());
+
+    std::atomic<int> progressCalls{0};
+    ProgressCallback progressCallback = [&](const Progress& p) {
+        progressCalls++;
+        (void)p;
+    };
+
+    auto outPath = fixture.testDir_ / "progress_out.txt";
+    auto retrieveResult =
+        fixture.store_->retrieve(storeResult.value().contentHash, outPath, progressCallback);
+    REQUIRE(retrieveResult.has_value());
+    CHECK(retrieveResult.value().found);
 }
 
 } // namespace yams::api::test

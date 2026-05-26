@@ -78,6 +78,7 @@ public:
     // Statistics and maintenance
     StorageStats getStats() const noexcept override;
     Result<uint64_t> getStorageSize() const override;
+    Result<std::vector<std::string>> list(std::string_view prefix = "") const override;
 
     // Compression-specific methods
 
@@ -139,6 +140,12 @@ public:
      */
     [[nodiscard]] bool
     waitForAsyncOperations(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+
+#ifdef YAMS_TESTING
+    [[nodiscard]] Result<void> testing_enqueueCompressionJob(std::string_view hash);
+    [[nodiscard]] size_t testing_asyncQueueDepth();
+    void testing_shutdownAsyncWorkers();
+#endif
 
 private:
     class Impl;

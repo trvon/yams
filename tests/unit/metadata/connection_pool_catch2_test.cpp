@@ -257,3 +257,30 @@ TEST_CASE("Read-only connection pool opens SQLite read-only",
 
     pool.shutdown();
 }
+
+TEST_CASE("Connection pool shutdown while connection is leased does not crash",
+          "[metadata][connection_pool][shutdown]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_shutdown_leased_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+
+    auto statsBefore = pool.getStats();
+    CHECK(statsBefore.activeConnections == 1u);
+
+    pool.shutdown();
+
+    auto statsAfter = pool.getStats();
+    CHECK(statsAfter.activeConnections == 0u);
+    CHECK(statsAfter.totalConnections == 0u);
+
+    auto afterShutdown = pool.acquire(std::chrono::milliseconds(0));
+    REQUIRE_FALSE(afterShutdown.has_value());
+    CHECK(afterShutdown.error().code == yams::ErrorCode::InvalidState);
+}

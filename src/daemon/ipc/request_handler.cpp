@@ -166,6 +166,22 @@ bool RequestHandler::is_request_canceled(uint64_t request_id) {
     return context && context->canceled.load(std::memory_order_relaxed);
 }
 
+void RequestHandler::set_activity_callback(std::function<void()> on_activity) {
+    std::lock_guard<std::mutex> lk(activity_mutex_);
+    activity_callback_ = std::move(on_activity);
+}
+
+void RequestHandler::notify_write_activity() {
+    std::function<void()> on_activity;
+    {
+        std::lock_guard<std::mutex> lk(activity_mutex_);
+        on_activity = activity_callback_;
+    }
+    if (on_activity) {
+        on_activity();
+    }
+}
+
 boost::asio::awaitable<std::vector<uint8_t>>
 RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token) {
     (void)token; // unused
@@ -251,6 +267,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
     using boost::asio::use_awaitable;
     const bool stream_trace = stream_trace_enabled_local();
     const auto handler_start = std::chrono::steady_clock::now();
+    set_activity_callback(on_activity);
     try {
 #if defined(TRACY_ENABLE)
         // Treat each connection as a fiber for better cross-await stack attribution
@@ -947,6 +964,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
             }
             co_return Error{ErrorCode::NetworkError, msg};
         }
+        notify_write_activity();
 
         FsmMetricsRegistry::instance().incrementPayloadWrites(1);
         FsmMetricsRegistry::instance().addBytesSent(frame.size());
@@ -1550,6 +1568,7 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
 
     if (fsm)
         fsm->on_write_flushed(frame_ref.size());
+    notify_write_activity();
     co_return Result<void>();
 }
 
@@ -1584,6 +1603,7 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
 
     if (fsm)
         fsm->on_write_flushed(frame.size());
+    notify_write_activity();
 
     co_return Result<void>();
 }
@@ -1794,6 +1814,7 @@ boost::asio::awaitable<Result<void>> RequestHandler::write_error_immediate(
     if (ec) {
         co_return Error{ErrorCode::NetworkError, ec.message()};
     }
+    notify_write_activity();
     co_return Result<void>{};
 }
 
@@ -1960,6 +1981,7 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                 }
                 co_return;
             }
+            notify_write_activity();
             spdlog::debug("[DRAIN] req_id={} wrote {} bytes successfully", rid, frame.data.size());
         }
     }

@@ -3,6 +3,7 @@
 // create() dispatch for each built-in backend type.
 
 #include <catch2/catch_test_macros.hpp>
+#include <yams/storage/object_storage_plugin_loader.h>
 #include <yams/storage/storage_backend.h>
 
 #include <algorithm>
@@ -125,6 +126,66 @@ TEST_CASE("StorageBackendFactory::create: unknown backend type returns nullptr",
           "[storage][factory][create]") {
     BackendConfig cfg;
     cfg.type = "does-not-exist";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("StorageBackendFactory::create: missing explicit plugin returns nullptr",
+          "[storage][factory][create][plugin]") {
+    BackendConfig cfg;
+    cfg.type = "plugin:yams_missing_plugin_for_test";
+    cfg.url = "s3://bucket/prefix";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("StorageBackendFactory::create: registered backend init failure returns nullptr",
+          "[storage][factory][create]") {
+    struct FailingInitBackend : IStorageBackend {
+        yams::Result<void> initialize(const BackendConfig&) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "init failed"};
+        }
+        yams::Result<void> store(std::string_view, std::span<const std::byte>) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<std::vector<std::byte>> retrieve(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<bool> exists(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<void> remove(std::string_view) override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<std::vector<std::string>> list(std::string_view) const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        yams::Result<yams::StorageStats> getStats() const override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+        std::future<yams::Result<void>> storeAsync(std::string_view,
+                                                   std::span<const std::byte>) override {
+            std::promise<yams::Result<void>> p;
+            p.set_value(yams::Error{yams::ErrorCode::InvalidState, "not initialized"});
+            return p.get_future();
+        }
+        std::future<yams::Result<std::vector<std::byte>>>
+        retrieveAsync(std::string_view) const override {
+            std::promise<yams::Result<std::vector<std::byte>>> p;
+            p.set_value(yams::Error{yams::ErrorCode::InvalidState, "not initialized"});
+            return p.get_future();
+        }
+        std::string getType() const override { return "yams_test_failing_init"; }
+        bool isRemote() const override { return true; }
+        yams::Result<void> flush() override {
+            return yams::Error{yams::ErrorCode::InvalidState, "not initialized"};
+        }
+    };
+
+    StorageBackendFactory::registerBackendType<FailingInitBackend>("yams_test_failing_init");
+
+    BackendConfig cfg;
+    cfg.type = "yams_test_failing_init";
     auto backend = StorageBackendFactory::create(cfg);
     CHECK(backend == nullptr);
 }
@@ -313,4 +374,37 @@ TEST_CASE("StorageBackendFactory::registerBackend: mocked remote backend support
     auto existsAfterRemove = backend->exists("docs/a");
     REQUIRE(existsAfterRemove.has_value());
     CHECK_FALSE(existsAfterRemove.value());
+}
+
+TEST_CASE("tryCreatePluginBackendByName: unknown plugin name returns nullptr",
+          "[storage][factory][plugin][dlopen]") {
+    auto backend =
+        tryCreatePluginBackendByName("yams_missing_obj_store_for_unit_test", BackendConfig{});
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("tryCreatePluginBackendByName: empty name returns nullptr",
+          "[storage][factory][plugin][dlopen]") {
+    auto backend = tryCreatePluginBackendByName("", BackendConfig{});
+    CHECK(backend == nullptr);
+}
+
+TEST_CASE("tryCreateS3PluginBackend: does not crash with valid config",
+          "[storage][factory][plugin][s3]") {
+    BackendConfig config;
+    config.type = "s3";
+    config.url = "s3://test/prefix";
+    config.requestTimeout = 1;
+    config.maxRetries = 0;
+    auto backend = tryCreateS3PluginBackend(config);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->isRemote());
+}
+
+TEST_CASE("StorageBackendFactory::create: plugin prefix with unknown name returns nullptr",
+          "[storage][factory][create][plugin]") {
+    BackendConfig cfg;
+    cfg.type = "plugin:yams_nonexistent_plugin_name";
+    auto backend = StorageBackendFactory::create(cfg);
+    CHECK(backend == nullptr);
 }

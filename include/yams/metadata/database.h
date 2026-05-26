@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <yams/core/types.h>
@@ -269,7 +270,8 @@ public:
     /**
      * @brief Run PRAGMA quick_check; fails if SQLite reports corruption.
      * Bounded ~ 10s by setting a busy timeout. Suitable for pre-flight on
-     * daemon startup before migrations run.
+     * daemon startup before migrations run. Transient SQLite lock/busy failures
+     * return ErrorCode::ResourceBusy and must not be treated as corruption.
      */
     Result<void> checkIntegrity();
 
@@ -447,5 +449,9 @@ private:
     int limit_ = -1;
     int offset_ = -1;
 };
+
+#if defined(YAMS_TESTING)
+bool testing_isTransientIntegrityCheckMessage(std::string_view message);
+#endif
 
 } // namespace yams::metadata

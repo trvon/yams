@@ -77,6 +77,18 @@ TEST_CASE("Database::checkIntegrity detects header corruption", "[unit][daemon][
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("Database::checkIntegrity treats locked quick_check output as transient",
+          "[unit][daemon][db_recovery]") {
+    using yams::metadata::testing_isTransientIntegrityCheckMessage;
+
+    CHECK(testing_isTransientIntegrityCheckMessage(
+        "unable to validate the inverted index for FTS5 table main.documents_fts: database is "
+        "locked"));
+    CHECK(testing_isTransientIntegrityCheckMessage("database table is locked"));
+    CHECK(testing_isTransientIntegrityCheckMessage("database is busy"));
+    CHECK_FALSE(testing_isTransientIntegrityCheckMessage("database disk image is malformed"));
+}
+
 TEST_CASE("quarantineAndRecreate renames db + sentinel + sibling files",
           "[unit][daemon][db_recovery]") {
     auto dir = makeScratchDir("yams_db_recovery_quarantine");

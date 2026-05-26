@@ -1,13 +1,13 @@
+#include <yams/compression/compression_header.h>
 #include <yams/profiling.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
-#include <yams/compression/compression_header.h>
 
+#include <spdlog/spdlog.h>
 #include <array>
 #include <cstddef>
 #include <fstream>
 #include <span>
-#include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
 namespace yamsfmt = std;
@@ -133,8 +133,8 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                     }
 
                     // Remove from reference database
-                    // This would be done through a specific method in ReferenceCounter
-                    // For now, we'll just count it
+                    txn->pruneReference(blockHash);
+
                     stats.blocksDeleted++;
                 } else {
                     const auto blockSizeResult = pImpl->storageEngine.getBlockSize(blockHash);

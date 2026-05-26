@@ -5368,9 +5368,13 @@ void MCPServer::initializeToolRegistry() {
             if (!dres)
                 co_return dres.error();
             MCPDeleteByNameResponse out;
-            out.count =
-                0; // Protocol returns SuccessResponse; detailed per-item results unavailable here
+            out.count = dres.value().successCount;
             out.dryRun = req.dryRun;
+            for (const auto& result : dres.value().results) {
+                if (result.success) {
+                    out.deleted.push_back(result.name.empty() ? result.hash : result.name);
+                }
+            }
             co_return out;
         }
 

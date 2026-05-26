@@ -15,6 +15,7 @@ namespace yamsfmt = fmt;
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <fstream>
 #include <limits>
@@ -109,6 +110,12 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
 
     return std::move(decompressed.value());
 }
+
+#ifdef YAMS_TESTING
+std::atomic<size_t> gAtomicWriteFailureAfterBytes{std::numeric_limits<size_t>::max()};
+std::atomic<bool> gFileOpenFailure{false};
+std::atomic<bool> gRenameFailure{false};
+#endif
 
 } // namespace
 
@@ -234,12 +241,30 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     // Write to temporary file
     auto tempPath = getTempPath();
 
+#ifdef YAMS_TESTING
+    if (gFileOpenFailure.load(std::memory_order_relaxed)) {
+        return Error{ErrorCode::PermissionDenied, "Injected file open failure"};
+    }
+#endif
+
     {
         std::ofstream file(tempPath, std::ios::binary);
         if (!file) {
             spdlog::error("Failed to create temp file: {}", tempPath.string());
             return Result<void>(ErrorCode::PermissionDenied);
         }
+
+#ifdef YAMS_TESTING
+        const auto failAfter = gAtomicWriteFailureAfterBytes.load(std::memory_order_relaxed);
+        if (failAfter != std::numeric_limits<size_t>::max() && failAfter < data.size()) {
+            file.write(reinterpret_cast<const char*>(data.data()),
+                       static_cast<std::streamsize>(failAfter));
+            file.flush();
+            file.close();
+            std::filesystem::remove(tempPath);
+            return Error{ErrorCode::WriteError, "Injected partial atomic write failure"};
+        }
+#endif
 
         file.write(reinterpret_cast<const char*>(data.data()),
                    static_cast<std::streamsize>(data.size()));
@@ -251,7 +276,15 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
 
     // Atomic rename
     std::error_code ec;
+#ifdef YAMS_TESTING
+    if (gRenameFailure.load(std::memory_order_relaxed)) {
+        ec = std::make_error_code(std::errc::permission_denied);
+    } else {
+        std::filesystem::rename(tempPath, path, ec);
+    }
+#else
     std::filesystem::rename(tempPath, path, ec);
+#endif
 
     if (ec) {
         // Clean up temp file
@@ -412,19 +445,40 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
     std::lock_guard<std::mutex> lock(hashMutex);
 
-    // Check existence
-    if (!std::filesystem::exists(objectPath)) {
+    std::error_code ec;
+    bool pathExists = std::filesystem::exists(objectPath, ec);
+    if (ec) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Error{ErrorCode::IOError, "Failed to check object path: " + ec.message()};
+    }
+    if (!pathExists) {
         return Result<void>(ErrorCode::ChunkNotFound);
     }
 
+    bool isFile = std::filesystem::is_regular_file(objectPath, ec);
+    if (ec) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Error{ErrorCode::IOError, "Failed to stat object path: " + ec.message()};
+    }
+    if (!isFile) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Error{ErrorCode::IOError, "Object path is not a regular file"};
+    }
+
     // Get file size before deletion
-    auto fileSize = std::filesystem::file_size(objectPath);
+    auto fileSize = std::filesystem::file_size(objectPath, ec);
+    if (ec) {
+        pImpl->stats.failedOperations.fetch_add(1);
+        return Error{ErrorCode::IOError, "Failed to size object before removal: " + ec.message()};
+    }
 
     // Remove file
-    std::error_code ec;
     if (!std::filesystem::remove(objectPath, ec)) {
         pImpl->stats.failedOperations.fetch_add(1);
-        return Result<void>(ErrorCode::PermissionDenied);
+        if (ec) {
+            return Error{ErrorCode::PermissionDenied, "Failed to remove object: " + ec.message()};
+        }
+        return Error{ErrorCode::IOError, "Object was not removed"};
     }
 
     // Update statistics using saturating subtraction to prevent underflow
@@ -511,6 +565,55 @@ Result<uint64_t> StorageEngine::getStorageSize() const {
         spdlog::error("Failed to calculate storage size: {}", e.what());
         return Result<uint64_t>(ErrorCode::Unknown);
     }
+}
+
+Result<std::vector<std::string>> StorageEngine::list(std::string_view prefix) const {
+    std::vector<std::string> keys;
+    const auto objectsRoot = pImpl->config.basePath / "objects";
+    const auto manifestsRoot = pImpl->config.basePath / "manifests";
+
+    auto collect = [&keys, prefix](const std::filesystem::path& root,
+                                   bool manifests) -> Result<void> {
+        std::error_code ec;
+        if (!std::filesystem::exists(root, ec)) {
+            return {};
+        }
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to check storage root: " + ec.message()};
+        }
+
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
+            if (ec) {
+                return Error{ErrorCode::IOError, "Failed to list storage root: " + ec.message()};
+            }
+            if (!entry.is_regular_file(ec) || ec) {
+                ec.clear();
+                continue;
+            }
+
+            auto key = storageHashFromObjectPath(root, entry.path());
+            if (manifests && !key.ends_with(".manifest")) {
+                key += ".manifest";
+            }
+            if (!isValidStorageKey(key)) {
+                continue;
+            }
+            if (prefix.empty() || key.starts_with(prefix)) {
+                keys.push_back(std::move(key));
+            }
+        }
+        return {};
+    };
+
+    if (auto result = collect(objectsRoot, false); !result) {
+        return result.error();
+    }
+    if (auto result = collect(manifestsRoot, true); !result) {
+        return result.error();
+    }
+
+    std::sort(keys.begin(), keys.end());
+    return keys;
 }
 
 Result<void> StorageEngine::verify() const {
@@ -758,5 +861,24 @@ auto validateStorageIntegrity(const std::filesystem::path& basePath) -> Result<b
         return {ErrorCode::Unknown};
     }
 }
+
+#ifdef YAMS_TESTING
+void StorageEngine::testing_setAtomicWriteFailureAfterBytes(size_t bytes) {
+    gAtomicWriteFailureAfterBytes.store(bytes, std::memory_order_relaxed);
+}
+
+void StorageEngine::testing_clearAtomicWriteFailure() {
+    gAtomicWriteFailureAfterBytes.store(std::numeric_limits<size_t>::max(),
+                                        std::memory_order_relaxed);
+}
+
+void StorageEngine::testing_setFileOpenFailure(bool v) {
+    gFileOpenFailure.store(v, std::memory_order_relaxed);
+}
+
+void StorageEngine::testing_setRenameFailure(bool v) {
+    gRenameFailure.store(v, std::memory_order_relaxed);
+}
+#endif
 
 } // namespace yams::storage

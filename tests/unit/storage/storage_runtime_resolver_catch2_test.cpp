@@ -67,6 +67,26 @@ TEST_CASE("Storage runtime resolver fails strict S3 when URL missing",
     CHECK(decision.error().message.find("storage.s3.url") != std::string::npos);
 }
 
+TEST_CASE("Storage runtime resolver does not silently fall back in strict S3 mode",
+          "[storage][runtime][resolver][catch2]") {
+    TempDir td;
+    const auto configPath = td.path() / "config.toml";
+    const auto fallbackDir = td.path() / "fallback-data";
+    {
+        std::ofstream out(configPath);
+        out << "[storage]\n";
+        out << "engine = \"s3\"\n";
+        out << "[storage.s3]\n";
+        out << "fallback_local_data_dir = \"" << fallbackDir.string() << "\"\n";
+    }
+
+    auto decision =
+        yams::storage::resolveStorageBootstrapDecision(configPath, td.path() / "primary-data");
+    REQUIRE_FALSE(decision.has_value());
+    CHECK(decision.error().message.find("storage.s3.url") != std::string::npos);
+    CHECK(decision.error().message.find("fallback requested") == std::string::npos);
+}
+
 TEST_CASE("Storage runtime resolver falls back to configured local data dir",
           "[storage][runtime][resolver][catch2]") {
     TempDir td;

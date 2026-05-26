@@ -37,6 +37,34 @@ std::string makeClusterId(const std::string& anchorHash) {
     return "topology.cluster." + anchorHash;
 }
 
+std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> documents,
+                                 const std::vector<std::size_t>& members) {
+    std::vector<float> centroid;
+    std::size_t count = 0;
+    for (std::size_t idx : members) {
+        if (idx >= documents.size() || documents[idx].embedding.empty()) {
+            continue;
+        }
+        const auto& emb = documents[idx].embedding;
+        if (centroid.empty()) {
+            centroid.assign(emb.size(), 0.0F);
+        } else if (centroid.size() != emb.size()) {
+            continue;
+        }
+        for (std::size_t i = 0; i < emb.size(); ++i) {
+            centroid[i] += emb[i];
+        }
+        ++count;
+    }
+    if (count == 0) {
+        return {};
+    }
+    for (auto& v : centroid) {
+        v /= static_cast<float>(count);
+    }
+    return centroid;
+}
+
 } // namespace
 
 Result<TopologyArtifactBatch>
@@ -192,6 +220,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                                                .documentHash = documents[medoidIdx].documentHash,
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
+        cluster.centroidEmbedding = meanEmbedding(documents, component);
         cluster.memberDocumentHashes.reserve(component.size());
         for (std::size_t idx : component) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);

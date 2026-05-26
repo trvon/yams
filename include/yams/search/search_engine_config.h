@@ -132,6 +132,10 @@ struct SearchEngineConfig {
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;
     float weakQueryEntityVectorFanoutMultiplier = 1.5f;
+    bool enableTopologyWeakQueryRouting = false;
+    size_t topologyMaxClusters = 2;
+    size_t topologyMaxDocs = 64;
+    float topologyMedoidBoost = 0.05f;
     // Phase Y: multi-meta-path scoring (PathSim-style fixed weights, post-fusion boost).
     // Each enabled meta-path independently scores candidate docs reachable from query
     // seeds; total boost = Σ_m (w_m × pathScore_m). Phase P is the special case
@@ -159,7 +163,7 @@ struct SearchEngineConfig {
         COMB_MNZ,
         CONVEX,
         WEIGHTED_LINEAR_ZSCORE
-    } fusionStrategy = FusionStrategy::RECIPROCAL_RANK;
+    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
 
     size_t weightedLinearZScorePoolSize = 500;
     float weightedLinearZScoreAlpha = 0.75f;
@@ -256,6 +260,9 @@ struct SearchEngineConfig {
     size_t rerankTopK = 5;
     float rerankAnchoredMinRelativeScore = 0.0f;
     bool rerankReplaceScores = true;
+    float rerankBlendWeight = 0.60f;
+    float rerankScoreGapThreshold = 0.0f;
+    size_t rerankSnippetMaxChars = 256;
     size_t fusionCandidateLimit = 0;
 
     bool enableGraphRerank = false;

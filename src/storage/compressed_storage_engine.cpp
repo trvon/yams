@@ -172,6 +172,10 @@ public:
 
     Result<uint64_t> getStorageSize() const { return underlying_->getStorageSize(); }
 
+    Result<std::vector<std::string>> list(std::string_view prefix) const {
+        return underlying_->list(prefix);
+    }
+
     Result<uint64_t> getBlockSize(std::string_view hash) const {
         return underlying_->getBlockSize(hash);
     }
@@ -307,10 +311,54 @@ public:
             return Error(ErrorCode::InvalidState, "Async compression is disabled");
         }
 
-        // Note: list() method not available in StorageEngine interface
-        // This functionality would require additional interface methods
-        return Error(ErrorCode::NotImplemented,
-                     "Background compression scan requires list() functionality");
+        auto keys = underlying_->list();
+        if (!keys) {
+            return keys.error();
+        }
+
+        const auto compressionFloor =
+            std::max(config_.compressionThreshold, policy_.rules().neverCompressBelow);
+        size_t queued = 0;
+        size_t queueDepth = 0;
+
+        for (const auto& key : keys.value()) {
+            auto raw = underlying_->retrieveRaw(key);
+            if (!raw) {
+                if (raw.error().code == ErrorCode::ChunkNotFound ||
+                    raw.error().code == ErrorCode::NotFound) {
+                    continue;
+                }
+                return raw.error();
+            }
+
+            const auto& object = raw.value();
+            std::span<const std::byte> data{object.data.data(), object.data.size()};
+            if (object.header || isCompressedData(data) || data.size() < compressionFloor) {
+                continue;
+            }
+
+            {
+                std::lock_guard lock(asyncMutex_);
+                if (shutdownFlag_) {
+                    return Error{ErrorCode::SystemShutdown,
+                                 "Async compression workers are shut down"};
+                }
+                if (asyncQueue_.size() >= config_.maxAsyncQueue) {
+                    break;
+                }
+                asyncQueue_.push(AsyncJob{AsyncJob::Type::Compress, key});
+                queueDepth = asyncQueue_.size();
+                ++queued;
+            }
+        }
+
+        updateStats([queueDepth](compression::CompressionStats& stats) {
+            stats.queuedCompressions = queueDepth;
+        });
+        if (queued > 0) {
+            asyncCV_.notify_all();
+        }
+        return queued;
     }
 
     bool waitForAsyncOperations(std::chrono::milliseconds timeout) {
@@ -318,6 +366,36 @@ public:
         return asyncCV_.wait_for(lock, timeout,
                                  [this] { return asyncQueue_.empty() && activeJobs_ == 0; });
     }
+
+#ifdef YAMS_TESTING
+    Result<void> testing_enqueueCompressionJob(std::string_view hash) {
+        size_t queuedJobs = 0;
+        {
+            std::lock_guard lock(asyncMutex_);
+            if (shutdownFlag_) {
+                return Error{ErrorCode::SystemShutdown, "Async compression workers are shut down"};
+            }
+            if (asyncQueue_.size() >= config_.maxAsyncQueue) {
+                return Error{ErrorCode::ResourceExhausted, "Async compression queue is full"};
+            }
+            asyncQueue_.push(AsyncJob{AsyncJob::Type::Compress, std::string(hash)});
+            queuedJobs = asyncQueue_.size();
+        }
+
+        updateStats([queuedJobs](compression::CompressionStats& stats) {
+            stats.queuedCompressions = queuedJobs;
+        });
+        asyncCV_.notify_one();
+        return {};
+    }
+
+    size_t testing_asyncQueueDepth() {
+        std::lock_guard lock(asyncMutex_);
+        return asyncQueue_.size();
+    }
+
+    void testing_shutdownAsyncWorkers() { shutdown(); }
+#endif
 
 private:
     struct AsyncJob {
@@ -574,7 +652,12 @@ private:
     }
 
     void shutdown() {
-        shutdownFlag_ = true;
+        {
+            std::lock_guard lock(asyncMutex_);
+            shutdownFlag_ = true;
+            std::queue<AsyncJob> empty;
+            asyncQueue_.swap(empty);
+        }
         asyncCV_.notify_all();
 
         for (auto& worker : workers_) {
@@ -582,6 +665,11 @@ private:
                 worker.join();
             }
         }
+
+        updateStats([](compression::CompressionStats& stats) {
+            stats.queuedCompressions = 0;
+            stats.currentWorkerThreads = 0;
+        });
     }
 };
 
@@ -653,6 +741,10 @@ Result<uint64_t> CompressedStorageEngine::getStorageSize() const {
     return pImpl->getStorageSize();
 }
 
+Result<std::vector<std::string>> CompressedStorageEngine::list(std::string_view prefix) const {
+    return pImpl->list(prefix);
+}
+
 // Async operations
 std::future<Result<void>> CompressedStorageEngine::storeAsync(std::string_view hash,
                                                               std::span<const std::byte> data) {
@@ -710,5 +802,19 @@ Result<size_t> CompressedStorageEngine::triggerCompressionScan() {
 bool CompressedStorageEngine::waitForAsyncOperations(std::chrono::milliseconds timeout) {
     return pImpl->waitForAsyncOperations(timeout);
 }
+
+#ifdef YAMS_TESTING
+Result<void> CompressedStorageEngine::testing_enqueueCompressionJob(std::string_view hash) {
+    return pImpl->testing_enqueueCompressionJob(hash);
+}
+
+size_t CompressedStorageEngine::testing_asyncQueueDepth() {
+    return pImpl->testing_asyncQueueDepth();
+}
+
+void CompressedStorageEngine::testing_shutdownAsyncWorkers() {
+    pImpl->testing_shutdownAsyncWorkers();
+}
+#endif
 
 } // namespace yams::storage

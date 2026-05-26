@@ -356,11 +356,16 @@ private:
     bool writer_running_{false};
     size_t total_queued_bytes_{0};
 
+    std::mutex activity_mutex_;
+    std::function<void()> activity_callback_;
+
     std::mutex ctx_mtx_;
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
 
     std::shared_ptr<RequestContext> find_request_context(uint64_t request_id);
     bool is_request_canceled(uint64_t request_id);
+    void set_activity_callback(std::function<void()> on_activity);
+    void notify_write_activity();
 
     // Queue a frame for fair writing; must be called on write strand when present
     Result<bool> enqueue_frame_sync(uint64_t request_id, std::vector<uint8_t> frame, bool last,

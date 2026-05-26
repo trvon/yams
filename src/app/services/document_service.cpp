@@ -2208,16 +2208,43 @@ public:
         typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
         resolveOpts.tryHashPrefix = true; // Allow hash prefix for delete operations
 
-        std::vector<metadata::DocumentInfo> allTargets;
+        struct DeleteTarget {
+            std::optional<metadata::DocumentInfo> doc;
+            std::string hash;
+            std::string name;
+        };
+
+        std::vector<DeleteTarget> allTargets;
         std::unordered_set<std::string> seenHashes;
 
         auto addUnique = [&](const std::vector<metadata::DocumentInfo>& docs) {
             for (const auto& doc : docs) {
                 if (seenHashes.insert(doc.sha256Hash).second) {
-                    allTargets.push_back(doc);
+                    DeleteTarget target;
+                    target.doc = doc;
+                    target.hash = doc.sha256Hash;
+                    target.name = doc.fileName.empty() ? doc.filePath : doc.fileName;
+                    allTargets.push_back(std::move(target));
                 }
             }
         };
+
+        auto addResolved =
+            [&](const std::string& selector,
+                const Result<std::vector<metadata::DocumentInfo>>& resolved) -> Result<void> {
+            if (!resolved) {
+                return Result<void>();
+            }
+            if (!req.force && resolved.value().size() > 1) {
+                return Error{ErrorCode::InvalidOperation, "Multiple documents match '" + selector +
+                                                              "'; use --force to delete all "
+                                                              "matches or specify the exact hash"};
+            }
+            addUnique(resolved.value());
+            return Result<void>();
+        };
+
+        bool rawFullHashWithoutMetadata = false;
 
         // Resolve hash (full or prefix) using efficient findDocumentsByHashPrefix
         if (!req.hash.empty()) {
@@ -2226,6 +2253,8 @@ public:
                 auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
                 if (docRes && docRes.value().has_value()) {
                     addUnique({docRes.value().value()});
+                } else if (docRes && isHex(req.hash)) {
+                    rawFullHashWithoutMetadata = true;
                 }
             } else {
                 // Partial hash - use efficient prefix search
@@ -2248,61 +2277,91 @@ public:
         // Resolve each name using DocumentResolver
         for (const auto& n : req.names) {
             auto resolved = resolver.resolveAll(n, resolveOpts);
-            if (resolved) {
-                addUnique(resolved.value());
+            auto added = addResolved(n, resolved);
+            if (!added) {
+                return added.error();
             }
         }
 
         // Resolve single name if provided
         if (!req.name.empty()) {
             auto resolved = resolver.resolveAll(req.name, resolveOpts);
-            if (resolved) {
-                addUnique(resolved.value());
+            auto added = addResolved(req.name, resolved);
+            if (!added) {
+                return added.error();
             }
         }
 
+        if (rawFullHashWithoutMetadata && !seenHashes.contains(req.hash)) {
+            DeleteTarget target;
+            target.hash = req.hash;
+            target.name = "hash:" + req.hash.substr(0, 8) + "...";
+            allTargets.push_back(std::move(target));
+        }
+
+        auto cleanupMetadata = [&](const metadata::DocumentInfo& doc,
+                                   DeleteByNameResult& r) -> bool {
+            if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
+                if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
+                    spdlog::warn("Failed to delete vectors for document {}: {}", doc.sha256Hash,
+                                 ctx_.vectorDatabase->getLastError());
+                }
+            }
+
+            auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
+            if (!metaResult) {
+                r.error = "Failed to delete metadata: " + metaResult.error().message;
+                return false;
+            }
+
+            if (ctx_.kgStore) {
+                auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
+                if (!kgResult) {
+                    spdlog::warn("Failed to clean up KG nodes for document {}: {}", doc.sha256Hash,
+                                 kgResult.error().message);
+                }
+            }
+            return true;
+        };
+
         // Execute deletions
-        for (const auto& doc : allTargets) {
+        for (const auto& target : allTargets) {
             DeleteByNameResult r;
-            r.name = doc.fileName;
-            r.hash = doc.sha256Hash;
+            r.name = target.name;
+            r.hash = target.hash;
 
             if (!req.dryRun) {
                 // Delete from content store
-                auto storeResult = ctx_.store->remove(doc.sha256Hash);
+                auto storeResult = ctx_.store->remove(target.hash);
                 if (!storeResult) {
-                    r.deleted = false;
-                    r.error = storeResult.error().message;
-                    resp.errors.push_back(r);
-                    continue;
+                    const bool canForceMetadataCleanup =
+                        req.force && target.doc.has_value() &&
+                        storeResult.error().message.find("Corrupted data") != std::string::npos;
+                    if (!canForceMetadataCleanup) {
+                        r.deleted = false;
+                        r.error = storeResult.error().message;
+                        resp.errors.push_back(r);
+                        continue;
+                    }
+                    spdlog::warn("Storage data is corrupted for {}. Forcing metadata deletion.",
+                                 target.name);
                 }
-                if (!storeResult.value()) {
+                if (storeResult && storeResult.value()) {
+                    r.contentRemoved = true;
+                }
+                if (storeResult && !storeResult.value() && !target.doc.has_value()) {
                     r.error = "Document not found in store";
                     resp.errors.push_back(r);
                     continue;
                 }
 
-                if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
-                    if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
-                        spdlog::warn("Failed to delete vectors for document {}: {}", doc.sha256Hash,
-                                     ctx_.vectorDatabase->getLastError());
+                if (target.doc.has_value()) {
+                    if (storeResult && !storeResult.value()) {
+                        spdlog::debug("Cleaning orphaned metadata for {}", target.name);
                     }
-                }
-
-                // Delete from metadata repository
-                auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
-                if (!metaResult) {
-                    r.error = "Failed to delete metadata: " + metaResult.error().message;
-                    resp.errors.push_back(r);
-                    continue;
-                }
-
-                // Clean up KG nodes associated with this document
-                if (ctx_.kgStore) {
-                    auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
-                    if (!kgResult) {
-                        spdlog::warn("Failed to clean up KG nodes for document {}: {}",
-                                     doc.sha256Hash, kgResult.error().message);
+                    if (!cleanupMetadata(*target.doc, r)) {
+                        resp.errors.push_back(r);
+                        continue;
                     }
                 }
 

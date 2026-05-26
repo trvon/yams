@@ -129,6 +129,15 @@ public:
         if (!backend) {
             return backend.error();
         }
+
+        if (backend.value()->isRemote()) {
+            auto stats = backend.value()->getStats();
+            if (!stats) {
+                return stats.error();
+            }
+            return stats.value().totalBytes;
+        }
+
         auto keys = backend.value()->list();
         if (!keys) {
             return keys.error();
@@ -143,6 +152,14 @@ public:
             total += static_cast<uint64_t>(object.value().size());
         }
         return total;
+    }
+
+    Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
+        auto backend = withBackend();
+        if (!backend) {
+            return backend.error();
+        }
+        return backend.value()->list(prefix);
     }
 
 private:

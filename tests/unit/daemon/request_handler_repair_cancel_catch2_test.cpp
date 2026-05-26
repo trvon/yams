@@ -13,6 +13,7 @@
 #include <boost/asio.hpp>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -235,4 +236,87 @@ TEST_CASE("RequestHandler: canceled RepairRequest streaming completes without de
     }
 
     REQUIRE(sawCancelled);
+}
+
+TEST_CASE("RequestHandler: RepairRequest streaming writes refresh connection activity",
+          "[daemon][ipc][repair][activity]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    DaemonConfig config;
+    StateComponent state;
+    DaemonLifecycleFsm lifecycle;
+    ServiceManager serviceManager(config, state, lifecycle);
+
+    auto repo = std::make_shared<BlockingRepairMetadataRepository>();
+    serviceManager.__test_setMetadataRepo(repo);
+    serviceManager.startRepairService([] { return size_t{0}; });
+    ScopeExit stopRepair([&] { serviceManager.stopRepairService(); });
+    ScopeExit releaseRepo([&] { repo->release(); });
+
+    RequestDispatcher dispatcher(nullptr, &serviceManager, &state);
+    boost::asio::io_context io;
+
+    RequestHandler::Config handlerConfig;
+    handlerConfig.enable_multiplexing = true;
+    handlerConfig.enable_streaming = true;
+    handlerConfig.stream_chunk_timeout = 50ms;
+    auto handler = std::make_shared<RequestHandler>(&dispatcher, handlerConfig);
+
+    boost::asio::local::stream_protocol::socket clientSock(io);
+    boost::asio::local::stream_protocol::socket serverSock(io);
+    boost::asio::local::connect_pair(clientSock, serverSock);
+
+    yams::compat::stop_source stopSource;
+    auto serverSockPtr =
+        std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(serverSock));
+    std::atomic<size_t> activityCount{0};
+    boost::asio::co_spawn(
+        io,
+        [handler, serverSockPtr, token = stopSource.get_token(),
+         &activityCount]() -> boost::asio::awaitable<void> {
+            co_await handler->handle_connection(serverSockPtr, token, 1, [&activityCount] {
+                activityCount.fetch_add(1, std::memory_order_relaxed);
+            });
+            co_return;
+        },
+        boost::asio::detached);
+
+    auto work = boost::asio::make_work_guard(io);
+    std::thread ioThread([&io]() { io.run(); });
+    ScopeExit stopIo([&] {
+        stopSource.request_stop();
+        boost::system::error_code ec;
+        clientSock.close(ec);
+        work.reset();
+        if (ioThread.joinable()) {
+            ioThread.join();
+        }
+    });
+
+    constexpr uint64_t kRequestId = 78;
+    RepairRequest repairReq;
+    repairReq.repairDownloads = true;
+
+    Message request;
+    request.version = 1;
+    request.requestId = kRequestId;
+    request.expectsStreamingResponse = true;
+    request.payload = Request{std::in_place_type<RepairRequest>, repairReq};
+
+    MessageFramer framer(1024 * 1024);
+    std::vector<uint8_t> frame;
+    REQUIRE(framer.frame_message_into(request, frame));
+    boost::asio::write(clientSock, boost::asio::buffer(frame));
+
+    auto headerMessage = readMessageWithTimeout(clientSock, framer, 2s);
+    REQUIRE(headerMessage.has_value());
+    CHECK(headerMessage->requestId == kRequestId);
+    REQUIRE(repo->waitUntilEntered(2s));
+
+    const auto baseline = activityCount.load(std::memory_order_relaxed);
+    REQUIRE(baseline >= 1);
+    REQUIRE(waitForCondition(
+        2s, [&] { return activityCount.load(std::memory_order_relaxed) > baseline; }));
 }

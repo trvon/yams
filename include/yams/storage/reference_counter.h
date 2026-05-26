@@ -99,6 +99,7 @@ public:
         }
         void increment(std::string_view blockHash) { increment(blockHash, 0, 0); }
         virtual void decrement(std::string_view blockHash) = 0;
+        virtual void pruneReference(std::string_view blockHash) = 0;
         virtual Result<void> commit() = 0;
         virtual void rollback() = 0;
         virtual bool isActive() const = 0;
@@ -212,6 +213,7 @@ public:
         void increment(std::string_view blockHash, size_t compressedSize,
                        size_t uncompressedSize) override;
         void decrement(std::string_view blockHash) override;
+        void pruneReference(std::string_view blockHash) override;
 
         // Batch operations for efficiency
         template <BlockHashRange R> void incrementBatch(R&& hashes, size_t blockSize = 0) {
@@ -253,6 +255,7 @@ public:
             int delta;
         };
         std::vector<Operation> operations_;
+        std::vector<std::string> prunedHashes_;
     };
 
     std::unique_ptr<ITransaction> beginTransaction() override;

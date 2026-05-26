@@ -1,8 +1,8 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/simeon_lexical_backend.h>
@@ -334,10 +334,22 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
-    // Topology routing policy was removed in the search-engine debloat;
-    // rrfK can still be tuned via the topology-routing config block.
+    // Topology weak-query routing is opt-in. It routes weak lexical queries through
+    // published topology clusters before narrowing vector search.
     {
         auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
+        if (tp.enableWeakQueryRouting) {
+            opts.config.enableTopologyWeakQueryRouting = *tp.enableWeakQueryRouting;
+        }
+        if (tp.maxClusters) {
+            opts.config.topologyMaxClusters = *tp.maxClusters;
+        }
+        if (tp.maxDocs) {
+            opts.config.topologyMaxDocs = *tp.maxDocs;
+        }
+        if (tp.medoidBoost) {
+            opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
+        }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);

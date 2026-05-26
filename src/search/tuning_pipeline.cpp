@@ -100,6 +100,8 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
     params.rerankTopK = config.rerankTopK;
     params.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
+    params.enableReranking = config.enableReranking;
+    params.rerankReplaceScores = config.rerankReplaceScores;
     params.chunkAggregation = config.chunkAggregation;
     params.enableGraphRerank = config.enableGraphRerank;
     params.graphRerankTopN = config.graphRerankTopN;

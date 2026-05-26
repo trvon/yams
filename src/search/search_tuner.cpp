@@ -598,6 +598,10 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.enableWeakQueryFanoutBoost = config.enableWeakQueryFanoutBoost;
     params_.weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
     params_.weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
+    params_.rerankTopK = config.rerankTopK;
+    params_.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
+    params_.enableReranking = config.enableReranking;
+    params_.rerankReplaceScores = config.rerankReplaceScores;
     params_.enableGraphRerank = config.enableGraphRerank;
     params_.graphRerankTopN = config.graphRerankTopN;
     params_.graphRerankWeight = config.graphRerankWeight;

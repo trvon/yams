@@ -368,12 +368,7 @@ DocumentIngestionService::deleteDocument(const DeleteOptions& opts) const {
         [client, dreq, p = std::move(p),
          d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
             auto r = co_await client->remove(dreq);
-            // remove() returns SuccessResponse; wrap into DeleteResponse
-            yams::daemon::DeleteResponse dr;
-            if (r) {
-                dr.successCount = 1;
-            }
-            p.set_value(Result<yams::daemon::DeleteResponse>(std::move(dr)));
+            p.set_value(std::move(r));
             d.set_value();
             co_return;
         },

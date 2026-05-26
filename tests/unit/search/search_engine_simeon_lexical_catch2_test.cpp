@@ -197,3 +197,47 @@ TEST_CASE("SearchEngine with ready Simeon backend rescores the FTS5 candidate po
         CHECK(r.score >= 0.0);
     }
 }
+
+TEST_CASE("Simeon backend can generate direct top candidates",
+          "[search][simeon][integration][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    SimeonLexicalBackend backend(SimeonLexicalBackend::Config{});
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+
+    auto top = backend.searchTop("alpha", 3);
+    REQUIRE(top.has_value());
+    REQUIRE_FALSE(top.value().candidates.empty());
+    CHECK(top.value().candidates.front().document_id == corpus.docIds.front());
+    CHECK(top.value().candidates.front().score > 0.0F);
+}
+
+TEST_CASE("SearchEngine uses direct Simeon candidates for weak FTS queries",
+          "[search][simeon][integration][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    auto cfg = makeLexicalOnlyConfig();
+    cfg.includeDebugInfo = true;
+    cfg.enableReranking = false;
+    cfg.weakQueryMinTextHits = 3;
+    cfg.simeonTextWeight = 1.0F;
+
+    auto engine = makeEngine(corpus, cfg);
+    auto backend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
+    auto* backendRaw = backend.get();
+    engine->setSimeonLexicalBackend(std::move(backend));
+    REQUIRE(waitReady(*backendRaw, std::chrono::seconds(5)));
+
+    SearchParams params;
+    params.limit = 10;
+    auto response = engine->searchWithResponse("alph", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    REQUIRE(debug.contains("simeon_direct_raw_hit_count"));
+    REQUIRE(debug.contains("simeon_direct_added_count"));
+    CHECK(std::stoull(debug.at("simeon_direct_raw_hit_count")) > 0u);
+    CHECK(std::stoull(debug.at("simeon_direct_added_count")) > 0u);
+
+    const auto ids = hashSet(response.value().results);
+    CHECK(ids.count("hash_a") == 1u);
+}

@@ -8,11 +8,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
+#include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
+#include <boost/asio.hpp>
 
 #include <yams/compat/unistd.h>
 
@@ -63,6 +68,137 @@ inline std::vector<std::byte> generateDeterministicData(size_t size, uint8_t see
     }
     return data;
 }
+
+inline std::vector<std::byte> bytesOf(std::string_view value) {
+    std::vector<std::byte> out;
+    out.reserve(value.size());
+    for (char ch : value) {
+        out.push_back(static_cast<std::byte>(ch));
+    }
+    return out;
+}
+
+class LocalHttpServer {
+public:
+    struct Response {
+        int status{200};
+        std::string body;
+        std::chrono::milliseconds delay{0};
+    };
+
+    explicit LocalHttpServer(std::vector<Response> responses)
+        : acceptor_(io_,
+                    boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0)),
+          responses_(responses.begin(), responses.end()) {
+        port_ = acceptor_.local_endpoint().port();
+        worker_ = std::thread([this] { serve(); });
+    }
+
+    ~LocalHttpServer() { stop(); }
+
+    LocalHttpServer(const LocalHttpServer&) = delete;
+    LocalHttpServer& operator=(const LocalHttpServer&) = delete;
+
+    std::string baseUrl() const { return "http://127.0.0.1:" + std::to_string(port_) + "/objects"; }
+
+    size_t requestCount() const { return requestCount_.load(); }
+
+private:
+    using tcp = boost::asio::ip::tcp;
+
+    boost::asio::io_context io_;
+    tcp::acceptor acceptor_;
+    std::thread worker_;
+    std::deque<Response> responses_;
+    mutable std::mutex responsesMutex_;
+    std::atomic<bool> stopping_{false};
+    std::atomic<size_t> requestCount_{0};
+    uint16_t port_{0};
+
+    void stop() {
+        if (stopping_.exchange(true)) {
+            return;
+        }
+
+        boost::system::error_code ec;
+        tcp::socket wake(io_);
+        wake.connect(tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port_), ec);
+        wake.close(ec);
+        acceptor_.close(ec);
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    Response nextResponse() {
+        std::lock_guard lock(responsesMutex_);
+        if (responses_.empty()) {
+            return Response{.status = 500, .body = "unexpected request"};
+        }
+        auto response = std::move(responses_.front());
+        responses_.pop_front();
+        return response;
+    }
+
+    static std::string reasonPhrase(int status) {
+        switch (status) {
+            case 200:
+                return "OK";
+            case 204:
+                return "No Content";
+            case 302:
+                return "Found";
+            case 404:
+                return "Not Found";
+            case 500:
+                return "Internal Server Error";
+            case 503:
+                return "Service Unavailable";
+            default:
+                return "Status";
+        }
+    }
+
+    void serve() {
+        while (!stopping_.load()) {
+            boost::system::error_code ec;
+            tcp::socket socket(io_);
+            acceptor_.accept(socket, ec);
+            if (ec) {
+                continue;
+            }
+            handle(std::move(socket));
+        }
+    }
+
+    void handle(tcp::socket socket) {
+        boost::system::error_code ec;
+        boost::asio::streambuf request;
+        boost::asio::read_until(socket, request, "\r\n\r\n", ec);
+        if (ec) {
+            return;
+        }
+
+        std::istream input(&request);
+        std::string method;
+        input >> method;
+        requestCount_.fetch_add(1);
+
+        auto response = nextResponse();
+        if (response.delay.count() > 0) {
+            std::this_thread::sleep_for(response.delay);
+        }
+
+        std::ostringstream output;
+        output << "HTTP/1.1 " << response.status << ' ' << reasonPhrase(response.status)
+               << "\r\nContent-Length: " << response.body.size() << "\r\nConnection: close\r\n\r\n";
+        if (method != "HEAD") {
+            output << response.body;
+        }
+        const auto raw = output.str();
+        boost::asio::write(socket, boost::asio::buffer(raw), ec);
+    }
+};
 
 /**
  * RAII test directory manager
@@ -633,6 +769,341 @@ TEST_CASE("FilesystemBackend - Edge Cases", "[storage][backend][filesystem][edge
         REQUIRE(result);
         CHECK(result.value() == allBytes);
     }
+}
+
+TEST_CASE("URLBackend - Initialization and bounded explicit until protocol-specific",
+          "[storage][backend][url][failure]") {
+    SECTION("Rejects unsupported URL schemes with a typed error") {
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = "gopher://example.invalid/storage";
+
+        auto result = backend.initialize(config);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::InvalidArgument);
+        CHECK(result.error().message.find("Unsupported URL scheme") != std::string::npos);
+    }
+
+    SECTION("List is bounded and explicit until protocol-specific listing exists") {
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = "http://example.invalid/storage";
+        config.maxRetries = 0;
+        config.requestTimeout = 1;
+
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("prefix/");
+        CHECK_FALSE(listed.has_value());
+        CHECK(listed.error().code == ErrorCode::NetworkError);
+
+        auto stats = backend.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalObjects == 0);
+        CHECK(stats.value().totalBytes == 0);
+        CHECK(backend.flush().has_value());
+    }
+}
+
+TEST_CASE("URLBackend - HTTP status taxonomy", "[storage][backend][url][http]") {
+    SECTION("GET maps success, missing, server error, and redirect") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 200, .body = "ok"},
+                                LocalHttpServer::Response{.status = 404},
+                                LocalHttpServer::Response{.status = 500},
+                                LocalHttpServer::Response{.status = 302}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto ok = backend.retrieve("ok");
+        REQUIRE(ok.has_value());
+        CHECK(ok.value() == bytesOf("ok"));
+
+        auto missing = backend.retrieve("missing");
+        REQUIRE_FALSE(missing.has_value());
+        CHECK(missing.error().code == ErrorCode::ChunkNotFound);
+
+        auto serverError = backend.retrieve("server-error");
+        REQUIRE_FALSE(serverError.has_value());
+        CHECK(serverError.error().code == ErrorCode::NetworkError);
+
+        auto redirect = backend.retrieve("redirect");
+        REQUIRE_FALSE(redirect.has_value());
+        CHECK(redirect.error().code == ErrorCode::NetworkError);
+
+        CHECK(server.requestCount() == 4);
+    }
+
+    SECTION("HEAD maps found, missing, and failure for exists") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 200},
+                                LocalHttpServer::Response{.status = 404},
+                                LocalHttpServer::Response{.status = 500}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto present = backend.exists("present");
+        REQUIRE(present.has_value());
+        CHECK(present.value());
+
+        auto missing = backend.exists("missing");
+        REQUIRE(missing.has_value());
+        CHECK_FALSE(missing.value());
+
+        auto failed = backend.exists("failed");
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == ErrorCode::NetworkError);
+
+        CHECK(server.requestCount() == 3);
+    }
+
+    SECTION("DELETE treats missing objects as idempotent and fails server errors") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 404}, LocalHttpServer::Response{.status = 500}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        CHECK(backend.remove("already-gone").has_value());
+
+        auto failed = backend.remove("server-error");
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == ErrorCode::NetworkError);
+
+        CHECK(server.requestCount() == 2);
+    }
+}
+
+TEST_CASE("URLBackend - Retry and timeout behavior", "[storage][backend][url][retry]") {
+    SECTION("Retries retryable HTTP failures until success") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 503},
+                                LocalHttpServer::Response{.status = 500},
+                                LocalHttpServer::Response{.status = 200, .body = "eventual"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 2;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto result = backend.retrieve("eventual");
+        REQUIRE(result.has_value());
+        CHECK(result.value() == bytesOf("eventual"));
+        CHECK(server.requestCount() == 3);
+    }
+
+    SECTION("Does not retry missing objects") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 404},
+                                LocalHttpServer::Response{.status = 200, .body = "unexpected"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 2;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto result = backend.retrieve("missing");
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::ChunkNotFound);
+        CHECK(server.requestCount() == 1);
+    }
+
+    SECTION("Request timeout returns a typed network error") {
+        LocalHttpServer server({LocalHttpServer::Response{
+            .status = 200, .body = "late", .delay = std::chrono::milliseconds{1500}}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 1;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto result = backend.retrieve("slow");
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::NetworkError);
+        CHECK(server.requestCount() == 1);
+    }
+}
+
+// =============================================================================
+// URLBackend - HTTP Listing
+// =============================================================================
+
+TEST_CASE("URLBackend - HTTP listing with prefix", "[storage][backend][url][list]") {
+    SECTION("Lists newline-delimited keys from GET response") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 200, .body = "alpha\nbeta\ngamma\n"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        REQUIRE(listed.value().size() == 3);
+        CHECK(listed.value()[0] == "alpha");
+        CHECK(listed.value()[1] == "beta");
+        CHECK(listed.value()[2] == "gamma");
+        CHECK(server.requestCount() == 1);
+    }
+
+    SECTION("CRLF line endings are handled") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 200, .body = "a\r\nb\r\nc\r\n"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().size() == 3);
+    }
+
+    SECTION("404 returns empty list without error") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 404}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto listed = backend.list("");
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().empty());
+    }
+}
+TEST_CASE("URLBackend - Authenticated provider header", "[storage][backend][url][auth]") {
+    SECTION("GET with authorization header succeeds after 401 without") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 401},
+             LocalHttpServer::Response{.status = 200, .body = "authenticated-key"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto unauth = backend.retrieve("any-key");
+        REQUIRE_FALSE(unauth.has_value());
+        CHECK(unauth.error().code == ErrorCode::NetworkError);
+
+        REQUIRE(backend.flush().has_value());
+
+        URLBackend authBackend;
+        BackendConfig authConfig;
+        authConfig.type = "http";
+        authConfig.url = server.baseUrl();
+        authConfig.maxRetries = 0;
+        authConfig.requestTimeout = 2;
+        authConfig.credentials["authorization"] = "Basic dXNlcjpwYXNz";
+        REQUIRE(authBackend.initialize(authConfig).has_value());
+
+        auto authed = authBackend.retrieve("any-key");
+        REQUIRE(authed.has_value());
+        CHECK(authed.value() == bytesOf("authenticated-key"));
+        CHECK(server.requestCount() == 2);
+    }
+}
+
+TEST_CASE("URLBackend - PUT and DELETE retry retryable failures",
+          "[storage][backend][url][retry]") {
+    SECTION("PUT retries on server error") {
+        LocalHttpServer server({LocalHttpServer::Response{.status = 500},
+                                LocalHttpServer::Response{.status = 200, .body = "stored"}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 1;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto payload = bytesOf("test-payload");
+        auto result = backend.store("key", payload);
+        REQUIRE(result.has_value());
+        CHECK(server.requestCount() == 2);
+    }
+
+    SECTION("DELETE retries on server error") {
+        LocalHttpServer server(
+            {LocalHttpServer::Response{.status = 503}, LocalHttpServer::Response{.status = 204}});
+
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "http";
+        config.url = server.baseUrl();
+        config.maxRetries = 1;
+        config.baseRetryMs = 0;
+        config.jitterMs = 0;
+        config.requestTimeout = 2;
+        REQUIRE(backend.initialize(config).has_value());
+
+        auto result = backend.remove("key");
+        REQUIRE(result.has_value());
+        CHECK(server.requestCount() == 2);
+    }
+}
+
+TEST_CASE("URLBackend - HEAD exists with 2xx returns true", "[storage][backend][url][head]") {
+    LocalHttpServer server(
+        {LocalHttpServer::Response{.status = 200}, LocalHttpServer::Response{.status = 204}});
+
+    URLBackend backend;
+    BackendConfig config;
+    config.type = "http";
+    config.url = server.baseUrl();
+    config.maxRetries = 0;
+    config.requestTimeout = 2;
+    REQUIRE(backend.initialize(config).has_value());
+
+    CHECK(backend.exists("present").value());
+    CHECK(backend.exists("also-present").value());
+    CHECK(server.requestCount() == 2);
 }
 
 // =============================================================================

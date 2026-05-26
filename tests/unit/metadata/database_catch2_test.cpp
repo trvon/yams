@@ -345,6 +345,61 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: failed migration reports error", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    MigrationManager mm(db);
+    REQUIRE(mm.initialize().has_value());
+
+    Migration broken;
+    broken.version = 1;
+    broken.name = "broken_migration";
+    broken.upSQL = "INVALID SQL THAT WILL FAIL";
+    broken.wrapInTransaction = true;
+    mm.registerMigration(broken);
+
+    auto needsBefore = mm.needsMigration();
+    REQUIRE(needsBefore.has_value());
+    CHECK(needsBefore.value());
+
+    auto result = mm.migrate();
+    CHECK_FALSE(result.has_value());
+
+    auto needsAfter = mm.needsMigration();
+    REQUIRE(needsAfter.has_value());
+    CHECK(needsAfter.value());
+
+    auto version = mm.getCurrentVersion();
+    REQUIRE(version.has_value());
+    CHECK(version.value() == 0);
+}
+
+TEST_CASE("Database: migration rollback restores previous version", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    MigrationManager mm(db);
+    REQUIRE(mm.initialize().has_value());
+
+    Migration good;
+    good.version = 1;
+    good.name = "create_test_table";
+    good.upSQL = "CREATE TABLE rollback_test (id INTEGER PRIMARY KEY, name TEXT)";
+    good.downSQL = "DROP TABLE IF EXISTS rollback_test";
+    mm.registerMigration(good);
+
+    REQUIRE(mm.migrate().has_value());
+    CHECK(db.tableExists("rollback_test").value());
+
+    REQUIRE(mm.rollbackTo(0).has_value());
+    CHECK_FALSE(db.tableExists("rollback_test").value());
+}
+
 TEST_CASE("Database: Concurrent access", "[unit][metadata][database][.slow]") {
     DatabaseFixture fix;
 
@@ -490,4 +545,63 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
 
         // Statement won't be returned to cache since it was released
     }
+}
+
+TEST_CASE("Database: operations after close return errors", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    REQUIRE(db.execute("CREATE TABLE post_close(id INTEGER PRIMARY KEY)").has_value());
+    db.close();
+    CHECK_FALSE(db.isOpen());
+
+    auto execAfter = db.execute("CREATE TABLE should_fail(id INTEGER PRIMARY KEY)");
+    CHECK_FALSE(execAfter.has_value());
+
+    auto prepareAfter = db.prepare("SELECT 1");
+    CHECK_FALSE(prepareAfter.has_value());
+
+    auto tableAfter = db.tableExists("post_close");
+    CHECK_FALSE(tableAfter.has_value());
+}
+
+TEST_CASE("Database: open nonexistent file without Create mode fails",
+          "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    auto nonexistent =
+        fix.dbPath_.parent_path() /
+        ("nonexistent_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+
+    Database db;
+    auto result = db.open(nonexistent.string(), ConnectionMode::ReadWrite);
+    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(db.isOpen());
+}
+
+TEST_CASE("Database: close clears statement cache", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    REQUIRE(db.execute("CREATE TABLE cache_clear(id INTEGER PRIMARY KEY, val TEXT)").has_value());
+
+    {
+        auto stmt = db.prepareCached("INSERT INTO cache_clear VALUES (?, ?)");
+        REQUIRE(stmt.has_value());
+        stmt.value()->bind(1, 1);
+        stmt.value()->bind(2, std::string_view{"a"});
+        REQUIRE(stmt.value()->execute().has_value());
+    }
+
+    auto stats = db.getStatementCacheStats();
+    CHECK(stats.currentSize > 0);
+
+    db.close();
+
+    auto statsAfter = db.getStatementCacheStats();
+    CHECK(statsAfter.currentSize == 0);
 }

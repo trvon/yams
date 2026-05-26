@@ -12,6 +12,7 @@
 #include <ranges>
 #include <shared_mutex>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -94,6 +95,7 @@ public:
     // Statistics
     virtual StorageStats getStats() const noexcept = 0;
     virtual Result<uint64_t> getStorageSize() const = 0;
+    virtual Result<std::vector<std::string>> list(std::string_view prefix = "") const = 0;
 };
 
 // Main storage engine implementation
@@ -141,11 +143,19 @@ public:
     // Statistics and maintenance
     StorageStats getStats() const noexcept override;
     Result<uint64_t> getStorageSize() const override;
+    Result<std::vector<std::string>> list(std::string_view prefix = "") const override;
 
     // Maintenance operations
     Result<void> verify() const;
     Result<void> compact();
     Result<void> cleanupTempFiles();
+
+#ifdef YAMS_TESTING
+    static void testing_setAtomicWriteFailureAfterBytes(size_t bytes);
+    static void testing_clearAtomicWriteFailure();
+    static void testing_setFileOpenFailure(bool v);
+    static void testing_setRenameFailure(bool v);
+#endif
 
 private:
     struct Impl;

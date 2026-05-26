@@ -69,6 +69,7 @@ struct ContentStoreBuilder::Impl {
     std::shared_ptr<crypto::IHasher> hasher;
     std::shared_ptr<manifest::IManifestManager> manifestManager;
     std::shared_ptr<storage::IReferenceCounter> referenceCounter;
+    bool storageEngineProvided = false;
 
     Impl() {
         // Set default configuration
@@ -120,6 +121,11 @@ struct ContentStoreBuilder::Impl {
         };
 
         // Create storage engine if not provided
+        if (storageEngineProvided && !storageEngine) {
+            return Result<void>(
+                Error{ErrorCode::InvalidArgument, "Explicit storage engine injection was null"});
+        }
+
         if (!storageEngine) {
             storage::StorageConfig storageConfig{
                 .basePath = config.storagePath,
@@ -417,6 +423,7 @@ ContentStoreBuilder::withGarbageCollectionInterval(std::chrono::seconds interval
 ContentStoreBuilder&
 ContentStoreBuilder::withStorageEngine(std::shared_ptr<storage::IStorageEngine> engine) {
     pImpl->storageEngine = std::move(engine);
+    pImpl->storageEngineProvided = true;
     return *this;
 }
 

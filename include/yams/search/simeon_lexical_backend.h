@@ -198,6 +198,16 @@ public:
         std::vector<float> scores;
     };
 
+    struct TopCandidate {
+        std::int64_t document_id = 0;
+        float score = 0.0f;
+    };
+
+    struct TopCandidateDecision {
+        const char* recipe_name = "Bm25SabSmooth";
+        std::vector<TopCandidate> candidates;
+    };
+
     // Router-driven rescore: computes pre-retrieval QueryFeatures, picks a
     // recipe via simeon::QueryRouter (passE preset by default), scores
     // against the selected BM25 variant. When router_enabled is false this
@@ -235,6 +245,11 @@ public:
     scoreBanditRouted(std::string_view query, std::string_view arm_name,
                       std::span<const std::int64_t> candidate_doc_ids) const;
 
+    // Generate top documents directly from the Simeon corpus. This is used for weak lexical
+    // queries where FTS5 does not provide enough candidates to rescore.
+    Result<TopCandidateDecision> searchTop(std::string_view query, std::size_t limit,
+                                           std::string_view arm_name = {}) const;
+
 private:
     Config cfg_;
     std::atomic<bool> ready_{false};
@@ -262,6 +277,7 @@ private:
     std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
     std::unique_ptr<simeon::StrategyRouter> strategy_router_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
+    std::vector<std::int64_t> index_to_doc_id_;
     std::size_t doc_count_ = 0;
 };
 

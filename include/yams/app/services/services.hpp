@@ -767,6 +767,7 @@ struct DeleteByNameResult {
     std::string name;
     std::string hash;
     bool deleted{false};
+    bool contentRemoved{false};
     std::optional<std::string> error;
 };
 

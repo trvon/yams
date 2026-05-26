@@ -11,8 +11,8 @@
 
 #include <spdlog/spdlog.h>
 
-#include <fstream>
 #include <charconv>
+#include <fstream>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -117,7 +117,18 @@ public:
                               metadata.name.empty() ? path.filename().string() : metadata.name};
 
         // Chunk the file
-        auto chunks = chunker_->chunkFile(path);
+        std::vector<chunking::Chunk> chunks;
+        try {
+            chunks = chunker_->chunkFile(path);
+        } catch (const std::exception& e) {
+            spdlog::error("Failed to chunk file {}: {}", path.string(), e.what());
+            return Result<StoreResult>(
+                Error{ErrorCode::InternalError, "Failed to chunk file: " + std::string(e.what())});
+        } catch (...) {
+            spdlog::error("Failed to chunk file {}: unknown error", path.string());
+            return Result<StoreResult>(
+                Error{ErrorCode::InternalError, "Failed to chunk file: unknown error"});
+        }
         spdlog::debug("File chunked into {} chunks", chunks.size());
 
         // Store chunks and track deduplication
@@ -126,12 +137,18 @@ public:
 
         // Begin reference counting transaction
         auto transaction = refCounter_->beginTransaction();
+        std::vector<std::string> storedChunks;
+
+        auto rollbackStore = [&]() {
+            transaction->rollback();
+            // Chunk objects are content-addressed — do not delete by hash on rollback.
+        };
 
         for (const auto& chunk : chunks) {
             // Check if chunk already exists
             auto existsResult = storage_->exists(chunk.hash);
             if (!existsResult) {
-                transaction->rollback();
+                rollbackStore();
                 return Result<StoreResult>(existsResult.error());
             }
 
@@ -144,19 +161,16 @@ public:
                 size_t compressedSize =
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
-                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
-                if (!incResult) {
-                    transaction->rollback();
-                    return Result<StoreResult>(incResult.error());
-                }
+                transaction->increment(chunk.hash, compressedSize, chunk.size);
             } else {
                 // Store new chunk
                 auto storeResult = storage_->store(
                     chunk.hash, std::span<const std::byte>(chunk.data.data(), chunk.data.size()));
                 if (!storeResult) {
-                    transaction->rollback();
+                    rollbackStore();
                     return Result<StoreResult>(storeResult.error());
                 }
+                storedChunks.push_back(chunk.hash);
 
                 bytesStored += chunk.size;
 
@@ -166,11 +180,7 @@ public:
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
                 // Add initial reference with both compressed and uncompressed sizes
-                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
-                if (!incResult) {
-                    transaction->rollback();
-                    return Result<StoreResult>(incResult.error());
-                }
+                transaction->increment(chunk.hash, compressedSize, chunk.size);
             }
 
             // Report progress
@@ -187,22 +197,16 @@ public:
         // Create and store manifest
         auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
         if (!manifestResult) {
-            transaction->rollback();
+            rollbackStore();
             return Result<StoreResult>(manifestResult.error());
         }
 
         auto& manifest = manifestResult.value();
 
-        // Store manifest metadata
-        {
-            std::unique_lock lock(metadataMutex_);
-            metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
-        }
-
         // Store manifest
         auto manifestData = manifestManager_->serialize(manifest);
         if (!manifestData) {
-            transaction->rollback();
+            rollbackStore();
             return Result<StoreResult>(manifestData.error());
         }
 
@@ -210,14 +214,44 @@ public:
         auto manifestStoreResult =
             storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
         if (!manifestStoreResult) {
-            transaction->rollback();
+            if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
+                                                manifestStoreResult.error())) {
+                auto commitResult2 = transaction->commit();
+                if (!commitResult2) {
+                    transaction->rollback();
+                    cleanupStoredObject(manifestHash);
+                    cleanupStoredObjects(storedChunks);
+                    return Result<StoreResult>(commitResult2.error());
+                }
+                {
+                    std::unique_lock lock(metadataMutex_);
+                    metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
+                }
+                updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+                auto endTime = std::chrono::steady_clock::now();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+                return StoreResult{.contentHash = fileHash,
+                                   .bytesStored = fileSize,
+                                   .bytesDeduped = bytesDeduped,
+                                   .duration = duration};
+            }
+            rollbackStore();
             return Result<StoreResult>(manifestStoreResult.error());
         }
 
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
+            transaction->rollback();
+            cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
+        }
+
+        // Store manifest metadata only after durable data and refs commit.
+        {
+            std::unique_lock lock(metadataMutex_);
+            metadataStore_[fileHash] = sanitizeStoredMetadata(metadata, fileHash, fileSize);
         }
 
         // Update statistics
@@ -421,12 +455,18 @@ public:
 
         // Begin reference counting transaction
         auto transaction = refCounter_->beginTransaction();
+        std::vector<std::string> storedChunks;
+
+        auto rollbackStore = [&]() {
+            transaction->rollback();
+            // Chunk objects are content-addressed — do not delete by hash on rollback.
+        };
 
         for (const auto& chunk : chunks) {
             // Check if chunk already exists
             auto existsResult = storage_->exists(chunk.hash);
             if (!existsResult) {
-                transaction->rollback();
+                rollbackStore();
                 return Result<StoreResult>(existsResult.error());
             }
 
@@ -439,19 +479,16 @@ public:
                 size_t compressedSize =
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
-                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
-                if (!incResult) {
-                    transaction->rollback();
-                    return Result<StoreResult>(incResult.error());
-                }
+                transaction->increment(chunk.hash, compressedSize, chunk.size);
             } else {
                 // Store new chunk — use source buffer subspan (lazy chunks have no data copy)
                 auto storeResult =
                     storage_->store(chunk.hash, data.subspan(chunk.offset, chunk.size));
                 if (!storeResult) {
-                    transaction->rollback();
+                    rollbackStore();
                     return Result<StoreResult>(storeResult.error());
                 }
+                storedChunks.push_back(chunk.hash);
 
                 bytesStored += chunk.size;
 
@@ -461,11 +498,7 @@ public:
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
                 // Add initial reference with both compressed and uncompressed sizes
-                auto incResult = refCounter_->increment(chunk.hash, compressedSize, chunk.size);
-                if (!incResult) {
-                    transaction->rollback();
-                    return Result<StoreResult>(incResult.error());
-                }
+                transaction->increment(chunk.hash, compressedSize, chunk.size);
             }
         }
 
@@ -486,22 +519,16 @@ public:
         // Create and store manifest
         auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
         if (!manifestResult) {
-            transaction->rollback();
+            rollbackStore();
             return Result<StoreResult>(manifestResult.error());
         }
 
         auto& manifest = manifestResult.value();
 
-        // Store manifest metadata
-        {
-            std::unique_lock lock(metadataMutex_);
-            metadataStore_[dataHash] = metadata;
-        }
-
         // Serialize and store manifest
         auto manifestData = manifestManager_->serialize(manifest);
         if (!manifestData) {
-            transaction->rollback();
+            rollbackStore();
             return Result<StoreResult>(manifestData.error());
         }
 
@@ -509,14 +536,44 @@ public:
         auto manifestStoreResult =
             storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
         if (!manifestStoreResult) {
-            transaction->rollback();
+            if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
+                                                manifestStoreResult.error())) {
+                auto commitResult2 = transaction->commit();
+                if (!commitResult2) {
+                    transaction->rollback();
+                    cleanupStoredObject(manifestHash);
+                    cleanupStoredObjects(storedChunks);
+                    return Result<StoreResult>(commitResult2.error());
+                }
+                {
+                    std::unique_lock lock(metadataMutex_);
+                    metadataStore_[dataHash] = metadata;
+                }
+                updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+                auto endTime = std::chrono::steady_clock::now();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+                return StoreResult{.contentHash = dataHash,
+                                   .bytesStored = data.size(),
+                                   .bytesDeduped = bytesDeduped,
+                                   .duration = duration};
+            }
+            rollbackStore();
             return Result<StoreResult>(manifestStoreResult.error());
         }
 
         // Commit transaction
         auto commitResult = transaction->commit();
         if (!commitResult) {
+            transaction->rollback();
+            cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
+        }
+
+        // Store manifest metadata only after durable data and refs commit.
+        {
+            std::unique_lock lock(metadataMutex_);
+            metadataStore_[dataHash] = metadata;
         }
 
         // Update statistics
@@ -1067,6 +1124,43 @@ private:
         stats_.retrieveOperations += retrieveOps;
         stats_.deleteOperations += deleteOps;
         stats_.lastOperation = std::chrono::system_clock::now();
+    }
+
+    void cleanupStoredObjects(std::span<const std::string> hashes) {
+        for (auto it = hashes.rbegin(); it != hashes.rend(); ++it) {
+            cleanupStoredObject(*it);
+        }
+    }
+
+    void cleanupStoredObject(const std::string& hash) {
+        auto removed = storage_->remove(hash);
+        if (!removed) {
+            spdlog::warn("Failed to clean up partial store object {}: {}", hash,
+                         removed.error().message);
+        }
+    }
+
+    bool reconcileAmbiguousManifestStore(const std::string& manifestHash,
+                                         const std::vector<std::byte>& intendedBytes,
+                                         const Error& storeError) {
+        if (storeError.code != ErrorCode::NetworkError && storeError.code != ErrorCode::Timeout) {
+            return false;
+        }
+
+        auto retrieved = storage_->retrieve(manifestHash);
+        if (!retrieved) {
+            return false;
+        }
+
+        if (retrieved.value().size() != intendedBytes.size() ||
+            !std::equal(retrieved.value().begin(), retrieved.value().end(),
+                        intendedBytes.begin())) {
+            cleanupStoredObject(manifestHash);
+            return false;
+        }
+
+        spdlog::info("Reconciled ambiguous manifest store for {}", manifestHash);
+        return true;
     }
 };
 
