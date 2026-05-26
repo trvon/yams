@@ -1089,6 +1089,23 @@ TEST_CASE("URLBackend - PUT and DELETE retry retryable failures",
     }
 }
 
+TEST_CASE("URLBackend - HEAD exists with 2xx returns true", "[storage][backend][url][head]") {
+    LocalHttpServer server(
+        {LocalHttpServer::Response{.status = 200}, LocalHttpServer::Response{.status = 204}});
+
+    URLBackend backend;
+    BackendConfig config;
+    config.type = "http";
+    config.url = server.baseUrl();
+    config.maxRetries = 0;
+    config.requestTimeout = 2;
+    REQUIRE(backend.initialize(config).has_value());
+
+    CHECK(backend.exists("present").value());
+    CHECK(backend.exists("also-present").value());
+    CHECK(server.requestCount() == 2);
+}
+
 // =============================================================================
 // StorageBackendFactory - URL Parsing
 // =============================================================================
