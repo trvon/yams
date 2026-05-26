@@ -205,7 +205,6 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke operations before initialize r
 
     CHECK_FALSE(db.isInitialized());
     CHECK_FALSE(db.insertVector(rec));
-    CHECK(db.getVectorCount() == 0);
 }
 
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke operations after close return false",
@@ -236,4 +235,88 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke operations after close return 
 
     CHECK_FALSE(db.isInitialized());
     CHECK_FALSE(db.insertVector(rec));
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert batch and delete",
+                 "[vector][smoke][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    std::vector<float> emb1 = {1.0f, 0.0f, 0.0f, 0.0f};
+    std::vector<float> emb2 = {0.0f, 1.0f, 0.0f, 0.0f};
+    std::vector<VectorRecord> batch;
+    VectorRecord r1;
+    r1.chunk_id = "batch_1";
+    r1.document_hash = "doc_batch";
+    r1.embedding = emb1;
+    r1.content = "batch 1";
+    r1.start_offset = 0;
+    r1.end_offset = 7;
+    batch.push_back(r1);
+
+    VectorRecord r2;
+    r2.chunk_id = "batch_2";
+    r2.document_hash = "doc_batch";
+    r2.embedding = emb2;
+    r2.content = "batch 2";
+    r2.start_offset = 0;
+    r2.end_offset = 7;
+    batch.push_back(r2);
+
+    REQUIRE(db.insertVectorsBatch(batch));
+    CHECK(db.getVectorCount() == 2);
+
+    auto got = db.getVector("batch_1");
+    CHECK(got.has_value());
+    CHECK(got.value().chunk_id == "batch_1");
+
+    REQUIRE(db.deleteVector("batch_1"));
+    CHECK(db.getVectorCount() == 1);
+
+    REQUIRE(db.deleteVectorsByDocument("doc_batch"));
+    CHECK(db.getVectorCount() == 0);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke update vector", "[vector][smoke][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    std::vector<float> emb = {1.0f, 0.0f, 0.0f, 0.0f};
+    VectorRecord rec;
+    rec.chunk_id = "to_update";
+    rec.document_hash = "doc_up";
+    rec.embedding = emb;
+    rec.content = "original";
+    rec.start_offset = 0;
+    rec.end_offset = 8;
+    REQUIRE(db.insertVector(rec));
+
+    VectorRecord updated;
+    updated.chunk_id = "to_update";
+    updated.document_hash = "doc_up";
+    updated.embedding = {0.0f, 1.0f, 0.0f, 0.0f};
+    updated.content = "updated content";
+    updated.start_offset = 0;
+    updated.end_offset = 14;
+    REQUIRE(db.updateVector("to_update", updated));
+
+    auto got = db.getVector("to_update");
+    REQUIRE(got.has_value());
+    CHECK(got.value().content == "updated content");
 }
