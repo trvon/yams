@@ -242,10 +242,9 @@ tasks:
       export YAMS_CONAN_HOST_PROFILE=./conan/profiles/host-linux-gcc
       export YAMS_CONAN_ARCH=x86_64
 
-      # Explicit compiler paths prevent Conan/CMake from picking up ccache
-      # directly as the compiler (which breaks OpenBLAS ASM compilation)
-      export CC=/usr/bin/gcc
-      export CXX=/usr/bin/g++
+      # Avoid ccache environment wrapping in CI VMs — interferes with
+      # Conan/OpenBLAS ASM compilation (ccache doesn't handle -D flags)
+      export YAMS_SKIP_CCACHE=1
       
       # Configure FAST_MODE via extra Meson flags
       if [ "${FAST_MODE:-0}" = "1" ]; then
