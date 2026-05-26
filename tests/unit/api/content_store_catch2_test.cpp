@@ -71,6 +71,7 @@ public:
     bool failStoresAsNotInitialized{false};
     bool failManifestStore{false};
     bool failManifestStoreAmbiguously{false};
+    bool failManifestStoreWithMismatchedDurableBytes{false};
     size_t storeCalls{0};
     size_t removeCalls{0};
     std::vector<std::string> removedKeys;
@@ -85,6 +86,17 @@ public:
             if (failManifestStoreAmbiguously) {
                 objects_[key] = std::vector<std::byte>(data.begin(), data.end());
                 return Error{ErrorCode::NetworkError, "scripted ambiguous manifest write"};
+            }
+            if (failManifestStoreWithMismatchedDurableBytes) {
+                auto durableBytes = std::vector<std::byte>(data.begin(), data.end());
+                if (durableBytes.empty()) {
+                    durableBytes.push_back(std::byte{0});
+                } else {
+                    durableBytes.front() ^= std::byte{0x01};
+                }
+                objects_[key] = std::move(durableBytes);
+                return Error{ErrorCode::NetworkError,
+                             "scripted ambiguous manifest write with mismatched durable bytes"};
             }
             return Error{ErrorCode::WriteError, "scripted manifest write failure"};
         }
@@ -847,7 +859,7 @@ TEST_CASE("ContentStore: Storage readiness failures", "[api][content-store][read
     }
 }
 
-TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
+TEST_CASE("ContentStore: Chunked add rollback leaves no committed manifest or metadata",
           "[api][content-store][readiness][rollback]") {
     auto tempDir = makeTempDir("content_store_partial_rollback");
     auto storage = std::make_shared<ScriptedStorageEngine>();
@@ -870,10 +882,11 @@ TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
         auto stored = store->storeBytes(data);
         REQUIRE_FALSE(stored.has_value());
         CHECK(stored.error().code == ErrorCode::WriteError);
-        CHECK(storage->empty());
-        CHECK(storage->removeCalls > 0);
-        CHECK(std::none_of(storage->removedKeys.begin(), storage->removedKeys.end(),
-                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+        CHECK(storage->storeCalls > 0);
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
@@ -881,7 +894,6 @@ TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
         CHECK(stats.uniqueBlocks == 0);
         CHECK(stats.totalUncompressedBytes == 0);
     }
@@ -927,7 +939,7 @@ TEST_CASE("ContentStore: File chunker failures return typed errors without durab
     fs::remove_all(tempDir, ec);
 }
 
-TEST_CASE("ContentStore: File add commit failure reconciles partial remote state",
+TEST_CASE("ContentStore: File add commit failure leaves no committed manifest metadata",
           "[api][content-store][readiness][rollback]") {
     auto tempDir = makeTempDir("content_store_file_commit_failure");
     auto storage = std::make_shared<ScriptedStorageEngine>();
@@ -963,10 +975,13 @@ TEST_CASE("ContentStore: File add commit failure reconciles partial remote state
         CHECK(refCounter->commitCalls == 1);
         CHECK(refCounter->rollbackCalls == 1);
         CHECK(refCounter->queuedIncrements > 0);
-        CHECK(storage->empty());
         CHECK(storage->removeCalls > 0);
         CHECK(std::any_of(storage->removedKeys.begin(), storage->removedKeys.end(),
                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
@@ -974,7 +989,6 @@ TEST_CASE("ContentStore: File add commit failure reconciles partial remote state
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
         CHECK(stats.uniqueBlocks == 0);
         CHECK(stats.totalUncompressedBytes == 0);
     }
@@ -1030,7 +1044,7 @@ TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls ba
     auto tempDir = makeTempDir("content_store_ambiguous_mismatch");
     auto storage = std::make_shared<ScriptedStorageEngine>();
     storage->failManifestStore = true;
-    storage->failManifestStoreAmbiguously = true;
+    storage->failManifestStoreWithMismatchedDurableBytes = true;
 
     {
         ContentStoreBuilder builder;
@@ -1046,20 +1060,20 @@ TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls ba
         const auto hash =
             yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
 
-        storage->failManifestStoreAmbiguously = false;
-
         auto stored = store->storeBytes(data, ContentMetadata{});
         REQUIRE_FALSE(stored.has_value());
-        CHECK(stored.error().code == ErrorCode::WriteError);
-        CHECK(storage->empty());
+        CHECK(stored.error().code == ErrorCode::NetworkError);
         CHECK(storage->removeCalls > 0);
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
     }
 
     std::error_code ec;

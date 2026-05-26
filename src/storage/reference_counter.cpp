@@ -840,6 +840,7 @@ Result<void> ReferenceCounter::Transaction::commit() {
                 auto pruneStmt =
                     counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::PRUNE_REF_STMT, "");
                 for (const auto& hash : prunedHashes_) {
+                    pruneStmt.reset();
                     pruneStmt.bind(1, std::string_view{hash});
                     pruneStmt.execute();
                 }

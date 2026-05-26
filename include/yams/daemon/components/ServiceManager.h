@@ -10,6 +10,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -656,6 +657,29 @@ private:
                                          const char* contextLabel);
 
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
+
+    void setDatabasePhase(std::string_view phase);
+    void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
+    bool openDatabaseOnce(const std::filesystem::path& dbPath);
+    bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath);
+    void maybeAutoVacuumDatabase(const std::filesystem::path& dbPath);
+    bool openDatabaseBlocking(const std::filesystem::path& dbPath);
+
+    void stopBackgroundTaskManagerForShutdown();
+    void stopSessionWatcherForShutdown();
+    void
+    quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
+    void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
+    void clearCachedServiceState();
+    void shutdownModelProviderForShutdown();
+    void resetRetrievalSessionsForShutdown();
+    void unloadPluginsForShutdown();
+    void shutdownMetadataRepositoryForShutdown();
+    void shutdownRuntimeServices();
+    void releaseDatabaseBackedState();
+    void releaseRemainingServiceState();
+    void shutdownExtractedManagers();
+    void releasePluginInfrastructure();
 
     boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
                                                  int timeout_ms, yams::compat::stop_token token);

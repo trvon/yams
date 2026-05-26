@@ -70,7 +70,9 @@ private:
 };
 
 struct TopologySearchFixture {
-    TopologySearchFixture() {
+    TopologySearchFixture()
+        : disableVectors("YAMS_DISABLE_VECTORS", std::optional<std::string>("0")),
+          skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::optional<std::string>("0")) {
         dbPath = tempDbPath("search_topology_");
         ConnectionPoolConfig poolConfig;
         poolConfig.minConnections = 1;
@@ -136,6 +138,8 @@ struct TopologySearchFixture {
         REQUIRE(vectorDb->insertVector(record));
     }
 
+    yams::test::ScopedEnvVar disableVectors;
+    yams::test::ScopedEnvVar skipVecInit;
     std::filesystem::path dbPath;
     std::unique_ptr<ConnectionPool> pool;
     std::shared_ptr<MetadataRepository> repo;
@@ -147,11 +151,6 @@ struct TopologySearchFixture {
 
 TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
           "[search][topology][catch2]") {
-    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
-                                            std::optional<std::string>("0"));
-    yams::test::ScopedEnvVar skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
-                                         std::optional<std::string>("0"));
-
     TopologySearchFixture fix;
     fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
     fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
