@@ -2,6 +2,7 @@
 
 #include <yams/crypto/hasher.h>
 #include <yams/integrity/chunk_validator.h>
+#include <yams/manifest/manifest_manager.h>
 
 #include <cstring>
 #include <string>
@@ -85,4 +86,76 @@ TEST_CASE("ChunkValidator configuration", "[integrity][chunk-validator]") {
         CHECK(currentCfg.maxParallelValidations == 2);
         CHECK_FALSE(currentCfg.failOnFirstError);
     }
+}
+
+TEST_CASE("ChunkValidator validates manifest with valid chunks", "[integrity][chunk-validator]") {
+    ChunkValidationConfig cfg;
+    cfg.maxParallelValidations = 4;
+    ChunkValidator validator(cfg);
+
+    auto hasher = yams::crypto::createSHA256Hasher();
+    std::string data1 = "chunk one data";
+    std::string data2 = "chunk two is longer";
+    auto bytes1 = toBytes(data1);
+    auto bytes2 = toBytes(data2);
+
+    std::string hash1 = hasher->hash(std::span<const std::byte>(bytes1.data(), bytes1.size()));
+    std::string hash2 = hasher->hash(std::span<const std::byte>(bytes2.data(), bytes2.size()));
+
+    yams::manifest::Manifest manifest;
+    manifest.fileHash = hasher->hash(std::span<const std::byte>(bytes1.data(), bytes1.size()));
+    manifest.fileSize = data1.size() + data2.size();
+    manifest.chunks.push_back(
+        {.hash = hash1, .offset = 0, .size = static_cast<uint32_t>(data1.size())});
+    manifest.chunks.push_back({.hash = hash2,
+                               .offset = static_cast<uint64_t>(data1.size()),
+                               .size = static_cast<uint32_t>(data2.size())});
+
+    auto chunkProvider = [&](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+        if (hash == hash1)
+            return bytes1;
+        if (hash == hash2)
+            return bytes2;
+        return yams::Error{yams::ErrorCode::ChunkNotFound, "no such chunk"};
+    };
+
+    auto report = validator.validateManifest(manifest, chunkProvider);
+    CHECK(report.overallSuccess);
+    CHECK(report.validChunks == 2);
+    CHECK(report.invalidChunks == 0);
+    CHECK(report.failures.empty());
+}
+
+TEST_CASE("ChunkValidator detects invalid chunk in manifest", "[integrity][chunk-validator]") {
+    ChunkValidationConfig cfg;
+    cfg.failOnFirstError = true;
+    ChunkValidator validator(cfg);
+
+    auto hasher = yams::crypto::createSHA256Hasher();
+    std::string goodData = "good chunk";
+    std::string badData = "bad chunk data";
+    auto goodBytes = toBytes(goodData);
+    auto badBytes = toBytes(badData);
+
+    std::string goodHash =
+        hasher->hash(std::span<const std::byte>(goodBytes.data(), goodBytes.size()));
+
+    yams::manifest::Manifest manifest;
+    manifest.fileHash = goodHash;
+    manifest.fileSize = goodData.size() + badData.size();
+    manifest.chunks.push_back(
+        {.hash = goodHash, .offset = 0, .size = static_cast<uint32_t>(goodData.size())});
+    manifest.chunks.push_back({.hash = "wrong-hash-for-bad-chunk",
+                               .offset = static_cast<uint64_t>(goodData.size()),
+                               .size = static_cast<uint32_t>(badData.size())});
+
+    auto chunkProvider = [&](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+        if (hash == goodHash)
+            return goodBytes;
+        return badBytes;
+    };
+
+    auto report = validator.validateManifest(manifest, chunkProvider);
+    CHECK_FALSE(report.overallSuccess);
+    CHECK(report.invalidChunks > 0);
 }
