@@ -1352,6 +1352,7 @@ if catch2_dep.found()
       'unit/cli/vector_db_util_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
       'unit/cli/time_parser_catch2_test.cpp',
+      'unit/cli/version_generated_header_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
