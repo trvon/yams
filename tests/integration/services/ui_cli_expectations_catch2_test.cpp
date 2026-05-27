@@ -1363,11 +1363,16 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: filename path queries prefer 
     opts.recursive = true;
     opts.noEmbeddings = true;
     REQUIRE(ing.addViaDaemon(opts));
-    std::this_thread::sleep_for(200ms);
 
     auto* sm = serviceManager();
     REQUIRE(sm != nullptr);
     auto ctx = sm->getAppContext();
+    REQUIRE(waitForDocumentByExactPath(
+                *ctx.metadataRepo, root() / "ingest" / ".github" / "workflows" / "ci.yml", 10000ms)
+                .has_value());
+    REQUIRE(waitForDocumentByExactPath(*ctx.metadataRepo, root() / "ingest" / "src" / "build.md",
+                                       10000ms)
+                .has_value());
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
     SECTION("ci.yml resolves through path-oriented search") {
