@@ -11,8 +11,8 @@
     YAMS_BENCH_CORPUS_SIZE=N          - Number of documents to generate (default: 50)
     YAMS_BENCH_NUM_QUERIES=N          - Number of test queries (default: 10)
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
-    YAMS_BENCH_DATASET=<name>         - Use BEIR dataset (default: synthetic)
-    YAMS_BENCH_DATASET_PATH=...       - Path to dataset directory
+    YAMS_BENCH_DATASET=<name>         - Use synthetic, BEIR, or local-manifest dataset
+    YAMS_BENCH_DATASET_PATH=...       - Path to BEIR directory or benchmark_manifest.json root
     YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Enable opt-in topology weak-query routing
     YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
     YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
@@ -44,6 +44,12 @@
   https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/cqadupstack.zip unzip
   cqadupstack.zip YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=cqadupstack
   ./builddir/tests/benchmarks/retrieval_quality_bench
+
+  Example (repo fixture / local manifest):
+    YAMS_TEST_SAFE_SINGLE_INSTANCE=1 \
+    YAMS_BENCH_DATASET=local-manifest \
+    YAMS_BENCH_DATASET_PATH=tests/benchmarks/data/retrieval_manifest_mini \
+    ./builddir/tests/benchmarks/retrieval_quality_bench --benchmark_filter=BM_RetrievalQuality
 */
 
 #include <sqlite3.h>
@@ -51,7 +57,7 @@
 #include <spdlog/spdlog.h>
 #include <benchmark/benchmark.h>
 
-#include "tests/benchmarks/beir_loader.h"
+#include "retrieval_benchmark_support.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
@@ -332,9 +338,15 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
     }
 }
 
+using yams::bench::BEIRCorpusLoader;
 using yams::bench::BEIRDataset;
 using yams::bench::BEIRDocument;
 using yams::bench::BEIRQuery;
+using yams::bench::CorpusGenerator;
+using yams::bench::RetrievalMetrics;
+using yams::bench::StageMetricAccumulator;
+using yams::bench::SyntheticCorpusMode;
+using yams::bench::TestQuery;
 
 static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
     const char* home = std::getenv("HOME");
@@ -436,6 +448,9 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
 // Generic BEIR dataset loader — delegates to yams::bench::loadBEIRDataset.
 static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
                                            const fs::path& cacheDir) {
+    if (datasetName == "local-manifest") {
+        return yams::bench::loadBenchmarkManifestDataset(datasetName, cacheDir);
+    }
     return yams::bench::loadBEIRDataset(datasetName, cacheDir);
 }
 
@@ -527,173 +542,6 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
 }
 
 using yams::test::DaemonHarness;
-
-struct TestQuery {
-    std::string query;
-    std::set<std::string> relevantFiles;
-    std::set<std::string> relevantDocIds;
-    std::map<std::string, int> relevanceGrades;
-    bool useDocIds = false;
-};
-
-enum class SyntheticCorpusMode { Generic, CommunityGraph };
-
-struct CorpusGenerator {
-    std::vector<std::string> topics = {"authentication", "database", "network", "parsing",
-                                       "encryption",     "testing",  "logging", "storage"};
-    std::vector<std::string> terms = {"user",       "password", "token",    "session",
-                                      "connection", "request",  "response", "cache",
-                                      "error",      "file",     "data"};
-    fs::path corpusDir;
-    std::vector<std::string> createdFiles;
-    std::mt19937 rng{42};
-    SyntheticCorpusMode mode = SyntheticCorpusMode::Generic;
-
-    CorpusGenerator(const fs::path& dir,
-                    SyntheticCorpusMode corpusMode = SyntheticCorpusMode::Generic)
-        : corpusDir(dir), mode(corpusMode) {
-        yams::common::ensureDirectories(corpusDir);
-    }
-
-    void generateDocuments(int count) {
-        if (mode == SyntheticCorpusMode::CommunityGraph) {
-            createdFiles.clear();
-
-            struct CommunityDocSpec {
-                const char* filename;
-                const char* content;
-            };
-
-            static constexpr CommunityDocSpec kCommunityDocs[] = {
-                {"community_target.txt", "Target note\n\nalpha rival target evidence\n"},
-                {"community_partner.txt", "Partner note\n\nalpha companion evidence\n"},
-                {"community_rival.txt", "Rival alpha note\n\nalpha rival alpha rival evidence\n"},
-            };
-
-            for (const auto& doc : kCommunityDocs) {
-                std::ofstream(corpusDir / doc.filename) << doc.content;
-                createdFiles.push_back(doc.filename);
-            }
-            return;
-        }
-
-        std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
-        std::uniform_int_distribution<int> termDist(0, static_cast<int>(terms.size()) - 1);
-        for (int i = 0; i < count; ++i) {
-            std::string topicName = topics[topicDist(rng)];
-            std::string content = "This document covers " + topicName + " functionality.\nThe " +
-                                  topicName + " system handles ";
-            for (int t = 0; t < 10; ++t)
-                content += terms[termDist(rng)] + " ";
-            content += "\nImplementation of " + topicName + " requires careful design.\n";
-            std::string filename = topicName + "_" + std::to_string(i) + ".txt";
-            std::ofstream(corpusDir / filename) << content;
-            createdFiles.push_back(filename);
-        }
-    }
-
-    std::vector<TestQuery> generateQueries(int numQueries) {
-        if (mode == SyntheticCorpusMode::CommunityGraph) {
-            std::vector<TestQuery> queries;
-            const int repeatedQueries = std::max(1, numQueries);
-            for (int i = 0; i < repeatedQueries; ++i) {
-                TestQuery tq;
-                tq.query = "alpha rival";
-                tq.useDocIds = true;
-                tq.relevantDocIds.insert("community_target");
-                tq.relevanceGrades["community_target"] = 3;
-                queries.push_back(std::move(tq));
-            }
-            return queries;
-        }
-
-        std::vector<TestQuery> queries;
-        std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
-        for (int q = 0; q < numQueries; ++q) {
-            std::string topic = topics[topicDist(rng)];
-            TestQuery tq;
-            tq.query = topic + " system";
-            for (const auto& filename : createdFiles) {
-                if (filename.find(topic) != std::string::npos) {
-                    tq.relevantFiles.insert(filename);
-                    tq.relevanceGrades[filename] = (filename.find(topic) == 0) ? 3 : 2;
-                }
-            }
-            if (!tq.relevantFiles.empty())
-                queries.push_back(tq);
-        }
-        return queries;
-    }
-};
-
-struct BEIRCorpusLoader {
-    BEIRDataset dataset;
-    fs::path corpusDir;
-    std::map<std::string, std::string> docIdToHash;
-
-    BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir) : dataset(ds), corpusDir(dir) {}
-
-    void writeDocumentsAsFiles() {
-        yams::common::ensureDirectories(corpusDir);
-        for (const auto& [id, doc] : dataset.documents) {
-            fs::path filePath = corpusDir / (id + ".txt");
-            std::ofstream outFile(filePath);
-            if (doc.title.empty()) {
-                outFile << doc.text;
-            } else {
-                outFile << doc.title << "\n\n" << doc.text;
-            }
-            outFile.close();
-            docIdToHash[id] = filePath.string();
-        }
-        spdlog::info("Wrote {} documents to {}", dataset.documents.size(), corpusDir.string());
-    }
-
-    std::vector<TestQuery> generateTestQueries() {
-        std::vector<TestQuery> testQueries;
-        for (const auto& [queryId, query] : dataset.queries) {
-            TestQuery tq;
-            tq.query = query.text;
-            tq.useDocIds = true;
-
-            auto range = dataset.qrels.equal_range(queryId);
-            for (auto it = range.first; it != range.second; ++it) {
-                const auto& [docId, score] = it->second;
-                tq.relevantDocIds.insert(docId);
-                tq.relevanceGrades[docId] = score;
-            }
-
-            if (!tq.relevantDocIds.empty()) {
-                testQueries.push_back(tq);
-            }
-        }
-        spdlog::info("Generated {} test queries from BEIR dataset", testQueries.size());
-        return testQueries;
-    }
-
-    std::vector<std::string> getDocumentPaths() const {
-        std::vector<std::string> paths;
-        for (const auto& [id, doc] : dataset.documents) {
-            paths.push_back((corpusDir / (id + ".txt")).string());
-        }
-        return paths;
-    }
-};
-
-struct RetrievalMetrics {
-    double mrr = 0.0, recallAtK = 0.0, precisionAtK = 0.0, ndcgAtK = 0.0, map = 0.0;
-    double duplicateRateAtK = 0.0;
-    int numQueries = 0;
-};
-
-struct StageMetricAccumulator {
-    double totalMRR = 0.0;
-    double totalRecall = 0.0;
-    double totalPrecision = 0.0;
-    double totalNDCG = 0.0;
-    double totalMAP = 0.0;
-    std::uint64_t queryCount = 0;
-};
 
 struct QueryDiagnosticsSummary {
     std::uint64_t queryCount = 0;
@@ -1224,51 +1072,6 @@ static json summarizeSamples(const std::vector<double>& samples) {
     out["p50"] = computePercentile(samples, 0.50);
     out["p95"] = computePercentile(samples, 0.95);
     out["max"] = *std::max_element(samples.begin(), samples.end());
-    return out;
-}
-
-static RetrievalMetrics finalizeStageMetrics(const StageMetricAccumulator& acc) {
-    RetrievalMetrics metrics;
-    metrics.numQueries = static_cast<int>(acc.queryCount);
-    if (acc.queryCount == 0) {
-        return metrics;
-    }
-
-    const double count = static_cast<double>(acc.queryCount);
-    metrics.mrr = acc.totalMRR / count;
-    metrics.recallAtK = acc.totalRecall / count;
-    metrics.precisionAtK = acc.totalPrecision / count;
-    metrics.ndcgAtK = acc.totalNDCG / count;
-    metrics.map = acc.totalMAP / count;
-    return metrics;
-}
-
-static json
-stageRetrievalMetricsToJson(const std::map<std::string, StageMetricAccumulator>& stageMetrics) {
-    json out = json::object();
-    if (stageMetrics.empty()) {
-        return out;
-    }
-
-    std::optional<RetrievalMetrics> finalMetrics;
-    if (auto finalIt = stageMetrics.find("final"); finalIt != stageMetrics.end()) {
-        finalMetrics = finalizeStageMetrics(finalIt->second);
-    }
-
-    for (const auto& [stage, acc] : stageMetrics) {
-        const auto metrics = finalizeStageMetrics(acc);
-        json item = {
-            {"num_queries", metrics.numQueries}, {"mrr", metrics.mrr},
-            {"recall_at_k", metrics.recallAtK},  {"precision_at_k", metrics.precisionAtK},
-            {"ndcg_at_k", metrics.ndcgAtK},      {"map", metrics.map},
-        };
-        if (finalMetrics.has_value()) {
-            item["mrr_delta_vs_final"] = metrics.mrr - finalMetrics->mrr;
-            item["recall_delta_vs_final"] = metrics.recallAtK - finalMetrics->recallAtK;
-            item["ndcg_delta_vs_final"] = metrics.ndcgAtK - finalMetrics->ndcgAtK;
-        }
-        out[stage] = std::move(item);
-    }
     return out;
 }
 
@@ -1803,7 +1606,7 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"turboquant_packed_candidates_scored",
          summarizeSamples(summary.turboQuantPackedCandidatesScoredSamples)},
         {"turboquant_skip_reasons", summary.turboQuantSkipReasonCounts},
-        {"stage_metrics", stageRetrievalMetricsToJson(summary.stageRetrievalMetrics)},
+        {"stage_metrics", yams::bench::stageRetrievalMetricsToJson(summary.stageRetrievalMetrics)},
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
@@ -1999,6 +1802,7 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 // Store final metrics globally for summary after teardown
 static RetrievalMetrics g_final_metrics;
 static RetrievalMetrics g_keyword_metrics; // FTS5-only metrics for component isolation
+static RetrievalMetrics g_grep_metrics;    // grep literal baseline for exact retrieval comparison
 static QueryDiagnosticsSummary g_final_hybrid_diagnostics;
 static QueryDiagnosticsSummary g_final_keyword_diagnostics;
 
@@ -4497,97 +4301,9 @@ static std::chrono::milliseconds defaultBenchQueryTimeout(const std::string& sea
     return std::chrono::milliseconds{20000};
 }
 
-double computeDCG(const std::vector<int>& grades, int k) {
-    double dcg = 0.0;
-    for (int i = 0; i < std::min(k, (int)grades.size()); ++i) {
-        dcg += (std::pow(2.0, grades[i]) - 1.0) / std::log2(i + 2.0);
-    }
-    return dcg;
-}
-
-double computeIDCG(std::vector<int> grades, int k) {
-    std::sort(grades.begin(), grades.end(), std::greater<int>());
-    return computeDCG(grades, k);
-}
-
-static bool isRelevantDocForQuery(const TestQuery& tq, const std::string& docId) {
-    if (docId.empty()) {
-        return false;
-    }
-    if (tq.useDocIds) {
-        return tq.relevantDocIds.count(docId) > 0;
-    }
-    return tq.relevantFiles.count(docId) > 0 || tq.relevantFiles.count(docId + ".txt") > 0;
-}
-
-static int relevanceGradeForQuery(const TestQuery& tq, const std::string& docId) {
-    if (auto it = tq.relevanceGrades.find(docId); it != tq.relevanceGrades.end()) {
-        return it->second;
-    }
-    if (!tq.useDocIds) {
-        if (auto it = tq.relevanceGrades.find(docId + ".txt"); it != tq.relevanceGrades.end()) {
-            return it->second;
-        }
-    }
-    return 0;
-}
-
-static void addStageMetricSample(StageMetricAccumulator& acc,
-                                 const std::vector<std::string>& rankedDocIds, const TestQuery& tq,
-                                 const std::vector<int>& allGrades, int k) {
-    acc.queryCount++;
-
-    int firstRelevantRank = -1;
-    int numRelevantInTopK = 0;
-    int numRelevantSeen = 0;
-    double avgPrecision = 0.0;
-    std::vector<int> retrievedGrades;
-    std::unordered_set<std::string> seenDocIds;
-    const size_t metricK = static_cast<size_t>(std::max(0, k));
-    retrievedGrades.reserve(std::min<std::size_t>(metricK, rankedDocIds.size()));
-    seenDocIds.reserve(std::min<std::size_t>(metricK, rankedDocIds.size()));
-
-    const size_t topK = std::min<std::size_t>(metricK, rankedDocIds.size());
-    for (size_t i = 0; i < topK; ++i) {
-        const auto& docId = rankedDocIds[i];
-        const bool isDuplicate = !seenDocIds.insert(docId).second;
-        const bool isRelevant = !isDuplicate && isRelevantDocForQuery(tq, docId);
-        if (isRelevant) {
-            numRelevantInTopK++;
-            if (firstRelevantRank < 0) {
-                firstRelevantRank = static_cast<int>(i + 1);
-            }
-            numRelevantSeen++;
-            avgPrecision += static_cast<double>(numRelevantSeen) / static_cast<double>(i + 1);
-        }
-        retrievedGrades.push_back(isDuplicate ? 0 : relevanceGradeForQuery(tq, docId));
-    }
-
-    if (firstRelevantRank > 0) {
-        acc.totalMRR += 1.0 / static_cast<double>(firstRelevantRank);
-    }
-
-    const auto relevantTotal = tq.useDocIds ? tq.relevantDocIds.size() : tq.relevantFiles.size();
-    if (relevantTotal > 0) {
-        acc.totalRecall +=
-            static_cast<double>(numRelevantInTopK) / static_cast<double>(relevantTotal);
-    }
-    if (topK > 0) {
-        acc.totalPrecision += static_cast<double>(numRelevantInTopK) / static_cast<double>(topK);
-    }
-    if (numRelevantSeen > 0) {
-        acc.totalMAP += avgPrecision / static_cast<double>(numRelevantSeen);
-    }
-
-    const double dcg = computeDCG(retrievedGrades, k);
-    const double idcg = computeIDCG(allGrades, k);
-    acc.totalNDCG += (idcg > 0.0) ? dcg / idcg : 0.0;
-}
-
 static void ingestStageRetrievalMetrics(QueryDiagnosticsSummary& summary,
                                         const std::map<std::string, std::string>& searchStats,
-                                        const TestQuery& tq, const std::vector<int>& allGrades,
-                                        int k) {
+                                        const TestQuery& tq, int k) {
     static const std::vector<std::pair<std::string, std::string>> kStageDocIdStats = {
         {"pre_fusion", "trace_pre_fusion_doc_ids"},
         {"graphless_post_fusion", "trace_graphless_post_fusion_doc_ids"},
@@ -4602,7 +4318,8 @@ static void ingestStageRetrievalMetrics(QueryDiagnosticsSummary& summary,
             continue;
         }
         auto rankedDocIds = splitTabList(it->second, static_cast<size_t>(std::max(0, k)));
-        addStageMetricSample(summary.stageRetrievalMetrics[stage], rankedDocIds, tq, allGrades, k);
+        yams::bench::addStageMetricSample(summary.stageRetrievalMetrics[stage], rankedDocIds, tq,
+                                          k);
     }
 }
 
@@ -4720,12 +4437,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             spdlog::debug("  [{}] Expected relevant: {} docs", searchType,
                           tq.relevantDocIds.size());
             for (size_t i = 0; i < std::min((size_t)5, results.size()); ++i) {
-                std::string filename = fs::path(results[i].path).filename().string();
-                std::string docId = filename;
-                if (docId.size() > 4 && docId.compare(docId.size() - 4, 4, ".txt") == 0) {
-                    docId.resize(docId.size() - 4);
-                }
-                bool relevant = tq.relevantDocIds.count(docId) > 0;
+                const std::string filename = fs::path(results[i].path).filename().string();
+                const std::string docId = yams::bench::canonicalResultDocId(tq, filename);
+                const bool relevant = yams::bench::isRelevantDocForQuery(tq, docId);
                 spdlog::debug("  [{}] Result {}: path='{}' docId='{}' score={:.4f} {}", searchType,
                               i, results[i].path, docId, results[i].score,
                               relevant ? "RELEVANT" : "");
@@ -4757,66 +4471,25 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                     std::chrono::duration_cast<std::chrono::milliseconds>(opts.timeout).count()));
         }
 
-        int firstRelevantRank = -1, numRelevantInTopK = 0, numRelevantSeen = 0;
-        std::vector<int> retrievedGrades;
-        double avgPrecision = 0.0;
-        bool hadTopKDuplicate = false;
-        std::unordered_set<std::string> seenTopKDocIds;
-        seenTopKDocIds.reserve(std::min((size_t)k, results.size()));
-
         for (size_t i = 0; i < std::min((size_t)k, results.size()); ++i) {
             debugEntry.returnedPaths.push_back(results[i].path);
             debugEntry.returnedScores.push_back(static_cast<float>(results[i].score));
 
-            std::string filename = fs::path(results[i].path).filename().string();
-            bool isRelevant = false;
-            std::string key;
-
-            if (tq.useDocIds) {
-                std::string docId = filename;
-                if (docId.size() > 4 && docId.compare(docId.size() - 4, 4, ".txt") == 0) {
-                    docId.resize(docId.size() - 4);
-                }
-                debugEntry.returnedDocIds.push_back(docId);
-                key = docId;
-                isRelevant = tq.relevantDocIds.count(docId) > 0;
-            } else {
-                debugEntry.returnedDocIds.push_back(filename);
-                key = filename;
-                isRelevant = tq.relevantFiles.count(filename) > 0;
-            }
-
+            const std::string filename = fs::path(results[i].path).filename().string();
+            debugEntry.returnedDocIds.push_back(yams::bench::canonicalResultDocId(tq, filename));
             totalTopKCount++;
-            const bool isDuplicate = !seenTopKDocIds.insert(key).second;
-            if (isDuplicate) {
-                hadTopKDuplicate = true;
-                duplicateTopKCount++;
-                debugEntry.diagnostics.push_back("duplicate_topk_doc=" + key);
-            }
+        }
 
-            if (isRelevant && !isDuplicate) {
-                numRelevantInTopK++;
-                if (firstRelevantRank < 0)
-                    firstRelevantRank = i + 1;
-                numRelevantSeen++;
-                avgPrecision += (double)numRelevantSeen / (i + 1);
-            }
-            auto gradeIt = tq.relevanceGrades.find(key);
-            auto grade =
-                (!isDuplicate && gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0;
-            retrievedGrades.push_back(grade);
-            debugEntry.returnedGrades.push_back(grade);
+        const auto scoreSample = yams::bench::scoreRankedDocIds(tq, debugEntry.returnedDocIds, k);
+        debugEntry.returnedGrades = scoreSample.retrievedGrades;
+        for (const auto& docId : scoreSample.duplicateDocIds) {
+            duplicateTopKCount++;
+            debugEntry.diagnostics.push_back("duplicate_topk_doc=" + docId);
         }
 
         const json relevantDecisionTrace = buildRelevantDecisionTrace(
             debugEntry.relevantDocIds, debugEntry.returnedDocIds, debugEntry.searchStats);
         debugEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
-
-        std::vector<int> allGrades;
-        allGrades.reserve(tq.relevanceGrades.size());
-        for (const auto& [fn, grade] : tq.relevanceGrades) {
-            allGrades.push_back(grade);
-        }
 
         if (benchDiagEnabled && results.empty() && tq.useDocIds && !tq.relevantDocIds.empty()) {
             // Opt-in diagnostic: show a snippet of the relevant BEIR doc file(s).
@@ -4924,29 +4597,16 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         if (diagnostics) {
             ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats,
-                                   relevantDecisionTrace, false, !results.empty(), hadTopKDuplicate,
-                                   firstRelevantRank);
-            ingestStageRetrievalMetrics(*diagnostics, run.value().response.searchStats, tq,
-                                        allGrades, k);
+                                   relevantDecisionTrace, false, !results.empty(),
+                                   scoreSample.hadDuplicateInTopK, scoreSample.firstRelevantRank);
+            ingestStageRetrievalMetrics(*diagnostics, run.value().response.searchStats, tq, k);
         }
 
-        if (firstRelevantRank > 0)
-            totalMRR += 1.0 / firstRelevantRank;
-        if (tq.useDocIds) {
-            if (tq.relevantDocIds.size() > 0)
-                totalRecall += (double)numRelevantInTopK / tq.relevantDocIds.size();
-        } else {
-            if (tq.relevantFiles.size() > 0)
-                totalRecall += (double)numRelevantInTopK / tq.relevantFiles.size();
-        }
-        if (results.size() > 0)
-            totalPrecision += (double)numRelevantInTopK / std::min((size_t)k, results.size());
-        if (numRelevantSeen > 0)
-            totalMAP += avgPrecision / numRelevantSeen;
-
-        double dcg = computeDCG(retrievedGrades, k);
-        double idcg = computeIDCG(allGrades, k);
-        totalNDCG += (idcg > 0.0) ? dcg / idcg : 0.0;
+        totalMRR += scoreSample.reciprocalRank;
+        totalRecall += scoreSample.recallAtK;
+        totalPrecision += scoreSample.precisionAtK;
+        totalMAP += scoreSample.averagePrecision;
+        totalNDCG += scoreSample.ndcgAtK;
     }
 
     if (metrics.numQueries > 0) {
@@ -4966,6 +4626,79 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                      static_cast<double>(totalAttempts) / metrics.numQueries, streamingCount,
                      fuzzyRetryCount, literalRetryCount, metrics.duplicateRateAtK);
     }
+    return metrics;
+}
+
+RetrievalMetrics evaluateGrepQueries(yams::daemon::DaemonClient& client,
+                                     const std::vector<TestQuery>& queries, int k) {
+    RetrievalMetrics metrics;
+    metrics.numQueries = static_cast<int>(queries.size());
+
+    double totalMRR = 0.0;
+    double totalRecall = 0.0;
+    double totalPrecision = 0.0;
+    double totalNDCG = 0.0;
+    double totalMAP = 0.0;
+    std::uint64_t totalTopKCount = 0;
+    std::uint64_t duplicateTopKCount = 0;
+
+    for (const auto& tq : queries) {
+        yams::daemon::GrepRequest req;
+        req.pattern = tq.query;
+        req.literalText = true;
+        req.pathsOnly = true;
+        req.maxMatches = 1;
+        req.useSession = false;
+
+        std::chrono::milliseconds queryTimeout = defaultBenchQueryTimeout("grep");
+        if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+            queryTimeout = std::chrono::milliseconds{
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+        }
+        auto waitBudget = queryTimeout + std::chrono::seconds(10);
+        if (waitBudget < std::chrono::seconds(10)) {
+            waitBudget = std::chrono::seconds(10);
+        }
+
+        auto run = benchRunSync(client.grep(req), waitBudget);
+        if (!run) {
+            spdlog::warn("Grep failed for query '{}': {}", tq.query, run.error().message);
+            continue;
+        }
+
+        std::vector<std::string> rankedDocIds;
+        rankedDocIds.reserve(std::min<std::size_t>(static_cast<std::size_t>(std::max(0, k)),
+                                                   run.value().pathsOnly.size()));
+        for (size_t i = 0; i < std::min<std::size_t>(static_cast<std::size_t>(std::max(0, k)),
+                                                     run.value().pathsOnly.size());
+             ++i) {
+            const std::string filename = fs::path(run.value().pathsOnly[i]).filename().string();
+            rankedDocIds.push_back(yams::bench::canonicalResultDocId(tq, filename));
+            totalTopKCount++;
+        }
+
+        const auto scoreSample = yams::bench::scoreRankedDocIds(tq, rankedDocIds, k);
+        duplicateTopKCount += scoreSample.duplicateDocIds.size();
+        totalMRR += scoreSample.reciprocalRank;
+        totalRecall += scoreSample.recallAtK;
+        totalPrecision += scoreSample.precisionAtK;
+        totalMAP += scoreSample.averagePrecision;
+        totalNDCG += scoreSample.ndcgAtK;
+    }
+
+    if (metrics.numQueries > 0) {
+        const double queryCount = static_cast<double>(metrics.numQueries);
+        metrics.mrr = totalMRR / queryCount;
+        metrics.recallAtK = totalRecall / queryCount;
+        metrics.precisionAtK = totalPrecision / queryCount;
+        metrics.ndcgAtK = totalNDCG / queryCount;
+        metrics.map = totalMAP / queryCount;
+        if (totalTopKCount > 0) {
+            metrics.duplicateRateAtK =
+                static_cast<double>(duplicateTopKCount) / static_cast<double>(totalTopKCount);
+        }
+    }
+
     return metrics;
 }
 
@@ -4989,6 +4722,20 @@ struct BenchFixture {
 
     bool useSyntheticCommunityCorpus() const {
         return syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph;
+    }
+
+    std::string datasetDisplayName() const {
+        if (useBEIR) {
+            return beirDatasetName == "local-manifest" ? std::string("local manifest")
+                                                       : beirDatasetName + " BEIR";
+        }
+        if (syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph) {
+            return "synthetic-community";
+        }
+        if (syntheticCorpusMode == SyntheticCorpusMode::HardLexical) {
+            return "synthetic-hard";
+        }
+        return datasetName;
     }
 
     bool benchmarkSemanticNeighborSeedingEnabled() const {
@@ -5412,9 +5159,9 @@ struct BenchFixture {
             // Supported BEIR datasets from
             // https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
             static const std::set<std::string> SUPPORTED_BEIR_DATASETS = {
-                "scifact",        "nfcorpus",    "arguana",     "scidocs",      "fiqa",
-                "quora",          "cqadupstack", "hotpotqa",    "fever",        "climate-fever",
-                "dbpedia-entity", "trec-covid",  "touche-2020", "longmemeval_s"};
+                "scifact",        "nfcorpus",    "arguana",     "scidocs",       "fiqa",
+                "quora",          "cqadupstack", "hotpotqa",    "fever",         "climate-fever",
+                "dbpedia-entity", "trec-covid",  "touche-2020", "longmemeval_s", "local-manifest"};
             if (SUPPORTED_BEIR_DATASETS.count(requestedDatasetName) > 0) {
                 useBEIR = true;
                 beirDatasetName = requestedDatasetName;
@@ -5427,21 +5174,25 @@ struct BenchFixture {
                 if (forcedOverride && std::strlen(forcedOverride) > 0) {
                     spdlog::info(
                         "Will set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE "
-                        "for BEIR benchmark ({})",
+                        "for dataset-backed benchmark ({})",
                         forcedOverride, requestedDatasetName);
                 } else if (existingOverride && std::strlen(existingOverride) > 0) {
-                    spdlog::info("Using pre-set YAMS_TUNING_OVERRIDE={} for BEIR benchmark ({})",
-                                 existingOverride, requestedDatasetName);
+                    spdlog::info(
+                        "Using pre-set YAMS_TUNING_OVERRIDE={} for dataset-backed benchmark ({})",
+                        existingOverride, requestedDatasetName);
                 } else {
-                    spdlog::info("Using SearchTuner auto mode for BEIR benchmark ({})",
+                    spdlog::info("Using SearchTuner auto mode for dataset-backed benchmark ({})",
                                  requestedDatasetName);
                 }
             } else if (requestedDatasetName == "synthetic-community") {
                 datasetName = requestedDatasetName;
                 syntheticCorpusMode = SyntheticCorpusMode::CommunityGraph;
+            } else if (requestedDatasetName == "synthetic-hard") {
+                datasetName = requestedDatasetName;
+                syntheticCorpusMode = SyntheticCorpusMode::HardLexical;
             } else {
                 spdlog::warn("Unknown dataset '{}', using synthetic. Supported: scifact, "
-                             "cqadupstack, nfcorpus, etc.",
+                             "cqadupstack, nfcorpus, synthetic-hard, local-manifest, etc.",
                              requestedDatasetName);
             }
         }
@@ -5499,8 +5250,7 @@ struct BenchFixture {
         const std::optional<int> queryLimit = optionalPositiveInt(env_queries);
 
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
-                     useBEIR ? beirDatasetName + " BEIR" : datasetName, corpusSize, numQueries,
-                     topK);
+                     datasetDisplayName(), corpusSize, numQueries, topK);
 
         // PBI-05b: Create summary log file for important embedding metrics
         fs::path summaryLogPath = fs::temp_directory_path() / "yams_bench_summary.log";
@@ -5510,8 +5260,7 @@ struct BenchFixture {
             auto time_t_now = std::chrono::system_clock::to_time_t(now);
             summaryLog << "=== YAMS Retrieval Quality Benchmark ===" << std::endl;
             summaryLog << "Started: " << std::ctime(&time_t_now);
-            summaryLog << "Dataset: " << (useBEIR ? beirDatasetName + " BEIR" : datasetName)
-                       << std::endl;
+            summaryLog << "Dataset: " << datasetDisplayName() << std::endl;
             summaryLog << "Corpus size: " << corpusSize << std::endl;
             summaryLog << "Num queries: " << numQueries << std::endl;
             summaryLog << "Top K: " << topK << std::endl;
@@ -8181,8 +7930,8 @@ static int runOptimizationLoop() {
 
     const char* datasetEnv = std::getenv("YAMS_BENCH_DATASET");
     if (!(datasetEnv && std::strlen(datasetEnv) > 0)) {
-        std::cout << "  Next: validate this winner on a BEIR dataset, e.g. "
-                  << "YAMS_BENCH_DATASET=scifact YAMS_BENCH_OPT_LOOP=1 ...\n";
+        std::cout << "  Next: validate this winner on a harder dataset, e.g. "
+                  << "YAMS_BENCH_DATASET=synthetic-hard or YAMS_BENCH_DATASET=scifact ...\n";
     }
 
     std::cout << std::string(78, '=') << "\n";
@@ -8224,6 +7973,11 @@ void BM_RetrievalQuality(benchmark::State& state) {
 
     state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
     state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;
+
+    spdlog::info("=== Evaluating GREP literal baseline for exact-match comparison ===");
+    g_grep_metrics = evaluateGrepQueries(*fixture.client, fixture.queries, fixture.topK);
+    state.counters["MRR_grep"] = g_grep_metrics.mrr;
+    state.counters["Recall_grep"] = g_grep_metrics.recallAtK;
 }
 // Retrieval quality is a long-running, end-to-end evaluation.
 // Force a single iteration to avoid repeated full-corpus evaluations.
@@ -8300,13 +8054,36 @@ int main(int argc, char** argv) {
     std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_keyword_metrics.map
               << "\n";
 
+    // Grep baseline results
+    std::cout << "\n  --- GREP BASELINE (literal exact match) ---\n";
+    std::cout << "  MRR (Mean Reciprocal Rank):     " << std::setw(10) << g_grep_metrics.mrr
+              << "\n";
+    std::cout << "  Recall@K:                       " << std::setw(10) << g_grep_metrics.recallAtK
+              << "\n";
+    std::cout << "  Precision@K:                    " << std::setw(10)
+              << g_grep_metrics.precisionAtK << "\n";
+    std::cout << "  nDCG@K (Normalized DCG):        " << std::setw(10) << g_grep_metrics.ndcgAtK
+              << "\n";
+    std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_grep_metrics.map
+              << "\n";
+
     // Component comparison summary
     std::cout << "\n  --- COMPONENT COMPARISON ---\n";
     std::cout << "  Number of queries evaluated:    " << std::setw(10) << g_final_metrics.numQueries
               << "\n";
-    double mrrDelta = g_final_metrics.mrr - g_keyword_metrics.mrr;
-    std::cout << "  MRR delta (hybrid - keyword):   " << std::setw(10) << mrrDelta
-              << (mrrDelta > 0 ? " (hybrid better)" : " (keyword better)") << "\n";
+    auto describeDelta = [](double delta, std::string_view positive, std::string_view negative) {
+        constexpr double kTieEpsilon = 1e-9;
+        if (std::abs(delta) <= kTieEpsilon) {
+            return std::string(" (tied)");
+        }
+        return std::string(delta > 0 ? positive : negative);
+    };
+    double keywordMrrDelta = g_final_metrics.mrr - g_keyword_metrics.mrr;
+    double grepMrrDelta = g_final_metrics.mrr - g_grep_metrics.mrr;
+    std::cout << "  MRR delta (hybrid - keyword):   " << std::setw(10) << keywordMrrDelta
+              << describeDelta(keywordMrrDelta, " (hybrid better)", " (keyword better)") << "\n";
+    std::cout << "  MRR delta (hybrid - grep):      " << std::setw(10) << grepMrrDelta
+              << describeDelta(grepMrrDelta, " (hybrid better)", " (grep better)") << "\n";
     std::cout << std::string(70, '=') << "\n";
 
     return 0;

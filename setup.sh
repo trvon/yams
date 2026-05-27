@@ -402,8 +402,13 @@ else
   fi
 fi
 
-# Wrap CC/CXX with ccache if available for faster incremental builds
-if command -v ccache >/dev/null 2>&1; then
+# Wrap CC/CXX with ccache if available for faster incremental builds.
+# Skip ccache environment wrapping when YAMS_SKIP_CCACHE=1 is set —
+# useful for CI environments where ccache interferes with Conan
+# dependency builds (e.g. OpenBLAS ASM compilation via CMake).
+if [[ "${YAMS_SKIP_CCACHE:-}" == "1" ]]; then
+  echo "--- Skipping ccache wrapper (YAMS_SKIP_CCACHE=1) ---"
+elif command -v ccache >/dev/null 2>&1; then
   echo "--- Enabling ccache for faster incremental builds ---"
   # Only wrap if not already wrapped
   if [[ "${CC:-}" != ccache* ]]; then

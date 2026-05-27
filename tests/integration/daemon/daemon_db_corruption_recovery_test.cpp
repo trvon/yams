@@ -11,15 +11,18 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/metadata/database.h>
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
 namespace {
+constexpr std::uintmax_t kOversizedDbBytes = 600ULL * 1024 * 1024;
 
 void writeCorruptDb(const fs::path& path) {
     std::ofstream out(path, std::ios::binary);
@@ -29,10 +32,59 @@ void writeCorruptDb(const fs::path& path) {
     out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
 }
 
-bool quarantinedFileExists(const fs::path& dataDir) {
+void writeDummyWal(const fs::path& dbPath, const std::string& payload = "stale-wal") {
+    std::ofstream out(dbPath.string() + "-wal", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+}
+
+void seedValidDb(const fs::path& dbPath, const std::string& value = "seed") {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+    REQUIRE(
+        db.execute("CREATE TABLE IF NOT EXISTS startup_probe(id INTEGER PRIMARY KEY, value TEXT)"));
+    REQUIRE(db.execute("DELETE FROM startup_probe"));
+    REQUIRE(db.execute("INSERT INTO startup_probe(value) VALUES('" + value + "')"));
+    db.close();
+}
+
+std::size_t startupProbeRowCount(const fs::path& dbPath) {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite));
+    auto stmtR = db.prepare("SELECT COUNT(*) FROM startup_probe");
+    REQUIRE(stmtR);
+    auto& stmt = stmtR.value();
+    REQUIRE(stmt.step());
+    auto count = static_cast<std::size_t>(stmt.getInt(0));
+    db.close();
+    return count;
+}
+
+bool walSidecarCleared(const fs::path& dbPath) {
+    std::error_code ec;
+    const fs::path walPath(dbPath.string() + "-wal");
+    if (!fs::exists(walPath, ec)) {
+        return true;
+    }
+    return fs::file_size(walPath, ec) == 0;
+}
+
+bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& payload) {
+    const fs::path walPath(dbPath.string() + "-wal");
+    std::error_code ec;
+    if (!fs::exists(walPath, ec) || fs::file_size(walPath, ec) != payload.size()) {
+        return false;
+    }
+    std::ifstream in(walPath, std::ios::binary);
+    std::string actual(payload.size(), '\0');
+    in.read(actual.data(), static_cast<std::streamsize>(actual.size()));
+    return in.good() && actual == payload;
+}
+
+std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
     std::error_code ec;
     if (!fs::exists(dataDir, ec)) {
-        return false;
+        return std::nullopt;
     }
     const std::string prefix = "yams.db.corrupt-";
     for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
@@ -40,11 +92,12 @@ bool quarantinedFileExists(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        if (it->path().filename().string().rfind(prefix, 0) == 0) {
-            return true;
+        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
+            it->path().extension() != ".sentinel") {
+            return it->path();
         }
     }
-    return false;
+    return std::nullopt;
 }
 
 } // namespace
@@ -57,7 +110,9 @@ TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
                    ("yams_db_recovery_it_" +
                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(dataDir);
-    writeCorruptDb(dataDir / "yams.db");
+    const auto dbPath = dataDir / "yams.db";
+    writeCorruptDb(dbPath);
+    writeDummyWal(dbPath, "corrupt-sidecar");
 
     yams::test::DaemonHarnessOptions opts;
     opts.dataDir = dataDir;
@@ -70,7 +125,9 @@ TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
     bool started = harness.start(60s);
     REQUIRE(started);
 
-    REQUIRE(quarantinedFileExists(dataDir));
+    auto quarantinedPath = findQuarantinedFile(dataDir);
+    REQUIRE(quarantinedPath.has_value());
+    REQUIRE(fs::exists(*quarantinedPath));
 
     yams::daemon::ClientConfig cfg;
     cfg.socketPath = harness.socketPath();
@@ -86,8 +143,59 @@ TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
     // surface "recovered from …" in `yams daemon status`.
     REQUIRE(status.value().databasePhase == "ready");
     REQUIRE_FALSE(status.value().databaseRecoveredFrom.empty());
+    CHECK(status.value().databaseRecoveredFrom == quarantinedPath->string());
+    CHECK(status.value().databaseRecoveredFrom.find(dataDir.string()) == 0);
 
     harness.stop();
+
+    std::error_code ec;
+    fs::remove_all(dataDir, ec);
+}
+
+TEST_CASE("Daemon startup checkpoints stale WAL and auto-vacuums oversized metadata DB",
+          "[integration][daemon][catch2][db_recovery][vacuum][wal]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    auto dataDir = fs::temp_directory_path() /
+                   ("yams_db_vacuum_it_" +
+                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(dataDir);
+    const auto dbPath = dataDir / "yams.db";
+    seedValidDb(dbPath, "vacuum_seed");
+    fs::resize_file(dbPath, kOversizedDbBytes);
+    REQUIRE(fs::file_size(dbPath) == kOversizedDbBytes);
+    const std::string staleWalPayload = "oversized-sidecar";
+    writeDummyWal(dbPath, staleWalPayload);
+
+    yams::test::DaemonHarnessOptions opts;
+    opts.dataDir = dataDir;
+    opts.enableModelProvider = false;
+    opts.useMockModelProvider = false;
+    opts.autoLoadPlugins = false;
+    opts.enableAutoRepair = false;
+
+    yams::test::DaemonHarness harness(opts);
+    bool started = harness.start(60s);
+    REQUIRE(started);
+
+    yams::daemon::ClientConfig cfg;
+    cfg.socketPath = harness.socketPath();
+    cfg.requestTimeout = 5s;
+    yams::daemon::DaemonClient client(cfg);
+    auto connect = yams::cli::run_sync(client.connect(), 5s);
+    REQUIRE(connect.has_value());
+
+    auto status = yams::cli::run_sync(client.status(), 5s);
+    REQUIRE(status.has_value());
+    CHECK(status.value().databasePhase == "ready");
+    CHECK(status.value().databaseRecoveredFrom.empty());
+    CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
+    CHECK(startupProbeRowCount(dbPath) == 1U);
+
+    harness.stop();
+    CHECK(walSidecarCleared(dbPath));
+    CHECK(fs::file_size(dbPath) < 1024 * 1024);
+    CHECK(startupProbeRowCount(dbPath) == 1U);
 
     std::error_code ec;
     fs::remove_all(dataDir, ec);

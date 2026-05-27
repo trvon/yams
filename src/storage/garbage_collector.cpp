@@ -20,6 +20,27 @@ namespace yamsfmt = fmt;
 #include <thread>
 
 namespace yams::storage {
+namespace {
+
+void notifyCollectionProgress(const GCOptions& options, const std::string& blockHash,
+                              const GCStats& stats) {
+    if (options.progressCallback) {
+        options.progressCallback(blockHash, stats.blocksDeleted);
+    }
+}
+
+void recordCollectionStatistics(ReferenceCounter& refCounter, const GCOptions& options,
+                                const GCStats& stats) {
+    if (options.dryRun || stats.blocksDeleted == 0) {
+        return;
+    }
+
+    refCounter.updateStatistics("gc_runs", 1);
+    refCounter.updateStatistics("gc_blocks_collected", static_cast<int64_t>(stats.blocksDeleted));
+    refCounter.updateStatistics("gc_bytes_reclaimed", static_cast<int64_t>(stats.bytesReclaimed));
+}
+
+} // namespace
 
 // Implementation details
 struct GarbageCollector::Impl {
@@ -49,6 +70,36 @@ struct GarbageCollector::Impl {
         }
     }
 };
+
+namespace {
+
+void processCollectibleBlock(ReferenceCounter& refCounter, StorageEngine& storageEngine,
+                             IReferenceCounter::ITransaction& txn, const GCOptions& options,
+                             const std::string& blockHash, GCStats& stats) {
+    auto refCountResult = refCounter.getRefCount(blockHash);
+    if (!refCountResult || refCountResult.value() > 0) {
+        return;
+    }
+
+    const auto blockSizeResult = storageEngine.getBlockSize(blockHash);
+    if (!options.dryRun) {
+        auto deleteResult = storageEngine.remove(blockHash);
+        if (!deleteResult) {
+            stats.errors.push_back(yamsfmt::format("Failed to delete block {}: {}", blockHash,
+                                                   deleteResult.error().message));
+            return;
+        }
+        txn.pruneReference(blockHash);
+    }
+
+    if (blockSizeResult) {
+        stats.bytesReclaimed += blockSizeResult.value();
+    }
+    ++stats.blocksDeleted;
+    notifyCollectionProgress(options, blockHash, stats);
+}
+
+} // namespace
 
 // Constructor
 GarbageCollector::GarbageCollector(ReferenceCounter& refCounter, StorageEngine& storageEngine)
@@ -111,44 +162,8 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
         {
             YAMS_ZONE_SCOPED_N("Process blocks");
             for (const auto& blockHash : blocks) {
-                // Double-check reference count (race condition protection)
-                auto refCountResult = pImpl->refCounter.getRefCount(blockHash);
-                if (!refCountResult || refCountResult.value() > 0) {
-                    continue; // Skip if error or references exist
-                }
-
-                if (!options.dryRun) {
-                    const auto blockSizeResult = pImpl->storageEngine.getBlockSize(blockHash);
-                    // Delete from storage
-                    auto deleteResult = pImpl->storageEngine.remove(blockHash);
-                    if (!deleteResult) {
-                        stats.errors.push_back(yamsfmt::format("Failed to delete block {}: {}",
-                                                               blockHash,
-                                                               deleteResult.error().message));
-                        continue;
-                    }
-
-                    if (blockSizeResult) {
-                        stats.bytesReclaimed += blockSizeResult.value();
-                    }
-
-                    // Remove from reference database
-                    txn->pruneReference(blockHash);
-
-                    stats.blocksDeleted++;
-                } else {
-                    const auto blockSizeResult = pImpl->storageEngine.getBlockSize(blockHash);
-                    // Dry run - just count
-                    stats.blocksDeleted++;
-                    if (blockSizeResult) {
-                        stats.bytesReclaimed += blockSizeResult.value();
-                    }
-                }
-
-                // Progress callback
-                if (options.progressCallback) {
-                    options.progressCallback(blockHash, stats.blocksDeleted);
-                }
+                processCollectibleBlock(pImpl->refCounter, pImpl->storageEngine, *txn, options,
+                                        blockHash, stats);
             }
         }
 
@@ -169,20 +184,11 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
     auto endTime = std::chrono::steady_clock::now();
     stats.duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-    // Update last stats
     {
         std::lock_guard lock(pImpl->statsMutex);
         pImpl->lastStats = stats;
     }
-
-    // Update database statistics
-    if (!options.dryRun && stats.blocksDeleted > 0) {
-        pImpl->refCounter.updateStatistics("gc_runs", 1);
-        pImpl->refCounter.updateStatistics("gc_blocks_collected",
-                                           static_cast<int64_t>(stats.blocksDeleted));
-        pImpl->refCounter.updateStatistics("gc_bytes_reclaimed",
-                                           static_cast<int64_t>(stats.bytesReclaimed));
-    }
+    recordCollectionStatistics(pImpl->refCounter, options, stats);
 
     spdlog::debug(
         "Garbage collection completed: {} blocks scanned, {} deleted, {} bytes reclaimed in {}ms",

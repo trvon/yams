@@ -45,6 +45,21 @@ public:
     CpuThresholdGuard& operator=(const CpuThresholdGuard&) = delete;
 };
 
+class TuningProfileOverrideGuard {
+    int prev_;
+
+public:
+    TuningProfileOverrideGuard()
+        : prev_(TuneAdvisor::tuningProfileOverride_.load(std::memory_order_relaxed)) {}
+
+    ~TuningProfileOverrideGuard() {
+        TuneAdvisor::tuningProfileOverride_.store(prev_, std::memory_order_relaxed);
+    }
+
+    TuningProfileOverrideGuard(const TuningProfileOverrideGuard&) = delete;
+    TuningProfileOverrideGuard& operator=(const TuningProfileOverrideGuard&) = delete;
+};
+
 using yams::test::ScopedEnvVar;
 
 /// Wait for daemon to complete initial setup and governor to be active.
@@ -151,6 +166,10 @@ bool addTestDocument(const DaemonHarness& harness, int docId) {
 TEST_CASE("ResourceGovernor metrics exposed in daemon status", "[integration][governor][status]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
+    TuningProfileOverrideGuard profileOverrideGuard;
+    TuneAdvisor::tuningProfileOverride_.store(0, std::memory_order_relaxed);
+    ScopedEnvVar tuningProfileEnv("YAMS_TUNING_PROFILE", "balanced");
+
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
     DaemonHarness harness(opts);
@@ -164,6 +183,10 @@ TEST_CASE("ResourceGovernor metrics exposed in daemon status", "[integration][go
 
     auto connected = yams::cli::run_sync(client.connect(), 5s);
     REQUIRE(connected.has_value());
+
+    // Daemon startup should snapshot the effective profile before background workers run so
+    // post-ingest/governor paths do not keep querying process env from hot threads.
+    CHECK(TuneAdvisor::tuningProfileOverride_.load(std::memory_order_relaxed) == 2);
 
     // Wait for governor to be active (via singleton check)
     REQUIRE(waitForGovernorActive(30s));

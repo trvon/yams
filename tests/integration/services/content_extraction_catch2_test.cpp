@@ -84,7 +84,7 @@ public:
         return path;
     }
 
-    std::string addFile(const fs::path& path) {
+    yams::Result<yams::daemon::AddDocumentResponse> addFileResponse(const fs::path& path) {
         yams::app::services::DocumentIngestionService ing;
         yams::app::services::AddOptions opts;
         opts.socketPath = harness_->socketPath();
@@ -93,8 +93,11 @@ public:
         opts.explicitDataDir = harness_->dataDir();
         opts.waitForProcessing = true;
         opts.waitTimeoutSeconds = 10;
+        return ing.addViaDaemon(opts);
+    }
 
-        auto result = ing.addViaDaemon(opts);
+    std::string addFile(const fs::path& path) {
+        auto result = addFileResponse(path);
         REQUIRE(result);
         return result.value().hash;
     }
@@ -141,17 +144,21 @@ public:
         return false;
     }
 
-    bool searchFindsContent(const std::string& query, size_t minMatches = 1,
-                            std::chrono::milliseconds timeout = 8s) {
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-
+    yams::Result<yams::daemon::SearchResponse> searchOnce(const std::string& query,
+                                                          std::chrono::milliseconds timeout = 1s) {
         yams::daemon::SearchRequest req;
         req.query = query;
         req.limit = 20;
         req.searchType = "keyword";
+        return yams::cli::run_sync(client_->search(req), timeout);
+    }
+
+    bool searchFindsContent(const std::string& query, size_t minMatches = 1,
+                            std::chrono::milliseconds timeout = 8s) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
 
         while (std::chrono::steady_clock::now() < deadline) {
-            auto result = yams::cli::run_sync(client_->search(req), 1s);
+            auto result = searchOnce(query, 1s);
             if (result && result.value().results.size() >= minMatches) {
                 return true;
             }
@@ -198,6 +205,27 @@ Unique marker: MARKDOWN_EXTRACTION_TEST_12345
     CHECK(doc->content.find("MARKDOWN_EXTRACTION_TEST_12345") != std::string::npos);
     CHECK(grepFindsContent("MARKDOWN_EXTRACTION_TEST"));
     CHECK(searchFindsContent("markdown document"));
+}
+
+TEST_CASE_METHOD(ContentExtractionFixture,
+                 "ContentExtraction: sync add returns after keyword search visibility",
+                 "[catch2][integration][services][content][sync]") {
+    const std::string content =
+        "sync visibility token SYNC_SEARCH_VISIBILITY_94827\nsecondary phrase\n";
+
+    auto path = createTestFile("sync_visibility.txt", content);
+
+    auto addResult = addFileResponse(path);
+    REQUIRE(addResult);
+    INFO("add_message=" << addResult.value().message);
+    INFO("add_extraction_status=" << addResult.value().extractionStatus);
+    INFO("add_hash=" << addResult.value().hash);
+    REQUIRE_FALSE(addResult.value().hash.empty());
+
+    auto result = searchOnce("SYNC_SEARCH_VISIBILITY_94827", 1s);
+    REQUIRE(result);
+    INFO("results=" << result.value().results.size());
+    REQUIRE_FALSE(result.value().results.empty());
 }
 
 TEST_CASE_METHOD(ContentExtractionFixture, "ContentExtraction: cpp source extraction",

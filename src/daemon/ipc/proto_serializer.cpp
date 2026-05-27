@@ -708,6 +708,8 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
         o->set_disable_auto_mime(r.disableAutoMime);
         o->set_no_embeddings(r.noEmbeddings);
+        o->set_wait_for_processing(r.waitForProcessing);
+        o->set_wait_timeout_seconds(r.waitTimeoutSeconds);
         if (!r.sessionId.empty()) {
             o->set_session_id(yams::common::sanitizeUtf8(r.sessionId));
         }
@@ -733,6 +735,8 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         r.mimeType = i.mime_type();
         r.disableAutoMime = i.disable_auto_mime();
         r.noEmbeddings = i.no_embeddings();
+        r.waitForProcessing = i.wait_for_processing();
+        r.waitTimeoutSeconds = i.wait_timeout_seconds();
         r.sessionId = i.session_id();
         r.instanceId = i.instance_id();
         return r;

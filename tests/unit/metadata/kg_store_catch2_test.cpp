@@ -374,3 +374,220 @@ TEST_CASE("KG topology analysis summarizes reciprocal communities", "[unit][meta
     CHECK(topology->reciprocalCommunitySizes[0] == 2);
     CHECK(topology->reciprocalCommunitySizes[1] == 2);
 }
+
+TEST_CASE("KG Store: batch rollback — uncommitted node upsert is not persisted",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    auto batchResult = fix.store_->beginWriteBatch();
+    REQUIRE(batchResult.has_value());
+    auto batch = std::move(batchResult).value();
+
+    std::vector<KGNode> nodes{
+        KGNode{.id = 0,
+               .nodeKey = "tag:rollback_one",
+               .label = std::string("rollback_one"),
+               .type = std::string("tag")},
+        KGNode{.id = 0,
+               .nodeKey = "tag:rollback_two",
+               .label = std::string("rollback_two"),
+               .type = std::string("tag")},
+    };
+    auto upsertRes = batch->upsertNodes(nodes);
+    REQUIRE(upsertRes.has_value());
+    REQUIRE(upsertRes.value().size() == 2);
+
+    // Verify batch-internal reads see the uncommitted data (within transaction)
+    auto internal = batch->upsertNodes(nodes);
+    REQUIRE(internal.has_value());
+    CHECK(internal.value()[0] == upsertRes.value()[0]);
+
+    // Destroy batch without commit — triggers rollback via destructor
+    batch.reset();
+
+    // Store-level reads (separate connection) must not see rolled-back nodes
+    auto n1 = fix.store_->getNodeByKey("tag:rollback_one");
+    REQUIRE(n1.has_value());
+    CHECK_FALSE(n1.value().has_value());
+
+    auto n2 = fix.store_->getNodeByKey("tag:rollback_two");
+    REQUIRE(n2.has_value());
+    CHECK_FALSE(n2.value().has_value());
+}
+
+TEST_CASE("KG Store: batch rollback — uncommitted edges are not persisted",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes{
+        KGNode{.id = 0,
+               .nodeKey = "doc:src_rb",
+               .label = std::string("src"),
+               .type = std::string("document")},
+        KGNode{.id = 0,
+               .nodeKey = "doc:dst_rb",
+               .label = std::string("dst"),
+               .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    REQUIRE(ids.value().size() == 2);
+    auto srcId = ids.value()[0];
+    auto dstId = ids.value()[1];
+
+    auto batchResult = fix.store_->beginWriteBatch();
+    REQUIRE(batchResult.has_value());
+    auto batch = std::move(batchResult).value();
+
+    KGEdge edge{
+        .srcNodeId = srcId, .dstNodeId = dstId, .relation = "rollback_relation", .weight = 0.5F};
+    {
+        std::vector<KGEdge> edges{edge};
+        auto addRes = batch->addEdgesUnique(edges);
+        REQUIRE(addRes.has_value());
+    }
+
+    // Destroy batch — rollback
+    batch.reset();
+
+    // Edges must not be visible after rollback
+    auto outEdges = fix.store_->getEdgesFrom(srcId, "rollback_relation", 10, 0);
+    REQUIRE(outEdges.has_value());
+    CHECK(outEdges.value().empty());
+}
+
+TEST_CASE("KG Store: batch rollback — prior state is preserved after delete rollback",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    std::vector<KGNode> nodes{
+        KGNode{.id = 0,
+               .nodeKey = "doc:keep_me",
+               .label = std::string("keep_me"),
+               .type = std::string("document")},
+    };
+    auto ids = fix.store_->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    REQUIRE(ids.value().size() == 1);
+    auto nodeId = ids.value()[0];
+
+    // Confirm it exists before rollback test
+    auto preCheck = fix.store_->getNodeById(nodeId);
+    REQUIRE(preCheck.has_value());
+    REQUIRE(preCheck.value().has_value());
+
+    // Delete in batch, then rollback
+    auto batchResult = fix.store_->beginWriteBatch();
+    REQUIRE(batchResult.has_value());
+    auto batch = std::move(batchResult).value();
+    auto delRes = batch->deleteNodeById(nodeId);
+    REQUIRE(delRes.has_value());
+    batch.reset();
+
+    // Node must still exist after rollback
+    auto postCheck = fix.store_->getNodeById(nodeId);
+    REQUIRE(postCheck.has_value());
+    REQUIRE(postCheck.value().has_value());
+    CHECK(postCheck.value()->nodeKey == "doc:keep_me");
+
+    // Also confirm no partial mutation — still exactly one node
+    auto byKey = fix.store_->getNodeByKey("doc:keep_me");
+    REQUIRE(byKey.has_value());
+    REQUIRE(byKey.value().has_value());
+    CHECK(byKey.value()->id == nodeId);
+}
+
+TEST_CASE("KG Store: batch rollback — composite batch (nodes + edges) fully rolled back",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    // Pre-create one node via store so the edge has a valid dst
+    std::vector<KGNode> preNodes{
+        KGNode{.id = 0,
+               .nodeKey = "doc:tgt",
+               .label = std::string("tgt"),
+               .type = std::string("document")},
+    };
+    auto preIds = fix.store_->upsertNodes(preNodes);
+    REQUIRE(preIds.has_value());
+    auto tgtId = preIds.value()[0];
+
+    auto batchResult = fix.store_->beginWriteBatch();
+    REQUIRE(batchResult.has_value());
+    auto batch = std::move(batchResult).value();
+
+    // Upsert a new source node in the batch
+    auto srcIds = batch->upsertNodes({KGNode{.id = 0,
+                                             .nodeKey = "doc:src_composite",
+                                             .label = std::string("src_composite"),
+                                             .type = std::string("document")}});
+    REQUIRE(srcIds.has_value());
+    auto srcId = srcIds.value()[0];
+
+    // Add an edge from batch-created node to pre-existing node
+    KGEdge edge{
+        .srcNodeId = srcId, .dstNodeId = tgtId, .relation = "composite_rel", .weight = 0.75F};
+    auto edgeRes = batch->addEdgesUnique({edge});
+    REQUIRE(edgeRes.has_value());
+
+    // Rollback everything
+    batch.reset();
+
+    // Source node must not exist
+    auto srcCheck = fix.store_->getNodeByKey("doc:src_composite");
+    REQUIRE(srcCheck.has_value());
+    CHECK_FALSE(srcCheck.value().has_value());
+
+    // Edge must not exist
+    auto outEdges = fix.store_->getEdgesFrom(tgtId, "composite_rel", 10, 0);
+    REQUIRE(outEdges.has_value());
+    CHECK(outEdges.value().empty());
+
+    // Pre-existing target node must still exist
+    auto tgtCheck = fix.store_->getNodeById(tgtId);
+    REQUIRE(tgtCheck.has_value());
+    REQUIRE(tgtCheck.value().has_value());
+}
+
+TEST_CASE("KG Store: batch rollback — committed batch isolated from uncommitted rollback",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+
+    // Batch 1: commit nodes
+    {
+        auto batchResult = fix.store_->beginWriteBatch();
+        REQUIRE(batchResult.has_value());
+        auto batch = std::move(batchResult).value();
+        auto r = batch->upsertNodes({KGNode{.id = 0,
+                                            .nodeKey = "tag:committed",
+                                            .label = std::string("committed"),
+                                            .type = std::string("tag")}});
+        REQUIRE(r.has_value());
+        auto cr = batch->commit();
+        REQUIRE(cr.has_value());
+    }
+
+    // Batch 2: upsert nodes, then rollback
+    {
+        auto batchResult = fix.store_->beginWriteBatch();
+        REQUIRE(batchResult.has_value());
+        auto batch = std::move(batchResult).value();
+        auto r = batch->upsertNodes({KGNode{.id = 0,
+                                            .nodeKey = "tag:rolled_back",
+                                            .label = std::string("rolled_back"),
+                                            .type = std::string("tag")}});
+        REQUIRE(r.has_value());
+        // batch goes out of scope — implicit rollback
+    }
+
+    // Committed node must exist
+    auto committed = fix.store_->getNodeByKey("tag:committed");
+    REQUIRE(committed.has_value());
+    REQUIRE(committed.value().has_value());
+    CHECK(committed.value()->label == std::optional<std::string>{"committed"});
+
+    // Rolled-back node must not exist
+    auto rolledBack = fix.store_->getNodeByKey("tag:rolled_back");
+    REQUIRE(rolledBack.has_value());
+    CHECK_FALSE(rolledBack.value().has_value());
+}

@@ -1,0 +1,2 @@
+Graph data unavailable fallback guidance should say retry after indexing completes.
+If the file is new, run yams add "<path>" --sync and then retry the graph command with depth 2.

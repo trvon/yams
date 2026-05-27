@@ -198,6 +198,9 @@ public:
     std::thread shutdownThread_;
     std::atomic<bool> shutdownThreadActive_{false};
 
+    int tuningProfileOverrideBeforeStart_{0};
+    bool tuningProfileOverrideSnapshotActive_{false};
+
     bool modelPreloadSkipped_{false};
     std::chrono::steady_clock::time_point repairBusySince_{};
     std::chrono::steady_clock::time_point repairReadySince_{};
@@ -216,6 +219,9 @@ public:
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
     void requestReload() { reloadRequested_.store(true, std::memory_order_relaxed); }
     void reloadTuningConfig();
+
+    void snapshotTuningProfileForRuntime();
+    void restoreTuningProfileOverrideSnapshot() noexcept;
 
     // Set a hook that will be called each iteration of runLoop() to check for signals
     // Returns true if shutdown was requested

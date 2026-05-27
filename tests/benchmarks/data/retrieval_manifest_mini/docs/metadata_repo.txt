@@ -1,0 +1,2 @@
+ORDER BY documents.indexed_time DESC, documents.id DESC keeps the latest indexed version first for path-scoped grep candidate selection.
+This freshness ordering is a stopgap toward a consolidated indexed snapshot model.

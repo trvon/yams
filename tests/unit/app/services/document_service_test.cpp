@@ -18,6 +18,8 @@
 #include <yams/search/search_engine.h>
 #include <yams/vector/vector_database.h>
 
+#include "tests/common/test_helpers_catch2.h"
+
 using namespace yams;
 using namespace yams::app::services;
 using namespace yams::metadata;
@@ -561,6 +563,11 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
     }
 
     SECTION("Delete document removes vector rows") {
+        yams::test::ScopedEnvVar enableVectors("YAMS_DISABLE_VECTORS",
+                                               std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
+                                                     std::optional<std::string>("0"));
+
         yams::vector::VectorDatabaseConfig config;
         config.database_path = ":memory:";
         config.embedding_dim = 4;

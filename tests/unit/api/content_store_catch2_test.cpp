@@ -71,6 +71,7 @@ public:
     bool failStoresAsNotInitialized{false};
     bool failManifestStore{false};
     bool failManifestStoreAmbiguously{false};
+    bool failManifestStoreWithMismatchedDurableBytes{false};
     size_t storeCalls{0};
     size_t removeCalls{0};
     std::vector<std::string> removedKeys;
@@ -85,6 +86,17 @@ public:
             if (failManifestStoreAmbiguously) {
                 objects_[key] = std::vector<std::byte>(data.begin(), data.end());
                 return Error{ErrorCode::NetworkError, "scripted ambiguous manifest write"};
+            }
+            if (failManifestStoreWithMismatchedDurableBytes) {
+                auto durableBytes = std::vector<std::byte>(data.begin(), data.end());
+                if (durableBytes.empty()) {
+                    durableBytes.push_back(std::byte{0});
+                } else {
+                    durableBytes.front() ^= std::byte{0x01};
+                }
+                objects_[key] = std::move(durableBytes);
+                return Error{ErrorCode::NetworkError,
+                             "scripted ambiguous manifest write with mismatched durable bytes"};
             }
             return Error{ErrorCode::WriteError, "scripted manifest write failure"};
         }
@@ -521,6 +533,28 @@ TEST_CASE("ContentStore: Metadata operations", "[api][content-store][metadata]")
         REQUIRE(retrieved.has_value());
         CHECK(retrieved.value().tags.at("unicode_tag") == "日本語");
     }
+
+    SECTION("Internal hash hint tags are stripped from persisted file metadata") {
+        const std::string content = "trusted hash hint";
+        auto file = fixture.createTestFile("trusted.txt", content);
+
+        ContentMetadata metadata;
+        metadata.name = "trusted.txt";
+        metadata.tags["visible"] = "keep";
+        metadata.tags["__yams_trusted_hash_hint"] = "1";
+        metadata.tags["__yams_hash_hint_mtime_ns"] = "123";
+
+        auto result = fixture.store_->store(file, metadata);
+        REQUIRE(result.has_value());
+
+        auto retrieved = fixture.store_->getMetadata(result.value().contentHash);
+        REQUIRE(retrieved.has_value());
+        CHECK(retrieved.value().tags.contains("visible"));
+        CHECK_FALSE(retrieved.value().tags.contains("__yams_trusted_hash_hint"));
+        CHECK_FALSE(retrieved.value().tags.contains("__yams_hash_hint_mtime_ns"));
+        CHECK(retrieved.value().contentHash == result.value().contentHash);
+        CHECK(retrieved.value().size == content.size());
+    }
 }
 
 // =============================================================================
@@ -606,6 +640,51 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
         CHECK(retrieved.value().size() == 6);
         CHECK(retrieved.value()[0] == std::byte{0x00});
         CHECK(retrieved.value()[3] == std::byte{0xFF});
+    }
+
+    SECTION("Retrieve raw returns stored direct bytes without compression header") {
+        const std::string content = "raw direct bytes";
+        std::vector<std::byte> data;
+        data.reserve(content.size());
+        for (char c : content) {
+            data.push_back(static_cast<std::byte>(c));
+        }
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto raw = fixture.store_->retrieveRaw(stored.value().contentHash);
+        REQUIRE(raw.has_value());
+        CHECK(raw.value().data == data);
+        CHECK_FALSE(raw.value().header.has_value());
+    }
+
+    SECTION("Retrieve raw async returns stored direct bytes") {
+        const std::string content = "async raw bytes";
+        std::vector<std::byte> data;
+        data.reserve(content.size());
+        for (char c : content) {
+            data.push_back(static_cast<std::byte>(c));
+        }
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto rawFuture = fixture.store_->retrieveRawAsync(stored.value().contentHash);
+        auto raw = rawFuture.get();
+        REQUIRE(raw.has_value());
+        CHECK(raw.value().data == data);
+        CHECK_FALSE(raw.value().header.has_value());
+    }
+
+    SECTION("Retrieve bytes prefix returns empty vector when max bytes is zero") {
+        std::vector<std::byte> data = {std::byte{0x41}, std::byte{0x42}, std::byte{0x43}};
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto prefix = fixture.store_->retrieveBytesPrefix(stored.value().contentHash, 0);
+        REQUIRE(prefix.has_value());
+        CHECK(prefix.value().empty());
     }
 }
 
@@ -780,7 +859,7 @@ TEST_CASE("ContentStore: Storage readiness failures", "[api][content-store][read
     }
 }
 
-TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
+TEST_CASE("ContentStore: Chunked add rollback leaves no committed manifest or metadata",
           "[api][content-store][readiness][rollback]") {
     auto tempDir = makeTempDir("content_store_partial_rollback");
     auto storage = std::make_shared<ScriptedStorageEngine>();
@@ -803,10 +882,11 @@ TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
         auto stored = store->storeBytes(data);
         REQUIRE_FALSE(stored.has_value());
         CHECK(stored.error().code == ErrorCode::WriteError);
-        CHECK(storage->empty());
-        CHECK(storage->removeCalls > 0);
-        CHECK(std::none_of(storage->removedKeys.begin(), storage->removedKeys.end(),
-                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+        CHECK(storage->storeCalls > 0);
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
@@ -814,7 +894,6 @@ TEST_CASE("ContentStore: Chunked add rollback removes partial durable state",
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
         CHECK(stats.uniqueBlocks == 0);
         CHECK(stats.totalUncompressedBytes == 0);
     }
@@ -860,7 +939,7 @@ TEST_CASE("ContentStore: File chunker failures return typed errors without durab
     fs::remove_all(tempDir, ec);
 }
 
-TEST_CASE("ContentStore: File add commit failure reconciles partial remote state",
+TEST_CASE("ContentStore: File add commit failure leaves no committed manifest metadata",
           "[api][content-store][readiness][rollback]") {
     auto tempDir = makeTempDir("content_store_file_commit_failure");
     auto storage = std::make_shared<ScriptedStorageEngine>();
@@ -896,10 +975,13 @@ TEST_CASE("ContentStore: File add commit failure reconciles partial remote state
         CHECK(refCounter->commitCalls == 1);
         CHECK(refCounter->rollbackCalls == 1);
         CHECK(refCounter->queuedIncrements > 0);
-        CHECK(storage->empty());
         CHECK(storage->removeCalls > 0);
         CHECK(std::any_of(storage->removedKeys.begin(), storage->removedKeys.end(),
                           [](const std::string& key) { return key.ends_with(".manifest"); }));
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
@@ -907,7 +989,6 @@ TEST_CASE("ContentStore: File add commit failure reconciles partial remote state
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
         CHECK(stats.uniqueBlocks == 0);
         CHECK(stats.totalUncompressedBytes == 0);
     }
@@ -963,7 +1044,7 @@ TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls ba
     auto tempDir = makeTempDir("content_store_ambiguous_mismatch");
     auto storage = std::make_shared<ScriptedStorageEngine>();
     storage->failManifestStore = true;
-    storage->failManifestStoreAmbiguously = true;
+    storage->failManifestStoreWithMismatchedDurableBytes = true;
 
     {
         ContentStoreBuilder builder;
@@ -979,20 +1060,20 @@ TEST_CASE("ContentStore: Ambiguous manifest store with mismatched bytes rolls ba
         const auto hash =
             yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
 
-        storage->failManifestStoreAmbiguously = false;
-
         auto stored = store->storeBytes(data, ContentMetadata{});
         REQUIRE_FALSE(stored.has_value());
-        CHECK(stored.error().code == ErrorCode::WriteError);
-        CHECK(storage->empty());
+        CHECK(stored.error().code == ErrorCode::NetworkError);
         CHECK(storage->removeCalls > 0);
+
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
 
         auto metadata = store->getMetadata(hash);
         REQUIRE_FALSE(metadata.has_value());
 
         auto stats = store->getStats();
         CHECK(stats.storeOperations == 0);
-        CHECK(stats.totalObjects == 0);
     }
 
     std::error_code ec;

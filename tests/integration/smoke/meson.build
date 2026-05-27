@@ -14,6 +14,7 @@ integration_smoke_srcs += files(
   'daemon_embedded_streaming_smoke_catch2_test.cpp',
   'graph_command_sandbox_smoke_catch2_test.cpp',
   'integrity_auto_repair_smoke_catch2_test.cpp',
+  'search_graph_ux_smoke_catch2_test.cpp',
   'smoke_link_catch2_test.cpp',
   'storage_compression_policy_builder_smoke_catch2_test.cpp',
   'storage_compression_smoke_catch2_test.cpp',

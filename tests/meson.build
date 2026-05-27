@@ -673,6 +673,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_db_recovery_vacuum_exe = executable('catch2_db_recovery_vacuum',
+    files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_storage_preflight_exe = executable('catch2_storage_preflight',
     files('unit/daemon/storage_preflight_test.cpp'),
     include_directories: incs,
@@ -1205,6 +1214,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
+    files(
+      'unit/search/retrieval_benchmark_support_catch2_test.cpp',
+      '../src/search/benchmarks/retrieval_benchmark_support.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_search_bandit_bench_exe = executable('catch2_search_bandit_bench',
     files('benchmarks/search_bandit_bench.cpp'),
     include_directories: incs,
@@ -1331,6 +1352,7 @@ if catch2_dep.found()
       'unit/cli/vector_db_util_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
       'unit/cli/time_parser_catch2_test.cpp',
+      'unit/cli/version_generated_header_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2704,6 +2726,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'db_salvage'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
+  )
+
+  test('db_recovery_vacuum', catch2_db_recovery_vacuum_exe,
+    suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('storage_preflight', catch2_storage_preflight_exe,

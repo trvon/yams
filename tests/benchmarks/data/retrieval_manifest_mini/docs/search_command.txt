@@ -1,0 +1,2 @@
+Search output ends with a concrete next step derived from the top result: yams graph --name "<file>" --depth 2.
+That next-step graph command is meant to make graph exploration agent-friendly and explicit.

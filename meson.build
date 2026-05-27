@@ -625,53 +625,31 @@ else
 endif
 
 python_exe = find_program('python3', 'python')
-_build_timestamp = run_command(
-  python_exe,
-  '-c',
-  '''import datetime, os
-epoch = os.environ.get("SOURCE_DATE_EPOCH")
-if epoch:
-    dt = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc)
-else:
-    dt = datetime.datetime.now(datetime.timezone.utc)
-print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))''',
-  check: true,
-).stdout().strip()
-
-_git_desc = ''
-_git_commit = ''
 _git_cmd = find_program('git', required: false)
-if _git_cmd.found()
-  # Capture short git describe (best-effort; ignore errors quietly)
-  _r = run_command(_git_cmd, ['describe', '--tags', '--always', '--dirty'], check: false)
-  if _r.returncode() == 0
-    _git_desc = _r.stdout().strip()
-  endif
-  # Capture short commit hash for dev builds
-  _r = run_command(_git_cmd, ['rev-parse', '--short', 'HEAD'], check: false)
-  if _r.returncode() == 0
-    _git_commit = _r.stdout().strip()
-  endif
-endif
+_git_exe = _git_cmd.found() ? _git_cmd.full_path() : 'git'
+version_header_template = files('include/yams/version_generated.h.in')[0]
+version_header_script = files('scripts/generate_version_header.py')[0]
 
-version_config = configuration_data()
-version_config.set('YAMS_EFFECTIVE_VERSION', _effective_version)
-version_config.set('YAMS_PROJECT_VERSION', meson.project_version())
-version_config.set('YAMS_OVERRIDE_VERSION', _override_version)
-version_config.set('YAMS_BUILD_TIMESTAMP', _build_timestamp)
-version_config.set('YAMS_GIT_DESCRIBE', _git_desc)
-version_config.set('YAMS_GIT_COMMIT', _git_commit)
-
-# Generate version header - will be at builddir/version_generated.h
-# CLI includes it via builddir in include path
-version_header = configure_file(
+# Generate version header at build time so installed binaries pick up the
+# current commit even when source changes occur after the last Meson reconfigure.
+version_header = custom_target(
+  'version_generated_header',
+  input: [version_header_template, version_header_script],
   output: 'version_generated.h',
+  command: [
+    python_exe,
+    version_header_script,
+    '@INPUT0@',
+    '@OUTPUT@',
+    meson.project_source_root(),
+    meson.project_version(),
+    _override_version,
+    _git_exe,
+  ],
+  build_always_stale: true,
+  build_by_default: true,
   install: true,
   install_dir: get_option('includedir') / 'yams',
-  configuration: version_config,
-  # Header template uses @VAR@ tokens.
-  format: 'meson',
-  input: files('include/yams/version_generated.h.in')
 )
 
 # Make builddir available as include path for generated headers

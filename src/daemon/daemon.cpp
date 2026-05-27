@@ -106,6 +106,22 @@ void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point n
 } // namespace
 namespace yams::daemon {
 
+void YamsDaemon::snapshotTuningProfileForRuntime() {
+    tuningProfileOverrideBeforeStart_ =
+        TuneAdvisor::tuningProfileOverride_.load(std::memory_order_relaxed);
+    TuneAdvisor::setTuningProfile(TuneAdvisor::tuningProfile());
+    tuningProfileOverrideSnapshotActive_ = true;
+}
+
+void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
+    if (!tuningProfileOverrideSnapshotActive_) {
+        return;
+    }
+    TuneAdvisor::tuningProfileOverride_.store(tuningProfileOverrideBeforeStart_,
+                                              std::memory_order_relaxed);
+    tuningProfileOverrideSnapshotActive_ = false;
+}
+
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
     : config_(config), asyncInitStartedFuture_(asyncInitStartedPromise_.get_future().share()) {
     spdlog::info("[YamsDaemon] Constructor entry");
@@ -234,6 +250,8 @@ YamsDaemon::~YamsDaemon() {
         spdlog::error(
             "YamsDaemon destructor caught unknown exception from shutdown thread cleanup");
     }
+
+    restoreTuningProfileOverrideSnapshot();
 }
 
 Result<size_t> YamsDaemon::autoloadPluginsNow() {
@@ -268,6 +286,17 @@ Result<void> YamsDaemon::start() {
         return Error{ErrorCode::InvalidState, "Daemon already running"};
     }
 
+    struct TuningProfileStartGuard {
+        YamsDaemon* daemon;
+        bool keep{false};
+        ~TuningProfileStartGuard() {
+            if (!keep) {
+                daemon->restoreTuningProfileOverrideSnapshot();
+            }
+        }
+    } tuningProfileStartGuard{this};
+
+    snapshotTuningProfileForRuntime();
     spdlog::info("Starting YAMS daemon...");
 
     // Reset state for restart
@@ -655,6 +684,7 @@ Result<void> YamsDaemon::start() {
                  "--embeddings' to generate vector embeddings.");
     spdlog::info("Hint: Use 'yams stats --verbose' to monitor worker pool (threads/active/queued) "
                  "and streaming metrics.");
+    tuningProfileStartGuard.keep = true;
     return Result<void>();
 }
 
@@ -1063,6 +1093,11 @@ Result<void> YamsDaemon::stop() {
             daemon->stop_cv_.notify_all();
         }
     } stopCompletionGuard{this};
+
+    struct TuningProfileStopGuard {
+        YamsDaemon* daemon;
+        ~TuningProfileStopGuard() { daemon->restoreTuningProfileOverrideSnapshot(); }
+    } tuningProfileStopGuard{this};
 
     spdlog::info("Stopping YAMS daemon...");
 

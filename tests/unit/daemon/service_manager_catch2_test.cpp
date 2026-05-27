@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <system_error>
 
@@ -14,6 +15,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/metadata/database.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -25,6 +27,99 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace yams::daemon::test {
+namespace {
+
+fs::path metadataDbPath(const DaemonConfig& config) {
+    return config.dataDir / "yams.db";
+}
+
+void seedMetadataDb(const fs::path& dbPath, const std::string& value = "seed") {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+    REQUIRE(
+        db.execute("CREATE TABLE IF NOT EXISTS startup_probe(id INTEGER PRIMARY KEY, value TEXT)"));
+    REQUIRE(db.execute("DELETE FROM startup_probe"));
+    REQUIRE(db.execute("INSERT INTO startup_probe(value) VALUES('" + value + "')"));
+    db.close();
+}
+
+void writeCorruptDb(const fs::path& dbPath) {
+    std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    const std::string header = "SQLite format 3\0";
+    out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    const std::string garbage(4096, '\xff');
+    out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    out.close();
+}
+
+std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
+    std::error_code ec;
+    if (!fs::exists(dataDir, ec)) {
+        return std::nullopt;
+    }
+    const std::string prefix = "yams.db.corrupt-";
+    for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
+            it->path().extension() != ".sentinel") {
+            return it->path();
+        }
+    }
+    return std::nullopt;
+}
+
+std::size_t startupProbeRowCount(const fs::path& dbPath) {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite));
+    auto stmtR = db.prepare("SELECT COUNT(*) FROM startup_probe");
+    REQUIRE(stmtR);
+    auto& stmt = stmtR.value();
+    REQUIRE(stmt.step());
+    auto count = static_cast<std::size_t>(stmt.getInt(0));
+    db.close();
+    return count;
+}
+
+void seedDummyWalSidecar(const fs::path& dbPath, const std::string& payload = "stale-wal") {
+    std::ofstream out(dbPath.string() + "-wal", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    out.close();
+    REQUIRE(fs::exists(dbPath.string() + "-wal"));
+}
+
+bool walSidecarCleared(const fs::path& dbPath) {
+    std::error_code ec;
+    const fs::path walPath(dbPath.string() + "-wal");
+    if (!fs::exists(walPath, ec)) {
+        return true;
+    }
+    return fs::file_size(walPath, ec) == 0;
+}
+
+bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& payload) {
+    const fs::path walPath(dbPath.string() + "-wal");
+    std::error_code ec;
+    if (!fs::exists(walPath, ec) || fs::file_size(walPath, ec) != payload.size()) {
+        return false;
+    }
+    std::ifstream in(walPath, std::ios::binary);
+    std::string actual(payload.size(), '\0');
+    in.read(actual.data(), static_cast<std::streamsize>(actual.size()));
+    return in.good() && actual == payload;
+}
+
+void requireReadyDatabaseState(const StateComponent& state) {
+    CHECK(state.readiness.databaseReady.load());
+    std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
+    CHECK(state.readiness.databasePhase == "ready");
+}
+
+} // namespace
 
 // Test fixture for ServiceManager tests
 struct ServiceManagerFixture {
@@ -231,6 +326,164 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     const auto misplacedWalDir = runRoot / "wal";
     CHECK_FALSE(fs::exists(misplacedWalDir));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager async init starts only once per initialize cycle",
+                 "[daemon][service_manager][startup][async_init]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+
+    std::promise<void> firstBarrierPromise;
+    auto firstBarrierFuture = firstBarrierPromise.get_future();
+    std::atomic<bool> firstBarrierSet{false};
+    sm->startAsyncInit(&firstBarrierPromise, &firstBarrierSet);
+
+    REQUIRE(firstBarrierFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(firstBarrierSet.load(std::memory_order_acquire));
+
+    std::promise<void> secondBarrierPromise;
+    auto secondBarrierFuture = secondBarrierPromise.get_future();
+    std::atomic<bool> secondBarrierSet{false};
+    sm->startAsyncInit(&secondBarrierPromise, &secondBarrierSet);
+
+    CHECK(secondBarrierFuture.wait_for(std::chrono::milliseconds(200)) ==
+          std::future_status::timeout);
+    CHECK_FALSE(secondBarrierSet.load(std::memory_order_acquire));
+
+    const auto snapshot = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(snapshot.state == ServiceManagerState::Ready);
+    requireReadyDatabaseState(state_);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager records recovery provenance for corrupt metadata DB startup",
+                 "[daemon][service_manager][startup][recovery]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    writeCorruptDb(dbPath);
+    seedDummyWalSidecar(dbPath, "corrupt-sidecar");
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    requireReadyDatabaseState(state_);
+    std::optional<fs::path> quarantinedPath;
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        REQUIRE_FALSE(state_.readiness.databaseRecoveredFrom.empty());
+        quarantinedPath = findQuarantinedFile(config_.dataDir);
+        REQUIRE(quarantinedPath.has_value());
+        CHECK(state_.readiness.databaseRecoveredFrom == quarantinedPath->string());
+    }
+    CHECK(fs::exists(*quarantinedPath));
+    CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, "corrupt-sidecar"));
+
+    sm->shutdown();
+    CHECK(walSidecarCleared(dbPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WAL during startup",
+                 "[daemon][service_manager][wal][startup]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "stale_wal_seed");
+    const std::string staleWalPayload = "stale-wal";
+    seedDummyWalSidecar(dbPath, staleWalPayload);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    requireReadyDatabaseState(state_);
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        CHECK(state_.readiness.databaseRecoveredFrom.empty());
+    }
+    CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
+    CHECK(startupProbeRowCount(dbPath) == 1U);
+
+    sm->shutdown();
+    CHECK(walSidecarCleared(dbPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown remains idempotent after async init reaches ready",
+                 "[daemon][service_manager][shutdown][idempotent]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto readySnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(readySnap.state == ServiceManagerState::Ready);
+
+    sm->shutdown();
+    const auto firstShutdown = sm->getServiceManagerFsmSnapshot();
+    CHECK(firstShutdown.state == ServiceManagerState::Stopped);
+    CHECK(sm->__test_getAbiHost() == nullptr);
+
+    REQUIRE_NOTHROW(sm->shutdown());
+    const auto secondShutdown = sm->getServiceManagerFsmSnapshot();
+    CHECK(secondShutdown.state == ServiceManagerState::Stopped);
+    CHECK(sm->getMetadataRepo() == nullptr);
+    CHECK(sm->getContentStore() == nullptr);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager restart cycles recover freshly seeded stale WAL",
+                 "[daemon][service_manager][wal][restart]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "restart_cycle_seed");
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        StateComponent cycleState;
+        DaemonLifecycleFsm cycleLifecycle;
+        const std::string staleWalPayload = "wal-cycle-" + std::to_string(cycle);
+        seedDummyWalSidecar(dbPath, staleWalPayload);
+
+        auto sm = std::make_shared<ServiceManager>(config_, cycleState, cycleLifecycle);
+        auto init = sm->initialize();
+        REQUIRE(init);
+        sm->startAsyncInit();
+        auto smSnap = sm->waitForServiceManagerTerminalState(30);
+        REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+        INFO("cycle=" << cycle);
+        requireReadyDatabaseState(cycleState);
+        CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
+        CHECK(startupProbeRowCount(dbPath) == 1U);
+
+        sm->shutdown();
+        CHECK(walSidecarCleared(dbPath));
+    }
 }
 
 } // namespace yams::daemon::test

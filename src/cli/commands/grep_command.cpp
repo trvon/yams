@@ -108,6 +108,7 @@ class GrepCommand : public ICommand {
 private:
     // Member variables
     YamsCLI* cli_ = nullptr;
+    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
     std::string pattern_;
     std::vector<std::string> paths_;
     std::string includePatterns_;
@@ -145,6 +146,73 @@ private:
     std::string extension_;
     std::string language_;
     bool liveFallback_{true};
+
+    using RelationSummaryMap = std::unordered_map<std::string, std::string>;
+    using SemanticScoreMap = std::map<std::string, double>;
+
+    struct FilePresentation {
+        std::string rawPath;
+        std::string displayPath;
+        std::string relationSummary;
+        std::string graphExploreHint;
+        std::string extension;
+    };
+
+    struct FileMatchAggregates {
+        std::set<std::string> files;
+        SemanticScoreMap semanticOnlyScores;
+        std::map<std::string, size_t> regexCounts;
+    };
+
+    struct Match;
+
+    struct RichRenderedMatch {
+        size_t lineNumber{0};
+        std::string lineText;
+        std::vector<std::string> contextBefore;
+        std::vector<std::string> contextAfter;
+        std::string prefixText;
+        const char* prefixColor{nullptr};
+        bool leadingGapSeparator{false};
+    };
+
+    struct RichFileMatches {
+        FilePresentation file;
+        size_t totalMatches{0};
+        size_t regexMatches{0};
+        size_t semanticMatches{0};
+        std::vector<RichRenderedMatch> matches;
+    };
+
+    struct SemanticDisplayResult {
+        FilePresentation file;
+        double score{0.0};
+        std::optional<std::string> snippet;
+    };
+
+    struct LocalHybridRenderPlan {
+        std::vector<RichFileMatches> regexGroups;
+        std::vector<SemanticDisplayResult> semanticOnlyResults;
+        size_t totalRegexMatches{0};
+        size_t totalRegexFiles{0};
+        size_t semanticSummaryCount{0};
+    };
+
+    static bool matchAnyGlob(const std::string& path, const std::vector<std::string>& globs) {
+        if (globs.empty()) {
+            return true;
+        }
+        for (const auto& glob : globs) {
+            if (yams::app::services::utils::matchGlob(path, glob)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool shouldApplySessionPatterns(const std::vector<std::string>& sessionPatterns) const {
+        return sessionOverride_.has_value() && !sessionPatterns.empty();
+    }
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
@@ -367,8 +435,16 @@ public:
                 }
             }
             if (!noSession_) {
-                sessionPatterns_ =
+                auto sessionPatterns =
                     yams::cli::session_store::active_include_patterns(sessionOverride_);
+                if (shouldApplySessionPatterns(sessionPatterns)) {
+                    sessionPatterns_ = std::move(sessionPatterns);
+                } else {
+                    sessionPatterns_.clear();
+                    if (!sessionPatterns.empty()) {
+                        spdlog::debug("[CLI] Skipping session include patterns outside CWD");
+                    }
+                }
             } else {
                 sessionPatterns_.clear();
             }
@@ -383,6 +459,7 @@ public:
 
     Result<void> execute() override {
         try {
+            invocationCwd_ = std::filesystem::current_path();
             // Attempt daemon-first grep with complete protocol mapping
             {
                 std::vector<std::string> cwdPatterns;
@@ -517,18 +594,7 @@ public:
                             if (!match.contextAfter.empty()) {
                                 m["context_after"] = match.contextAfter;
                             }
-                            auto relationSummary =
-                                relationHintForFile(relationSummaries, match.file);
-                            if (!relationSummary.empty()) {
-                                m["relation_summary"] = relationSummary;
-                            }
-                            if (!match.file.empty()) {
-                                auto topRel = extractTopRelation(relationSummary);
-                                auto hint = buildGraphExploreHint(match.file, topRel, 2);
-                                if (!hint.empty()) {
-                                    m["graph_explore_hint"] = hint;
-                                }
-                            }
+                            addGraphFields(m, describeFile(relationSummaries, match.file));
                             j["matches"].push_back(m);
                         }
                         if (!relationSummaries.empty()) {
@@ -563,283 +629,23 @@ public:
                     }
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {
-                        // Show files from regex and semantic results (semantic marked with
-                        // confidence when no regex)
-                        std::set<std::string> files;
-                        std::map<std::string, bool> hasRegex;
-                        std::map<std::string, double> semOnlyConf;
-
-                        for (const auto& match : resp.matches) {
-                            files.insert(match.file);
-                            if (match.matchType == "semantic") {
-                                auto it = semOnlyConf.find(match.file);
-                                if (it == semOnlyConf.end() || match.confidence > it->second) {
-                                    semOnlyConf[match.file] = match.confidence;
-                                }
-                            } else {
-                                hasRegex[match.file] = true;
-                            }
-                        }
-
-                        if (files.empty()) {
-                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printNoResultsDiagnostics(resp.filesSearched);
-                        } else {
-                            for (const auto& file : files) {
-                                auto itR = hasRegex.find(file);
-                                auto itS = semOnlyConf.find(file);
-                                if ((itR == hasRegex.end() || !itR->second) &&
-                                    itS != semOnlyConf.end()) {
-                                    // Semantic-only match: show confidence in cyan
-                                    std::cout
-                                        << ui::colorize(
-                                               "[S:" + std::to_string(itS->second).substr(0, 4) +
-                                                   "]",
-                                               ui::Ansi::CYAN)
-                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA);
-                                } else {
-                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA);
-                                }
-                                auto relationSummary = relationHintForFile(relationSummaries, file);
-                                if (!relationSummary.empty()) {
-                                    std::cout << " "
-                                              << ui::colorize("[rel: " + relationSummary + "]",
-                                                              ui::Ansi::DIM);
-                                }
-                                std::cout << std::endl;
-                            }
-                        }
+                        const auto aggregates = collectDaemonFileAggregates(resp.matches);
+                        renderPathResults(aggregates.files, aggregates.semanticOnlyScores,
+                                          relationSummaries, resp.filesSearched);
                     } else if (countOnly_) {
-                        // Count regex matches per file; also surface semantic suggestions
-                        // separately
-                        std::map<std::string, size_t> fileCounts;
-                        std::set<std::string> regexFiles;
-                        std::map<std::string, double> semanticOnly;
-
-                        for (const auto& match : resp.matches) {
-                            if (match.matchType == "semantic") {
-                                if (regexFiles.find(match.file) == regexFiles.end()) {
-                                    auto it = semanticOnly.find(match.file);
-                                    if (it == semanticOnly.end() || match.confidence > it->second) {
-                                        semanticOnly[match.file] = match.confidence;
-                                    }
-                                }
-                            } else {
-                                regexFiles.insert(match.file);
-                                fileCounts[match.file]++;
-                                // If this file was previously marked as semantic-only, it is no
-                                // longer semantic-only
-                                semanticOnly.erase(match.file);
-                            }
-                        }
-
-                        if (fileCounts.empty() && semanticOnly.empty()) {
-                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printNoResultsDiagnostics(resp.filesSearched);
-                        } else {
-                            for (const auto& [file, count] : fileCounts) {
-                                if (showFilename_ || fileCounts.size() > 1) {
-                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << ":";
-                                }
-                                std::cout << ui::colorize(std::to_string(count), ui::Ansi::GREEN)
-                                          << std::endl;
-                                auto relationSummary = relationHintForFile(relationSummaries, file);
-                                if (!relationSummary.empty()) {
-                                    std::cout
-                                        << ui::colorize("  rel: " + relationSummary, ui::Ansi::DIM)
-                                        << std::endl;
-                                }
-                            }
-                            if (!semanticOnly.empty()) {
-                                std::cout << ui::colorize("\nSemantic suggestions:", ui::Ansi::DIM)
-                                          << std::endl;
-                                for (const auto& [file, conf] : semanticOnly) {
-                                    std::cout
-                                        << ui::colorize("[S:" + std::to_string(conf).substr(0, 4) +
-                                                            "]",
-                                                        ui::Ansi::CYAN)
-                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA);
-                                    auto relationSummary =
-                                        relationHintForFile(relationSummaries, file);
-                                    if (!relationSummary.empty()) {
-                                        std::cout << " "
-                                                  << ui::colorize("[rel: " + relationSummary + "]",
-                                                                  ui::Ansi::DIM);
-                                    }
-                                    std::cout << std::endl;
-                                }
-                            }
-                        }
+                        const auto aggregates = collectDaemonFileAggregates(resp.matches);
+                        renderCountResults(aggregates.regexCounts, aggregates.semanticOnlyScores,
+                                           relationSummaries, resp.filesSearched);
                     } else {
                         if (resp.matches.empty()) {
-                            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                            printNoResultsDiagnostics(resp.filesSearched);
+                            renderNoResults(resp.filesSearched);
                             return Result<void>();
                         }
 
-                        // Check if minimal mode is enabled
                         if (minimalMode_) {
-                            // Traditional grep output with colors
-                            for (const auto& match : resp.matches) {
-                                if (showFilename_ || resp.matches.size() > 1) {
-                                    std::cout << ui::colorize(match.file, ui::Ansi::MAGENTA) << ":";
-                                }
-                                if (showLineNumbers_) {
-                                    std::cout << ui::colorize(std::to_string(match.lineNumber),
-                                                              ui::Ansi::CYAN)
-                                              << ":";
-                                }
-                                std::cout << formatSnippet(sanitizeForDisplay(match.line))
-                                          << std::endl;
-
-                                for (const auto& ctx : match.contextBefore) {
-                                    std::cout << ui::colorize("  ", ui::Ansi::DIM)
-                                              << formatSnippet(sanitizeForDisplay(ctx))
-                                              << std::endl;
-                                }
-                                for (const auto& ctx : match.contextAfter) {
-                                    std::cout << ui::colorize("  ", ui::Ansi::DIM)
-                                              << formatSnippet(sanitizeForDisplay(ctx))
-                                              << std::endl;
-                                }
-                            }
+                            renderDaemonMinimalMatches(resp.matches, relationSummaries);
                         } else {
-                            // Rich colorized output (default)
-                            size_t regexCount = 0, semanticCount = 0;
-                            std::map<std::string, std::vector<const daemon::GrepMatch*>> fileGroups;
-
-                            // Group matches by file
-                            for (const auto& match : resp.matches) {
-                                fileGroups[match.file].push_back(&match);
-                                if (match.matchType == "semantic") {
-                                    semanticCount++;
-                                } else {
-                                    regexCount++;
-                                }
-                            }
-
-                            // Print results grouped by file
-                            for (const auto& [filename, matches] : fileGroups) {
-                                // Get file extension for language hint
-                                std::string ext;
-                                auto dotPos = filename.rfind('.');
-                                if (dotPos != std::string::npos) {
-                                    ext = filename.substr(dotPos + 1);
-                                }
-
-                                // File header in magenta
-                                std::cout << ui::colorize(filename, ui::Ansi::MAGENTA);
-
-                                // Match count with type breakdown
-                                size_t fileRegex = 0, fileSemantic = 0;
-                                for (const auto* m : matches) {
-                                    if (m->matchType == "semantic")
-                                        fileSemantic++;
-                                    else
-                                        fileRegex++;
-                                }
-
-                                std::string countInfo = " (" + std::to_string(matches.size()) +
-                                                        " match" +
-                                                        (matches.size() != 1 ? "es" : "");
-                                if (fileRegex > 0 && fileSemantic > 0) {
-                                    countInfo += ": " + std::to_string(fileRegex) + " regex, " +
-                                                 std::to_string(fileSemantic) + " semantic";
-                                }
-                                countInfo += ")";
-                                std::cout << ui::colorize(countInfo, ui::Ansi::DIM);
-
-                                if (!ext.empty()) {
-                                    std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
-                                }
-                                auto relationSummary =
-                                    relationHintForFile(relationSummaries, filename);
-                                if (!relationSummary.empty()) {
-                                    std::cout << " "
-                                              << ui::colorize("[rel: " + relationSummary + "]",
-                                                              ui::Ansi::DIM);
-                                }
-                                if (!filename.empty()) {
-                                    auto topRel = extractTopRelation(relationSummary);
-                                    auto hint = buildGraphExploreHint(filename, topRel, 2);
-                                    if (!hint.empty()) {
-                                        std::cout
-                                            << " "
-                                            << ui::colorize("[hint: " + hint + "]", ui::Ansi::DIM);
-                                    }
-                                }
-                                std::cout << std::endl;
-
-                                // Print matches for this file
-                                for (const auto* match : matches) {
-                                    // Line number in cyan
-                                    std::cout
-                                        << "  "
-                                        << ui::colorize(std::to_string(match->lineNumber) + ":",
-                                                        ui::Ansi::CYAN)
-                                        << " ";
-
-                                    // Match type indicator with appropriate color
-                                    if (match->matchType == "semantic") {
-                                        const char* confColor = ui::Ansi::DIM;
-                                        if (match->confidence >= 0.8)
-                                            confColor = ui::Ansi::GREEN;
-                                        else if (match->confidence >= 0.5)
-                                            confColor = ui::Ansi::YELLOW;
-                                        std::cout
-                                            << ui::colorize("[S:" +
-                                                                std::to_string(match->confidence)
-                                                                    .substr(0, 4) +
-                                                                "]",
-                                                            confColor)
-                                            << " ";
-                                    } else if (match->matchType == "hybrid") {
-                                        std::cout << ui::colorize("[H]", ui::Ansi::YELLOW) << " ";
-                                    } else if (semanticCount > 0) {
-                                        std::cout << ui::colorize("[R]", ui::Ansi::GREEN) << " ";
-                                    }
-
-                                    std::cout << formatSnippet(sanitizeForDisplay(match->line))
-                                              << std::endl;
-
-                                    // Context lines in dim
-                                    for (const auto& ctx : match->contextBefore) {
-                                        std::cout
-                                            << ui::colorize("       ", ui::Ansi::DIM)
-                                            << ui::colorize(formatSnippet(sanitizeForDisplay(ctx)),
-                                                            ui::Ansi::DIM)
-                                            << std::endl;
-                                    }
-                                    for (const auto& ctx : match->contextAfter) {
-                                        std::cout
-                                            << ui::colorize("       ", ui::Ansi::DIM)
-                                            << ui::colorize(formatSnippet(sanitizeForDisplay(ctx)),
-                                                            ui::Ansi::DIM)
-                                            << std::endl;
-                                    }
-                                }
-                                std::cout << std::endl;
-                            }
-
-                            // Final summary in dim
-                            std::string summary = std::to_string(resp.matches.size()) + " match" +
-                                                  (resp.matches.size() != 1 ? "es" : "") +
-                                                  " across " + std::to_string(fileGroups.size()) +
-                                                  " file" + (fileGroups.size() != 1 ? "s" : "");
-                            if (regexCount > 0 && semanticCount > 0) {
-                                summary += " (" + std::to_string(regexCount) + " regex, " +
-                                           std::to_string(semanticCount) + " semantic)";
-                            }
-                            std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
-                            if (!resp.matches.empty()) {
-                                std::cout
-                                    << "\n"
-                                    << ui::colorize(
-                                           "Tip: Explore relationships with `yams graph --name "
-                                           "<file> --depth 2`",
-                                           ui::Ansi::DIM)
-                                    << std::endl;
-                            }
+                            renderDaemonRichMatches(resp.matches, relationSummaries);
                         }
                     }
 
@@ -993,7 +799,8 @@ private:
                               << "\n";
                     break;
                 }
-                std::cout << ui::colorize(match.file, ui::Ansi::MAGENTA);
+                std::cout << ui::colorize(describeFile({}, match.file).displayPath,
+                                          ui::Ansi::MAGENTA);
                 if (showLineNumbers_) {
                     std::cout << ":"
                               << ui::colorize(std::to_string(match.lineNumber), ui::Ansi::CYAN);
@@ -1050,7 +857,7 @@ private:
         return summaryByFile;
     }
 
-    std::string relationHintForFile(const std::unordered_map<std::string, std::string>& summaries,
+    std::string relationHintForFile(const RelationSummaryMap& summaries,
                                     const std::string& file) const {
         if (auto it = summaries.find(file); it != summaries.end()) {
             return it->second;
@@ -1088,6 +895,531 @@ private:
             return match;
         }
         return {};
+    }
+
+    static const char* scoreColor(double score) {
+        if (score >= 0.8) {
+            return ui::Ansi::GREEN;
+        }
+        if (score >= 0.5) {
+            return ui::Ansi::YELLOW;
+        }
+        return ui::Ansi::DIM;
+    }
+
+    static std::string formatSemanticScore(double score) {
+        return "[S:" + std::to_string(score).substr(0, 4) + "]";
+    }
+
+    FilePresentation describeFile(const RelationSummaryMap& relationSummaries,
+                                  const std::string& file) const {
+        auto presentation =
+            describeFileForCli(file, relationHintForFile(relationSummaries, file), invocationCwd_);
+        std::string extension =
+            std::filesystem::path(presentation.displayPath).extension().string();
+        if (!extension.empty() && extension.front() == '.') {
+            extension.erase(extension.begin());
+        }
+        return FilePresentation{std::move(presentation.rawPath),
+                                std::move(presentation.displayPath),
+                                std::move(presentation.relationSummary),
+                                std::move(presentation.graphExploreHint), std::move(extension)};
+    }
+
+    void addGraphFields(nlohmann::json& doc, const FilePresentation& file) const {
+        if (!file.relationSummary.empty()) {
+            doc["relation_summary"] = file.relationSummary;
+        }
+        if (!file.graphExploreHint.empty()) {
+            doc["graph_explore_hint"] = file.graphExploreHint;
+        }
+    }
+
+    void printPathResult(const FilePresentation& file,
+                         std::optional<double> semanticScore = std::nullopt) const {
+        if (semanticScore.has_value()) {
+            std::cout << ui::colorize(formatSemanticScore(*semanticScore), ui::Ansi::CYAN) << " ";
+        }
+        std::cout << ui::colorize(file.displayPath, ui::Ansi::MAGENTA);
+        if (!file.relationSummary.empty()) {
+            std::cout << " " << ui::colorize("[rel: " + file.relationSummary + "]", ui::Ansi::DIM);
+        }
+        std::cout << std::endl;
+    }
+
+    FileMatchAggregates
+    collectDaemonFileAggregates(const std::vector<daemon::GrepMatch>& matches) const {
+        FileMatchAggregates aggregates;
+        std::map<std::string, bool> hasRegex;
+
+        for (const auto& match : matches) {
+            aggregates.files.insert(match.file);
+            if (match.matchType == "semantic") {
+                auto it = aggregates.semanticOnlyScores.find(match.file);
+                if (it == aggregates.semanticOnlyScores.end() || match.confidence > it->second) {
+                    aggregates.semanticOnlyScores[match.file] = match.confidence;
+                }
+                continue;
+            }
+
+            hasRegex[match.file] = true;
+            aggregates.regexCounts[match.file]++;
+            aggregates.semanticOnlyScores.erase(match.file);
+        }
+
+        for (auto it = aggregates.semanticOnlyScores.begin();
+             it != aggregates.semanticOnlyScores.end();) {
+            if (auto regexIt = hasRegex.find(it->first);
+                regexIt != hasRegex.end() && regexIt->second) {
+                it = aggregates.semanticOnlyScores.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        return aggregates;
+    }
+
+    FileMatchAggregates collectLocalFileAggregates(
+        const std::vector<std::string>& matchingFiles,
+        const std::map<std::string, std::vector<Match>>& allRegexMatches,
+        const std::vector<yams::metadata::SearchResult>& semanticResults) const {
+        FileMatchAggregates aggregates;
+        aggregates.files.insert(matchingFiles.begin(), matchingFiles.end());
+
+        for (const auto& [filePath, matches] : allRegexMatches) {
+            aggregates.regexCounts[filePath] = matches.size();
+        }
+
+        for (const auto& result : semanticResults) {
+            const std::string& path = result.document.filePath;
+            if (aggregates.files.find(path) == aggregates.files.end()) {
+                auto it = aggregates.semanticOnlyScores.find(path);
+                if (it == aggregates.semanticOnlyScores.end() || result.score > it->second) {
+                    aggregates.semanticOnlyScores[path] = result.score;
+                }
+                aggregates.files.insert(path);
+            }
+        }
+
+        return aggregates;
+    }
+
+    void renderPathResults(const std::set<std::string>& files, const SemanticScoreMap& semOnlyConf,
+                           const RelationSummaryMap& relationSummaries,
+                           std::optional<uint64_t> filesSearched = std::nullopt) const {
+        if (files.empty()) {
+            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
+            printNoResultsDiagnostics(filesSearched);
+            return;
+        }
+
+        for (const auto& file : files) {
+            const auto presentation = describeFile(relationSummaries, file);
+            if (auto it = semOnlyConf.find(file); it != semOnlyConf.end()) {
+                printPathResult(presentation, it->second);
+            } else {
+                printPathResult(presentation);
+            }
+        }
+    }
+
+    void renderCountResults(const std::map<std::string, size_t>& fileCounts,
+                            const SemanticScoreMap& semanticOnly,
+                            const RelationSummaryMap& relationSummaries,
+                            std::optional<uint64_t> filesSearched = std::nullopt) const {
+        if (fileCounts.empty() && semanticOnly.empty()) {
+            std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
+            printNoResultsDiagnostics(filesSearched);
+            return;
+        }
+
+        for (const auto& [file, count] : fileCounts) {
+            const auto presentation = describeFile(relationSummaries, file);
+            if (showFilename_ || fileCounts.size() > 1) {
+                std::cout << ui::colorize(presentation.displayPath, ui::Ansi::MAGENTA) << ":";
+            }
+            std::cout << ui::colorize(std::to_string(count), ui::Ansi::GREEN) << std::endl;
+            if (!presentation.relationSummary.empty()) {
+                std::cout << ui::colorize("  rel: " + presentation.relationSummary, ui::Ansi::DIM)
+                          << std::endl;
+            }
+        }
+
+        if (semanticOnly.empty()) {
+            return;
+        }
+
+        std::cout << ui::colorize("\nSemantic suggestions:", ui::Ansi::DIM) << std::endl;
+        for (const auto& [file, score] : semanticOnly) {
+            printPathResult(describeFile(relationSummaries, file), score);
+        }
+    }
+
+    void printMatchFileHeader(const FilePresentation& file, std::string_view countInfo) const {
+        std::cout << ui::colorize(file.displayPath, ui::Ansi::MAGENTA)
+                  << ui::colorize(std::string(countInfo), ui::Ansi::DIM);
+        if (!file.extension.empty()) {
+            std::cout << ui::colorize(" [" + file.extension + "]", ui::Ansi::DIM);
+        }
+        if (!file.relationSummary.empty()) {
+            std::cout << " " << ui::colorize("[rel: " + file.relationSummary + "]", ui::Ansi::DIM);
+        }
+        if (!file.graphExploreHint.empty()) {
+            std::cout << " "
+                      << ui::colorize("[hint: " + file.graphExploreHint + "]", ui::Ansi::DIM);
+        }
+        std::cout << std::endl;
+    }
+
+    void renderNoResults(std::optional<uint64_t> filesSearched = std::nullopt) const {
+        std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
+        printNoResultsDiagnostics(filesSearched);
+    }
+
+    void renderGraphExploreTip() const {
+        std::cout << "\n"
+                  << ui::colorize(
+                         "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
+                         ui::Ansi::DIM)
+                  << std::endl;
+    }
+
+    void renderSummaryLine(const std::string& summary, bool showTip) const {
+        std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
+        if (showTip) {
+            renderGraphExploreTip();
+        }
+    }
+
+    void renderSemanticResult(const FilePresentation& file, double score,
+                              const std::string* snippet = nullptr) const {
+        std::cout << ui::colorize(file.displayPath, ui::Ansi::MAGENTA) << " "
+                  << ui::colorize(formatSemanticScore(score), scoreColor(score));
+        if (!file.relationSummary.empty()) {
+            std::cout << " " << ui::colorize("[rel: " + file.relationSummary + "]", ui::Ansi::DIM);
+        }
+        std::cout << std::endl;
+        if (snippet != nullptr && !snippet->empty()) {
+            std::cout << ui::colorize("  1:", ui::Ansi::CYAN) << " " << *snippet << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    void renderSectionHeader(std::string_view title) const {
+        std::cout << ui::colorize(std::string(title), ui::Ansi::DIM) << std::endl;
+        std::cout << std::endl;
+    }
+
+    void renderRichFileMatches(const RichFileMatches& group) const {
+        std::string countInfo = " (" + std::to_string(group.totalMatches) + " match" +
+                                (group.totalMatches != 1 ? "es" : "");
+        if (group.regexMatches > 0 && group.semanticMatches > 0) {
+            countInfo += ": " + std::to_string(group.regexMatches) + " regex, " +
+                         std::to_string(group.semanticMatches) + " semantic";
+        }
+        countInfo += ")";
+        printMatchFileHeader(group.file, countInfo);
+
+        for (const auto& match : group.matches) {
+            if (match.leadingGapSeparator) {
+                std::cout << ui::colorize("  ...", ui::Ansi::DIM) << std::endl;
+            }
+
+            std::cout << "  "
+                      << ui::colorize(std::to_string(match.lineNumber) + ":", ui::Ansi::CYAN)
+                      << " ";
+            if (!match.prefixText.empty()) {
+                std::cout << ui::colorize(match.prefixText, match.prefixColor) << " ";
+            }
+            std::cout << match.lineText << std::endl;
+
+            for (const auto& ctx : match.contextBefore) {
+                std::cout << ui::colorize("       ", ui::Ansi::DIM)
+                          << ui::colorize(ctx, ui::Ansi::DIM) << std::endl;
+            }
+            for (const auto& ctx : match.contextAfter) {
+                std::cout << ui::colorize("       ", ui::Ansi::DIM)
+                          << ui::colorize(ctx, ui::Ansi::DIM) << std::endl;
+            }
+        }
+        std::cout << std::endl;
+    }
+
+    std::string highlightLocalMatchLine(const std::string& lineText, const Match& match) const {
+        if (invertMatch_ || match.columnStart >= lineText.size()) {
+            return invertMatch_ ? ui::colorize(lineText, ui::Ansi::DIM) : lineText;
+        }
+
+        std::ostringstream out;
+        out << lineText.substr(0, match.columnStart);
+        if (ui::colors_enabled()) {
+            out << ui::Ansi::RED;
+        }
+        const size_t matchLen =
+            (match.columnEnd > match.columnStart) ? match.columnEnd - match.columnStart : 0;
+        out << lineText.substr(match.columnStart, matchLen);
+        if (ui::colors_enabled()) {
+            out << ui::Ansi::RESET;
+        }
+        if (match.columnEnd < lineText.size()) {
+            out << lineText.substr(match.columnEnd);
+        }
+        return out.str();
+    }
+
+    RichFileMatches buildLocalRichFileMatches(const FilePresentation& file,
+                                              const std::string& content,
+                                              const std::vector<Match>& matches) const {
+        RichFileMatches group;
+        group.file = file;
+        group.totalMatches = matches.size();
+        group.regexMatches = matches.size();
+
+        std::vector<std::string> lines;
+        std::istringstream stream(content);
+        std::string line;
+        while (std::getline(stream, line)) {
+            lines.push_back(line);
+        }
+
+        std::set<size_t> printedLines;
+        for (const auto& match : matches) {
+            RichRenderedMatch rendered;
+            rendered.lineNumber = match.lineNumber;
+
+            const size_t startLine =
+                (match.lineNumber > beforeContext_) ? match.lineNumber - beforeContext_ : 1;
+            const size_t endLine = std::min(match.lineNumber + afterContext_, lines.size());
+            rendered.leadingGapSeparator =
+                !printedLines.empty() && startLine > *printedLines.rbegin() + 1;
+
+            for (size_t i = startLine; i <= endLine; ++i) {
+                if (printedLines.count(i) > 0) {
+                    continue;
+                }
+                printedLines.insert(i);
+
+                if (i == 0 || i - 1 >= lines.size()) {
+                    continue;
+                }
+
+                if (i == match.lineNumber) {
+                    rendered.lineText = highlightLocalMatchLine(lines[i - 1], match);
+                } else if (i < match.lineNumber) {
+                    rendered.contextBefore.push_back(lines[i - 1]);
+                } else {
+                    rendered.contextAfter.push_back(lines[i - 1]);
+                }
+            }
+
+            if (rendered.lineText.empty() && match.lineNumber > 0 &&
+                match.lineNumber <= lines.size()) {
+                rendered.lineText = highlightLocalMatchLine(lines[match.lineNumber - 1], match);
+            }
+            group.matches.push_back(std::move(rendered));
+        }
+
+        return group;
+    }
+
+    std::vector<RichFileMatches>
+    buildDaemonRichFileMatches(const std::vector<daemon::GrepMatch>& matches,
+                               const RelationSummaryMap& relationSummaries) const {
+        size_t semanticCount = 0;
+        std::map<std::string, std::vector<const daemon::GrepMatch*>> fileGroups;
+
+        for (const auto& match : matches) {
+            fileGroups[match.file].push_back(&match);
+            if (match.matchType == "semantic") {
+                semanticCount++;
+            }
+        }
+
+        std::vector<RichFileMatches> groups;
+        groups.reserve(fileGroups.size());
+        for (const auto& [filename, groupedMatches] : fileGroups) {
+            RichFileMatches group;
+            group.file = describeFile(relationSummaries, filename);
+            group.totalMatches = groupedMatches.size();
+
+            for (const auto* match : groupedMatches) {
+                RichRenderedMatch rendered;
+                rendered.lineNumber = match->lineNumber;
+                rendered.lineText = formatSnippet(sanitizeForDisplay(match->line));
+                for (const auto& ctx : match->contextBefore) {
+                    rendered.contextBefore.push_back(formatSnippet(sanitizeForDisplay(ctx)));
+                }
+                for (const auto& ctx : match->contextAfter) {
+                    rendered.contextAfter.push_back(formatSnippet(sanitizeForDisplay(ctx)));
+                }
+
+                if (match->matchType == "semantic") {
+                    group.semanticMatches++;
+                    rendered.prefixText = formatSemanticScore(match->confidence);
+                    rendered.prefixColor = scoreColor(match->confidence);
+                } else {
+                    group.regexMatches++;
+                    if (match->matchType == "hybrid") {
+                        rendered.prefixText = "[H]";
+                        rendered.prefixColor = ui::Ansi::YELLOW;
+                    } else if (semanticCount > 0) {
+                        rendered.prefixText = "[R]";
+                        rendered.prefixColor = ui::Ansi::GREEN;
+                    }
+                }
+
+                group.matches.push_back(std::move(rendered));
+            }
+
+            groups.push_back(std::move(group));
+        }
+
+        return groups;
+    }
+
+    LocalHybridRenderPlan
+    buildLocalHybridRenderPlan(const std::vector<metadata::DocumentInfo>& documents,
+                               const std::shared_ptr<api::IContentStore>& store,
+                               const std::map<std::string, std::vector<Match>>& allRegexMatches,
+                               const std::vector<yams::metadata::SearchResult>& semanticResults,
+                               const RelationSummaryMap& relationSummaries) const {
+        LocalHybridRenderPlan plan;
+        plan.totalRegexFiles = allRegexMatches.size();
+        plan.semanticSummaryCount = semanticResults.size();
+
+        const bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
+        size_t fileCount = 0;
+        for (const auto& [filePath, matches] : allRegexMatches) {
+            plan.totalRegexMatches += matches.size();
+            if (fileCount >= 3 && hasSemanticResults) {
+                ++fileCount;
+                continue;
+            }
+
+            auto doc = std::find_if(documents.begin(), documents.end(),
+                                    [&filePath](const auto& d) { return d.filePath == filePath; });
+            if (doc != documents.end()) {
+                auto contentResult = store->retrieveBytes(doc->sha256Hash);
+                if (contentResult) {
+                    std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
+                                        contentResult.value().size());
+
+                    auto limitedMatches = matches;
+                    if (maxCount_ > 0 && limitedMatches.size() > static_cast<size_t>(maxCount_)) {
+                        limitedMatches.resize(maxCount_);
+                    }
+
+                    plan.regexGroups.push_back(buildLocalRichFileMatches(
+                        describeFile(relationSummaries, filePath), content, limitedMatches));
+                }
+            }
+            ++fileCount;
+        }
+
+        size_t shown = 0;
+        for (size_t i = 0; i < semanticResults.size() && shown < semanticLimit_; i++) {
+            const auto& result = semanticResults[i];
+            const std::string& path = result.document.filePath;
+            if (allRegexMatches.find(path) != allRegexMatches.end()) {
+                continue;
+            }
+
+            SemanticDisplayResult display;
+            display.file = describeFile(relationSummaries, path);
+            display.score = result.score;
+            if (!result.snippet.empty()) {
+                display.snippet = truncateSnippet(result.snippet, 200);
+            }
+            plan.semanticOnlyResults.push_back(std::move(display));
+            shown++;
+        }
+
+        return plan;
+    }
+
+    void renderLocalHybridResults(const LocalHybridRenderPlan& plan) const {
+        const bool hasRegexMatches = !plan.regexGroups.empty();
+        const bool hasSemanticResults = !plan.semanticOnlyResults.empty();
+
+        if (hasRegexMatches) {
+            if (hasSemanticResults) {
+                renderSectionHeader("=== Text Matches ===");
+            }
+            for (const auto& group : plan.regexGroups) {
+                renderRichFileMatches(group);
+            }
+        }
+
+        if (hasSemanticResults) {
+            if (hasRegexMatches) {
+                std::cout << std::endl;
+            }
+            renderSectionHeader("=== Semantic Matches ===");
+            for (const auto& result : plan.semanticOnlyResults) {
+                renderSemanticResult(result.file, result.score,
+                                     result.snippet ? &*result.snippet : nullptr);
+            }
+        }
+
+        if (!hasRegexMatches && !hasSemanticResults) {
+            renderNoResults();
+            return;
+        }
+
+        std::string summary = std::to_string(plan.totalRegexMatches) + " match" +
+                              (plan.totalRegexMatches != 1 ? "es" : "") + " in " +
+                              std::to_string(plan.totalRegexFiles) + " file" +
+                              (plan.totalRegexFiles != 1 ? "s" : "");
+        if (plan.semanticSummaryCount > 0) {
+            summary += " + " + std::to_string(plan.semanticSummaryCount) + " semantic";
+        }
+        renderSummaryLine(summary, hasRegexMatches || hasSemanticResults);
+    }
+
+    void renderDaemonMinimalMatches(const std::vector<daemon::GrepMatch>& matches,
+                                    const RelationSummaryMap& relationSummaries) const {
+        for (const auto& match : matches) {
+            const auto file = describeFile(relationSummaries, match.file);
+            if (showFilename_ || matches.size() > 1) {
+                std::cout << ui::colorize(file.displayPath, ui::Ansi::MAGENTA) << ":";
+            }
+            if (showLineNumbers_) {
+                std::cout << ui::colorize(std::to_string(match.lineNumber), ui::Ansi::CYAN) << ":";
+            }
+            std::cout << formatSnippet(sanitizeForDisplay(match.line)) << std::endl;
+
+            for (const auto& ctx : match.contextBefore) {
+                std::cout << ui::colorize("  ", ui::Ansi::DIM)
+                          << formatSnippet(sanitizeForDisplay(ctx)) << std::endl;
+            }
+            for (const auto& ctx : match.contextAfter) {
+                std::cout << ui::colorize("  ", ui::Ansi::DIM)
+                          << formatSnippet(sanitizeForDisplay(ctx)) << std::endl;
+            }
+        }
+    }
+
+    void renderDaemonRichMatches(const std::vector<daemon::GrepMatch>& matches,
+                                 const RelationSummaryMap& relationSummaries) const {
+        const auto groups = buildDaemonRichFileMatches(matches, relationSummaries);
+
+        size_t regexCount = 0;
+        size_t semanticCount = 0;
+        for (const auto& group : groups) {
+            regexCount += group.regexMatches;
+            semanticCount += group.semanticMatches;
+            renderRichFileMatches(group);
+        }
+
+        std::string summary =
+            std::to_string(matches.size()) + " match" + (matches.size() != 1 ? "es" : "") +
+            " across " + std::to_string(groups.size()) + " file" + (groups.size() != 1 ? "s" : "");
+        if (regexCount > 0 && semanticCount > 0) {
+            summary += " (" + std::to_string(regexCount) + " regex, " +
+                       std::to_string(semanticCount) + " semantic)";
+        }
+        renderSummaryLine(summary, !matches.empty());
     }
 
     std::string formatSnippet(std::string_view snippet) const {
@@ -1670,188 +2002,23 @@ private:
         auto relationSummaries = buildRelationSummaryMap(relationFiles);
 
         if (filesOnly_ || pathsOnly_) {
-            // Show files from regex and semantic results (semantic marked with confidence when no
-            // regex)
-            std::set<std::string> files(matchingFiles.begin(), matchingFiles.end());
-            std::map<std::string, double> semOnlyConf;
-
-            // Merge semantic paths (only when not already matched by regex)
-            for (const auto& result : semanticResults) {
-                const std::string& p = result.document.filePath;
-                if (files.find(p) == files.end()) {
-                    double conf = result.score;
-                    auto itc = semOnlyConf.find(p);
-                    if (itc == semOnlyConf.end() || conf > itc->second) {
-                        semOnlyConf[p] = conf;
-                    }
-                    files.insert(p);
-                }
-            }
-
-            if (files.empty()) {
-                std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                printNoResultsDiagnostics();
-            } else {
-                for (const auto& file : files) {
-                    auto itc = semOnlyConf.find(file);
-                    if (itc != semOnlyConf.end()) {
-                        std::cout << ui::colorize("[S:" + std::to_string(itc->second).substr(0, 4) +
-                                                      "]",
-                                                  ui::Ansi::CYAN)
-                                  << " " << ui::colorize(file, ui::Ansi::MAGENTA);
-                    } else {
-                        std::cout << ui::colorize(file, ui::Ansi::MAGENTA);
-                    }
-                    auto relationSummary = relationHintForFile(relationSummaries, file);
-                    if (!relationSummary.empty()) {
-                        std::cout << " "
-                                  << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
-                    }
-                    std::cout << std::endl;
-                }
-            }
+            const auto aggregates =
+                collectLocalFileAggregates(matchingFiles, allRegexMatches, semanticResults);
+            renderPathResults(aggregates.files, aggregates.semanticOnlyScores, relationSummaries);
         } else if (countOnly_) {
-            // Output counts
-            for (const auto& [filePath, matches] : allRegexMatches) {
-                if (showFilename_) {
-                    std::cout << ui::colorize(filePath, ui::Ansi::MAGENTA) << ":";
-                }
-                std::cout << ui::colorize(std::to_string(matches.size()), ui::Ansi::GREEN)
-                          << std::endl;
-                auto relationSummary = relationHintForFile(relationSummaries, filePath);
-                if (!relationSummary.empty()) {
-                    std::cout << ui::colorize("  rel: " + relationSummary, ui::Ansi::DIM)
-                              << std::endl;
-                }
-            }
+            const auto aggregates =
+                collectLocalFileAggregates(matchingFiles, allRegexMatches, semanticResults);
+            renderCountResults(aggregates.regexCounts, {}, relationSummaries);
         } else if (filesWithoutMatch_) {
             // Handle files-without-match option
             for (const auto& file : nonMatchingFiles) {
-                std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
+                std::cout << ui::colorize(describeFile({}, file).displayPath, ui::Ansi::MAGENTA)
+                          << std::endl;
             }
         } else {
-            // Hybrid output mode - show both regex and semantic results
-            bool hasRegexMatches = !allRegexMatches.empty();
-            bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
-
-            if (hasRegexMatches) {
-                if (hasSemanticResults) {
-                    std::cout << ui::colorize("=== Text Matches ===", ui::Ansi::DIM) << std::endl;
-                    std::cout << std::endl;
-                }
-
-                // Show top regex matches (limit to 3 files for balance)
-                size_t fileCount = 0;
-                for (const auto& [filePath, matches] : allRegexMatches) {
-                    if (fileCount >= 3 && hasSemanticResults)
-                        break; // Limit when showing both
-
-                    // Retrieve content for printing
-                    auto doc =
-                        std::find_if(documents.begin(), documents.end(),
-                                     [&filePath](const auto& d) { return d.filePath == filePath; });
-
-                    if (doc != documents.end()) {
-                        auto contentResult = store->retrieveBytes(doc->sha256Hash);
-                        if (contentResult) {
-                            std::string content(
-                                reinterpret_cast<const char*>(contentResult.value().data()),
-                                contentResult.value().size());
-
-                            // Apply per-file limit
-                            auto limitedMatches = matches;
-                            if (maxCount_ > 0 &&
-                                limitedMatches.size() > static_cast<size_t>(maxCount_)) {
-                                limitedMatches.resize(maxCount_);
-                            }
-
-                            printMatchesColorized(filePath, content, limitedMatches,
-                                                  relationHintForFile(relationSummaries, filePath));
-                        }
-                    }
-                    fileCount++;
-                }
-            }
-
-            if (hasSemanticResults) {
-                if (hasRegexMatches) {
-                    std::cout << std::endl;
-                }
-                std::cout << ui::colorize("=== Semantic Matches ===", ui::Ansi::DIM) << std::endl;
-                std::cout << std::endl;
-
-                // Show semantic results
-                size_t shown = 0;
-                for (size_t i = 0; i < semanticResults.size() && shown < semanticLimit_; i++) {
-                    const auto& result = semanticResults[i];
-
-                    // Get path from document
-                    const std::string& path = result.document.filePath;
-
-                    // Skip if this file already shown in regex matches
-                    if (allRegexMatches.find(path) != allRegexMatches.end()) {
-                        continue;
-                    }
-
-                    // File path in magenta
-                    std::cout << ui::colorize(path, ui::Ansi::MAGENTA);
-
-                    // Score with color based on confidence
-                    const char* scoreColor = ui::Ansi::DIM;
-                    if (result.score >= 0.8)
-                        scoreColor = ui::Ansi::GREEN;
-                    else if (result.score >= 0.5)
-                        scoreColor = ui::Ansi::YELLOW;
-                    std::cout << " "
-                              << ui::colorize("[S:" + std::to_string(result.score).substr(0, 4) +
-                                                  "]",
-                                              scoreColor);
-
-                    auto relationSummary = relationHintForFile(relationSummaries, path);
-                    if (!relationSummary.empty()) {
-                        std::cout << " "
-                                  << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
-                    }
-                    std::cout << std::endl;
-
-                    // Show snippet if available
-                    if (!result.snippet.empty()) {
-                        std::string snippet = truncateSnippet(result.snippet, 200);
-                        std::cout << ui::colorize("  1:", ui::Ansi::CYAN) << " " << snippet
-                                  << std::endl;
-                    }
-                    std::cout << std::endl;
-                    shown++;
-                }
-            }
-
-            if (!hasRegexMatches && !hasSemanticResults) {
-                std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
-                printNoResultsDiagnostics();
-            } else {
-                // Summary line
-                size_t totalMatches = 0;
-                for (const auto& [_, m] : allRegexMatches) {
-                    totalMatches += m.size();
-                }
-                std::string summary = std::to_string(totalMatches) + " match" +
-                                      (totalMatches != 1 ? "es" : "") + " in " +
-                                      std::to_string(allRegexMatches.size()) + " file" +
-                                      (allRegexMatches.size() != 1 ? "s" : "");
-                if (hasSemanticResults) {
-                    summary += " + " + std::to_string(semanticResults.size()) + " semantic";
-                }
-                std::cout << ui::colorize(summary, ui::Ansi::DIM) << std::endl;
-                if (hasRegexMatches || hasSemanticResults) {
-                    std::cout << "\n"
-                              << ui::colorize(
-                                     "Tip: Explore relationships with `yams graph --name <file> "
-                                     "--depth 2`",
-                                     ui::Ansi::DIM)
-                              << std::endl;
-                }
-            }
-
+            const auto plan = buildLocalHybridRenderPlan(documents, store, allRegexMatches,
+                                                         semanticResults, relationSummaries);
+            renderLocalHybridResults(plan);
             return Result<void>();
         }
         return Result<void>();
@@ -1863,28 +2030,6 @@ private:
         size_t columnEnd;
         std::string line;
     };
-
-    void printHighlightedLine(const std::string& line, const Match& match) {
-        if (match.columnStart >= line.size()) {
-            std::cout << line << std::endl;
-            return;
-        }
-
-        std::cout << line.substr(0, match.columnStart);
-        if (ui::colors_enabled()) {
-            std::cout << ui::Ansi::RED;
-        }
-        if (match.columnEnd > match.columnStart) {
-            std::cout << line.substr(match.columnStart, match.columnEnd - match.columnStart);
-        }
-        if (ui::colors_enabled()) {
-            std::cout << ui::Ansi::RESET;
-        }
-        if (match.columnEnd < line.size()) {
-            std::cout << line.substr(match.columnEnd);
-        }
-        std::cout << std::endl;
-    }
 
     std::vector<Match> processFile(const std::string& /*filename*/, const std::string& content,
                                    const std::regex& regex) {
@@ -1935,157 +2080,6 @@ private:
         return matches;
     }
 
-    void printMatches(const std::string& filename, const std::string& content,
-                      const std::vector<Match>& matches) {
-        // Split content into lines for context printing
-        std::vector<std::string> lines;
-        std::istringstream stream(content);
-        std::string line;
-        while (std::getline(stream, line)) {
-            lines.push_back(line);
-        }
-
-        // Track which lines we've already printed (for context overlap)
-        std::set<size_t> printedLines;
-
-        for (const auto& match : matches) {
-            // Calculate context range
-            size_t startLine =
-                (match.lineNumber > beforeContext_) ? match.lineNumber - beforeContext_ : 1;
-            size_t endLine = std::min(match.lineNumber + afterContext_, lines.size());
-
-            // Print separator if needed
-            if (!printedLines.empty() && startLine > *printedLines.rbegin() + 1) {
-                std::cout << "--" << std::endl;
-            }
-
-            // Print context and match
-            for (size_t i = startLine; i <= endLine; ++i) {
-                if (printedLines.count(i) > 0) {
-                    continue; // Already printed this line
-                }
-                printedLines.insert(i);
-
-                if (i - 1 >= lines.size()) {
-                    continue;
-                }
-
-                // Print filename if needed
-                if (showFilename_) {
-                    std::cout << filename << ":";
-                }
-
-                // Print line number if needed
-                if (showLineNumbers_) {
-                    std::cout << std::setw(6) << i << ":";
-                }
-
-                // Print the line with highlighting if it's a match line
-                if (i == match.lineNumber && !invertMatch_) {
-                    printHighlightedLine(lines[i - 1], match);
-                } else {
-                    std::cout << lines[i - 1] << std::endl;
-                }
-            }
-        }
-    }
-
-    void printMatchesColorized(const std::string& filename, const std::string& content,
-                               const std::vector<Match>& matches,
-                               std::string relationSummary = std::string{}) {
-        // Split content into lines for context printing
-        std::vector<std::string> lines;
-        std::istringstream stream(content);
-        std::string line;
-        while (std::getline(stream, line)) {
-            lines.push_back(line);
-        }
-
-        // File header in magenta with match count
-        std::cout << ui::colorize(filename, ui::Ansi::MAGENTA);
-        std::cout << ui::colorize(" (" + std::to_string(matches.size()) + " match" +
-                                      (matches.size() != 1 ? "es" : "") + ")",
-                                  ui::Ansi::DIM);
-
-        // Get file extension for language hint
-        std::string ext;
-        auto dotPos = filename.rfind('.');
-        if (dotPos != std::string::npos) {
-            ext = filename.substr(dotPos + 1);
-            std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
-        }
-        if (!relationSummary.empty()) {
-            std::cout << " " << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
-        }
-        if (!filename.empty()) {
-            auto topRel = extractTopRelation(relationSummary);
-            auto hint = buildGraphExploreHint(filename, topRel, 2);
-            if (!hint.empty()) {
-                std::cout << " " << ui::colorize("[hint: " + hint + "]", ui::Ansi::DIM);
-            }
-        }
-        std::cout << std::endl;
-
-        // Track which lines we've already printed (for context overlap)
-        std::set<size_t> printedLines;
-
-        for (const auto& match : matches) {
-            // Calculate context range
-            size_t startLine =
-                (match.lineNumber > beforeContext_) ? match.lineNumber - beforeContext_ : 1;
-            size_t endLine = std::min(match.lineNumber + afterContext_, lines.size());
-
-            // Print separator if needed
-            if (!printedLines.empty() && startLine > *printedLines.rbegin() + 1) {
-                std::cout << ui::colorize("  ...", ui::Ansi::DIM) << std::endl;
-            }
-
-            // Print context and match
-            for (size_t i = startLine; i <= endLine; ++i) {
-                if (printedLines.count(i) > 0) {
-                    continue; // Already printed this line
-                }
-                printedLines.insert(i);
-
-                if (i - 1 >= lines.size()) {
-                    continue;
-                }
-
-                // Line number in cyan
-                std::cout << "  " << ui::colorize(std::to_string(i) + ":", ui::Ansi::CYAN) << " ";
-
-                // Print the line - context lines in dim, match lines normal with highlight
-                if (i == match.lineNumber && !invertMatch_) {
-                    // Highlight the match within the line
-                    const std::string& lineText = lines[i - 1];
-                    if (match.columnStart < lineText.size()) {
-                        std::cout << lineText.substr(0, match.columnStart);
-                        if (ui::colors_enabled()) {
-                            std::cout << ui::Ansi::RED;
-                        }
-                        size_t matchLen = (match.columnEnd > match.columnStart)
-                                              ? match.columnEnd - match.columnStart
-                                              : 0;
-                        std::cout << lineText.substr(match.columnStart, matchLen);
-                        if (ui::colors_enabled()) {
-                            std::cout << ui::Ansi::RESET;
-                        }
-                        if (match.columnEnd < lineText.size()) {
-                            std::cout << lineText.substr(match.columnEnd);
-                        }
-                        std::cout << std::endl;
-                    } else {
-                        std::cout << lineText << std::endl;
-                    }
-                } else {
-                    // Context line in dim
-                    std::cout << ui::colorize(lines[i - 1], ui::Ansi::DIM) << std::endl;
-                }
-            }
-        }
-        std::cout << std::endl;
-    }
-
     std::vector<std::string> splitPatterns(const std::vector<std::string>& patterns) {
         std::vector<std::string> result;
         for (const auto& pattern : patterns) {
@@ -2102,7 +2096,7 @@ private:
     }
 
     // Helper function to truncate snippet to a maximum length at word boundary
-    std::string truncateSnippet(const std::string& snippet, size_t maxLength) {
+    std::string truncateSnippet(const std::string& snippet, size_t maxLength) const {
         // Remove newlines and multiple spaces
         std::string cleaned;
         bool lastWasSpace = false;

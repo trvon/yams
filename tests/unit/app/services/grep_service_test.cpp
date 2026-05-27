@@ -14,6 +14,8 @@
 #include <fstream>
 #include <ranges>
 
+#include "common/test_helpers_catch2.h"
+
 #if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
 #include <onnxruntime_c_api.h>
 #define YAMS_ORT_API_VERSION ORT_API_VERSION
@@ -44,6 +46,7 @@ public:
 
     void setGetAllMetadataFailures(std::size_t count) { getAllMetadataFailures_ = count; }
     void setQueryDocumentsFailures(std::size_t count) { queryFailures_ = count; }
+    void setFindDocumentsByTagsFailures(std::size_t count) { findDocumentsByTagsFailures_ = count; }
 
     Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) override {
@@ -69,6 +72,14 @@ public:
         return MetadataRepository::getMetadataForDocuments(documentIds);
     }
 
+    Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
+                                                          bool matchAll = false) override {
+        if (consume(findDocumentsByTagsFailures_)) {
+            return Error{ErrorCode::NotInitialized, "tag index warming up"};
+        }
+        return MetadataRepository::findDocumentsByTags(tags, matchAll);
+    }
+
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override {
         return MetadataRepository::findDocumentByExactPath(path);
     }
@@ -83,6 +94,7 @@ private:
 
     std::size_t getAllMetadataFailures_{0};
     std::size_t queryFailures_{0};
+    std::size_t findDocumentsByTagsFailures_{0};
 };
 
 class RetrieveBytesFailStore final : public IContentStore {
@@ -585,7 +597,33 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
         CHECK(res.value().totalMatches > 0);
     }
 
-    SECTION("Propagates errors when tags unavailable") {
+    SECTION("Propagates tag query failures after retry exhaustion") {
+        auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*fixture.pool_);
+        auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
+        REQUIRE(docsRes);
+        REQUIRE_FALSE(docsRes.value().empty());
+
+        const auto docId = docsRes.value().front().id;
+        REQUIRE(
+            flakyRepo->setMetadata(docId, "tag:ready_flag", MetadataValue(std::string("true"))));
+
+        flakyRepo->setFindDocumentsByTagsFailures(8);
+        fixture.repo_ = flakyRepo;
+        fixture.ctx_.metadataRepo = flakyRepo;
+        fixture.grepService_ = makeGrepService(fixture.ctx_);
+
+        auto res = fixture.grep({
+            .pattern = "alpha",
+            .literalText = true,
+            .tags = {"ready_flag"},
+        });
+
+        REQUIRE_FALSE(res);
+        CHECK(res.error().code == ErrorCode::NotInitialized);
+        CHECK_FALSE(res.error().message.empty());
+    }
+
+    SECTION("Tag-filtered grep tolerates metadata warming when tag index query succeeds") {
         auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*fixture.pool_);
         auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
         REQUIRE(docsRes);
@@ -606,13 +644,13 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
             .tags = {"ready_flag"},
         });
 
-        REQUIRE_FALSE(res);
-        CHECK(res.error().code == ErrorCode::NotInitialized);
-        CHECK_FALSE(res.error().message.empty());
+        REQUIRE(res);
+        CHECK(res.value().totalMatches > 0);
     }
 }
 
-TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][service][session]") {
+TEST_CASE("GrepService - Falls back to extracted content when blob unavailable",
+          "[grep][service][session]") {
     SKIP_GREP_ON_WINDOWS();
 
     GrepFixture fixture;
@@ -630,7 +668,7 @@ TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][s
     });
 
     REQUIRE(coldRes);
-    CHECK(coldRes.value().totalMatches == 0);
+    CHECK(coldRes.value().totalMatches == 1);
 
     auto sessionRes = fixture.grep({
         .pattern = "alpha",
@@ -642,6 +680,58 @@ TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][s
     CHECK(sessionRes.value().totalMatches == 1);
     REQUIRE(sessionRes.value().filesWith.size() == 1);
     CHECK(sessionRes.value().filesWith.front().find("session_hot.txt") != std::string::npos);
+}
+
+TEST_CASE("GrepService - Path-scoped grep prefers latest indexed version",
+          "[grep][service][versioning]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("1"));
+    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("1"));
+
+    fixture.addDocument("versioned.txt", "old-token only\n");
+    fixture.addDocument("versioned.txt", "new-token only\n");
+
+    auto docs = metadata::queryDocumentsByPattern(*fixture.repo_, "%versioned.txt");
+    REQUIRE(docs);
+    REQUIRE(docs.value().size() >= 2);
+
+    auto res = fixture.grep({
+        .pattern = "new-token",
+        .paths = {"versioned.txt"},
+        .literalText = true,
+    });
+
+    REQUIRE(res);
+    CHECK(res.value().totalMatches == 1);
+    REQUIRE(res.value().filesWith.size() == 1);
+    CHECK(res.value().filesWith.front().find("versioned.txt") != std::string::npos);
+}
+
+TEST_CASE("GrepService - Broad regex grep does not stop at candidate cap",
+          "[grep][service][versioning]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("2"));
+    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("0"));
+    yams::test::ScopedEnvVar budget("YAMS_GREP_TIME_BUDGET_MS", std::string("10000"));
+
+    fixture.addDocument("old_match.txt", "rare_token_42\n");
+    fixture.addDocument("newer_a.txt", "alpha\n");
+    fixture.addDocument("newer_b.txt", "beta\n");
+    fixture.addDocument("newer_c.txt", "gamma\n");
+
+    auto res = fixture.grep({
+        .pattern = "rare_token_[0-9]+",
+        .regexOnly = true,
+    });
+
+    REQUIRE(res);
+    CHECK(res.value().totalMatches == 1);
+    REQUIRE(res.value().filesWith.size() == 1);
+    CHECK(res.value().filesWith.front().find("old_match.txt") != std::string::npos);
 }
 
 TEST_CASE("GrepService - Edge Cases", "[grep][service][edge]") {

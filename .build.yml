@@ -58,6 +58,9 @@ packages:
   - pkg-config
   - libboost-all-dev
   - liburing-dev # enables io_uring async path instead of fallback
+  - libomp-dev # OpenMP runtime for FAISS parallel compute
+  - libfaiss-dev # FAISS vector similarity library
+  - libopenblas-dev # optimized BLAS for FAISS/vector math
   - libarchive-dev # enables archive extraction features
   - libacl1-dev # required for libarchive ACL support
   - libtag1-dev # enables taglib (audio metadata) detection
@@ -241,6 +244,10 @@ tasks:
       export YAMS_CPPSTD=20
       export YAMS_CONAN_HOST_PROFILE=./conan/profiles/host-linux-gcc
       export YAMS_CONAN_ARCH=x86_64
+
+      # Avoid ccache environment wrapping in CI VMs — interferes with
+      # Conan/OpenBLAS ASM compilation (ccache doesn't handle -D flags)
+      export YAMS_SKIP_CCACHE=1
       
       # Configure FAST_MODE via extra Meson flags
       if [ "${FAST_MODE:-0}" = "1" ]; then
@@ -253,14 +260,11 @@ tasks:
       # Set install prefix to /usr for Linux packages (matches GitHub workflow)
       export YAMS_INSTALL_PREFIX="/usr"
       
-      # Disable ccache — interferes with Conan/OpenBLAS ASM compilation
-      export CCACHE_DISABLE=1
-
       # Run setup.sh (Release build) - it now respects all YAMS_* environment variables
       ./setup.sh Release
 
-      # Build the project
-      meson compile -C build/release
+      # Build the project (single-job: prevents OOM on large files like mcp_server.cpp)
+      meson compile -C build/release -j1
 
       # Install the built artifacts into build-local staging directory (BUILD_DIR/STAGE_DIR).
       meson install -C build/release --destdir "${STAGE_DIR}"
@@ -359,70 +363,12 @@ tasks:
 
   - collect_artifacts: |
       set -e
-      ART_DIR="artifacts"
-      mkdir -p "${ART_DIR}"
-      rm -f "${ART_DIR}/yams"*.tar.gz "${ART_DIR}/yams"*.deb "${ART_DIR}/yams"*.rpm 2>/dev/null || true
-      # Determine repository root
       if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then
         REPO_DIR="yams"
       else
         REPO_DIR="."
       fi
-      # Publish a minimal, size-safe artifact set so SourceHut can retain them reliably.
-      # Policy:
-      #  - Tag builds: prefer distro packages (.deb, .rpm) if available; fall back to the tarball.
-      #  - Nightly/weekly: publish only the primary tarball (avoid duplicates and stage archives).
-      shopt -s nullglob || true
-      if [[ "${GIT_REF:-}" == refs/tags/* ]]; then
-        # Prefer distro packages on tagged releases
-        if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.deb" > /dev/null; then
-          for f in "${REPO_DIR}/${BUILD_DIR}"/*.deb; do cp -v "$f" "${ART_DIR}/"; done
-        fi
-        if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.rpm" > /dev/null; then
-          for f in "${REPO_DIR}/${BUILD_DIR}"/*.rpm; do cp -v "$f" "${ART_DIR}/"; done
-        fi
-        # Fallback to tarball when packages are missing
-        if ! compgen -G "${ART_DIR}/*" > /dev/null; then
-          for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
-        fi
-      else
-        # Nightly/weekly: publish only the primary tarball
-        for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
-      fi
-      # Provide stable filenames expected by SourceHut (no globbing in artifacts list)
-      if compgen -G "${ART_DIR}/*.tar.gz" > /dev/null; then
-        TARBALL=$(ls -1 "${ART_DIR}"/*.tar.gz | head -1)
-        cp -v "$TARBALL" "${ART_DIR}/yams.tar.gz"
-      fi
-      if compgen -G "${ART_DIR}/*.deb" > /dev/null; then
-        DEB=$(ls -1 "${ART_DIR}"/*.deb | head -1)
-        cp -v "$DEB" "${ART_DIR}/yams.deb"
-      fi
-      if compgen -G "${ART_DIR}/*.rpm" > /dev/null; then
-        RPM=$(ls -1 "${ART_DIR}"/*.rpm | head -1)
-        cp -v "$RPM" "${ART_DIR}/yams.rpm"
-      fi
-      echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
-      # Fallback for CI branches: if no artifacts were collected (packaging gated),
-      # compress the staged install to provide a basic artifact for inspection.
-      if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
-        if [ -d "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" ]; then
-          echo "No release artifacts; creating CI tarball from ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" >&2
-          tar -C "${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}" -czf "${ART_DIR}/yams.tar.gz" .
-          ls -l "${ART_DIR}" || true
-        else
-          echo "WARNING: Stage dir ${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR} missing; no artifacts to publish" >&2
-        fi
-      fi
-
-      # Ensure artifacts listed in manifest exist (SourceHut fails if any are missing).
-      for f in yams.deb yams.rpm meson-logs.tar.gz testlog.txt meson-log.txt compile_commands.json; do
-        if [ ! -f "${ART_DIR}/${f}" ]; then
-          echo "Not produced in this build." > "${ART_DIR}/${f}"
-        fi
-      done
-
-      echo "collect_artifacts completed successfully"
+      bash "${REPO_DIR}/scripts/srht-collect-artifacts.sh"
       exit 0
 
 artifacts:

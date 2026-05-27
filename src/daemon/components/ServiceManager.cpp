@@ -967,6 +967,421 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     });
 }
 
+void ServiceManager::stopBackgroundTaskManagerForShutdown() {
+    spdlog::info("[ServiceManager] Phase 1: Stopping background task manager");
+    const auto phaseStart = std::chrono::steady_clock::now();
+    if (!backgroundTaskManager_) {
+        spdlog::info("[ServiceManager] Phase 1: No background task manager to stop");
+        return;
+    }
+
+    try {
+        backgroundTaskManager_->stop();
+        backgroundTaskManager_.reset();
+        const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - phaseStart);
+        spdlog::info("[ServiceManager] Phase 1: Background task manager stopped ({}ms)",
+                     duration.count());
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 1: Background task manager stop failed: {}", e.what());
+    }
+}
+
+void ServiceManager::stopSessionWatcherForShutdown() {
+    spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
+    try {
+        if (sessionWatchStopSource_.stop_possible()) {
+            sessionWatchStopSource_.request_stop();
+        }
+        spdlog::info("[ServiceManager] Phase 2: Session watcher stop requested");
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop signal failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop signal failed");
+    }
+
+    spdlog::info("[ServiceManager] Phase 2.5: Waiting for session watcher to complete");
+    try {
+        if (!sessionWatcherFuture_.valid()) {
+            return;
+        }
+        const auto status = sessionWatcherFuture_.wait_for(std::chrono::seconds(3));
+        if (status == std::future_status::timeout) {
+            spdlog::warn("[ServiceManager] Phase 2.5: Session watcher future timed out");
+        } else {
+            sessionWatcherFuture_.get();
+            spdlog::info("[ServiceManager] Phase 2.5: Session watcher completed");
+        }
+        sessionWatcherFuture_ = std::future<void>();
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed");
+    }
+}
+
+void ServiceManager::quiesceServicesBeforeWorkerShutdown(
+    std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
+    spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
+
+    if (requestExecutor_) {
+        try {
+            requestExecutor_->stop();
+            requestExecutor_->join();
+            requestExecutor_.reset();
+            spdlog::info("[ServiceManager] Phase 3.5: Request executor stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.5: Request executor stop failed: {}", e.what());
+        }
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
+    if (checkpointManager_) {
+        checkpointManager_->stop();
+        checkpointManagerHold = std::move(checkpointManager_);
+        spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
+    auto postIngestHold = std::atomic_exchange_explicit(
+        &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
+    if (postIngestHold) {
+        try {
+            if (pluginManager_) {
+                pluginManager_->setPostIngestQueue(nullptr);
+            }
+            postIngestHold->stop();
+            postIngestHold.reset();
+            spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        try {
+            embeddingService->shutdown();
+            spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.8: Quiescing ingest service");
+    if (ingestService_) {
+        try {
+            ingestService_->stop();
+            ingestService_.reset();
+            spdlog::info("[ServiceManager] Phase 3.8: Ingest service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.8: IngestService quiesce failed: {}", e.what());
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.9: Stopping blocking I/O pool");
+    if (blockingPool_) {
+        try {
+            blockingPool_->stop();
+            blockingPool_->join();
+            spdlog::info("[ServiceManager] Phase 3.9: Blocking I/O pool stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed: {}", e.what());
+        }
+        blockingPool_.reset();
+    }
+
+    spdlog::info("[ServiceManager] Phase 3.9.5: Stopping write coordinator");
+    if (writeCoordinator_) {
+        writeCoordinator_->shutdown();
+        writeCoordinator_.reset();
+    }
+}
+
+void ServiceManager::stopWorkCoordinatorForShutdown(
+    std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
+    spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
+    shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
+    if (workCoordinator_) {
+        workCoordinator_->stop();
+        spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
+    }
+
+    spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    if (workCoordinator_) {
+        try {
+            constexpr auto kShutdownTimeout = std::chrono::seconds(5);
+            const bool benchmarkFastShutdown = std::getenv("YAMS_BENCH_OPT_LOOP") != nullptr ||
+                                               std::getenv("YAMS_BENCH_DATASET") != nullptr;
+            if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
+                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
+                             "retrying with extended timeout to avoid unsafe teardown races");
+                constexpr auto kExtendedShutdownTimeout = std::chrono::seconds(30);
+                if (!workCoordinator_->joinWithTimeout(kExtendedShutdownTimeout)) {
+                    if (benchmarkFastShutdown) {
+                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired during "
+                                     "benchmark shutdown; detaching remaining workers to avoid "
+                                     "losing completed benchmark results");
+                        workCoordinator_->abandonWorkersForShutdown();
+                    } else {
+                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired; "
+                                     "falling back to blocking join() to ensure clean teardown");
+                        workCoordinator_->join();
+                    }
+                }
+            }
+            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
+        }
+    }
+
+    if (checkpointManagerHold) {
+        checkpointManagerHold.reset();
+        spdlog::info("[ServiceManager] Phase 5.1: CheckpointManager destroyed");
+    }
+}
+
+void ServiceManager::clearCachedServiceState() {
+    storeGraphComponent(std::shared_ptr<GraphComponent>{});
+    graphQueryServiceOverride_.reset();
+    repairManager_.reset();
+    contentExtractors_.clear();
+    symbolExtractors_.clear();
+    cachedQueryConceptExtractor_ = {};
+    searchEngineManager_.clearEngine();
+    searchComponent_.reset();
+}
+
+void ServiceManager::shutdownModelProviderForShutdown() {
+    spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
+    auto modelProvider = loadModelProvider();
+    if (!modelProvider) {
+        spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
+        embeddingLifecycle_.resetWarmupState();
+        return;
+    }
+
+    try {
+        if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider.get()) == nullptr) {
+            auto loaded = modelProvider->getLoadedModels();
+            for (const auto& name : loaded) {
+                (void)modelProvider->unloadModel(name);
+            }
+        }
+        modelProvider->shutdown();
+        storeModelProvider(nullptr);
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] Phase 6.6: Model provider shutdown failed: {}", e.what());
+        storeModelProvider(nullptr);
+    }
+    embeddingLifecycle_.resetWarmupState();
+}
+
+void ServiceManager::resetRetrievalSessionsForShutdown() {
+    spdlog::info("[ServiceManager] Phase 6.8: Resetting retrieval sessions");
+    if (retrievalSessions_) {
+        retrievalSessions_.reset();
+        spdlog::info("[ServiceManager] Phase 6.8: Retrieval sessions reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.8: No retrieval sessions to reset");
+    }
+}
+
+void ServiceManager::unloadPluginsForShutdown() {
+    spdlog::info("[ServiceManager] Phase 6.9: Unloading plugins");
+    try {
+        if (!abiHost_) {
+            spdlog::info("[ServiceManager] Phase 6.9: No ABI host, no plugins to unload");
+            return;
+        }
+
+        const auto loaded = abiHost_->listLoaded();
+        spdlog::info("[ServiceManager] Phase 6.9: Unloading {} plugins", loaded.size());
+        for (const auto& d : loaded) {
+            (void)abiHost_->unload(d.name);
+        }
+        spdlog::info("[ServiceManager] Phase 6.9: All plugins unloaded");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
+    }
+}
+
+void ServiceManager::shutdownMetadataRepositoryForShutdown() {
+    if (auto metadataRepo = getMetadataRepo()) {
+        try {
+            metadataRepo->shutdown();
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn(
+                "[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: unknown");
+        }
+    }
+}
+
+void ServiceManager::shutdownRuntimeServices() {
+    spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
+
+    spdlog::info("[ServiceManager] Phase 6.0.5: Stopping repair service");
+    if (auto rs = getRepairServiceShared()) {
+        try {
+            stopRepairService();
+            spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
+                         e.what());
+        }
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.1: Ingest service already quiesced");
+
+    spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
+    if (auto gc = loadGraphComponent()) {
+        try {
+            gc->shutdown();
+            storeGraphComponent(std::shared_ptr<GraphComponent>{});
+            spdlog::info("[ServiceManager] Phase 6.2: Graph component shut down");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.2: GraphComponent shutdown failed: {}",
+                         e.what());
+        }
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.3: Resetting post-ingest queue");
+    auto postIngestHold = std::atomic_exchange_explicit(
+        &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
+    if (postIngestHold) {
+        if (pluginManager_) {
+            pluginManager_->setPostIngestQueue(nullptr);
+        }
+        postIngestHold->stop();
+        postIngestHold.reset();
+        spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
+    auto embeddingServiceHold = std::atomic_exchange_explicit(
+        &embeddingService_, std::shared_ptr<EmbeddingService>{}, std::memory_order_acq_rel);
+    if (embeddingServiceHold) {
+        embeddingServiceHold.reset();
+        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
+    }
+
+    spdlog::info("[ServiceManager] Phase 6.3.6: Write coordinator already shut down");
+    spdlog::info("[ServiceManager] Phase 6.4: Vector search uses VectorDatabase directly");
+    spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
+
+    shutdownModelProviderForShutdown();
+
+    spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
+    searchEngineManager_.clearEngine();
+
+    resetRetrievalSessionsForShutdown();
+    unloadPluginsForShutdown();
+}
+
+void ServiceManager::releaseDatabaseBackedState() {
+    spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB "
+                 "shutdown");
+    shutdownMetadataRepositoryForShutdown();
+
+    clearCachedServiceState();
+    if (databaseManager_) {
+        databaseManager_->setContentStore(nullptr);
+    }
+
+    try {
+        if (databaseManager_) {
+            databaseManager_->shutdown();
+            databaseManager_.reset();
+            spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
+        }
+        database_.reset();
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
+    }
+}
+
+void ServiceManager::releaseRemainingServiceState() {
+    spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
+    spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
+    spdlog::info("[ServiceManager] Phase 8.4: Content store owned by DatabaseManager");
+    clearCachedServiceState();
+    spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
+
+    spdlog::info("[ServiceManager] Phase 8.4.2: Releasing vector index coordinator");
+    vectorIndexCoordinator_.reset();
+
+    spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
+    initStrand_.reset();
+    pluginStrand_.reset();
+    modelStrand_.reset();
+
+#ifdef __APPLE__
+    malloc_zone_pressure_relief(nullptr, 0);
+#endif
+}
+
+void ServiceManager::shutdownExtractedManagers() {
+    spdlog::info("[ServiceManager] Phase 9: Releasing extracted managers");
+    try {
+        if (pluginManager_) {
+            pluginManager_->shutdown();
+            pluginManager_.reset();
+            spdlog::info("[ServiceManager] Phase 9.1: PluginManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting PluginManager");
+    }
+    try {
+        if (vectorSystemManager_) {
+            vectorSystemManager_->shutdown();
+            vectorSystemManager_.reset();
+            spdlog::info("[ServiceManager] Phase 9.2: VectorSystemManager reset");
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
+    }
+}
+
+void ServiceManager::releasePluginInfrastructure() {
+    spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
+    try {
+        abiPluginLoader_.reset();
+        spdlog::info("[ServiceManager] Phase 10.1: ABI plugin loader reset");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI plugin loader");
+    }
+    try {
+        abiHost_.reset();
+        spdlog::info("[ServiceManager] Phase 10.2: ABI host reset");
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
+    }
+
+    spdlog::info("[ServiceManager] Phase 10.5: Releasing WorkCoordinator");
+    workCoordinator_.reset();
+}
+
 void ServiceManager::shutdown() {
     // FSM-first guard: avoid duplicate shutdown
     try {
@@ -1007,441 +1422,15 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
     }
 
-    // Phase 1: Stop background task consumers FIRST (before io_context stop)
-    // This signals coroutines to exit gracefully before we stop the io_context
-    spdlog::info("[ServiceManager] Phase 1: Stopping background task manager");
-    auto phase1Start = std::chrono::steady_clock::now();
-    if (backgroundTaskManager_) {
-        try {
-            backgroundTaskManager_->stop();
-            backgroundTaskManager_.reset();
-            auto phase1Duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - phase1Start);
-            spdlog::info("[ServiceManager] Phase 1: Background task manager stopped ({}ms)",
-                         phase1Duration.count());
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 1: Background task manager stop failed: {}",
-                         e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 1: No background task manager to stop");
-    }
-
-    // Phase 2: Signal stop to session watcher and wait for it to complete
-    // We must wait for the session watcher BEFORE stopping the io_context, because:
-    // - The session watcher is a coroutine suspended on a timer
-    // - When we request stop, it will exit on its next timer wake-up
-    // - If we stop io_context first, worker threads exit and the coroutine can never resume
-    spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
-    try {
-        if (sessionWatchStopSource_.stop_possible())
-            sessionWatchStopSource_.request_stop();
-        spdlog::info("[ServiceManager] Phase 2: Session watcher stop requested");
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop signal failed: {}", e.what());
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 2: Session watcher stop signal failed");
-    }
-
-    // Phase 2.5: Wait for session watcher to complete (it checks stop_requested on timer wake)
-    // Timer interval is 2s by default, so wait up to 3s for graceful completion
-    spdlog::info("[ServiceManager] Phase 2.5: Waiting for session watcher to complete");
-    try {
-        if (sessionWatcherFuture_.valid()) {
-            auto status = sessionWatcherFuture_.wait_for(std::chrono::seconds(3));
-            if (status == std::future_status::timeout) {
-                spdlog::warn("[ServiceManager] Phase 2.5: Session watcher future timed out");
-            } else {
-                sessionWatcherFuture_.get();
-                spdlog::info("[ServiceManager] Phase 2.5: Session watcher completed");
-            }
-            sessionWatcherFuture_ = std::future<void>();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed: {}", e.what());
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 2.5: Session watcher stop failed");
-    }
-
-    // Phase 3: (Removed - work guard now managed by WorkCoordinator)
-    spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
-
-    // Phase 3.5: Stop request executor and CLI request pool
-    if (requestExecutor_) {
-        try {
-            requestExecutor_->stop();
-            requestExecutor_->join();
-            requestExecutor_.reset();
-            spdlog::info("[ServiceManager] Phase 3.5: Request executor stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.5: Request executor stop failed: {}", e.what());
-        }
-    }
-    // Phase 3.6: Stop CheckpointManager before WorkCoordinator
-    spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
-    if (checkpointManager_) {
-        checkpointManager_->stop();
-        checkpointManagerHold = std::move(checkpointManager_);
-        spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
-    }
-
-    // Phase 3.6.5: Stop post-ingest queue before quiescing embedding workers.
-    // This prevents new extraction/embedding dispatch during shutdown and reduces metadata lock
-    // contention while in-flight embed jobs finish.
-    spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
-    {
-        auto postIngestHold = std::atomic_exchange_explicit(
-            &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
-        if (postIngestHold) {
-            try {
-                if (pluginManager_) {
-                    pluginManager_->setPostIngestQueue(nullptr);
-                }
-                postIngestHold->stop();
-                postIngestHold.reset();
-                spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
-            } catch (const std::exception& e) {
-                spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}",
-                             e.what());
-            } catch (...) {
-                spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
-            }
-        } else {
-            spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
-        }
-    }
-
-    // Phase 3.7: Quiesce embedding service before stopping WorkCoordinator threads.
-    // Embedding jobs run on WorkCoordinator executors; stopping/joining workers first can leave
-    // in-flight embed tasks stranded and trigger shutdown detaches/timeouts.
-    spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
-    {
-        auto embeddingService =
-            std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-        if (embeddingService) {
-            try {
-                embeddingService->shutdown();
-                spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
-            } catch (const std::exception& e) {
-                spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
-                             e.what());
-            } catch (...) {
-                spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
-            }
-        } else {
-            spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
-        }
-    }
-
-    // Phase 3.8: Stop ingest service before WorkCoordinator shutdown.
-    // Ingest processing dispatches work onto WorkCoordinator executors and waits on futures;
-    // stopping the coordinator first can destroy pending promises and leave workers wedged.
-    spdlog::info("[ServiceManager] Phase 3.8: Quiescing ingest service");
-    if (ingestService_) {
-        try {
-            ingestService_->stop();
-            ingestService_.reset();
-            spdlog::info("[ServiceManager] Phase 3.8: Ingest service quiesced");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.8: IngestService quiesce failed: {}", e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
-    }
-
-    // Phase 3.9: Stop the dedicated blocking I/O pool before tearing down shared state.
-    // SQLite open/migrate run here; we must join so no worker touches database_ after
-    // DatabaseManager is destroyed.
-    spdlog::info("[ServiceManager] Phase 3.9: Stopping blocking I/O pool");
-    if (blockingPool_) {
-        try {
-            blockingPool_->stop();
-            blockingPool_->join();
-            spdlog::info("[ServiceManager] Phase 3.9: Blocking I/O pool stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed: {}", e.what());
-        }
-        blockingPool_.reset();
-    }
-
-    // Phase 3.9.5: Stop the write coordinator before tearing down the work coordinator.
-    // Write batches that are still pending need workers to process them; shutting down
-    // the write coordinator now lets the drain complete while workers are alive, then
-    // any remaining I/O is rejected rather than blocking the io_context stop below.
-    spdlog::info("[ServiceManager] Phase 3.9.5: Stopping write coordinator");
-    if (writeCoordinator_) {
-        writeCoordinator_->shutdown();
-        writeCoordinator_.reset();
-    }
-
-    // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
-    spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
-    shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
-    if (workCoordinator_) {
-        workCoordinator_->stop();
-        spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
-    }
-
-    // Phase 5: Join worker threads with timeout to ensure no threads are accessing
-    // shared resources when we start resetting them. This prevents race conditions
-    // during shutdown. Use timeout to avoid hanging on long-running operations.
-    spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
-    if (workCoordinator_) {
-        try {
-            constexpr auto kShutdownTimeout = std::chrono::seconds(5);
-            const bool benchmarkFastShutdown = std::getenv("YAMS_BENCH_OPT_LOOP") != nullptr ||
-                                               std::getenv("YAMS_BENCH_DATASET") != nullptr;
-            if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
-                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
-                             "retrying with extended timeout to avoid unsafe teardown races");
-                constexpr auto kExtendedShutdownTimeout = std::chrono::seconds(30);
-                if (!workCoordinator_->joinWithTimeout(kExtendedShutdownTimeout)) {
-                    if (benchmarkFastShutdown) {
-                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired during "
-                                     "benchmark shutdown; detaching remaining workers to avoid "
-                                     "losing completed benchmark results");
-                        workCoordinator_->abandonWorkersForShutdown();
-                    } else {
-                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired; "
-                                     "falling back to blocking join() to ensure clean teardown");
-                        workCoordinator_->join();
-                    }
-                }
-            }
-            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
-        }
-    }
-
-    if (checkpointManagerHold) {
-        checkpointManagerHold.reset();
-        spdlog::info("[ServiceManager] Phase 5.1: CheckpointManager destroyed");
-    }
-
-    // Phase 6: Stop services in reverse dependency order
-    spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
-
-    spdlog::info("[ServiceManager] Phase 6.0.5: Stopping repair service");
-    {
-        auto rs = getRepairServiceShared();
-        if (rs) {
-            try {
-                stopRepairService();
-                spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
-            } catch (const std::exception& e) {
-                spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
-                             e.what());
-            }
-        }
-    }
-
-    spdlog::info("[ServiceManager] Phase 6.1: Ingest service already quiesced");
-
-    spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
-    if (auto gc = loadGraphComponent()) {
-        try {
-            gc->shutdown();
-            storeGraphComponent(std::shared_ptr<GraphComponent>{});
-            spdlog::info("[ServiceManager] Phase 6.2: Graph component shut down");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.2: GraphComponent shutdown failed: {}",
-                         e.what());
-        }
-    }
-
-    spdlog::info("[ServiceManager] Phase 6.3: Resetting post-ingest queue");
-    {
-        auto postIngestHold = std::atomic_exchange_explicit(
-            &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
-        if (postIngestHold) {
-            if (pluginManager_) {
-                pluginManager_->setPostIngestQueue(nullptr);
-            }
-            postIngestHold->stop();
-            postIngestHold.reset();
-            spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
-        } else {
-            spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
-        }
-    }
-
-    spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
-    {
-        auto embeddingServiceHold = std::atomic_exchange_explicit(
-            &embeddingService_, std::shared_ptr<EmbeddingService>{}, std::memory_order_acq_rel);
-        if (embeddingServiceHold) {
-            embeddingServiceHold.reset();
-            spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
-        } else {
-            spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
-        }
-    }
-
-    // Write coordinator already shut down in Phase 3.9.5 (before io_context stop)
-    spdlog::info("[ServiceManager] Phase 6.3.6: Write coordinator already shut down");
-
-    // No vector index to save - using VectorDatabase directly
-    spdlog::info("[ServiceManager] Phase 6.4: Vector search uses VectorDatabase directly");
-
-    // Model provider manages embedding lifecycle, no separate shutdown needed
-    spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
-
-    spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
-    auto modelProvider = loadModelProvider();
-    if (modelProvider) {
-        try {
-            // Avoid unloading individual models during shutdown for ABI-backed providers.
-            // The ONNX plugin can have a background preload/warmup thread; unloading models here
-            // can race with that thread and lead to use-after-free (observed as
-            // std::system_error("mutex lock failed: Invalid argument") during teardown).
-            // For ABI providers, rely on plugin shutdown (Phase 6.9) to join background threads
-            // and release resources safely.
-            if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider.get()) == nullptr) {
-                auto loaded = modelProvider->getLoadedModels();
-                for (const auto& name : loaded) {
-                    (void)modelProvider->unloadModel(name);
-                }
-            }
-            modelProvider->shutdown();
-            storeModelProvider(nullptr);
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.6: Model provider shutdown failed: {}",
-                         e.what());
-            storeModelProvider(nullptr);
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
-    }
-    embeddingLifecycle_.resetWarmupState();
-
-    // Shutdown search engine
-    spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
-    searchEngineManager_.clearEngine();
-
-    // Shutdown retrieval sessions
-    spdlog::info("[ServiceManager] Phase 6.8: Resetting retrieval sessions");
-    if (retrievalSessions_) {
-        retrievalSessions_.reset();
-        spdlog::info("[ServiceManager] Phase 6.8: Retrieval sessions reset");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.8: No retrieval sessions to reset");
-    }
-
-    // Shutdown plugins (prefer ABI host)
-    spdlog::info("[ServiceManager] Phase 6.9: Unloading plugins");
-    try {
-        if (abiHost_) {
-            auto loaded = abiHost_->listLoaded();
-            spdlog::info("[ServiceManager] Phase 6.9: Unloading {} plugins", loaded.size());
-            for (const auto& d : loaded) {
-                (void)abiHost_->unload(d.name);
-            }
-            spdlog::info("[ServiceManager] Phase 6.9: All plugins unloaded");
-        } else {
-            spdlog::info("[ServiceManager] Phase 6.9: No ABI host, no plugins to unload");
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
-    }
-
-    // Release DB-owning service graph before pool shutdown so outstanding shared_ptr owners do not
-    // keep old SQLite handles alive across daemon cycles.
-    spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB shutdown");
-    if (auto metadataRepo = getMetadataRepo()) {
-        try {
-            metadataRepo->shutdown();
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: {}",
-                         e.what());
-        } catch (...) {
-            spdlog::warn(
-                "[ServiceManager] Phase 6.9.5: MetadataRepository shutdown failed: unknown");
-        }
-    }
-    storeGraphComponent(std::shared_ptr<GraphComponent>{});
-    graphQueryServiceOverride_.reset();
-    repairManager_.reset();
-    contentExtractors_.clear();
-    symbolExtractors_.clear();
-    cachedQueryConceptExtractor_ = {};
-    searchEngineManager_.clearEngine();
-    if (databaseManager_) {
-        databaseManager_->setContentStore(nullptr);
-    }
-    searchComponent_.reset();
-    try {
-        if (databaseManager_) {
-            databaseManager_->shutdown();
-            databaseManager_.reset();
-            spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
-        }
-        database_.reset();
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
-    }
-
-    // Release all remaining resources
-    spdlog::info("[ServiceManager] Phase 8: Releasing remaining resources");
-    spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
-    spdlog::info("[ServiceManager] Phase 8.4: Content store owned by DatabaseManager");
-    searchComponent_.reset();
-    spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
-    graphQueryServiceOverride_.reset();
-    repairManager_.reset();
-    contentExtractors_.clear();
-    symbolExtractors_.clear();
-    cachedQueryConceptExtractor_ = {};
-
-    spdlog::info("[ServiceManager] Phase 8.4.2: Releasing vector index coordinator");
-    vectorIndexCoordinator_.reset();
-
-    spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
-    initStrand_.reset();
-    pluginStrand_.reset();
-    modelStrand_.reset();
-
-#ifdef __APPLE__
-    malloc_zone_pressure_relief(nullptr, 0);
-#endif
-
-    // PBI-088: Shutdown extracted managers BEFORE plugin infrastructure
-    // (PluginManager holds raw pointer to abiHost_ via sharedPluginHost_)
-    spdlog::info("[ServiceManager] Phase 9: Releasing extracted managers");
-    try {
-        if (pluginManager_) {
-            pluginManager_->shutdown();
-            pluginManager_.reset();
-            spdlog::info("[ServiceManager] Phase 9.1: PluginManager reset");
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.1: Exception resetting PluginManager");
-    }
-    try {
-        if (vectorSystemManager_) {
-            vectorSystemManager_->shutdown();
-            vectorSystemManager_.reset();
-            spdlog::info("[ServiceManager] Phase 9.2: VectorSystemManager reset");
-        }
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 9.2: Exception resetting VectorSystemManager");
-    }
-    spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
-    try {
-        abiPluginLoader_.reset();
-        spdlog::info("[ServiceManager] Phase 10.1: ABI plugin loader reset");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI plugin loader");
-    }
-    try {
-        abiHost_.reset();
-        spdlog::info("[ServiceManager] Phase 10.2: ABI host reset");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
-    }
-
-    spdlog::info("[ServiceManager] Phase 10.5: Releasing WorkCoordinator");
-    workCoordinator_.reset(); // WorkCoordinator destructor will join threads
+    stopBackgroundTaskManagerForShutdown();
+    stopSessionWatcherForShutdown();
+    quiesceServicesBeforeWorkerShutdown(checkpointManagerHold);
+    stopWorkCoordinatorForShutdown(checkpointManagerHold);
+    shutdownRuntimeServices();
+    releaseDatabaseBackedState();
+    releaseRemainingServiceState();
+    shutdownExtractedManagers();
+    releasePluginInfrastructure();
 
     auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - shutdownStart);
@@ -1623,6 +1612,204 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
     }
 }
 
+Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore() {
+    namespace fs = std::filesystem;
+
+    fs::path dataDir = config_.dataDir;
+    if (dataDir.empty()) {
+        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+            dataDir = fs::path(xdgDataHome) / "yams";
+        } else if (const char* homeEnv = std::getenv("HOME")) {
+            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+        } else {
+            dataDir = fs::path(".") / "yams_data";
+        }
+    }
+
+    yams::common::ensureDirectories(dataDir);
+    resolvedDataDir_ = dataDir;
+
+    auto storageDecision =
+        yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
+    if (!storageDecision) {
+        return Error{storageDecision.error().code,
+                     std::string("Storage bootstrap resolution failed: ") +
+                         storageDecision.error().message};
+    }
+
+    if (storageDecision.value().activeDataDir != dataDir) {
+        dataDir = storageDecision.value().activeDataDir;
+        yams::common::ensureDirectories(dataDir);
+        resolvedDataDir_ = dataDir;
+    }
+
+    if (storageDecision.value().fallbackTriggered) {
+        spdlog::warn("[ServiceManager] Storage fallback activated (policy={}): {}. "
+                     "Using local data dir: {}",
+                     yams::storage::toString(storageDecision.value().fallbackPolicy),
+                     storageDecision.value().fallbackReason, dataDir.string());
+    } else if (storageDecision.value().activeEngine == "s3") {
+        spdlog::info("[ServiceManager] Storage engine active: s3");
+    }
+
+    spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
+    spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
+
+    const auto storeRoot = dataDir / "storage";
+    spdlog::info("ContentStore root: {}", storeRoot.string());
+    using StorePtr = std::unique_ptr<yams::api::IContentStore>;
+    auto storeRes = init::record_duration(
+        std::string(readiness::kContentStore),
+        [&]() -> yams::Result<StorePtr> {
+            if (storageDecision.value().storageEngineOverride) {
+                yams::api::ContentStoreBuilder builder;
+                builder.withStoragePath(storeRoot)
+                    .withStorageEngine(storageDecision.value().storageEngineOverride)
+                    .withCompression(true)
+                    .withDeduplication(true)
+                    .withIntegrityChecks(true);
+                return builder.build();
+            }
+            return yams::api::ContentStoreBuilder::createDefault(storeRoot);
+        },
+        state_.initDurationsMs);
+    if (!storeRes) {
+        spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
+        try {
+            if (databaseManager_) {
+                databaseManager_->setContentStoreError(storeRes.error().message);
+            }
+        } catch (...) {
+        }
+        return Error{ErrorCode::IOError, std::string("ContentStore initialization failed: ") +
+                                             storeRes.error().message};
+    }
+
+    auto& uniqueStore = const_cast<StorePtr&>(storeRes.value());
+    if (databaseManager_) {
+        databaseManager_->setContentStore(
+            std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
+    }
+    state_.readiness.contentStoreReady = true;
+    writeBootstrapStatusFile(config_, state_, this);
+    spdlog::info("[ServiceManager] Phase: Content Store Initialized.");
+
+    return dataDir;
+}
+
+boost::asio::awaitable<bool>
+ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
+                                             yams::compat::stop_token token) {
+    database_ = std::make_shared<metadata::Database>();
+    const int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
+
+    if (token.stop_requested()) {
+        co_return false;
+    }
+
+    try {
+        serviceFsm_.dispatch(OpeningDatabaseEvent{});
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
+        co_return false;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
+        co_return false;
+    }
+
+    const bool dbOk = co_await init::await_record_duration(
+        std::string(readiness::kDatabase),
+        [&]() -> boost::asio::awaitable<bool> {
+            co_return co_await co_openDatabase(dbPath, open_timeout, token);
+        },
+        state_.initDurationsMs);
+    writeBootstrapStatusFile(config_, state_, this);
+    spdlog::info("[ServiceManager] Phase: Database Opened.");
+    if (dbOk) {
+        try {
+            serviceFsm_.dispatch(DatabaseOpenedEvent{});
+        } catch (...) {
+        }
+    }
+
+    if (dbOk) {
+        const int migrationTimeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
+        try {
+            serviceFsm_.dispatch(MigrationStartedEvent{});
+        } catch (...) {
+        }
+        const bool migrationOk = co_await init::await_record_duration(
+            "migrations",
+            [&]() -> boost::asio::awaitable<bool> {
+                co_return co_await co_migrateDatabase(migrationTimeout, token);
+            },
+            state_.initDurationsMs);
+        if (migrationOk) {
+            try {
+                serviceFsm_.dispatch(MigrationCompletedEvent{});
+            } catch (...) {
+            }
+        }
+    }
+    spdlog::info("[ServiceManager] Phase: Database Migrated.");
+
+    if (dbOk) {
+        finalizeDatabaseStartup(dbPath);
+    }
+
+    co_return dbOk;
+}
+
+void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+
+    if (databaseManager_) {
+        databaseManager_->setDatabase(database_);
+        const bool poolsOk = databaseManager_->initializePools(dbPath);
+        if (!poolsOk) {
+            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
+        }
+        writeBootstrapStatusFile(config_, state_, this);
+    }
+    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
+
+    const auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+    const auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
+
+    if (qc.needsSalvage) {
+        spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB ({}); "
+                     "blocking startup to recover",
+                     qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
+            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+        }
+        auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
+        if (aggregateResult.combined.documentsSalvaged > 0) {
+            spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
+                         aggregateResult.combined.documentsSalvaged,
+                         aggregateResult.salvagedPaths.size());
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databaseRecoveredFrom =
+                    "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
+                state_.readiness.databaseSalvaged = true;
+            }
+        } else {
+            spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
+        }
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.databasePhase = std::string(dbphase::kReady);
+            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+        }
+    } else {
+        spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are less "
+                     "than current DB; skipping salvage");
+    }
+}
+
 boost::asio::awaitable<Result<void>>
 ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Async initialization started.");
@@ -1715,204 +1902,19 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Resolve data dir strictly from config with XDG/HOME default only (no env overrides)
-    namespace fs = std::filesystem;
-    fs::path dataDir = config_.dataDir;
-    if (dataDir.empty()) {
-        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-            dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        } else {
-            dataDir = fs::path(".") / "yams_data";
-        }
+    auto dataDirResult = initializeDataDirAndContentStore();
+    if (!dataDirResult) {
+        co_return Error{dataDirResult.error().code, dataDirResult.error().message};
     }
-    {
-        yams::common::ensureDirectories(dataDir);
-        resolvedDataDir_ = dataDir;
-    }
-
-    auto storageDecision =
-        yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
-    if (!storageDecision) {
-        co_return Error{storageDecision.error().code,
-                        std::string("Storage bootstrap resolution failed: ") +
-                            storageDecision.error().message};
-    }
-
-    if (storageDecision.value().activeDataDir != dataDir) {
-        dataDir = storageDecision.value().activeDataDir;
-        yams::common::ensureDirectories(dataDir);
-        resolvedDataDir_ = dataDir;
-    }
-
-    if (storageDecision.value().fallbackTriggered) {
-        spdlog::warn("[ServiceManager] Storage fallback activated (policy={}): {}. "
-                     "Using local data dir: {}",
-                     yams::storage::toString(storageDecision.value().fallbackPolicy),
-                     storageDecision.value().fallbackReason, dataDir.string());
-    } else if (storageDecision.value().activeEngine == "s3") {
-        spdlog::info("[ServiceManager] Storage engine active: s3");
-    }
-
-    spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
-    spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
-
-    // Content store (synchronous, quick) using init helpers
-    auto storeRoot = dataDir / "storage";
-    spdlog::info("ContentStore root: {}", storeRoot.string());
-    {
-        using T = std::unique_ptr<yams::api::IContentStore>;
-        auto storeRes = init::record_duration(
-            std::string(readiness::kContentStore),
-            [&]() -> yams::Result<T> {
-                if (storageDecision.value().storageEngineOverride) {
-                    yams::api::ContentStoreBuilder builder;
-                    builder.withStoragePath(storeRoot)
-                        .withStorageEngine(storageDecision.value().storageEngineOverride)
-                        .withCompression(true)
-                        .withDeduplication(true)
-                        .withIntegrityChecks(true);
-                    return builder.build();
-                }
-                return yams::api::ContentStoreBuilder::createDefault(storeRoot);
-            },
-            state_.initDurationsMs);
-        if (storeRes) {
-            auto& uniqueStore = const_cast<T&>(storeRes.value());
-            if (databaseManager_) {
-                databaseManager_->setContentStore(
-                    std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
-            }
-            state_.readiness.contentStoreReady = true;
-            writeBootstrapStatusFile(config_, state_, this);
-        } else {
-            spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
-            try {
-                if (databaseManager_) {
-                    databaseManager_->setContentStoreError(storeRes.error().message);
-                }
-            } catch (...) {
-            }
-            co_return Error{ErrorCode::IOError,
-                            std::string("ContentStore initialization failed: ") +
-                                storeRes.error().message};
-        }
-    }
-    spdlog::info("[ServiceManager] Phase: Content Store Initialized.");
+    const auto dataDir = dataDirResult.value();
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Phase: Open metadata DB with timeout (awaitable helper)
-    auto dbPath = dataDir / "yams.db";
-    database_ = std::make_shared<metadata::Database>();
-    // Hard-cap on the blocking SQLite open. 0 = no cap (await real completion).
-    // A non-zero value is an escape hatch for CI/operators; in normal operation the
-    // coroutine awaits the actual open event and a watchdog emits progress logs.
-    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
-
-    // Re-check shutdown before transitioning the database FSM.
-    if (token.stop_requested())
+    const auto dbPath = dataDir / "yams.db";
+    (void)(co_await initializeMetadataDatabaseAt(dbPath, token));
+    if (token.stop_requested()) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
-
-    // FSM: opening database (catch exceptions during shutdown race)
-    try {
-        serviceFsm_.dispatch(OpeningDatabaseEvent{});
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
-        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
-    } catch (...) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
-        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
-    }
-    bool db_ok = co_await init::await_record_duration(
-        std::string(readiness::kDatabase),
-        [&]() -> boost::asio::awaitable<bool> {
-            co_return co_await co_openDatabase(dbPath, open_timeout, token);
-        },
-        state_.initDurationsMs);
-    writeBootstrapStatusFile(config_, state_, this);
-    spdlog::info("[ServiceManager] Phase: Database Opened.");
-    if (db_ok) {
-        try {
-            serviceFsm_.dispatch(DatabaseOpenedEvent{});
-        } catch (...) {
-        }
-    }
-
-    // Phase: Migrations (if DB ok)
-    if (db_ok) {
-        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
-        try {
-            serviceFsm_.dispatch(MigrationStartedEvent{});
-        } catch (...) {
-        }
-        bool mig_ok = co_await init::await_record_duration(
-            "migrations",
-            [&]() -> boost::asio::awaitable<bool> {
-                co_return co_await co_migrateDatabase(mig_timeout, token);
-            },
-            state_.initDurationsMs);
-        if (mig_ok) {
-            try {
-                serviceFsm_.dispatch(MigrationCompletedEvent{});
-            } catch (...) {
-            }
-        }
-    }
-    spdlog::info("[ServiceManager] Phase: Database Migrated.");
-
-    // Phase: Connection pool + repo (owned by DatabaseManager)
-    if (db_ok && databaseManager_) {
-        databaseManager_->setDatabase(database_);
-        bool poolsOk = databaseManager_->initializePools(dbPath);
-        if (!poolsOk) {
-            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
-        }
-        writeBootstrapStatusFile(config_, state_, this);
-    }
-    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
-
-    // Phase: Quick-check corrupt DBs for documents needing recovery.
-    // Runs AFTER pool init so 'yams daemon status' can see the salvaging
-    // database phase via the metrics/pool system.
-    {
-        auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
-        auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
-
-        if (qc.needsSalvage) {
-            spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB "
-                         "({}); blocking startup to recover",
-                         qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
-                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-            }
-            auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
-            if (aggregateResult.combined.documentsSalvaged > 0) {
-                spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
-                             aggregateResult.combined.documentsSalvaged,
-                             aggregateResult.salvagedPaths.size());
-                {
-                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                    state_.readiness.databaseRecoveredFrom =
-                        "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
-                    state_.readiness.databaseSalvaged = true;
-                }
-            } else {
-                spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
-            }
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databasePhase = std::string(dbphase::kReady);
-                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-            }
-        } else {
-            spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are "
-                         "less than current DB; skipping salvage");
-        }
     }
 
     // Phase: mark vectors ready (vector backend initialization is opportunistic)
@@ -2763,6 +2765,142 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
     co_return;
 }
 
+void ServiceManager::setDatabasePhase(std::string_view phase) {
+    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+    state_.readiness.databasePhase = std::string(phase);
+    state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+}
+
+void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPath) {
+    const std::filesystem::path walPath(dbPath.string() + "-wal");
+    if (!std::filesystem::exists(walPath) || !std::filesystem::exists(dbPath)) {
+        return;
+    }
+
+    spdlog::info("[ServiceManager] Detected stale WAL file; attempting recovery before integrity "
+                 "check");
+    const auto walSize = std::filesystem::file_size(walPath);
+    auto tempDb = std::make_unique<metadata::Database>();
+    auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
+    if (!openR) {
+        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}", openR.error().message);
+        return;
+    }
+
+    auto cpR = tempDb->execute("PRAGMA wal_checkpoint(TRUNCATE)");
+    if (cpR) {
+        spdlog::info("[ServiceManager] Recovered stale WAL ({} bytes), checkpointed "
+                     "successfully",
+                     walSize);
+    } else {
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}", cpR.error().message);
+    }
+    tempDb->close();
+}
+
+bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath) {
+    auto openR = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+    if (!openR) {
+        spdlog::warn("Database open failed: {}", openR.error().message);
+        return false;
+    }
+    return true;
+}
+
+bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath) {
+    auto integrity = database_->checkIntegrity();
+    if (integrity) {
+        return true;
+    }
+
+    if (integrity.error().code == ErrorCode::ResourceBusy) {
+        spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due to transient "
+                     "SQLite contention: {}",
+                     integrity.error().message);
+        database_->close();
+        return false;
+    }
+
+    spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
+                  integrity.error().message);
+    database_->close();
+
+    auto recovery = quarantineAndRecreate(dbPath);
+    if (!recovery) {
+        spdlog::error("[ServiceManager] Could not auto-recover DB: {}. Inspect {} or run "
+                      "'yams repair --orphans' after manual cleanup.",
+                      recovery.error().message, dbPath.string());
+        return false;
+    }
+
+    spdlog::warn("[ServiceManager] Quarantined corrupt DB to {}; reopening fresh metadata DB. "
+                 "Run 'yams repair --orphans' to rebuild metadata.",
+                 recovery.value().quarantinedPath.string());
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databaseRecoveredAt = recovery.value().timestamp;
+        state_.readiness.databaseRecoveredFrom = recovery.value().quarantinedPath.string();
+        state_.readiness.databasePhase = std::string(dbphase::kRecovering);
+        state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+    }
+
+    return openDatabaseOnce(dbPath);
+}
+
+void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
+    std::error_code ec;
+    const auto dbSize = std::filesystem::file_size(dbPath, ec);
+    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
+    if (ec || dbSize <= kAutoVacuumThreshold) {
+        return;
+    }
+
+    const auto spaceInfo = std::filesystem::space(dbPath.parent_path(), ec);
+    if (ec || spaceInfo.available <= dbSize) {
+        spdlog::info("[ServiceManager] DB file is {} MB but only {} MB free; skipping "
+                     "auto-VACUUM",
+                     dbSize / (1024 * 1024), ec ? 0 : spaceInfo.available / (1024 * 1024));
+        return;
+    }
+
+    spdlog::info("[ServiceManager] DB file is {} MB, auto-VACUUM to reclaim space ({} MB free)",
+                 dbSize / (1024 * 1024), spaceInfo.available / (1024 * 1024));
+    auto vacuumR = database_->execute("VACUUM");
+    if (!vacuumR) {
+        spdlog::warn("[ServiceManager] auto-VACUUM failed: {}", vacuumR.error().message);
+        return;
+    }
+
+    const auto newSize = std::filesystem::file_size(dbPath, ec);
+    if (!ec) {
+        spdlog::info("[ServiceManager] auto-VACUUM complete: {} MB -> {} MB",
+                     dbSize / (1024 * 1024), newSize / (1024 * 1024));
+    }
+}
+
+bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
+    try {
+        recoverStaleWalIfPresent(dbPath);
+        if (!openDatabaseOnce(dbPath)) {
+            return false;
+        }
+        if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
+            return false;
+        }
+
+        state_.readiness.databaseReady = true;
+        maybeAutoVacuumDatabase(dbPath);
+        setDatabasePhase(dbphase::kReady);
+        spdlog::info("Database opened successfully");
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::warn("Database open threw exception: {}", e.what());
+    } catch (...) {
+        spdlog::warn("Database open failed (unknown exception)");
+    }
+    return false;
+}
+
 boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
                                                              int /*timeout_ms*/,
                                                              yams::compat::stop_token token) {
@@ -2808,103 +2946,8 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
         },
         boost::asio::detached);
 
-    // Package the blocking SQLite open and run it off the event loop.
-    auto task = std::make_shared<std::packaged_task<bool()>>([this, dbPath]() {
-        bool ok = false;
-        try {
-            // Pre-open WAL recovery: if the WAL file exists from a prior unclean
-            // shutdown, open the database once in ReadWrite mode to let SQLite
-            // replay/rollback the WAL, then flush it. This prevents "database is
-            // locked" errors during the subsequent integrity check.
-            std::filesystem::path walPath(dbPath.string() + "-wal");
-            if (std::filesystem::exists(walPath) && std::filesystem::exists(dbPath)) {
-                spdlog::info("[ServiceManager] Detected stale WAL file; "
-                             "attempting recovery before integrity check");
-                auto walSize = std::filesystem::file_size(walPath);
-                {
-                    auto tempDb = std::make_unique<metadata::Database>();
-                    auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
-                    if (openR) {
-                        auto cpR = tempDb->execute("PRAGMA wal_checkpoint(TRUNCATE)");
-                        if (cpR) {
-                            spdlog::info("[ServiceManager] Recovered stale WAL ({} bytes), "
-                                         "checkpointed successfully",
-                                         walSize);
-                        } else {
-                            spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}",
-                                         cpR.error().message);
-                        }
-                        tempDb->close();
-                    } else {
-                        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}",
-                                     openR.error().message);
-                    }
-                }
-            }
-
-            auto openOnce = [&]() -> bool {
-                auto r = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
-                if (!r) {
-                    spdlog::warn("Database open failed: {}", r.error().message);
-                    return false;
-                }
-                return true;
-            };
-
-            if (!openOnce()) {
-                return false;
-            }
-
-            auto integrity = database_->checkIntegrity();
-            if (!integrity) {
-                if (integrity.error().code == ErrorCode::ResourceBusy) {
-                    spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due "
-                                 "to transient SQLite contention: {}",
-                                 integrity.error().message);
-                    database_->close();
-                    return false;
-                }
-                spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
-                              integrity.error().message);
-                database_->close();
-                auto recovery = quarantineAndRecreate(dbPath);
-                if (!recovery) {
-                    spdlog::error("[ServiceManager] Could not auto-recover DB: {}. Inspect "
-                                  "{} or run 'yams repair --orphans' after manual cleanup.",
-                                  recovery.error().message, dbPath.string());
-                    return false;
-                }
-                spdlog::warn("[ServiceManager] Quarantined corrupt DB to {}; reopening fresh "
-                             "metadata DB. Run 'yams repair --orphans' to rebuild metadata.",
-                             recovery.value().quarantinedPath.string());
-                {
-                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                    state_.readiness.databaseRecoveredAt = recovery.value().timestamp;
-                    state_.readiness.databaseRecoveredFrom =
-                        recovery.value().quarantinedPath.string();
-                    state_.readiness.databasePhase = std::string(dbphase::kRecovering);
-                    state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-                }
-                if (!openOnce()) {
-                    return false;
-                }
-            }
-
-            ok = true;
-            state_.readiness.databaseReady = true;
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databasePhase = std::string(dbphase::kReady);
-                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-            }
-            spdlog::info("Database opened successfully");
-        } catch (const std::exception& e) {
-            spdlog::warn("Database open threw exception: {}", e.what());
-        } catch (...) {
-            spdlog::warn("Database open failed (unknown exception)");
-        }
-        return ok;
-    });
+    auto task = std::make_shared<std::packaged_task<bool()>>(
+        [this, dbPath]() { return openDatabaseBlocking(dbPath); });
     auto future = task->get_future();
     boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
 
