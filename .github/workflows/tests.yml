@@ -144,7 +144,7 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             coverage: false
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false"
           - suffix: macos-arm64
             runs_on: macos-15
             conan_host_profile: ./conan/profiles/host-macos-apple-clang
@@ -376,6 +376,7 @@ jobs:
           du -sh ~/.conan2/p 2>/dev/null || true
           ls ~/.conan2/r 2>/dev/null | head || true
       - name: Cache ccache
+        if: matrix.suffix != 'linux-arm64'
         uses: actions/cache@v4
         with:
           path: |
@@ -421,10 +422,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache || true
+          extra_packages=(liburing-dev libarchive-dev libtag1-dev)
+          if [ "${{ matrix.suffix }}" != "linux-arm64" ]; then
+            extra_packages+=(ccache)
+          fi
+          sudo apt-get install -y --no-install-recommends "${extra_packages[@]}" || true
           echo "Optional packages installed (best-effort)."
 
       - name: Setup ccache env
+        if: matrix.suffix != 'linux-arm64'
         shell: bash
         run: |
           set -euo pipefail
@@ -435,6 +441,17 @@ jobs:
           echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
+
+      - name: Reclaim disk for linux-arm64 builds
+        if: matrix.suffix == 'linux-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "YAMS_SKIP_CCACHE=1" >> "$GITHUB_ENV"
+          rm -rf ~/.cache/ccache ~/.ccache || true
+          python3 -m pip cache purge || true
+          sudo apt-get clean || true
+          df -h
 
       # Conan already installed above
 

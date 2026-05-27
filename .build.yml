@@ -409,8 +409,8 @@ tasks:
       echo "Collected artifacts:" && ls -l "${ART_DIR}" || true
       # Fallback for CI branches: if no release artifacts were collected (e.g. non-tag
       # feature branches), create a runtime-pruned tarball from the staged install.
-      # A raw stage archive is often too large for SourceHut artifact limits because it
-      # includes headers, pkg-config metadata, and static archives.
+      # Keep only the minimal runtime subset used for smoke/debugging so the artifact
+      # stays within SourceHut's size limit.
       if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
         STAGE_ROOT="${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}"
         if [ -d "${STAGE_ROOT}" ]; then
@@ -427,7 +427,43 @@ tasks:
             bash "${REPO_DIR}/scripts/prune-runtime-install.sh" "${PRUNE_ROOT}"
           fi
 
-          tar -C "${STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
+          TMP_STAGE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "${TMP_STAGE_ROOT}"' EXIT
+          PREFIX_REL="${PRUNE_ROOT#"${STAGE_ROOT}/"}"
+          RUNTIME_ROOT="${TMP_STAGE_ROOT}/${PREFIX_REL}"
+          mkdir -p "${RUNTIME_ROOT}"
+
+          copy_dir_if_present() {
+            local rel="$1"
+            if [ -d "${PRUNE_ROOT}/${rel}" ]; then
+              mkdir -p "$(dirname "${RUNTIME_ROOT}/${rel}")"
+              cp -a "${PRUNE_ROOT}/${rel}" "${RUNTIME_ROOT}/${rel}"
+            fi
+          }
+
+          copy_runtime_libs() {
+            local libdir="$1"
+            [ -d "${PRUNE_ROOT}/${libdir}" ] || return 0
+            while IFS= read -r -d '' path; do
+              mkdir -p "${RUNTIME_ROOT}/${libdir}"
+              cp -a "$path" "${RUNTIME_ROOT}/${libdir}/"
+            done < <(
+              find "${PRUNE_ROOT}/${libdir}" -maxdepth 1 -type f \
+                \( -name 'libyams*.so' -o -name 'libyams*.so.*' -o -name 'libyams*.dylib' \) \
+                -print0
+            )
+          }
+
+          copy_dir_if_present bin
+          copy_dir_if_present share/yams
+          copy_dir_if_present lib/yams/plugins
+          copy_dir_if_present lib64/yams/plugins
+          copy_runtime_libs lib
+          copy_runtime_libs lib64
+
+          tar -C "${TMP_STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
+          rm -rf "${TMP_STAGE_ROOT}"
+          trap - EXIT
           ls -l "${ART_DIR}" || true
         else
           echo "WARNING: Stage dir ${STAGE_ROOT} missing; no artifacts to publish" >&2

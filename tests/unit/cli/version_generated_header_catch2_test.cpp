@@ -9,17 +9,33 @@
 
 namespace {
 
+FILE* openPipe(const char* command, const char* mode) {
+#ifdef _WIN32
+    return _popen(command, mode);
+#else
+    return popen(command, mode);
+#endif
+}
+
+int closePipe(FILE* pipe) {
+#ifdef _WIN32
+    return _pclose(pipe);
+#else
+    return pclose(pipe);
+#endif
+}
+
 std::string runCommand(const char* command) {
     std::array<char, 256> buffer{};
     std::string output;
-    FILE* pipe = popen(command, "r");
+    FILE* pipe = openPipe(command, "r");
     if (!pipe) {
         return {};
     }
     while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
         output += buffer.data();
     }
-    pclose(pipe);
+    closePipe(pipe);
     while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
         output.pop_back();
     }
@@ -29,7 +45,7 @@ std::string runCommand(const char* command) {
 } // namespace
 
 TEST_CASE("Version header tracks current git commit", "[cli][version]") {
-    const auto gitCommit = runCommand("git rev-parse --short=8 HEAD 2>/dev/null");
+    const auto gitCommit = runCommand("git rev-parse --short=8 HEAD");
     REQUIRE_FALSE(gitCommit.empty());
     CHECK(std::string(yams::version::commit_v) == gitCommit);
 }
