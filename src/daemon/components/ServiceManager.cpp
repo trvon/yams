@@ -1612,6 +1612,204 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
     }
 }
 
+Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore() {
+    namespace fs = std::filesystem;
+
+    fs::path dataDir = config_.dataDir;
+    if (dataDir.empty()) {
+        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+            dataDir = fs::path(xdgDataHome) / "yams";
+        } else if (const char* homeEnv = std::getenv("HOME")) {
+            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
+        } else {
+            dataDir = fs::path(".") / "yams_data";
+        }
+    }
+
+    yams::common::ensureDirectories(dataDir);
+    resolvedDataDir_ = dataDir;
+
+    auto storageDecision =
+        yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
+    if (!storageDecision) {
+        return Error{storageDecision.error().code,
+                     std::string("Storage bootstrap resolution failed: ") +
+                         storageDecision.error().message};
+    }
+
+    if (storageDecision.value().activeDataDir != dataDir) {
+        dataDir = storageDecision.value().activeDataDir;
+        yams::common::ensureDirectories(dataDir);
+        resolvedDataDir_ = dataDir;
+    }
+
+    if (storageDecision.value().fallbackTriggered) {
+        spdlog::warn("[ServiceManager] Storage fallback activated (policy={}): {}. "
+                     "Using local data dir: {}",
+                     yams::storage::toString(storageDecision.value().fallbackPolicy),
+                     storageDecision.value().fallbackReason, dataDir.string());
+    } else if (storageDecision.value().activeEngine == "s3") {
+        spdlog::info("[ServiceManager] Storage engine active: s3");
+    }
+
+    spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
+    spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
+
+    const auto storeRoot = dataDir / "storage";
+    spdlog::info("ContentStore root: {}", storeRoot.string());
+    using StorePtr = std::unique_ptr<yams::api::IContentStore>;
+    auto storeRes = init::record_duration(
+        std::string(readiness::kContentStore),
+        [&]() -> yams::Result<StorePtr> {
+            if (storageDecision.value().storageEngineOverride) {
+                yams::api::ContentStoreBuilder builder;
+                builder.withStoragePath(storeRoot)
+                    .withStorageEngine(storageDecision.value().storageEngineOverride)
+                    .withCompression(true)
+                    .withDeduplication(true)
+                    .withIntegrityChecks(true);
+                return builder.build();
+            }
+            return yams::api::ContentStoreBuilder::createDefault(storeRoot);
+        },
+        state_.initDurationsMs);
+    if (!storeRes) {
+        spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
+        try {
+            if (databaseManager_) {
+                databaseManager_->setContentStoreError(storeRes.error().message);
+            }
+        } catch (...) {
+        }
+        return Error{ErrorCode::IOError, std::string("ContentStore initialization failed: ") +
+                                             storeRes.error().message};
+    }
+
+    auto& uniqueStore = const_cast<StorePtr&>(storeRes.value());
+    if (databaseManager_) {
+        databaseManager_->setContentStore(
+            std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
+    }
+    state_.readiness.contentStoreReady = true;
+    writeBootstrapStatusFile(config_, state_, this);
+    spdlog::info("[ServiceManager] Phase: Content Store Initialized.");
+
+    return dataDir;
+}
+
+boost::asio::awaitable<bool>
+ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
+                                             yams::compat::stop_token token) {
+    database_ = std::make_shared<metadata::Database>();
+    const int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
+
+    if (token.stop_requested()) {
+        co_return false;
+    }
+
+    try {
+        serviceFsm_.dispatch(OpeningDatabaseEvent{});
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
+        co_return false;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
+        co_return false;
+    }
+
+    const bool dbOk = co_await init::await_record_duration(
+        std::string(readiness::kDatabase),
+        [&]() -> boost::asio::awaitable<bool> {
+            co_return co_await co_openDatabase(dbPath, open_timeout, token);
+        },
+        state_.initDurationsMs);
+    writeBootstrapStatusFile(config_, state_, this);
+    spdlog::info("[ServiceManager] Phase: Database Opened.");
+    if (dbOk) {
+        try {
+            serviceFsm_.dispatch(DatabaseOpenedEvent{});
+        } catch (...) {
+        }
+    }
+
+    if (dbOk) {
+        const int migrationTimeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
+        try {
+            serviceFsm_.dispatch(MigrationStartedEvent{});
+        } catch (...) {
+        }
+        const bool migrationOk = co_await init::await_record_duration(
+            "migrations",
+            [&]() -> boost::asio::awaitable<bool> {
+                co_return co_await co_migrateDatabase(migrationTimeout, token);
+            },
+            state_.initDurationsMs);
+        if (migrationOk) {
+            try {
+                serviceFsm_.dispatch(MigrationCompletedEvent{});
+            } catch (...) {
+            }
+        }
+    }
+    spdlog::info("[ServiceManager] Phase: Database Migrated.");
+
+    if (dbOk) {
+        finalizeDatabaseStartup(dbPath);
+    }
+
+    co_return dbOk;
+}
+
+void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+
+    if (databaseManager_) {
+        databaseManager_->setDatabase(database_);
+        const bool poolsOk = databaseManager_->initializePools(dbPath);
+        if (!poolsOk) {
+            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
+        }
+        writeBootstrapStatusFile(config_, state_, this);
+    }
+    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
+
+    const auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+    const auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
+
+    if (qc.needsSalvage) {
+        spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB ({}); "
+                     "blocking startup to recover",
+                     qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
+            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+        }
+        auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
+        if (aggregateResult.combined.documentsSalvaged > 0) {
+            spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
+                         aggregateResult.combined.documentsSalvaged,
+                         aggregateResult.salvagedPaths.size());
+            {
+                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                state_.readiness.databaseRecoveredFrom =
+                    "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
+                state_.readiness.databaseSalvaged = true;
+            }
+        } else {
+            spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
+        }
+        {
+            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+            state_.readiness.databasePhase = std::string(dbphase::kReady);
+            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+        }
+    } else {
+        spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are less "
+                     "than current DB; skipping salvage");
+    }
+}
+
 boost::asio::awaitable<Result<void>>
 ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Async initialization started.");
@@ -1704,204 +1902,19 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Resolve data dir strictly from config with XDG/HOME default only (no env overrides)
-    namespace fs = std::filesystem;
-    fs::path dataDir = config_.dataDir;
-    if (dataDir.empty()) {
-        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-            dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        } else {
-            dataDir = fs::path(".") / "yams_data";
-        }
+    auto dataDirResult = initializeDataDirAndContentStore();
+    if (!dataDirResult) {
+        co_return Error{dataDirResult.error().code, dataDirResult.error().message};
     }
-    {
-        yams::common::ensureDirectories(dataDir);
-        resolvedDataDir_ = dataDir;
-    }
-
-    auto storageDecision =
-        yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
-    if (!storageDecision) {
-        co_return Error{storageDecision.error().code,
-                        std::string("Storage bootstrap resolution failed: ") +
-                            storageDecision.error().message};
-    }
-
-    if (storageDecision.value().activeDataDir != dataDir) {
-        dataDir = storageDecision.value().activeDataDir;
-        yams::common::ensureDirectories(dataDir);
-        resolvedDataDir_ = dataDir;
-    }
-
-    if (storageDecision.value().fallbackTriggered) {
-        spdlog::warn("[ServiceManager] Storage fallback activated (policy={}): {}. "
-                     "Using local data dir: {}",
-                     yams::storage::toString(storageDecision.value().fallbackPolicy),
-                     storageDecision.value().fallbackReason, dataDir.string());
-    } else if (storageDecision.value().activeEngine == "s3") {
-        spdlog::info("[ServiceManager] Storage engine active: s3");
-    }
-
-    spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
-    spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
-
-    // Content store (synchronous, quick) using init helpers
-    auto storeRoot = dataDir / "storage";
-    spdlog::info("ContentStore root: {}", storeRoot.string());
-    {
-        using T = std::unique_ptr<yams::api::IContentStore>;
-        auto storeRes = init::record_duration(
-            std::string(readiness::kContentStore),
-            [&]() -> yams::Result<T> {
-                if (storageDecision.value().storageEngineOverride) {
-                    yams::api::ContentStoreBuilder builder;
-                    builder.withStoragePath(storeRoot)
-                        .withStorageEngine(storageDecision.value().storageEngineOverride)
-                        .withCompression(true)
-                        .withDeduplication(true)
-                        .withIntegrityChecks(true);
-                    return builder.build();
-                }
-                return yams::api::ContentStoreBuilder::createDefault(storeRoot);
-            },
-            state_.initDurationsMs);
-        if (storeRes) {
-            auto& uniqueStore = const_cast<T&>(storeRes.value());
-            if (databaseManager_) {
-                databaseManager_->setContentStore(
-                    std::shared_ptr<yams::api::IContentStore>(uniqueStore.release()));
-            }
-            state_.readiness.contentStoreReady = true;
-            writeBootstrapStatusFile(config_, state_, this);
-        } else {
-            spdlog::warn("ContentStore initialization failed: {}", storeRes.error().message);
-            try {
-                if (databaseManager_) {
-                    databaseManager_->setContentStoreError(storeRes.error().message);
-                }
-            } catch (...) {
-            }
-            co_return Error{ErrorCode::IOError,
-                            std::string("ContentStore initialization failed: ") +
-                                storeRes.error().message};
-        }
-    }
-    spdlog::info("[ServiceManager] Phase: Content Store Initialized.");
+    const auto dataDir = dataDirResult.value();
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
-    // Phase: Open metadata DB with timeout (awaitable helper)
-    auto dbPath = dataDir / "yams.db";
-    database_ = std::make_shared<metadata::Database>();
-    // Hard-cap on the blocking SQLite open. 0 = no cap (await real completion).
-    // A non-zero value is an escape hatch for CI/operators; in normal operation the
-    // coroutine awaits the actual open event and a watchdog emits progress logs.
-    int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
-
-    // Re-check shutdown before transitioning the database FSM.
-    if (token.stop_requested())
+    const auto dbPath = dataDir / "yams.db";
+    (void)(co_await initializeMetadataDatabaseAt(dbPath, token));
+    if (token.stop_requested()) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
-
-    // FSM: opening database (catch exceptions during shutdown race)
-    try {
-        serviceFsm_.dispatch(OpeningDatabaseEvent{});
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
-        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
-    } catch (...) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
-        co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
-    }
-    bool db_ok = co_await init::await_record_duration(
-        std::string(readiness::kDatabase),
-        [&]() -> boost::asio::awaitable<bool> {
-            co_return co_await co_openDatabase(dbPath, open_timeout, token);
-        },
-        state_.initDurationsMs);
-    writeBootstrapStatusFile(config_, state_, this);
-    spdlog::info("[ServiceManager] Phase: Database Opened.");
-    if (db_ok) {
-        try {
-            serviceFsm_.dispatch(DatabaseOpenedEvent{});
-        } catch (...) {
-        }
-    }
-
-    // Phase: Migrations (if DB ok)
-    if (db_ok) {
-        int mig_timeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
-        try {
-            serviceFsm_.dispatch(MigrationStartedEvent{});
-        } catch (...) {
-        }
-        bool mig_ok = co_await init::await_record_duration(
-            "migrations",
-            [&]() -> boost::asio::awaitable<bool> {
-                co_return co_await co_migrateDatabase(mig_timeout, token);
-            },
-            state_.initDurationsMs);
-        if (mig_ok) {
-            try {
-                serviceFsm_.dispatch(MigrationCompletedEvent{});
-            } catch (...) {
-            }
-        }
-    }
-    spdlog::info("[ServiceManager] Phase: Database Migrated.");
-
-    // Phase: Connection pool + repo (owned by DatabaseManager)
-    if (db_ok && databaseManager_) {
-        databaseManager_->setDatabase(database_);
-        bool poolsOk = databaseManager_->initializePools(dbPath);
-        if (!poolsOk) {
-            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
-        }
-        writeBootstrapStatusFile(config_, state_, this);
-    }
-    spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
-
-    // Phase: Quick-check corrupt DBs for documents needing recovery.
-    // Runs AFTER pool init so 'yams daemon status' can see the salvaging
-    // database phase via the metrics/pool system.
-    {
-        auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
-        auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
-
-        if (qc.needsSalvage) {
-            spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB "
-                         "({}); blocking startup to recover",
-                         qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
-                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-            }
-            auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
-            if (aggregateResult.combined.documentsSalvaged > 0) {
-                spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
-                             aggregateResult.combined.documentsSalvaged,
-                             aggregateResult.salvagedPaths.size());
-                {
-                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                    state_.readiness.databaseRecoveredFrom =
-                        "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
-                    state_.readiness.databaseSalvaged = true;
-                }
-            } else {
-                spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
-            }
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databasePhase = std::string(dbphase::kReady);
-                state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-            }
-        } else {
-            spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are "
-                         "less than current DB; skipping salvage");
-        }
     }
 
     // Phase: mark vectors ready (vector backend initialization is opportunistic)

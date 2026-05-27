@@ -3,16 +3,22 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sqlite3.h>
+
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <future>
+#include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <thread>
 
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams::storage;
 
@@ -87,6 +93,63 @@ struct GarbageCollectorFixture {
     std::unique_ptr<StorageEngine> storageEngine;
     std::unique_ptr<GarbageCollector> gc;
 };
+
+struct SqliteHandle {
+    explicit SqliteHandle(const std::filesystem::path& path) {
+        REQUIRE(sqlite3_open(path.string().c_str(), &db) == SQLITE_OK);
+    }
+
+    ~SqliteHandle() {
+        if (db != nullptr) {
+            sqlite3_close(db);
+        }
+    }
+
+    SqliteHandle(const SqliteHandle&) = delete;
+    SqliteHandle& operator=(const SqliteHandle&) = delete;
+
+    sqlite3* db = nullptr;
+};
+
+void execSql(sqlite3* db, std::string_view sql) {
+    char* err = nullptr;
+    const int rc = sqlite3_exec(db, std::string(sql).c_str(), nullptr, nullptr, &err);
+    INFO(std::string(sql));
+    INFO(std::string(err != nullptr ? err : ""));
+    REQUIRE(rc == SQLITE_OK);
+    if (err != nullptr) {
+        sqlite3_free(err);
+    }
+}
+
+int64_t queryInt64(const std::filesystem::path& dbPath, std::string_view sql) {
+    SqliteHandle db(dbPath);
+    sqlite3_stmt* rawStmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db.db, std::string(sql).c_str(), -1, &rawStmt, nullptr) ==
+            SQLITE_OK);
+    auto stmt =
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(rawStmt, &sqlite3_finalize);
+    REQUIRE(sqlite3_step(stmt.get()) == SQLITE_ROW);
+    return sqlite3_column_int64(stmt.get(), 0);
+}
+
+bool columnExists(const std::filesystem::path& dbPath, std::string_view table,
+                  std::string_view column) {
+    SqliteHandle db(dbPath);
+    sqlite3_stmt* rawStmt = nullptr;
+    const auto sql = std::format("PRAGMA table_info({})", table);
+    REQUIRE(sqlite3_prepare_v2(db.db, sql.c_str(), -1, &rawStmt, nullptr) == SQLITE_OK);
+    auto stmt =
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(rawStmt, &sqlite3_finalize);
+
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* name = sqlite3_column_text(stmt.get(), 1);
+        if (name != nullptr && column == reinterpret_cast<const char*>(name)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 } // namespace
 
@@ -692,6 +755,205 @@ TEST_CASE("ReferenceCounter factory returns null for invalid database path",
     std::filesystem::remove(blockerPath, ec);
 }
 
+TEST_CASE("ReferenceCounter upgrades schema discovered via YAMS_DATA_DIR",
+          "[storage][refcount][bootstrap][catch2]") {
+    yams::test::TempDirGuard tempDir("yams_refcount_schema_");
+    const auto dbPath = tempDir.path() / "refs.db";
+    const auto schemaPath = tempDir.path() / "reference_schema.sql";
+    yams::test::write_file(schemaPath, R"(
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS block_references (
+            block_hash TEXT PRIMARY KEY,
+            ref_count INTEGER NOT NULL DEFAULT 0,
+            block_size INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            last_accessed INTEGER NOT NULL,
+            metadata TEXT,
+            CHECK (ref_count >= 0),
+            CHECK (block_size > 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS ref_transactions (
+            transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_timestamp INTEGER NOT NULL,
+            commit_timestamp INTEGER,
+            state TEXT NOT NULL DEFAULT 'PENDING'
+        );
+
+        CREATE TABLE IF NOT EXISTS ref_transaction_ops (
+            op_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL,
+            block_hash TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            delta INTEGER NOT NULL DEFAULT 1,
+            block_size INTEGER,
+            timestamp INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ref_statistics (
+            stat_name TEXT PRIMARY KEY,
+            stat_value INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        INSERT OR IGNORE INTO ref_statistics(stat_name, stat_value, updated_at) VALUES
+            ('total_blocks', 0, strftime('%s', 'now')),
+            ('total_references', 0, strftime('%s', 'now')),
+            ('total_bytes', 0, strftime('%s', 'now')),
+            ('transactions_completed', 0, strftime('%s', 'now')),
+            ('transactions_rolled_back', 0, strftime('%s', 'now'));
+    )");
+    yams::test::ScopedEnvVar dataDirEnv("YAMS_DATA_DIR",
+                                        std::optional<std::string>{tempDir.path().string()});
+
+    {
+        ReferenceCounter::Config config{.databasePath = dbPath,
+                                        .enableWAL = true,
+                                        .enableStatistics = true,
+                                        .cacheSize = 1000,
+                                        .busyTimeout = 1000,
+                                        .enableAuditLog = false};
+        ReferenceCounter counter(std::move(config));
+
+        CHECK(columnExists(dbPath, "block_references", "uncompressed_size"));
+        CHECK(
+            queryInt64(
+                dbPath,
+                "SELECT COUNT(*) FROM ref_statistics WHERE stat_name='total_uncompressed_bytes'") ==
+            1);
+
+        const auto hash = std::format("{:064x}", 0xABC);
+        REQUIRE(counter.increment(hash, 512, 2048).has_value());
+        REQUIRE(counter.decrement(hash).has_value());
+
+        auto stats = counter.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 1u);
+        CHECK(stats.value().totalReferences == 0u);
+        CHECK(stats.value().totalBytes == 512u);
+        CHECK(stats.value().totalUncompressedBytes == 2048u);
+        CHECK(stats.value().unreferencedBlocks == 1u);
+        CHECK(stats.value().unreferencedBytes == 512u);
+    }
+}
+
+TEST_CASE("ReferenceCounter upgrades existing legacy database state on open",
+          "[storage][refcount][migration][catch2]") {
+    yams::test::TempDirGuard tempDir("yams_refcount_legacy_");
+    const auto dbPath = tempDir.path() / "refs.db";
+    const auto legacyHash = std::format("{:064x}", 0x1234);
+
+    {
+        SqliteHandle db(dbPath);
+        execSql(db.db, R"(
+            CREATE TABLE block_references (
+                block_hash TEXT PRIMARY KEY,
+                ref_count INTEGER NOT NULL DEFAULT 0,
+                block_size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_accessed INTEGER NOT NULL,
+                metadata TEXT
+            );
+        )");
+        execSql(db.db, R"(
+            CREATE TABLE ref_statistics (
+                stat_name TEXT PRIMARY KEY,
+                stat_value INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        )");
+        execSql(db.db, std::format(R"(
+            INSERT INTO block_references
+                (block_hash, ref_count, block_size, created_at, last_accessed, metadata)
+            VALUES ('{}', 1, 111, strftime('%s', 'now'), strftime('%s', 'now'), NULL);
+        )",
+                                   legacyHash));
+        execSql(db.db, R"(
+            INSERT INTO ref_statistics(stat_name, stat_value, updated_at) VALUES
+                ('total_blocks', 0, strftime('%s', 'now')),
+                ('total_references', 0, strftime('%s', 'now')),
+                ('total_bytes', 0, strftime('%s', 'now')),
+                ('transactions_completed', 0, strftime('%s', 'now')),
+                ('transactions_rolled_back', 0, strftime('%s', 'now'));
+        )");
+    }
+
+    {
+        ReferenceCounter::Config config{.databasePath = dbPath,
+                                        .enableWAL = true,
+                                        .enableStatistics = true,
+                                        .cacheSize = 1000,
+                                        .busyTimeout = 1000,
+                                        .enableAuditLog = false};
+        ReferenceCounter counter(std::move(config));
+
+        CHECK(columnExists(dbPath, "block_references", "uncompressed_size"));
+        CHECK(
+            queryInt64(
+                dbPath,
+                "SELECT COUNT(*) FROM ref_statistics WHERE stat_name='total_uncompressed_bytes'") ==
+            1);
+
+        auto legacyCount = counter.getRefCount(legacyHash);
+        REQUIRE(legacyCount.has_value());
+        CHECK(legacyCount.value() == 1u);
+
+        auto stats = counter.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 1u);
+        CHECK(stats.value().totalReferences == 1u);
+        CHECK(stats.value().totalBytes == 111u);
+        CHECK(stats.value().totalUncompressedBytes == 111u);
+
+        const auto newHash = std::format("{:064x}", 0x5678);
+        REQUIRE(counter.increment(newHash, 50, 75).has_value());
+
+        stats = counter.getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 2u);
+        CHECK(stats.value().totalReferences == 2u);
+        CHECK(stats.value().totalBytes == 161u);
+        CHECK(stats.value().totalUncompressedBytes == 186u);
+    }
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter pruneReference removes multiple rows in one commit",
+                 "[storage][refcount][transaction][prune][catch2]") {
+    std::vector<std::string> hashes;
+    for (int i = 0; i < 3; ++i) {
+        hashes.push_back(generateHash(950 + i));
+        REQUIRE(refCounter->increment(hashes.back(), 256, 512).has_value());
+        REQUIRE(refCounter->decrement(hashes.back()).has_value());
+    }
+
+    auto before = refCounter->getStats();
+    REQUIRE(before.has_value());
+    CHECK(before.value().totalBlocks == 3u);
+    CHECK(before.value().unreferencedBlocks == 3u);
+
+    auto txn = refCounter->beginTransaction();
+    REQUIRE(txn != nullptr);
+    for (const auto& hash : hashes) {
+        txn->pruneReference(hash);
+    }
+    REQUIRE(txn->commit().has_value());
+
+    auto after = refCounter->getStats();
+    REQUIRE(after.has_value());
+    CHECK(after.value().totalBlocks == 0u);
+    CHECK(after.value().totalReferences == 0u);
+    CHECK(after.value().totalBytes == 0u);
+    CHECK(after.value().totalUncompressedBytes == 0u);
+    CHECK(after.value().unreferencedBlocks == 0u);
+    CHECK(after.value().unreferencedBytes == 0u);
+
+    auto unreferenced = refCounter->getUnreferencedBlocks(10, std::chrono::seconds(0));
+    REQUIRE(unreferenced.has_value());
+    CHECK(unreferenced.value().empty());
+}
+
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter async batch operations",
                  "[storage][refcount][async][catch2]") {
     const size_t batchSize = 50;
@@ -822,6 +1084,48 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
     CHECK(lastStats.blocksScanned == stats.blocksScanned);
     CHECK(lastStats.blocksDeleted == stats.blocksDeleted);
     CHECK(lastStats.bytesReclaimed == stats.bytesReclaimed);
+}
+
+TEST_CASE_METHOD(GarbageCollectorFixture,
+                 "GarbageCollector updates gc statistics only for committed deletions",
+                 "[storage][gc][stats][catch2]") {
+    std::vector<std::byte> data(512, std::byte{7});
+    const auto hashA = generateHash(140);
+    const auto hashB = generateHash(141);
+
+    for (const auto& hash : {hashA, hashB}) {
+        REQUIRE(storageEngine->store(hash, data).has_value());
+        REQUIRE(refCounter->increment(hash, data.size()).has_value());
+        REQUIRE(refCounter->decrement(hash).has_value());
+    }
+
+    GCOptions dryRun{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
+    auto dryRunResult = gc->collect(dryRun);
+    REQUIRE(dryRunResult.has_value());
+    CHECK(queryInt64(testDbPath,
+                     "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_runs'") == 0);
+    CHECK(queryInt64(
+              testDbPath,
+              "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_blocks_collected'") == 0);
+    CHECK(queryInt64(
+              testDbPath,
+              "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_bytes_reclaimed'") == 0);
+
+    GCOptions realRun{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
+    auto realRunResult = gc->collect(realRun);
+    REQUIRE(realRunResult.has_value());
+    CHECK(realRunResult.value().blocksDeleted == 2u);
+    CHECK(queryInt64(testDbPath,
+                     "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_runs'") == 1);
+    CHECK(queryInt64(
+              testDbPath,
+              "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_blocks_collected'") == 2);
+    CHECK(
+        queryInt64(testDbPath,
+                   "SELECT stat_value FROM ref_statistics WHERE stat_name='gc_bytes_reclaimed'") ==
+        static_cast<int64_t>(2 * data.size()));
 }
 
 TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector respects minimum age horizon",

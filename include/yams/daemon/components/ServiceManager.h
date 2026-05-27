@@ -658,6 +658,11 @@ private:
 
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
+    Result<std::filesystem::path> initializeDataDirAndContentStore();
+    boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
+                                                              yams::compat::stop_token token);
+    void finalizeDatabaseStartup(const std::filesystem::path& dbPath);
+
     void setDatabasePhase(std::string_view phase);
     void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
     bool openDatabaseOnce(const std::filesystem::path& dbPath);

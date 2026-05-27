@@ -43,6 +43,35 @@ void seedMetadataDb(const fs::path& dbPath, const std::string& value = "seed") {
     db.close();
 }
 
+void writeCorruptDb(const fs::path& dbPath) {
+    std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    const std::string header = "SQLite format 3\0";
+    out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    const std::string garbage(4096, '\xff');
+    out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    out.close();
+}
+
+std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
+    std::error_code ec;
+    if (!fs::exists(dataDir, ec)) {
+        return std::nullopt;
+    }
+    const std::string prefix = "yams.db.corrupt-";
+    for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
+            it->path().extension() != ".sentinel") {
+            return it->path();
+        }
+    }
+    return std::nullopt;
+}
+
 std::size_t startupProbeRowCount(const fs::path& dbPath) {
     yams::metadata::Database db;
     REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite));
@@ -299,6 +328,75 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK_FALSE(fs::exists(misplacedWalDir));
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager async init starts only once per initialize cycle",
+                 "[daemon][service_manager][startup][async_init]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+
+    std::promise<void> firstBarrierPromise;
+    auto firstBarrierFuture = firstBarrierPromise.get_future();
+    std::atomic<bool> firstBarrierSet{false};
+    sm->startAsyncInit(&firstBarrierPromise, &firstBarrierSet);
+
+    REQUIRE(firstBarrierFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(firstBarrierSet.load(std::memory_order_acquire));
+
+    std::promise<void> secondBarrierPromise;
+    auto secondBarrierFuture = secondBarrierPromise.get_future();
+    std::atomic<bool> secondBarrierSet{false};
+    sm->startAsyncInit(&secondBarrierPromise, &secondBarrierSet);
+
+    CHECK(secondBarrierFuture.wait_for(std::chrono::milliseconds(200)) ==
+          std::future_status::timeout);
+    CHECK_FALSE(secondBarrierSet.load(std::memory_order_acquire));
+
+    const auto snapshot = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(snapshot.state == ServiceManagerState::Ready);
+    requireReadyDatabaseState(state_);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager records recovery provenance for corrupt metadata DB startup",
+                 "[daemon][service_manager][startup][recovery]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    writeCorruptDb(dbPath);
+    seedDummyWalSidecar(dbPath, "corrupt-sidecar");
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    requireReadyDatabaseState(state_);
+    std::optional<fs::path> quarantinedPath;
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        REQUIRE_FALSE(state_.readiness.databaseRecoveredFrom.empty());
+        quarantinedPath = findQuarantinedFile(config_.dataDir);
+        REQUIRE(quarantinedPath.has_value());
+        CHECK(state_.readiness.databaseRecoveredFrom == quarantinedPath->string());
+    }
+    CHECK(fs::exists(*quarantinedPath));
+    CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, "corrupt-sidecar"));
+
+    sm->shutdown();
+    CHECK(walSidecarCleared(dbPath));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WAL during startup",
                  "[daemon][service_manager][wal][startup]") {
     config_.enableModelProvider = false;
@@ -327,6 +425,32 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
 
     sm->shutdown();
     CHECK(walSidecarCleared(dbPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown remains idempotent after async init reaches ready",
+                 "[daemon][service_manager][shutdown][idempotent]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto readySnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(readySnap.state == ServiceManagerState::Ready);
+
+    sm->shutdown();
+    const auto firstShutdown = sm->getServiceManagerFsmSnapshot();
+    CHECK(firstShutdown.state == ServiceManagerState::Stopped);
+    CHECK(sm->__test_getAbiHost() == nullptr);
+
+    REQUIRE_NOTHROW(sm->shutdown());
+    const auto secondShutdown = sm->getServiceManagerFsmSnapshot();
+    CHECK(secondShutdown.state == ServiceManagerState::Stopped);
+    CHECK(sm->getMetadataRepo() == nullptr);
+    CHECK(sm->getContentStore() == nullptr);
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
