@@ -28,6 +28,7 @@
 #include <yams/cli/search_runner.h>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
 
 #include <algorithm>
 #include <chrono>
@@ -69,6 +70,39 @@ static yams::Result<BEIRDataset> loadExperimentDataset(const std::string& datase
         return yams::bench::loadBenchmarkManifestDataset(datasetName, datasetPath);
     }
     return yams::bench::loadBEIRDataset(datasetName, datasetPath);
+}
+
+static bool experimentEmbedBackendSimeon() {
+    const char* value = std::getenv("YAMS_EMBED_BACKEND");
+    return value && std::string(value) == "simeon";
+}
+
+static fs::path selectExperimentPluginDir(bool needsOnnxPlugin) {
+    if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR"); envPluginDir && *envPluginDir) {
+        return fs::path(envPluginDir);
+    }
+
+    const fs::path cwd = fs::current_path();
+    const std::vector<fs::path> candidates = {
+        cwd / "plugins",
+        cwd / "build/debug/plugins",
+        cwd / "builddir-nosan/plugins",
+        cwd / "builddir/plugins",
+        fs::path("/opt/homebrew/lib/yams/plugins"),
+    };
+
+    for (const auto& candidate : candidates) {
+        if (!fs::exists(candidate)) {
+            continue;
+        }
+        if (needsOnnxPlugin && !fs::exists(candidate / "onnx" / "libyams_onnx_plugin.dylib") &&
+            !fs::exists(candidate / "libyams_onnx_plugin.dylib")) {
+            continue;
+        }
+        return candidate;
+    }
+
+    return cwd / "build/debug/plugins";
 }
 
 // ============================================================================
@@ -716,26 +750,40 @@ int main(int argc, char** argv) {
     }
 
     // Setup daemon harness with vector support
+    const bool embedBackendSimeon = experimentEmbedBackendSimeon();
     yams::test::DaemonHarness::Options harnessOpts;
     harnessOpts.isolateState = true;
     harnessOpts.useMockModelProvider = false;
     harnessOpts.autoLoadPlugins = true;
     harnessOpts.configureModelPool = true;
     harnessOpts.modelPoolLazyLoading = false;
+    harnessOpts.pluginDir = selectExperimentPluginDir(!embedBackendSimeon);
+    harnessOpts.preloadModels = embedBackendSimeon ? std::vector<std::string>{"simeon-default"}
+                                                   : std::vector<std::string>{"all-MiniLM-L6-v2"};
 
-    // Configure plugin directory
-    const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
-    if (envPluginDir) {
-        harnessOpts.pluginDir = fs::path(envPluginDir);
-    } else {
-        harnessOpts.pluginDir = fs::current_path() / "builddir" / "plugins";
+    if (embedBackendSimeon) {
+        json onnxConfig;
+        onnxConfig["reranker_model"] = "bge-reranker-base";
+        harnessOpts.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
     }
-    harnessOpts.preloadModels = {"all-MiniLM-L6-v2"};
 
     auto harness = std::make_unique<yams::test::DaemonHarness>(harnessOpts);
     if (!harness->start(30s)) {
         std::cerr << "Failed to start daemon harness\n";
         return 1;
+    }
+
+    if (embedBackendSimeon) {
+        auto* daemon = harness->daemon();
+        auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+        if (serviceManager != nullptr) {
+            auto ready =
+                serviceManager->ensureEmbeddingModelReadySync("simeon-default", {}, 10000, true);
+            if (!ready) {
+                std::cerr << "Failed to ready simeon-default: " << ready.error().message << "\n";
+                return 1;
+            }
+        }
     }
 
     // Write corpus to temp directory
@@ -765,8 +813,9 @@ int main(int argc, char** argv) {
     addReq.noEmbeddings = false;
     addReq.includePatterns = {"*.txt"};
 
-    // Large corpus needs a longer timeout (10 minutes for 5000+ docs)
-    auto ingestResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 600s);
+    const auto corpusSize = dataset.documents.size();
+    const auto ingestTimeout = corpusSize <= 64 ? 60s : 600s;
+    auto ingestResult = yams::cli::run_sync(client->streamingAddDocument(addReq), ingestTimeout);
     if (!ingestResult) {
         std::cerr << "Failed to ingest corpus: " << ingestResult.error().message << "\n";
         return 1;
@@ -775,10 +824,10 @@ int main(int argc, char** argv) {
     std::cout.flush();
 
     // Phase 1: Wait for ingestion to complete (documents_total reaches corpus size)
-    const size_t corpusSize = dataset.documents.size();
     std::cout << "Waiting for ingestion to complete (" << corpusSize << " docs)...\n";
     std::cout.flush();
-    auto deadline = std::chrono::steady_clock::now() + 900s; // 15 min for large corpus
+    const auto ingestWaitBudget = corpusSize <= 64 ? 30s : 900s;
+    auto deadline = std::chrono::steady_clock::now() + ingestWaitBudget;
     uint64_t lastDocCount = 0;
     int stableChecks = 0;
     bool ingestionComplete = false;
@@ -836,8 +885,8 @@ int main(int argc, char** argv) {
 
     // Phase 3: Wait for embeddings to be generated
     std::cout << "Waiting for embeddings to be generated (target: " << corpusSize << " docs)...\n";
-    deadline = std::chrono::steady_clock::now() +
-               7200s; // 2 hour timeout for large corpus with slow models
+    const auto embedWaitBudget = corpusSize <= 64 ? 60s : 7200s;
+    deadline = std::chrono::steady_clock::now() + embedWaitBudget;
     uint64_t lastVectorCount = 0;
     int stableCount = 0;
     uint64_t embedDropped = 0;
@@ -974,7 +1023,7 @@ int main(int argc, char** argv) {
 
     // Save JSON
     json jsonResults;
-    jsonResults["dataset"] = "scifact";
+    jsonResults["dataset"] = datasetName;
     jsonResults["num_queries"] = queries.size();
     jsonResults["k"] = k;
     jsonResults["strategies"] = json::object();
