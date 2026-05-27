@@ -176,6 +176,7 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
     CHECK(out.find("-r blob_at_path") == std::string::npos);
     CHECK(out.find("yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
     CHECK(out.find("Next: yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
+    CHECK(out.find("Alt: yams graph --search \"*example*\"") != std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "graph", "--name", "src/example.cpp", "--depth", "2"}, &out);
@@ -187,6 +188,103 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
     CHECK(out.find("not indexed yet") != std::string::npos);
     CHECK(out.find("yams add \"src/example.cpp\" --sync") != std::string::npos);
     CHECK(out.find("yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
+    CHECK(out.find("yams graph --search \"*example*\"") != std::string::npos);
+}
+
+TEST_CASE("IntegrationSmoke.SearchNextHintMatchesFirstRenderedResult",
+          "[smoke][integrationsmoke]") {
+    SearchGraphUxFixture fixture;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    ScopedCurrentPath cwdGuard(fixture.worktree);
+    yams::test::write_file(fixture.worktree / "src" / "alpha.cpp", "shared-token alpha\n");
+    yams::test::write_file(fixture.worktree / "src" / "beta.cpp", "shared-token beta\n");
+
+    std::string out;
+    int rc = run_cli({"yams", "add", "src/alpha.cpp", "--sync"}, &out);
+    INFO(out);
+    REQUIRE(rc == 0);
+
+    out.clear();
+    rc = run_cli({"yams", "add", "src/beta.cpp", "--sync"}, &out);
+    INFO(out);
+    REQUIRE(rc == 0);
+
+    out.clear();
+    rc = run_cli({"yams", "search", "shared-token", "--type", "keyword", "--limit", "5"}, &out);
+    INFO(out);
+    REQUIRE(rc == 0);
+
+    const auto nextPos = out.find("\nNext: yams graph --name ");
+    REQUIRE(nextPos != std::string::npos);
+    const auto rendered = out.substr(0, nextPos);
+    const auto firstLineEnd = rendered.find('\n');
+    REQUIRE(firstLineEnd != std::string::npos);
+    const std::string firstPath = rendered.substr(0, firstLineEnd);
+    CHECK(out.find("Next: yams graph --name \"" + firstPath + "\" --depth 2") != std::string::npos);
+}
+
+TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
+          "[smoke][integrationsmoke]") {
+    SearchGraphUxFixture fixture;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    ScopedCurrentPath cwdGuard(fixture.worktree);
+
+    std::string out;
+    int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
+    INFO(out);
+    REQUIRE(rc == 0);
+
+    out.clear();
+    rc = run_cli(
+        {"yams", "search", "missing-agent-ux-token", "--type", "keyword", "--limit", "5", "--cwd"},
+        &out);
+    INFO(out);
+    REQUIRE(rc == 0);
+    CHECK(out.find("(no results)") != std::string::npos);
+    CHECK(out.find("Try: yams grep -F \"missing-agent-ux-token\" --cwd .") != std::string::npos);
+    CHECK(out.find("yams add . -r --include \"*.cpp,*.h,*.hpp\"") != std::string::npos);
+    CHECK(out.find("yams graph --search \"*missing-agent-ux-token*\"") != std::string::npos);
+}
+
+TEST_CASE("IntegrationSmoke.GraphNotFoundSuggestsIndexAndRetry", "[smoke][integrationsmoke]") {
+    SearchGraphUxFixture fixture;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    ScopedCurrentPath cwdGuard(fixture.worktree);
+    yams::test::write_file(fixture.worktree / "src" / "new_file.cpp", "int value = 1;\n");
+
+    std::string out;
+    int rc = run_cli({"yams", "graph", "--name", "src/new_file.cpp", "--depth", "2"}, &out);
+    INFO(out);
+    CHECK(rc != 0);
+    CHECK(out.find("If this file is new, run: yams add \"src/new_file.cpp\" --sync") !=
+          std::string::npos);
+    CHECK(out.find("Then retry: yams graph --name \"src/new_file.cpp\" --depth 2") !=
+          std::string::npos);
+    CHECK(out.find("yams graph --search \"*new_file*\"") != std::string::npos);
 }
 
 TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",

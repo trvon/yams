@@ -288,6 +288,11 @@ private:
         std::string traceId;
     };
 
+    struct GroupedSearchResults {
+        std::string path;
+        std::vector<UnifiedItem> versions;
+    };
+
     std::vector<UnifiedItem>
     makeDaemonUnifiedItems(const yams::daemon::SearchResponse& resp,
                            const std::vector<std::string>& includeGlobs = {}) const {
@@ -402,15 +407,21 @@ private:
         return group;
     }
 
-    std::unordered_map<std::string, std::vector<UnifiedItem>>
+    std::vector<GroupedSearchResults>
     groupItemsByDisplayPath(std::vector<UnifiedItem>& items) const {
-        std::unordered_map<std::string, std::vector<UnifiedItem>> groups;
+        std::vector<GroupedSearchResults> groups;
+        std::unordered_map<std::string, std::size_t> indexByPath;
+        indexByPath.reserve(items.size());
         groups.reserve(items.size());
         for (auto& item : items) {
             std::string key = item.getDisplayPath();
             if (key.empty())
                 continue;
-            groups[key].push_back(std::move(item));
+            auto [it, inserted] = indexByPath.emplace(key, groups.size());
+            if (inserted) {
+                groups.push_back(GroupedSearchResults{.path = key});
+            }
+            groups[it->second].versions.push_back(std::move(item));
         }
         return groups;
     }
@@ -448,9 +459,10 @@ private:
         }
     }
 
-    void
-    renderGroupedHumanResults(std::unordered_map<std::string, std::vector<UnifiedItem>>& groups) {
-        for (auto& [path, vec] : groups) {
+    void renderGroupedHumanResults(std::vector<GroupedSearchResults>& groups) {
+        for (auto& group : groups) {
+            auto& path = group.path;
+            auto& vec = group.versions;
             std::stable_sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
                 if (versionsSort_ == "path")
                     return a.path < b.path;
@@ -545,6 +557,22 @@ private:
             }
         };
 
+        auto emitNoResultsGuidance = [&]() {
+            if (jsonOutput_ || pathsOnly_) {
+                return;
+            }
+            std::cout << "\nDiagnostics:\n";
+            std::cout << "  Try: yams grep -F \"" << query_ << "\" --cwd .\n";
+            std::cout << "  If you expected repo-local hits, retry with: yams search \"" << query_
+                      << "\" --cwd .\n";
+            std::cout
+                << "  If this content is new, run: yams add . -r --include \"*.cpp,*.h,*.hpp\"\n";
+            if (auto graphSearchHint = buildGraphSearchHint(query_, invocationCwd_);
+                !graphSearchHint.empty()) {
+                std::cout << "  Try graph labels too: " << graphSearchHint << "\n";
+            }
+        };
+
         // Deduplicate by path
         std::unordered_set<std::string> seenPaths;
         seenPaths.reserve(items.size());
@@ -600,27 +628,49 @@ private:
         if (deduplicated.empty()) {
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
+            emitNoResultsGuidance();
             return Result<void>();
         }
 
         std::string concreteGraphNextHint;
-        if (!deduplicated.empty()) {
-            const auto topPresentation =
-                describeFileForCli(deduplicated.front().getDisplayPath(),
-                                   deduplicated.front().relationSummary, invocationCwd_);
-            if (!topPresentation.graphExploreHint.empty()) {
-                concreteGraphNextHint = "Next: " + topPresentation.graphExploreHint;
-            }
-        }
+        std::string alternativeGraphSearchHint;
 
         if (verbose_ && !ctx.traceId.empty()) {
             std::cout << ui::colorize("trace_id: " + ctx.traceId, ui::Ansi::DIM) << "\n\n";
         }
 
         if (!groupVersions_) {
+            const auto topPresentation =
+                describeFileForCli(deduplicated.front().getDisplayPath(),
+                                   deduplicated.front().relationSummary, invocationCwd_);
+            if (!topPresentation.graphExploreHint.empty()) {
+                concreteGraphNextHint = "Next: " + topPresentation.graphExploreHint;
+            }
+            alternativeGraphSearchHint =
+                buildGraphSearchHint(topPresentation.rawPath, invocationCwd_);
             renderFlatHumanResults(deduplicated);
         } else {
             auto groups = groupItemsByDisplayPath(deduplicated);
+            for (auto& group : groups) {
+                std::stable_sort(group.versions.begin(), group.versions.end(),
+                                 [&](const auto& a, const auto& b) {
+                                     if (versionsSort_ == "path")
+                                         return a.path < b.path;
+                                     if (versionsSort_ == "title")
+                                         return a.title < b.title;
+                                     return a.score > b.score;
+                                 });
+            }
+            if (!groups.empty() && !groups.front().versions.empty()) {
+                const auto topPresentation = describeFileForCli(
+                    groups.front().versions.front().getDisplayPath(),
+                    groups.front().versions.front().relationSummary, invocationCwd_);
+                if (!topPresentation.graphExploreHint.empty()) {
+                    concreteGraphNextHint = "Next: " + topPresentation.graphExploreHint;
+                }
+                alternativeGraphSearchHint = buildGraphSearchHint(
+                    groups.front().versions.front().getDisplayPath(), invocationCwd_);
+            }
 
             if (jsonOutput_ && jsonGrouped_) {
                 // Grouped JSON output
@@ -629,8 +679,8 @@ private:
                 output["method"] = ctx.method;
                 output["total_groups"] = groups.size();
                 nlohmann::json groupsArr = nlohmann::json::array();
-                for (auto& [path, vec] : groups) {
-                    groupsArr.push_back(makeGroupedSearchJson(path, vec));
+                for (auto& group : groups) {
+                    groupsArr.push_back(makeGroupedSearchJson(group.path, group.versions));
                 }
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
@@ -654,6 +704,10 @@ private:
                              "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
                              ui::Ansi::DIM)
                       << std::endl;
+            if (!alternativeGraphSearchHint.empty()) {
+                std::cout << ui::colorize("Alt: " + alternativeGraphSearchHint, ui::Ansi::DIM)
+                          << std::endl;
+            }
         }
         return Result<void>();
     }

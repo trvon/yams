@@ -1630,6 +1630,26 @@ private:
         auto r = co_await client.get(req);
         if (!r) {
             std::cerr << "Graph error: " << r.error().message << "\n";
+            if (!name_.empty() &&
+                r.error().message.find("Document not found with name") != std::string::npos) {
+                const auto displayName = projectPathForCli(name_, invocationCwd_);
+                if (!displayName.empty()) {
+                    std::cout << yams::cli::ui::status_info(
+                                     "If this file is new, run: yams add \"" + displayName +
+                                     "\" --sync")
+                              << "\n";
+                    std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
+                                                            displayName + "\" --depth " +
+                                                            std::to_string(depth_))
+                              << "\n";
+                }
+                if (auto searchHint = buildGraphSearchHint(name_, invocationCwd_);
+                    !searchHint.empty()) {
+                    std::cout << yams::cli::ui::status_info("Or explore graph labels with: " +
+                                                            searchHint)
+                              << "\n";
+                }
+            }
             co_return r.error();
         }
 
@@ -1733,28 +1753,35 @@ private:
             std::cout << yams::cli::ui::section_header("Knowledge Graph Query") << "\n\n";
 
             const auto& cwd = invocationCwd_;
-            auto isStorageNode = [](const yams::daemon::GraphNode& node) {
-                return node.type == "blob" || node.type == "document" || node.type == "file" ||
-                       node.type == "directory" || node.type == "path";
-            };
-            auto nodeLabelForDisplay = [&](const yams::daemon::GraphNode& node) {
-                if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
-                    return projectPathForCli(nodePath, cwd);
-                }
-                return projectPathForCli(node.label, cwd);
+            struct VisibleNodeRow {
+                const yams::daemon::GraphNode* node{nullptr};
+                yams::cli::GraphNodeCliPresentation presentation;
             };
 
-            std::vector<const yams::daemon::GraphNode*> visibleNodes;
+            std::vector<VisibleNodeRow> visibleNodes;
             visibleNodes.reserve(resp.connectedNodes.size());
-            const bool hasCodeNodes =
-                std::any_of(resp.connectedNodes.begin(), resp.connectedNodes.end(),
-                            [&](const auto& node) { return !isStorageNode(node); });
+            const bool hasHighSignalNodes = std::any_of(
+                resp.connectedNodes.begin(), resp.connectedNodes.end(), [&](const auto& node) {
+                    return !describeGraphNodeForCli(node, cwd).hideByDefault;
+                });
             for (const auto& node : resp.connectedNodes) {
-                if (!verbose_ && hasCodeNodes && isStorageNode(node)) {
+                auto presentation = describeGraphNodeForCli(node, cwd);
+                if (!verbose_ && hasHighSignalNodes && presentation.hideByDefault) {
                     continue;
                 }
-                visibleNodes.push_back(&node);
+                visibleNodes.push_back(
+                    VisibleNodeRow{.node = &node, .presentation = std::move(presentation)});
             }
+            std::stable_sort(visibleNodes.begin(), visibleNodes.end(),
+                             [](const auto& a, const auto& b) {
+                                 if (a.presentation.sortRank != b.presentation.sortRank) {
+                                     return a.presentation.sortRank < b.presentation.sortRank;
+                                 }
+                                 if (a.node->distance != b.node->distance) {
+                                     return a.node->distance < b.node->distance;
+                                 }
+                                 return a.presentation.displayLabel < b.presentation.displayLabel;
+                             });
 
             // Origin node info
             std::cout << yams::cli::ui::colorize("Origin: ", yams::cli::ui::Ansi::BOLD)
@@ -1771,10 +1798,11 @@ private:
                 yams::cli::ui::format_number(resp.totalNodesFound) + " nodes, " +
                 yams::cli::ui::format_number(resp.totalEdgesTraversed) + " edges";
             std::cout << yams::cli::ui::status_info(summary) << "\n";
-            if (!verbose_ && hasCodeNodes && visibleNodes.size() != resp.connectedNodes.size()) {
+            if (!verbose_ && hasHighSignalNodes &&
+                visibleNodes.size() != resp.connectedNodes.size()) {
                 std::cout
                     << yams::cli::ui::status_info(
-                           "Showing code-oriented relationships; rerun with --verbose for storage "
+                           "Showing high-signal relationships; rerun with --verbose for storage "
                            "and structural nodes")
                     << "\n";
             }
@@ -1790,10 +1818,14 @@ private:
             }
             table.has_header = true;
 
-            for (const auto* node : visibleNodes) {
+            for (const auto& visible : visibleNodes) {
+                const auto* node = visible.node;
                 std::vector<std::string> row;
-                row.push_back(yams::cli::ui::truncate_to_width(nodeLabelForDisplay(*node), 35));
-                row.push_back(node->type.empty() ? "-" : node->type);
+                row.push_back(
+                    yams::cli::ui::truncate_to_width(visible.presentation.displayLabel, 35));
+                row.push_back(visible.presentation.displayType.empty()
+                                  ? "-"
+                                  : visible.presentation.displayType);
                 row.push_back(std::to_string(node->distance));
                 std::string viaDisplay = "-";
                 if (auto it = traversalHints.find(node->nodeId); it != traversalHints.end()) {
@@ -1815,7 +1847,7 @@ private:
 
             if (visibleNodes.empty()) {
                 std::cout << yams::cli::ui::status_info(
-                                 "No code-oriented relationships found. Rerun with --verbose to "
+                                 "No high-signal relationships found. Rerun with --verbose to "
                                  "inspect storage and structural nodes")
                           << "\n";
             } else {
@@ -1887,6 +1919,13 @@ private:
                 std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
                                                         displayPath + "\" --depth " +
                                                         std::to_string(depth_))
+                          << "\n";
+            }
+            if (auto searchHint = buildGraphSearchHint(
+                    resp.path.empty() ? resp.fileName : resp.path, invocationCwd_);
+                !searchHint.empty()) {
+                std::cout << yams::cli::ui::status_info("Or explore graph labels with: " +
+                                                        searchHint)
                           << "\n";
             }
             return Result<void>();

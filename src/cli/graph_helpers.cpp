@@ -2,6 +2,8 @@
 
 #include <spdlog/spdlog.h>
 #include <filesystem>
+#include <nlohmann/json.hpp>
+#include <optional>
 #include <string_view>
 #include <unordered_set>
 
@@ -83,6 +85,71 @@ bool shouldIncludeRelationInHint(std::string_view relation) {
         "implements", "references", "referenced_by", "overrides", "instantiates",
     };
     return kHighSignalRelations.contains(std::string(relation));
+}
+
+std::string stripVersionSuffix(std::string type) {
+    static constexpr std::string_view kSuffix = "_version";
+    if (type.size() > kSuffix.size() &&
+        type.compare(type.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
+        type.resize(type.size() - kSuffix.size());
+    }
+    return type;
+}
+
+bool isSyntheticGraphPath(std::string_view value) {
+    return value.starts_with("snap:") || value.starts_with("path:") || value.starts_with("blob:") ||
+           value.starts_with("document:");
+}
+
+bool looksLikeFilesystemPath(std::string_view value) {
+    return !value.empty() && !isSyntheticGraphPath(value) &&
+           (value.find('/') != std::string_view::npos ||
+            value.find('\\') != std::string_view::npos);
+}
+
+std::optional<std::string> extractGraphNodePath(const yams::daemon::GraphNode& node) {
+    if (!node.documentPath.empty()) {
+        return node.documentPath;
+    }
+    if (node.properties.empty()) {
+        return std::nullopt;
+    }
+    try {
+        auto props = nlohmann::json::parse(node.properties);
+        if (props.is_object()) {
+            for (const char* key : {"file_path", "path", "document_path"}) {
+                auto it = props.find(key);
+                if (it != props.end() && it->is_string()) {
+                    return it->get<std::string>();
+                }
+            }
+        }
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+int graphNodeSortRank(std::string_view displayType) {
+    if (displayType == "file") {
+        return 0;
+    }
+    if (displayType == "function" || displayType == "class" || displayType == "struct" ||
+        displayType == "enum" || displayType == "trait") {
+        return 1;
+    }
+    if (displayType == "field") {
+        return 2;
+    }
+    if (displayType == "document" || displayType == "blob" || displayType == "directory" ||
+        displayType == "path") {
+        return 3;
+    }
+    return 4;
+}
+
+bool graphNodeHiddenByDefault(std::string_view displayType) {
+    return displayType == "document" || displayType == "blob" || displayType == "directory" ||
+           displayType == "path" || displayType == "field";
 }
 
 } // namespace
@@ -197,6 +264,65 @@ std::string buildGraphExploreHint(const std::string& filePath, const std::string
     }
     cmd += " --depth " + std::to_string(depth);
     return cmd;
+}
+
+std::string buildGraphSearchHint(const std::string& value, const std::filesystem::path& cwd) {
+    if (value.empty()) {
+        return {};
+    }
+
+    std::string token = value;
+    try {
+        std::filesystem::path path(value);
+        if (!path.empty()) {
+            if (path.is_relative()) {
+                path = cwd / path;
+            }
+            const auto filename = std::filesystem::path(value).filename().string();
+            const auto stem = std::filesystem::path(filename).stem().string();
+            if (!stem.empty()) {
+                token = stem;
+            } else if (!filename.empty()) {
+                token = filename;
+            }
+        }
+    } catch (...) {
+    }
+
+    if (token.empty()) {
+        return {};
+    }
+    return "yams graph --search \"*" + token + "*\"";
+}
+
+GraphNodeCliPresentation describeGraphNodeForCli(const yams::daemon::GraphNode& node,
+                                                 const std::filesystem::path& cwd) {
+    GraphNodeCliPresentation presentation;
+    presentation.displayType = stripVersionSuffix(node.type);
+    presentation.hideByDefault = graphNodeHiddenByDefault(presentation.displayType);
+    presentation.sortRank = graphNodeSortRank(presentation.displayType);
+
+    if (const auto extractedPath = extractGraphNodePath(node);
+        extractedPath.has_value() && looksLikeFilesystemPath(*extractedPath) &&
+        presentation.displayType == "file") {
+        presentation.displayLabel = projectPathForCli(*extractedPath, cwd);
+    } else if (!node.label.empty() &&
+               (!looksLikeFilesystemPath(node.label) || presentation.displayType != "file")) {
+        presentation.displayLabel = node.label;
+    } else if (!node.label.empty()) {
+        presentation.displayLabel = projectPathForCli(node.label, cwd);
+    } else if (const auto extractedPath = extractGraphNodePath(node); extractedPath.has_value()) {
+        presentation.displayLabel = looksLikeFilesystemPath(*extractedPath)
+                                        ? projectPathForCli(*extractedPath, cwd)
+                                        : *extractedPath;
+    } else {
+        presentation.displayLabel = node.nodeKey;
+    }
+
+    if (presentation.displayLabel.empty()) {
+        presentation.displayLabel = node.nodeKey;
+    }
+    return presentation;
 }
 
 CliFilePresentation describeFileForCli(const std::string& rawPath, std::string relationSummary,

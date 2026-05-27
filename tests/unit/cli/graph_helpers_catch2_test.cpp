@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/graph_helpers.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <filesystem>
 #include <string>
@@ -50,4 +51,38 @@ TEST_CASE("Graph helpers: file presentation bundles display path and hint", "[cl
     CHECK(presentation.relationSummary == "calls(3), includes(2)");
     CHECK(presentation.graphExploreHint ==
           "yams graph --name \"src/cli/commands/search_command.cpp\" -r calls --depth 2");
+}
+
+TEST_CASE("Graph helpers: label search hint uses filename stem", "[cli][graph]") {
+    const auto cwd = std::filesystem::current_path();
+    const auto path = (cwd / "src" / "app" / "services" / "grep_service.cpp").string();
+
+    CHECK(yams::cli::buildGraphSearchHint(path, cwd) == "yams graph --search \"*grep_service*\"");
+    CHECK(yams::cli::buildGraphSearchHint("grep", cwd) == "yams graph --search \"*grep*\"");
+}
+
+TEST_CASE("Graph helpers: node presentation prefers symbolic labels over snap paths",
+          "[cli][graph]") {
+    yams::daemon::GraphNode node;
+    node.label = "ActiveGrepRequestGuard";
+    node.type = "function_version";
+    node.properties = R"({"path":"snap:71503b..."})";
+
+    const auto presentation = yams::cli::describeGraphNodeForCli(node);
+
+    CHECK(presentation.displayLabel == "ActiveGrepRequestGuard");
+    CHECK(presentation.displayType == "function");
+    CHECK_FALSE(presentation.hideByDefault);
+}
+
+TEST_CASE("Graph helpers: field version nodes are hidden by default", "[cli][graph]") {
+    yams::daemon::GraphNode node;
+    node.label = "worker_";
+    node.type = "field_version";
+
+    const auto presentation = yams::cli::describeGraphNodeForCli(node);
+
+    CHECK(presentation.displayLabel == "worker_");
+    CHECK(presentation.displayType == "field");
+    CHECK(presentation.hideByDefault);
 }

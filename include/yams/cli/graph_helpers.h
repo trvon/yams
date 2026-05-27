@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <yams/daemon/ipc/ipc_protocol.h>
+
 namespace yams::cli {
 
 std::vector<std::string> build_graph_file_node_candidates(
@@ -16,6 +18,13 @@ struct CliFilePresentation {
     std::string displayPath;
     std::string relationSummary;
     std::string graphExploreHint;
+};
+
+struct GraphNodeCliPresentation {
+    std::string displayLabel;
+    std::string displayType;
+    bool hideByDefault{false};
+    int sortRank{100};
 };
 
 // Extract the top relation name from a human-readable summary like "calls(3), includes(2)".
@@ -63,6 +72,17 @@ std::string
 buildGraphExploreHint(const std::string& filePath, const std::string& topRelation = {},
                       int depth = 2,
                       const std::filesystem::path& cwd = std::filesystem::current_path());
+
+// Build a graph label search hint from a path-like or symbolic query.
+// Uses the filename stem when given a path, otherwise the raw token.
+std::string
+buildGraphSearchHint(const std::string& value,
+                     const std::filesystem::path& cwd = std::filesystem::current_path());
+
+// Normalize graph-node display so CLI surfaces prefer human labels over internal snapshot paths.
+GraphNodeCliPresentation
+describeGraphNodeForCli(const yams::daemon::GraphNode& node,
+                        const std::filesystem::path& cwd = std::filesystem::current_path());
 
 // Bundle the common CLI presentation details for a file: repo-relative path when possible,
 // relation summary, and graph explore hint.
