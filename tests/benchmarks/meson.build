@@ -159,7 +159,10 @@ if benchmark_dep.found()
   endif
 
   retrieval_quality_bench = executable('retrieval_quality_bench',
-    files('../../src/search/benchmarks/retrieval_quality_bench.cpp'),
+    files(
+      '../../src/search/benchmarks/retrieval_quality_bench.cpp',
+      '../../src/search/benchmarks/retrieval_benchmark_support.cpp',
+    ),
     include_directories: incs,
     dependencies: retrieval_quality_bench_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
@@ -171,7 +174,10 @@ if benchmark_dep.found()
 
   # Fusion strategy experiment - compares different fusion approaches
   fusion_experiment = executable('fusion_strategy_experiment',
-    files('../../src/search/benchmarks/fusion_strategy_experiment.cpp'),
+    files(
+      '../../src/search/benchmarks/fusion_strategy_experiment.cpp',
+      '../../src/search/benchmarks/retrieval_benchmark_support.cpp',
+    ),
     include_directories: incs,
     dependencies: retrieval_quality_bench_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,

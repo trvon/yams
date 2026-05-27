@@ -1,0 +1,2 @@
+CAS first indexed content scan keeps grep on the freshest indexed snapshot before falling back to extracted text.
+The consolidated scan path uses blob-backed bytes as the authoritative indexed content surface.

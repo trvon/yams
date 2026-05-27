@@ -11,11 +11,18 @@
  * Run with:
  *   YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=scifact \
  *   ./builddir/tests/benchmarks/fusion_strategy_experiment
+ *
+ *   or with the checked-in local manifest fixture:
+ *   YAMS_TEST_SAFE_SINGLE_INSTANCE=1 \
+ *   YAMS_BENCH_DATASET=local-manifest \
+ *   YAMS_BENCH_DATASET_PATH=tests/benchmarks/data/retrieval_manifest_mini \
+ *   ./builddir/tests/benchmarks/fusion_strategy_experiment
  */
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include "retrieval_benchmark_support.h"
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/search_runner.h>
@@ -44,164 +51,25 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 using json = nlohmann::json;
 
-// ============================================================================
-// BEIR Dataset Types (copied from retrieval_quality_bench.cpp)
-// ============================================================================
-
-struct BEIRDocument {
-    std::string id;
-    std::string text;
-    std::string title;
-};
-
-struct BEIRQuery {
-    std::string id;
-    std::string text;
-};
-
-struct BEIRDataset {
-    std::map<std::string, BEIRDocument> documents;
-    std::map<std::string, BEIRQuery> queries;
-    std::multimap<std::string, std::pair<std::string, int>> qrels;
-};
-
-struct TestQuery {
-    std::string query;
-    std::set<std::string> relevantFiles;
-    std::set<std::string> relevantDocIds;
-    std::map<std::string, int> relevanceGrades;
-    bool useDocIds = false;
-};
+using yams::bench::BEIRCorpusLoader;
+using yams::bench::BEIRDataset;
+using yams::bench::TestQuery;
 
 // ============================================================================
-// BEIR Dataset Loading (from retrieval_quality_bench.cpp)
+// Dataset loading
 // ============================================================================
 
-BEIRDataset loadBEIRDataset(const std::string& datasetName) {
-    BEIRDataset dataset;
-    std::string basePath;
-
+static yams::Result<BEIRDataset> loadExperimentDataset(const std::string& datasetName) {
+    fs::path datasetPath;
     if (const char* env = std::getenv("YAMS_BENCH_DATASET_PATH")) {
-        basePath = env;
-    } else if (const char* home = std::getenv("HOME")) {
-        basePath = std::string(home) + "/.cache/yams/beir/" + datasetName;
-    } else {
-        basePath = "/tmp/yams_beir/" + datasetName;
+        datasetPath = env;
     }
 
-    fs::path corpusPath = fs::path(basePath) / "corpus.jsonl";
-    fs::path queriesPath = fs::path(basePath) / "queries.jsonl";
-    fs::path qrelsPath = fs::path(basePath) / "qrels" / "test.tsv";
-
-    if (!fs::exists(corpusPath)) {
-        spdlog::warn("BEIR corpus not found at {}", corpusPath.string());
-        return dataset;
+    if (datasetName == "local-manifest") {
+        return yams::bench::loadBenchmarkManifestDataset(datasetName, datasetPath);
     }
-
-    // Load corpus
-    std::ifstream corpusFile(corpusPath);
-    std::string line;
-    while (std::getline(corpusFile, line)) {
-        if (line.empty())
-            continue;
-        try {
-            auto j = json::parse(line);
-            BEIRDocument doc;
-            doc.id = j.value("_id", "");
-            doc.text = j.value("text", "");
-            doc.title = j.value("title", "");
-            if (!doc.id.empty()) {
-                dataset.documents[doc.id] = doc;
-            }
-        } catch (...) {
-        }
-    }
-
-    // Load queries
-    if (fs::exists(queriesPath)) {
-        std::ifstream queriesFile(queriesPath);
-        while (std::getline(queriesFile, line)) {
-            if (line.empty())
-                continue;
-            try {
-                auto j = json::parse(line);
-                BEIRQuery q;
-                q.id = j.value("_id", "");
-                q.text = j.value("text", "");
-                if (!q.id.empty()) {
-                    dataset.queries[q.id] = q;
-                }
-            } catch (...) {
-            }
-        }
-    }
-
-    // Load qrels
-    if (fs::exists(qrelsPath)) {
-        std::ifstream qrelsFile(qrelsPath);
-        std::getline(qrelsFile, line); // skip header
-        while (std::getline(qrelsFile, line)) {
-            if (line.empty())
-                continue;
-            std::istringstream iss(line);
-            std::string queryId, docId;
-            int score;
-            if (iss >> queryId >> docId >> score) {
-                dataset.qrels.insert({queryId, {docId, score}});
-            }
-        }
-    }
-
-    spdlog::info("Loaded BEIR dataset '{}': {} docs, {} queries, {} qrels", datasetName,
-                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size());
-    return dataset;
+    return yams::bench::loadBEIRDataset(datasetName, datasetPath);
 }
-
-// ============================================================================
-// BEIR Corpus Loader
-// ============================================================================
-
-struct BEIRCorpusLoader {
-    BEIRDataset dataset;
-    fs::path corpusDir;
-
-    BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir) : dataset(ds), corpusDir(dir) {}
-
-    void writeDocumentsAsFiles() {
-        yams::common::ensureDirectories(corpusDir);
-        for (const auto& [id, doc] : dataset.documents) {
-            fs::path filePath = corpusDir / (id + ".txt");
-            std::ofstream outFile(filePath);
-            if (doc.title.empty()) {
-                outFile << doc.text;
-            } else {
-                outFile << doc.title << "\n\n" << doc.text;
-            }
-        }
-        spdlog::info("Wrote {} documents to {}", dataset.documents.size(), corpusDir.string());
-    }
-
-    std::vector<TestQuery> generateTestQueries() {
-        std::vector<TestQuery> testQueries;
-        for (const auto& [queryId, query] : dataset.queries) {
-            TestQuery tq;
-            tq.query = query.text;
-            tq.useDocIds = true;
-
-            auto range = dataset.qrels.equal_range(queryId);
-            for (auto it = range.first; it != range.second; ++it) {
-                const auto& [docId, score] = it->second;
-                tq.relevantDocIds.insert(docId);
-                tq.relevanceGrades[docId] = score;
-            }
-
-            if (!tq.relevantDocIds.empty()) {
-                testQueries.push_back(tq);
-            }
-        }
-        return testQueries;
-    }
-};
 
 // ============================================================================
 // Experiment Metrics
@@ -818,27 +686,32 @@ int main(int argc, char** argv) {
     spdlog::set_level(spdlog::level::info);
 
     const char* datasetEnv = std::getenv("YAMS_BENCH_DATASET");
-    if (!datasetEnv || std::string(datasetEnv) != "scifact") {
-        std::cerr << "Usage: YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=scifact "
-                  << "./fusion_strategy_experiment\n";
+    const std::string datasetName = datasetEnv ? std::string(datasetEnv) : std::string("scifact");
+    if (datasetName != "scifact" && datasetName != "local-manifest") {
+        std::cerr
+            << "Usage: YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=scifact|local-manifest "
+            << "./fusion_strategy_experiment\n";
         return 1;
     }
 
-    // Set SCIENTIFIC tuning override
-    setenv("YAMS_TUNING_OVERRIDE", "SCIENTIFIC", 1);
+    // Set SCIENTIFIC tuning override for dataset-backed runs unless already chosen.
+    if (std::getenv("YAMS_TUNING_OVERRIDE") == nullptr) {
+        setenv("YAMS_TUNING_OVERRIDE", "SCIENTIFIC", 1);
+    }
 
     std::cout << "=======================================================\n";
-    std::cout << "       FUSION STRATEGY EXPERIMENT - SciFact\n";
+    std::cout << "       FUSION STRATEGY EXPERIMENT - " << datasetName << "\n";
     std::cout << "=======================================================\n\n";
 
-    // Load BEIR dataset
-    auto dataset = loadBEIRDataset("scifact");
+    auto datasetResult = loadExperimentDataset(datasetName);
+    if (!datasetResult) {
+        std::cerr << "Failed to load dataset '" << datasetName
+                  << "': " << datasetResult.error().message << "\n";
+        return 1;
+    }
+    auto dataset = std::move(datasetResult.value());
     if (dataset.documents.empty()) {
-        std::cerr << "Failed to load SciFact dataset\n";
-        std::cerr
-            << "Download with: python -c \"from beir import util; util.download_and_unzip("
-            << "'https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip', "
-            << "'~/.cache/yams/beir/')\"\n";
+        std::cerr << "Dataset '" << datasetName << "' is empty\n";
         return 1;
     }
 

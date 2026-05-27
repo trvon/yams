@@ -1,0 +1,53 @@
+{
+  "name": "retrieval-manifest-mini",
+  "documents": [
+    {
+      "id": "grep_service",
+      "title": "Grep service",
+      "path": "docs/grep_service.txt"
+    },
+    {
+      "id": "metadata_repo",
+      "title": "Metadata repository",
+      "path": "docs/metadata_repo.txt"
+    },
+    {
+      "id": "search_command",
+      "title": "Search command",
+      "path": "docs/search_command.txt"
+    },
+    {
+      "id": "graph_command",
+      "title": "Graph command",
+      "path": "docs/graph_command.txt"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "text": "indexed content scan freshest snapshot"
+    },
+    {
+      "id": "q2",
+      "text": "documents indexed_time desc latest indexed version"
+    },
+    {
+      "id": "q3",
+      "text": "graph next step top result depth 2"
+    },
+    {
+      "id": "q4",
+      "text": "graph data unavailable retry after indexing completes"
+    }
+  ],
+  "qrels": [
+    { "query_id": "q1", "doc_id": "grep_service", "score": 3 },
+    { "query_id": "q1", "doc_id": "metadata_repo", "score": 1 },
+    { "query_id": "q2", "doc_id": "metadata_repo", "score": 3 },
+    { "query_id": "q2", "doc_id": "grep_service", "score": 1 },
+    { "query_id": "q3", "doc_id": "search_command", "score": 3 },
+    { "query_id": "q3", "doc_id": "graph_command", "score": 1 },
+    { "query_id": "q4", "doc_id": "graph_command", "score": 3 },
+    { "query_id": "q4", "doc_id": "search_command", "score": 1 }
+  ]
+}

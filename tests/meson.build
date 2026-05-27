@@ -1214,6 +1214,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
+    files(
+      'unit/search/retrieval_benchmark_support_catch2_test.cpp',
+      '../src/search/benchmarks/retrieval_benchmark_support.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_search_bandit_bench_exe = executable('catch2_search_bandit_bench',
     files('benchmarks/search_bandit_bench.cpp'),
     include_directories: incs,
