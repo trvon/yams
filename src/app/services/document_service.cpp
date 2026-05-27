@@ -986,13 +986,28 @@ public:
                     // Non-fatal: fuzzy search indexing is opportunistic
                 }
 
-                // Inline text extraction for stdin/content-based stores so
-                // that `yams list` shows content immediately instead of
-                // "[Content not available]".
-                if (!req.content.empty() && isTextMime(info.mimeType)) {
-                    (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId,
-                                                            info.fileName, req.content,
-                                                            info.mimeType, "inline_store_sync");
+                // Synchronously persist extracted text for direct text adds so sync callers can
+                // search immediately without waiting for post-ingest indexing.
+                if (isTextMime(info.mimeType)) {
+                    std::string extractedText;
+                    std::string extractionMethod;
+                    if (!req.content.empty()) {
+                        extractedText = req.content;
+                        extractionMethod = "inline_store_sync";
+                    } else {
+                        std::ifstream ifs(usePath, std::ios::binary);
+                        if (ifs.good()) {
+                            std::ostringstream oss;
+                            oss << ifs.rdbuf();
+                            extractedText = oss.str();
+                            extractionMethod = "text_store_sync";
+                        }
+                    }
+                    if (!extractedText.empty()) {
+                        (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId,
+                                                                info.fileName, extractedText,
+                                                                info.mimeType, extractionMethod);
+                    }
                 }
             }
         }
@@ -1027,7 +1042,7 @@ public:
         metadata::MetadataOpScope metadataScope("client_get");
 
         RetrieveDocumentResponse resp;
-        resp.graphEnabled = req.graph;
+        resp.graphEnabled = false;
 
         // Validate hash format if provided (must be hex string, at least 8 chars for partial)
         if (!req.hash.empty()) {
@@ -1317,6 +1332,7 @@ public:
                     }
                 }
             }
+            resp.graphEnabled = !resp.related.empty();
         }
 
         return resp;

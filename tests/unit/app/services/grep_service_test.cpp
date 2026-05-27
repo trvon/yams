@@ -46,6 +46,7 @@ public:
 
     void setGetAllMetadataFailures(std::size_t count) { getAllMetadataFailures_ = count; }
     void setQueryDocumentsFailures(std::size_t count) { queryFailures_ = count; }
+    void setFindDocumentsByTagsFailures(std::size_t count) { findDocumentsByTagsFailures_ = count; }
 
     Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) override {
@@ -71,6 +72,14 @@ public:
         return MetadataRepository::getMetadataForDocuments(documentIds);
     }
 
+    Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
+                                                          bool matchAll = false) override {
+        if (consume(findDocumentsByTagsFailures_)) {
+            return Error{ErrorCode::NotInitialized, "tag index warming up"};
+        }
+        return MetadataRepository::findDocumentsByTags(tags, matchAll);
+    }
+
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override {
         return MetadataRepository::findDocumentByExactPath(path);
     }
@@ -85,6 +94,7 @@ private:
 
     std::size_t getAllMetadataFailures_{0};
     std::size_t queryFailures_{0};
+    std::size_t findDocumentsByTagsFailures_{0};
 };
 
 class RetrieveBytesFailStore final : public IContentStore {
@@ -587,7 +597,33 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
         CHECK(res.value().totalMatches > 0);
     }
 
-    SECTION("Propagates errors when tags unavailable") {
+    SECTION("Propagates tag query failures after retry exhaustion") {
+        auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*fixture.pool_);
+        auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
+        REQUIRE(docsRes);
+        REQUIRE_FALSE(docsRes.value().empty());
+
+        const auto docId = docsRes.value().front().id;
+        REQUIRE(
+            flakyRepo->setMetadata(docId, "tag:ready_flag", MetadataValue(std::string("true"))));
+
+        flakyRepo->setFindDocumentsByTagsFailures(8);
+        fixture.repo_ = flakyRepo;
+        fixture.ctx_.metadataRepo = flakyRepo;
+        fixture.grepService_ = makeGrepService(fixture.ctx_);
+
+        auto res = fixture.grep({
+            .pattern = "alpha",
+            .literalText = true,
+            .tags = {"ready_flag"},
+        });
+
+        REQUIRE_FALSE(res);
+        CHECK(res.error().code == ErrorCode::NotInitialized);
+        CHECK_FALSE(res.error().message.empty());
+    }
+
+    SECTION("Tag-filtered grep tolerates metadata warming when tag index query succeeds") {
         auto flakyRepo = std::make_shared<FlakyMetadataRepository>(*fixture.pool_);
         auto docsRes = metadata::queryDocumentsByPattern(*flakyRepo, "%");
         REQUIRE(docsRes);
@@ -608,9 +644,8 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
             .tags = {"ready_flag"},
         });
 
-        REQUIRE_FALSE(res);
-        CHECK(res.error().code == ErrorCode::NotInitialized);
-        CHECK_FALSE(res.error().message.empty());
+        REQUIRE(res);
+        CHECK(res.value().totalMatches > 0);
     }
 }
 

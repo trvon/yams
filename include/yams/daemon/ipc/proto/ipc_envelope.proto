@@ -214,6 +214,8 @@ message AddDocumentRequest {
   string mime_type = 13;
   bool disable_auto_mime = 14;
   bool no_embeddings = 15;
+  bool wait_for_processing = 16;
+  int32 wait_timeout_seconds = 17;
   string session_id = 99;
   string instance_id = 100;
 }

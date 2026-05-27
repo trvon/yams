@@ -414,13 +414,10 @@ tasks:
       if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
         STAGE_ROOT="${REPO_DIR}/${BUILD_DIR}/${STAGE_DIR}"
         if [ -d "${STAGE_ROOT}" ]; then
-          TMP_STAGE_ROOT="$(mktemp -d)"
-          trap 'rm -rf "${TMP_STAGE_ROOT}"' EXIT
           echo "No release artifacts; creating runtime-pruned CI tarball from ${STAGE_ROOT}" >&2
-          cp -a "${STAGE_ROOT}/." "${TMP_STAGE_ROOT}/"
 
           PRUNE_ROOT=""
-          for candidate in "${TMP_STAGE_ROOT}/usr" "${TMP_STAGE_ROOT}/usr/local" "${TMP_STAGE_ROOT}/opt/homebrew"; do
+          for candidate in "${STAGE_ROOT}/usr" "${STAGE_ROOT}/usr/local" "${STAGE_ROOT}/opt/homebrew"; do
             if [ -d "${candidate}" ]; then
               PRUNE_ROOT="${candidate}"
               break
@@ -430,9 +427,7 @@ tasks:
             bash "${REPO_DIR}/scripts/prune-runtime-install.sh" "${PRUNE_ROOT}"
           fi
 
-          tar -C "${TMP_STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
-          rm -rf "${TMP_STAGE_ROOT}"
-          trap - EXIT
+          tar -C "${STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
           ls -l "${ART_DIR}" || true
         else
           echo "WARNING: Stage dir ${STAGE_ROOT} missing; no artifacts to publish" >&2

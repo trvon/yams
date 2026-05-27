@@ -588,9 +588,10 @@ public:
                         return ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
                     },
                     4, std::chrono::milliseconds(25), &metadataTelemetry);
-                if (tRes) {
-                    addDocs(convertToGrepCandidates(std::move(tRes.value())));
+                if (!tRes) {
+                    return tRes.error();
                 }
+                addDocs(convertToGrepCandidates(std::move(tRes.value())));
             } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
                        retrievalMode != search::QueryRetrievalMode::Literal &&
                        retrievalMode != search::QueryRetrievalMode::Path &&
