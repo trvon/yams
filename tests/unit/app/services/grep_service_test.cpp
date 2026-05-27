@@ -674,6 +674,31 @@ TEST_CASE("GrepService - Path-scoped grep prefers latest indexed version",
     CHECK(res.value().filesWith.front().find("versioned.txt") != std::string::npos);
 }
 
+TEST_CASE("GrepService - Broad regex grep does not stop at candidate cap",
+          "[grep][service][versioning]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("2"));
+    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("0"));
+    yams::test::ScopedEnvVar budget("YAMS_GREP_TIME_BUDGET_MS", std::string("10000"));
+
+    fixture.addDocument("old_match.txt", "rare_token_42\n");
+    fixture.addDocument("newer_a.txt", "alpha\n");
+    fixture.addDocument("newer_b.txt", "beta\n");
+    fixture.addDocument("newer_c.txt", "gamma\n");
+
+    auto res = fixture.grep({
+        .pattern = "rare_token_[0-9]+",
+        .regexOnly = true,
+    });
+
+    REQUIRE(res);
+    CHECK(res.value().totalMatches == 1);
+    REQUIRE(res.value().filesWith.size() == 1);
+    CHECK(res.value().filesWith.front().find("old_match.txt") != std::string::npos);
+}
+
 TEST_CASE("GrepService - Edge Cases", "[grep][service][edge]") {
     SKIP_GREP_ON_WINDOWS();
 

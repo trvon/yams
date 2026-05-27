@@ -804,12 +804,6 @@ public:
                               filesSkippedSize);
             }
 
-            const size_t candidateCap = static_cast<size_t>(std::max(0, max_docs_hot)) +
-                                        static_cast<size_t>(std::max(0, max_docs_cold));
-            if (candidateCap > 0 && filteredDocs.size() > candidateCap) {
-                filteredDocs.resize(candidateCap);
-            }
-
             docs = std::move(filteredDocs);
         }
         recordPhaseMetric(phaseTimings, "phase_candidate_classification_ms",
@@ -848,11 +842,11 @@ public:
         size_t workers = std::min<size_t>({rec, hw, perRequestCap});
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
 
-        const int candidateCap = std::max(0, max_docs_hot) + std::max(0, max_docs_cold);
+        const int ftsCandidateLimit = std::max(0, max_docs_hot);
         spdlog::debug("[GrepService] starting worker scan: docs={} tags={} paths={} includes={} "
-                      "active={} candidate_cap={} budget_ms={}",
+                      "active={} fts_candidate_limit={} budget_ms={}",
                       docs.size(), req.tags.size(), req.paths.size(), req.includePatterns.size(),
-                      activeRequests, candidateCap, budget_ms);
+                      activeRequests, ftsCandidateLimit, budget_ms);
         const auto workerScanStart = GrepClock::now();
         std::atomic<size_t> next{0};
         std::mutex outMutex;
