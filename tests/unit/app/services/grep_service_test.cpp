@@ -14,6 +14,8 @@
 #include <fstream>
 #include <ranges>
 
+#include "common/test_helpers_catch2.h"
+
 #if defined(_WIN32) && __has_include(<onnxruntime_c_api.h>)
 #include <onnxruntime_c_api.h>
 #define YAMS_ORT_API_VERSION ORT_API_VERSION
@@ -612,7 +614,8 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
     }
 }
 
-TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][service][session]") {
+TEST_CASE("GrepService - Falls back to extracted content when blob unavailable",
+          "[grep][service][session]") {
     SKIP_GREP_ON_WINDOWS();
 
     GrepFixture fixture;
@@ -630,7 +633,7 @@ TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][s
     });
 
     REQUIRE(coldRes);
-    CHECK(coldRes.value().totalMatches == 0);
+    CHECK(coldRes.value().totalMatches == 1);
 
     auto sessionRes = fixture.grep({
         .pattern = "alpha",
@@ -642,6 +645,33 @@ TEST_CASE("GrepService - Session auto mode uses hot metadata content", "[grep][s
     CHECK(sessionRes.value().totalMatches == 1);
     REQUIRE(sessionRes.value().filesWith.size() == 1);
     CHECK(sessionRes.value().filesWith.front().find("session_hot.txt") != std::string::npos);
+}
+
+TEST_CASE("GrepService - Path-scoped grep prefers latest indexed version",
+          "[grep][service][versioning]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("1"));
+    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("1"));
+
+    fixture.addDocument("versioned.txt", "old-token only\n");
+    fixture.addDocument("versioned.txt", "new-token only\n");
+
+    auto docs = metadata::queryDocumentsByPattern(*fixture.repo_, "%versioned.txt");
+    REQUIRE(docs);
+    REQUIRE(docs.value().size() >= 2);
+
+    auto res = fixture.grep({
+        .pattern = "new-token",
+        .paths = {"versioned.txt"},
+        .literalText = true,
+    });
+
+    REQUIRE(res);
+    CHECK(res.value().totalMatches == 1);
+    REQUIRE(res.value().filesWith.size() == 1);
+    CHECK(res.value().filesWith.front().find("versioned.txt") != std::string::npos);
 }
 
 TEST_CASE("GrepService - Edge Cases", "[grep][service][edge]") {

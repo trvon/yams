@@ -3762,6 +3762,10 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
                 }
             }
 
+            // Grep should prefer the freshest indexed snapshot when candidate caps apply,
+            // especially for path-scoped queries that may have multiple historical versions.
+            sql += " ORDER BY documents.indexed_time DESC, documents.id DESC";
+
             if (options.limit > 0) {
                 sql += " LIMIT ?";
                 addIntParam(params, options.limit);
