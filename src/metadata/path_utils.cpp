@@ -71,4 +71,14 @@ PathDerivedValues computePathDerivedValues(const std::string& filePath) {
     return out;
 }
 
+void populatePathDerivedFields(DocumentInfo& info) {
+    auto derived = computePathDerivedValues(info.filePath);
+    info.filePath = std::move(derived.normalizedPath);
+    info.pathPrefix = std::move(derived.pathPrefix);
+    info.reversePath = std::move(derived.reversePath);
+    info.pathHash = std::move(derived.pathHash);
+    info.parentHash = std::move(derived.parentHash);
+    info.pathDepth = derived.pathDepth;
+}
+
 } // namespace yams::metadata

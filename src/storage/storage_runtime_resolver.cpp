@@ -1,5 +1,6 @@
 #include <yams/storage/storage_runtime_resolver.h>
 
+#include <yams/common/string_utils.h>
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_backend_engine_adapter.h>
 
@@ -33,9 +34,7 @@ std::string trim(std::string value) {
 }
 
 std::string toLower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 std::string expandTilde(std::string value) {

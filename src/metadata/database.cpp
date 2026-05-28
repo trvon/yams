@@ -1,8 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +13,7 @@
 #include <thread>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/database.h>
+#include <yams/storage/sqlite_retry.h>
 
 namespace yams::metadata {
 
@@ -57,7 +58,7 @@ int count_live_statements(sqlite3* db) {
 }
 
 bool is_sqlite_busy_or_locked(int rc) {
-    return rc == SQLITE_BUSY || rc == SQLITE_LOCKED;
+    return storage::sqlite_retry::isBusyOrLocked(rc);
 }
 
 bool is_transient_integrity_check_message(std::string_view message) {
@@ -65,9 +66,7 @@ bool is_transient_integrity_check_message(std::string_view message) {
     lower.reserve(message.size());
     std::transform(message.begin(), message.end(), std::back_inserter(lower),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return lower.find("database is locked") != std::string::npos ||
-           lower.find("database table is locked") != std::string::npos ||
-           lower.find("database is busy") != std::string::npos;
+    return storage::sqlite_retry::isBusyOrLockedMessage(lower);
 }
 
 } // namespace
@@ -242,27 +241,21 @@ Result<void> Statement::bind(int index, std::chrono::sys_seconds tp) {
 }
 
 Result<void> Statement::execute() {
-    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
+    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED).
     // Each retry calls sqlite3_step() which blocks for up to busy_timeout ms,
     // so retries must be kept low to avoid starving worker threads.
-#if YAMS_LIBSQL_BACKEND
-    constexpr int kMaxRetries = 2;               // Fewer retries with MVCC
-    auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
-#else
-    constexpr int kMaxRetries = 3;                // Keep low: each blocks for busy_timeout
-    auto backoff = std::chrono::milliseconds(10); // Standard backoff
-#endif
+    const auto retryPolicy = storage::sqlite_retry::metadataStatementPolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         int rc = sqlite3_step(stmt_);
         if (rc == SQLITE_DONE) {
             return {};
         }
         // Check for transient lock errors that are worth retrying
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+        if (storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
             sqlite3_reset(stmt_); // Reset statement for retry
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2; // Exponential backoff
+            storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
         // Non-retryable error or max retries exceeded
@@ -283,18 +276,13 @@ Result<void> Statement::execute() {
 }
 
 Result<bool> Statement::step() {
-    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
+    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED).
     // Each retry calls sqlite3_step() which blocks for up to busy_timeout ms,
     // so retries must be kept low to avoid starving worker threads.
-#if YAMS_LIBSQL_BACKEND
-    constexpr int kMaxRetries = 2;               // Fewer retries with MVCC
-    auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
-#else
-    constexpr int kMaxRetries = 3;                // Keep low: each blocks for busy_timeout
-    auto backoff = std::chrono::milliseconds(10); // Standard backoff
-#endif
+    const auto retryPolicy = storage::sqlite_retry::metadataStatementPolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         int rc = sqlite3_step(stmt_);
         if (rc == SQLITE_ROW) {
             return true;
@@ -302,10 +290,9 @@ Result<bool> Statement::step() {
             return false;
         }
         // Check for transient lock errors that are worth retrying
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+        if (storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
             sqlite3_reset(stmt_); // Reset statement for retry
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2; // Exponential backoff
+            storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
         // Non-retryable error or max retries exceeded

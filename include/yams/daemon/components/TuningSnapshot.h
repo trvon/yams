@@ -1,8 +1,8 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
-#include <memory>
+
+#include <yams/daemon/components/AtomicSnapshotRegistry.h>
 
 namespace yams::daemon {
 
@@ -41,26 +41,6 @@ struct TuningSnapshot {
 };
 
 // Registry exposing the latest snapshot using atomic shared_ptr for zero-copy reads.
-class TuningSnapshotRegistry {
-public:
-    static TuningSnapshotRegistry& instance() {
-        static TuningSnapshotRegistry reg;
-        return reg;
-    }
-
-    void set(std::shared_ptr<const TuningSnapshot> snap) {
-        // Use C++11 atomic free functions for shared_ptr to support libc++
-        std::atomic_store_explicit(&snap_, std::move(snap), std::memory_order_release);
-    }
-
-    std::shared_ptr<const TuningSnapshot> get() const {
-        return std::atomic_load_explicit(&snap_, std::memory_order_acquire);
-    }
-
-private:
-    TuningSnapshotRegistry() = default;
-    // Plain shared_ptr storage; synchronization via atomic_load/store free functions above
-    std::shared_ptr<const TuningSnapshot> snap_{nullptr};
-};
+using TuningSnapshotRegistry = AtomicSnapshotRegistry<TuningSnapshot>;
 
 } // namespace yams::daemon

@@ -7,8 +7,25 @@
 #include <future>
 #include <queue>
 #include <thread>
+#include <type_traits>
+#include <utility>
 
 namespace yams::api {
+
+namespace {
+
+template <typename T, typename Callback>
+void attachCallback(std::future<Result<T>> future, Callback callback) {
+    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
+        try {
+            callback(future.get());
+        } catch (...) {
+            callback(Result<T>(ErrorCode::Unknown));
+        }
+    }).detach();
+}
+
+} // namespace
 
 // Implementation details
 struct AsyncContentStore::Impl {
@@ -49,7 +66,7 @@ struct AsyncContentStore::Impl {
     template <typename F> auto runAsync(F&& func) -> std::future<decltype(func())> {
         waitForSlot();
 
-        return std::async(std::launch::async, [this, func = std::forward<F>(func)]() {
+        return std::async(std::launch::async, [this, func = std::forward<F>(func)]() mutable {
             // Ensure slot is released even if exception occurs
             struct SlotGuard {
                 Impl* impl;
@@ -58,6 +75,13 @@ struct AsyncContentStore::Impl {
 
             return func();
         });
+    }
+
+    template <typename F>
+    auto runStoreAsync(F&& func)
+        -> std::future<std::invoke_result_t<F, std::shared_ptr<IContentStore>>> {
+        return runAsync(
+            [store = store, func = std::forward<F>(func)]() mutable { return func(store); });
     }
 };
 
@@ -77,8 +101,8 @@ AsyncContentStore& AsyncContentStore::operator=(AsyncContentStore&&) noexcept = 
 std::future<Result<StoreResult>> AsyncContentStore::storeAsync(const std::filesystem::path& path,
                                                                const ContentMetadata& metadata,
                                                                ProgressCallback progress) {
-    return pImpl->runAsync(
-        [store = pImpl->store, path, metadata, progress = std::move(progress)]() {
+    return pImpl->runStoreAsync(
+        [path, metadata, progress = std::move(progress)](auto store) mutable {
             return store->store(path, metadata, std::move(progress));
         });
 }
@@ -86,8 +110,8 @@ std::future<Result<StoreResult>> AsyncContentStore::storeAsync(const std::filesy
 std::future<Result<RetrieveResult>>
 AsyncContentStore::retrieveAsync(const std::string& hash, const std::filesystem::path& outputPath,
                                  ProgressCallback progress) {
-    return pImpl->runAsync(
-        [store = pImpl->store, hash, outputPath, progress = std::move(progress)]() {
+    return pImpl->runStoreAsync(
+        [hash, outputPath, progress = std::move(progress)](auto store) mutable {
             return store->retrieve(hash, outputPath, std::move(progress));
         });
 }
@@ -97,8 +121,8 @@ AsyncContentStore::storeStreamAsync(std::istream& stream, const ContentMetadata&
                                     ProgressCallback progress) {
     // Note: Stream reference capture requires careful handling
     // In production, would need to ensure stream lifetime
-    return pImpl->runAsync(
-        [store = pImpl->store, &stream, metadata, progress = std::move(progress)]() {
+    return pImpl->runStoreAsync(
+        [&stream, metadata, progress = std::move(progress)](auto store) mutable {
             return store->storeStream(stream, metadata, std::move(progress));
         });
 }
@@ -106,144 +130,87 @@ AsyncContentStore::storeStreamAsync(std::istream& stream, const ContentMetadata&
 std::future<Result<RetrieveResult>>
 AsyncContentStore::retrieveStreamAsync(const std::string& hash, std::ostream& output,
                                        ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, hash, &output, progress = std::move(progress)]() {
-        return store->retrieveStream(hash, output, std::move(progress));
-    });
+    return pImpl->runStoreAsync(
+        [hash, &output, progress = std::move(progress)](auto store) mutable {
+            return store->retrieveStream(hash, output, std::move(progress));
+        });
 }
 
 std::future<Result<bool>> AsyncContentStore::existsAsync(const std::string& hash) {
-    return pImpl->runAsync([store = pImpl->store, hash]() { return store->exists(hash); });
+    return pImpl->runStoreAsync([hash](auto store) { return store->exists(hash); });
 }
 
 std::future<Result<bool>> AsyncContentStore::removeAsync(const std::string& hash) {
-    return pImpl->runAsync([store = pImpl->store, hash]() { return store->remove(hash); });
+    return pImpl->runStoreAsync([hash](auto store) { return store->remove(hash); });
 }
 
 std::future<Result<ContentMetadata>> AsyncContentStore::getMetadataAsync(const std::string& hash) {
-    return pImpl->runAsync([store = pImpl->store, hash]() { return store->getMetadata(hash); });
+    return pImpl->runStoreAsync([hash](auto store) { return store->getMetadata(hash); });
 }
 
 std::future<Result<void>> AsyncContentStore::updateMetadataAsync(const std::string& hash,
                                                                  const ContentMetadata& metadata) {
-    return pImpl->runAsync(
-        [store = pImpl->store, hash, metadata]() { return store->updateMetadata(hash, metadata); });
+    return pImpl->runStoreAsync(
+        [hash, metadata](auto store) { return store->updateMetadata(hash, metadata); });
 }
 
 // Callback-based async operations
 void AsyncContentStore::storeAsync(const std::filesystem::path& path, StoreCallback callback,
                                    const ContentMetadata& metadata, ProgressCallback progress) {
-    auto future = storeAsync(path, metadata, std::move(progress));
-
-    // Launch a task to wait for result and invoke callback
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<StoreResult>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(storeAsync(path, metadata, std::move(progress)), std::move(callback));
 }
 
 void AsyncContentStore::retrieveAsync(const std::string& hash,
                                       const std::filesystem::path& outputPath,
                                       RetrieveCallback callback, ProgressCallback progress) {
-    auto future = retrieveAsync(hash, outputPath, std::move(progress));
-
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<RetrieveResult>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(retrieveAsync(hash, outputPath, std::move(progress)), std::move(callback));
 }
 
 void AsyncContentStore::existsAsync(const std::string& hash, BoolCallback callback) {
-    auto future = existsAsync(hash);
-
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<bool>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(existsAsync(hash), std::move(callback));
 }
 
 void AsyncContentStore::removeAsync(const std::string& hash, BoolCallback callback) {
-    auto future = removeAsync(hash);
-
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<bool>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(removeAsync(hash), std::move(callback));
 }
 
 void AsyncContentStore::getMetadataAsync(const std::string& hash, MetadataCallback callback) {
-    auto future = getMetadataAsync(hash);
-
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<ContentMetadata>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(getMetadataAsync(hash), std::move(callback));
 }
 
 void AsyncContentStore::updateMetadataAsync(const std::string& hash,
                                             const ContentMetadata& metadata,
                                             VoidCallback callback) {
-    auto future = updateMetadataAsync(hash, metadata);
-
-    std::thread([future = std::move(future), callback = std::move(callback)]() mutable {
-        try {
-            auto result = future.get();
-            callback(result);
-        } catch (const std::exception& e) {
-            callback(Result<void>(ErrorCode::Unknown));
-        }
-    }).detach();
+    attachCallback(updateMetadataAsync(hash, metadata), std::move(callback));
 }
 
 // Batch operations
 std::future<std::vector<Result<StoreResult>>>
 AsyncContentStore::storeBatchAsync(const std::vector<std::filesystem::path>& paths,
                                    const std::vector<ContentMetadata>& metadata) {
-    return pImpl->runAsync(
-        [store = pImpl->store, paths, metadata]() { return store->storeBatch(paths, metadata); });
+    return pImpl->runStoreAsync(
+        [paths, metadata](auto store) { return store->storeBatch(paths, metadata); });
 }
 
 std::future<std::vector<Result<bool>>>
 AsyncContentStore::removeBatchAsync(const std::vector<std::string>& hashes) {
-    return pImpl->runAsync([store = pImpl->store, hashes]() { return store->removeBatch(hashes); });
+    return pImpl->runStoreAsync([hashes](auto store) { return store->removeBatch(hashes); });
 }
 
 // Maintenance operations
 std::future<Result<void>> AsyncContentStore::verifyAsync(ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
-        return store->verify(progress);
-    });
+    return pImpl->runStoreAsync(
+        [progress = std::move(progress)](auto store) { return store->verify(progress); });
 }
 
 std::future<Result<void>> AsyncContentStore::compactAsync(ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
-        return store->compact(progress);
-    });
+    return pImpl->runStoreAsync(
+        [progress = std::move(progress)](auto store) { return store->compact(progress); });
 }
 
 std::future<Result<void>> AsyncContentStore::garbageCollectAsync(ProgressCallback progress) {
-    return pImpl->runAsync([store = pImpl->store, progress = std::move(progress)]() {
-        return store->garbageCollect(progress);
-    });
+    return pImpl->runStoreAsync(
+        [progress = std::move(progress)](auto store) { return store->garbageCollect(progress); });
 }
 
 // Concurrency control

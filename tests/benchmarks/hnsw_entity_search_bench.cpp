@@ -682,8 +682,10 @@ TEST_CASE_METHOD(HNSWSearchFixture, "Entity Vector Search with Symbol Extractor"
         }
 
         std::sort(latencies_us.begin(), latencies_us.end());
-        double mean_latency =
-            std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0) / latencies_us.size();
+        double mean_latency = latencies_us.empty()
+                                  ? 0.0
+                                  : std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0) /
+                                        latencies_us.size();
 
         EntitySearchResult result;
         result.name = "Entity_Vector_Search";
@@ -692,7 +694,7 @@ TEST_CASE_METHOD(HNSWSearchFixture, "Entity Vector Search with Symbol Extractor"
         result.extraction_time_ms = extraction_time_ms;
         result.indexing_time_ms = indexing_time_ms;
         result.search_latency_us = mean_latency;
-        result.qps = 1000000.0 / mean_latency;
+        result.qps = mean_latency > 0.0 ? 1000000.0 / mean_latency : 0.0;
 
         INFO("Entity Search Results:");
         INFO("  Total entities: " << result.total_entities);

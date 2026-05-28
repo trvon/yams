@@ -21,6 +21,8 @@
 #include <yams/chunking/streaming_chunker.h>
 #include <yams/crypto/hasher.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -329,11 +331,19 @@ TEST_CASE("StreamingChunker - File operations", "[chunking][streaming]") {
 
         // Read file to memory
         std::ifstream file(filePath, std::ios::binary);
+        REQUIRE(file.is_open());
         file.seekg(0, std::ios::end);
-        size_t fileSize = file.tellg();
+        REQUIRE(file.good());
+        const auto endPos = file.tellg();
+        const size_t fileSize =
+            yams::test::checked_streampos_to_size(endPos, "chunking equivalence fixture");
         file.seekg(0, std::ios::beg);
+        REQUIRE(file.good());
         std::vector<std::byte> data(fileSize);
-        file.read(reinterpret_cast<char*>(data.data()), fileSize);
+        file.read(reinterpret_cast<char*>(data.data()),
+                  yams::test::checked_streamsize(data.size(), "chunking equivalence fixture"));
+        REQUIRE(file.gcount() ==
+                yams::test::checked_streamsize(data.size(), "chunking equivalence fixture"));
 
         auto memoryChunks = chunker.chunkData(data);
 

@@ -1,10 +1,26 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <yams/benchmarks/vector_benchmark.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <Windows.h>
+#include <Psapi.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 #if __has_include(<format>)
 #include <format>
@@ -14,6 +30,52 @@
 #endif
 
 namespace yams::benchmarks {
+
+namespace {
+
+size_t readCurrentRssBytes() noexcept {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        return static_cast<size_t>(pmc.WorkingSetSize);
+    }
+    return 0;
+#elif defined(__APPLE__)
+    mach_task_basic_info info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+                  &count) == KERN_SUCCESS) {
+        return static_cast<size_t>(info.resident_size);
+    }
+    return 0;
+#else
+    std::FILE* file = std::fopen("/proc/self/status", "r");
+    if (!file) {
+        return 0;
+    }
+
+    size_t rssKb = 0;
+    char line[256];
+    while (std::fgets(line, sizeof(line), file)) {
+        if (std::strncmp(line, "VmRSS:", 6) == 0) {
+            unsigned long kb = 0;
+            if (std::sscanf(line + 6, " %lu", &kb) == 1) {
+                rssKb = static_cast<size_t>(kb);
+            }
+            break;
+        }
+    }
+    std::fclose(file);
+
+    constexpr size_t kBytesPerKiB = 1024;
+    if (rssKb > (std::numeric_limits<size_t>::max() / kBytesPerKiB)) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return rssKb * kBytesPerKiB;
+#endif
+}
+
+} // namespace
 
 // VectorBenchmark implementation
 VectorBenchmark::VectorBenchmark(const std::string& name, const BenchmarkConfig& config)
@@ -127,8 +189,7 @@ void VectorBenchmark::calculateStatistics(BenchmarkResult& result,
 }
 
 size_t VectorBenchmark::getCurrentMemoryUsage() const {
-    // Simplified - would use platform-specific APIs in real implementation
-    return 0;
+    return readCurrentRssBytes();
 }
 
 // BenchmarkSuite implementation
@@ -182,7 +243,11 @@ void BenchmarkSuite::generateReport(const std::vector<BenchmarkResult>& results,
         file << "  P95: " << result.p95_time_us << " μs\n";
         file << "  P99: " << result.p99_time_us << " μs\n";
         file << "  Throughput: " << result.ops_per_second << " ops/s\n";
-        file << "  Memory Used: " << result.memory_used_bytes << " bytes\n";
+        if (result.memory_used_bytes > 0) {
+            file << "  Current RSS: " << result.memory_used_bytes << " bytes\n";
+        } else {
+            file << "  Current RSS: unavailable\n";
+        }
         file << "\n";
     }
 }
@@ -198,10 +263,15 @@ void BenchmarkSuite::compareResults(const std::vector<BenchmarkResult>& baseline
         if (base.name != curr.name)
             continue;
 
-        double speedup = base.mean_time_us / curr.mean_time_us;
-        double memory_change = static_cast<double>(curr.memory_used_bytes) / base.memory_used_bytes;
-
-        spdlog::info("  {}: Speedup: {:.2f}x, Memory: {:.2f}x", base.name, speedup, memory_change);
+        const double speedup =
+            curr.mean_time_us > 0.0 ? base.mean_time_us / curr.mean_time_us : 0.0;
+        if (base.memory_used_bytes > 0 && curr.memory_used_bytes > 0) {
+            const double memory_change =
+                static_cast<double>(curr.memory_used_bytes) / base.memory_used_bytes;
+            spdlog::info("  {}: Speedup: {:.2f}x, RSS: {:.2f}x", base.name, speedup, memory_change);
+        } else {
+            spdlog::info("  {}: Speedup: {:.2f}x, RSS: unavailable", base.name, speedup);
+        }
     }
 }
 

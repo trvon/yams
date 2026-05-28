@@ -64,15 +64,16 @@ int main() {
         auto t1 = std::chrono::steady_clock::now();
 
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double throughputFilesPerSec = ms > 0.0 ? numFiles / (ms / 1000.0) : 0.0;
 
         nlohmann::json entry;
         entry["files"] = numFiles;
         entry["latency_ms"] = ms;
-        entry["throughput_files_per_sec"] = numFiles / (ms / 1000.0);
+        entry["throughput_files_per_sec"] = throughputFilesPerSec;
         results.push_back(entry);
 
         std::cout << "n=" << numFiles << "  " << ms << " ms  "
-                  << static_cast<int>(numFiles / (ms / 1000.0)) << " files/sec\n";
+                  << static_cast<int>(throughputFilesPerSec) << " files/sec\n";
     }
 
     std::ofstream out("/tmp/tree_build_results.json");

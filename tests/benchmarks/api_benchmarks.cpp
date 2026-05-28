@@ -149,6 +149,10 @@ protected:
         connectionPool_ = std::make_unique<metadata::ConnectionPool>(dbPath.string());
         metadataRepo_ = std::make_unique<metadata::MetadataRepository>(*connectionPool_);
         createTestDocuments();
+        if (documentIds_.empty()) {
+            throw std::runtime_error(
+                "MetadataBenchmark setup failed: no benchmark documents were created");
+        }
         generator_ = std::make_unique<test::TestDataGenerator>();
     }
 

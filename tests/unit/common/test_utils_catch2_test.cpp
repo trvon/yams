@@ -5,12 +5,37 @@
 
 #include "env_compat.h"
 
+#include <yams/common/metric_helpers.h>
+#include <yams/common/string_utils.h>
 #include <yams/common/test_utils.h>
 #include <yams/compat/unistd.h>
 
 using yams::test::isModelDownloadAllowed;
 using yams::test::isTestDiscoveryMode;
 using yams::test::shouldSkipModelLoading;
+
+TEST_CASE("common asciiToLowerCopy normalizes ASCII strings", "[common][string][catch2]") {
+    CHECK(yams::common::asciiToLowerCopy("TRUE-On_123") == "true-on_123");
+    CHECK(yams::common::asciiToLowerCopy(std::string{"MiXeD.Path"}) == "mixed.path");
+    CHECK(yams::common::asciiToLowerCopy("") == "");
+}
+
+TEST_CASE("common sanitizeForTerminal preserves printable text controls and masks bytes",
+          "[common][string][catch2]") {
+    CHECK(yams::common::sanitizeForTerminal(std::string_view{"ok\n\t\r"}) == "ok\n\t\r");
+    CHECK(yams::common::sanitizeForTerminal(std::string_view{"a\x01\x7f"}) == "a??");
+}
+
+TEST_CASE("common metric helpers increment relaxed counters conditionally",
+          "[common][metrics][catch2]") {
+    std::atomic<std::uint64_t> counter{0};
+    yams::common::metrics::incrementRelaxed(counter, 2);
+    CHECK(counter.load(std::memory_order_relaxed) == 2);
+    yams::common::metrics::incrementIfEnabled(false, [&]() -> auto& { return counter; }, 3);
+    CHECK(counter.load(std::memory_order_relaxed) == 2);
+    yams::common::metrics::incrementIfEnabled(true, [&]() -> auto& { return counter; }, 3);
+    CHECK(counter.load(std::memory_order_relaxed) == 5);
+}
 
 namespace {
 

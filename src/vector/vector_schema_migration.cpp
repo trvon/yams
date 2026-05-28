@@ -10,23 +10,13 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/storage/sqlite_retry.h>
 
 #include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 
 namespace yams::vector {
 
 namespace {
-
-// Retry parameters vary by backend:
-// - libsql MVCC: fewer retries needed since concurrent writers don't block
-// - SQLite: more retries with longer backoff for single-writer model
-#if YAMS_LIBSQL_BACKEND
-constexpr int kMaxRetries = 3;
-constexpr int kInitialBackoffMs = 5;
-#else
-constexpr int kMaxRetries = 5;
-constexpr int kInitialBackoffMs = 10;
-#endif
 
 // Check if a table exists
 bool tableExists(sqlite3* db, const char* table_name) {
@@ -46,9 +36,10 @@ bool tableExists(sqlite3* db, const char* table_name) {
 
 // Execute SQL statement with retry for transient lock errors
 Result<void> executeSQL(sqlite3* db, const char* sql) {
-    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+    const auto retryPolicy = yams::storage::sqlite_retry::vectorWritePolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         char* err_msg = nullptr;
         int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err_msg);
 
@@ -60,11 +51,10 @@ Result<void> executeSQL(sqlite3* db, const char* sql) {
         sqlite3_free(err_msg);
 
         // Check for transient lock errors
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+        if (yams::storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
             spdlog::debug("[Migration] transient lock on '{}', retry {}/{}", sql, attempt + 1,
-                          kMaxRetries);
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2;
+                          retryPolicy.maxRetries);
+            yams::storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -190,50 +191,7 @@ std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
 
 std::map<std::string, std::string>
 ConfigResolver::parseSimpleTomlFlat(const std::filesystem::path& path) {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file)
-        return config;
-
-    std::string line;
-    std::string currentSection;
-    auto trim = [](std::string s) {
-        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-            s.erase(s.begin());
-        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-            s.pop_back();
-        return s;
-    };
-
-    while (std::getline(file, line)) {
-        auto comment = line.find('#');
-        if (comment != std::string::npos)
-            line.resize(comment);
-        line = trim(line);
-        if (line.empty())
-            continue;
-
-        if (line.front() == '[' && line.back() == ']') {
-            currentSection = line.substr(1, line.size() - 2);
-            continue;
-        }
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos)
-            continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-        if (!value.empty() && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-        }
-        if (!currentSection.empty()) {
-            config[currentSection + "." + key] = value;
-        } else {
-            config[key] = value;
-        }
-    }
-    return config;
+    return yams::config::parse_simple_toml(path);
 }
 
 std::optional<size_t> ConfigResolver::readDbEmbeddingDim(const std::filesystem::path& dbPath) {

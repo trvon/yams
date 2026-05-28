@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 
+#include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/sandbox_probe.h>
@@ -14,9 +15,7 @@ namespace yams::daemon {
 namespace {
 
 std::string normalize(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 bool is_true(std::string_view raw) {

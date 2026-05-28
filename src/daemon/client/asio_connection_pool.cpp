@@ -1,6 +1,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_wait_config.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/profiling.h>
@@ -90,10 +91,6 @@ bool cli_one_shot_shutdown_enabled() {
     return env_truthy(std::getenv("YAMS_CLI_ONE_SHOT"));
 }
 
-bool ipc_wait_trace_enabled() {
-    return false;
-}
-
 void log_pool_debug(const char* message) noexcept {
     try {
         spdlog::debug("{}", message);
@@ -106,11 +103,6 @@ void log_pool_debug(const char* message, const std::exception& e) noexcept {
         spdlog::debug("{}: {}", message, e.what());
     } catch (...) {
     }
-}
-
-int ipc_wait_warn_ms() {
-    static constexpr int warn_ms = 250;
-    return warn_ms;
 }
 
 bool should_run_stale_cleanup(std::atomic<int64_t>& last_cleanup_ns,

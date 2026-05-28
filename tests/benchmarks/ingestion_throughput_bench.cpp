@@ -840,7 +840,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     const double elapsed = std::chrono::duration<double>(end - start).count();
     const uint64_t documentsTotal = waitResult.lastSnapshot.documentsTotal;
     const double throughput =
-        (documentsTotal > 0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
+        (documentsTotal > 0 && elapsed > 0.0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
 
     auto nsToMs = [](std::chrono::nanoseconds ns) -> double {
         return ns.count() > 0 ? std::chrono::duration<double, std::milli>(ns).count() : 0.0;

@@ -1,13 +1,17 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <yams/common/string_utils.h>
 
 namespace yams::config {
 
@@ -51,18 +55,7 @@ inline std::filesystem::path expand_tilde(const std::string& path) {
 
 // Terminal sanitization
 inline std::string sanitize_for_terminal(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    for (unsigned char c : in) {
-        if (c >= 0x20 && c <= 0x7E) {
-            out.push_back(static_cast<char>(c));
-        } else if (c == '\n' || c == '\r' || c == '\t') {
-            out.push_back(static_cast<char>(c));
-        } else {
-            out.push_back('?');
-        }
-    }
-    return out;
+    return yams::common::sanitizeForTerminal(in);
 }
 
 // Time parsing
@@ -72,6 +65,24 @@ inline std::chrono::milliseconds parse_ms(std::string_view s) {
     } catch (...) {
         return std::chrono::milliseconds(0);
     }
+}
+
+/// Parse common config boolean spellings. Unknown or empty values return fallback.
+inline bool parse_bool(std::string_view value, bool fallback = false) {
+    std::string normalized(value);
+    trim(normalized);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized.empty()) {
+        return fallback;
+    }
+    if (normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on") {
+        return true;
+    }
+    if (normalized == "0" || normalized == "false" || normalized == "no" || normalized == "off") {
+        return false;
+    }
+    return fallback;
 }
 
 // Parse a value from TOML config file

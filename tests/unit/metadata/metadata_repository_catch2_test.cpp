@@ -49,16 +49,25 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     info.modifiedTime = info.createdTime;
     info.indexedTime = info.createdTime;
-    auto derived = computePathDerivedValues(path);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
-    info.pathDepth = derived.pathDepth;
+    populatePathDerivedFields(info);
     info.contentExtracted = true;
     info.extractionStatus = ExtractionStatus::Success;
     return info;
+}
+
+TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[metadata][path]") {
+    DocumentInfo info;
+    info.filePath = "/tmp/../tmp/yams/path-note.md";
+
+    const auto expected = computePathDerivedValues(info.filePath);
+    populatePathDerivedFields(info);
+
+    CHECK(info.filePath == expected.normalizedPath);
+    CHECK(info.pathPrefix == expected.pathPrefix);
+    CHECK(info.reversePath == expected.reversePath);
+    CHECK(info.pathHash == expected.pathHash);
+    CHECK(info.parentHash == expected.parentHash);
+    CHECK(info.pathDepth == expected.pathDepth);
 }
 
 struct MetadataRepositoryFixture {
@@ -90,6 +99,27 @@ struct MetadataRepositoryFixture {
 };
 
 } // namespace
+
+TEST_CASE("MetadataRepository: path-derived fields support exact path lookup",
+          "[unit][metadata][repository][path]") {
+    MetadataRepositoryFixture fix;
+
+    auto docInfo = makeDocumentWithPath("/tmp/../tmp/yams/path-index.md", "path-index-hash");
+    REQUIRE(!docInfo.pathHash.empty());
+    REQUIRE(!docInfo.reversePath.empty());
+    REQUIRE(docInfo.pathDepth > 0);
+
+    auto insert = fix.repository_->insertDocument(docInfo);
+    REQUIRE(insert.has_value());
+
+    auto found = fix.repository_->findDocumentByExactPath(docInfo.filePath);
+    REQUIRE(found.has_value());
+    REQUIRE(found.value().has_value());
+    CHECK(found.value()->pathHash == docInfo.pathHash);
+    CHECK(found.value()->pathPrefix == docInfo.pathPrefix);
+    CHECK(found.value()->parentHash == docInfo.parentHash);
+    CHECK(found.value()->pathDepth == docInfo.pathDepth);
+}
 
 TEST_CASE("MetadataRepository: insert and get document", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;

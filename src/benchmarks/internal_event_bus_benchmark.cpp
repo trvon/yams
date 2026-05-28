@@ -20,11 +20,22 @@ static uint64_t env_u64(const char* key, uint64_t def) {
     }
 }
 
+static uint64_t env_u64_at_least(const char* key, uint64_t def, uint64_t min_value) {
+    const uint64_t value = env_u64(key, def);
+    if (value >= min_value) {
+        return value;
+    }
+    std::fprintf(stderr, "%s must be >= %llu; using %llu\n", key,
+                 static_cast<unsigned long long>(min_value),
+                 static_cast<unsigned long long>(min_value));
+    return min_value;
+}
+
 int main() {
-    const uint64_t producers = env_u64("YAMS_BENCH_P", 4);
-    const uint64_t consumers = env_u64("YAMS_BENCH_C", 4);
+    const uint64_t producers = env_u64_at_least("YAMS_BENCH_P", 4, 1);
+    const uint64_t consumers = env_u64_at_least("YAMS_BENCH_C", 4, 1);
     const uint64_t iters = env_u64("YAMS_BENCH_ITERS", 200000);
-    const uint64_t capacity = env_u64("YAMS_BENCH_CAP", 4096);
+    const uint64_t capacity = env_u64_at_least("YAMS_BENCH_CAP", 4096, 2);
 
     yams::daemon::SpscQueue<int> q(static_cast<size_t>(capacity));
     std::atomic<uint64_t> produced{0}, consumed{0};

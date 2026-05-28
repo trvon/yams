@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -57,6 +58,12 @@ Config parseArgs(int argc, char* argv[]) {
                         argv[0]);
             std::exit(0);
         }
+    }
+    if (cfg.queries == 0) {
+        throw std::invalid_argument("--queries must be >= 1");
+    }
+    if (cfg.k == 0) {
+        throw std::invalid_argument("--k must be >= 1");
     }
     return cfg;
 }

@@ -26,7 +26,9 @@
 #include <yams/storage/corpus_stats.h>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -317,6 +319,40 @@ TEST_CASE("CorpusStats: expiration check", "[unit][corpus_stats]") {
     CHECK_FALSE(stats.isExpired(61000)); // exactly at TTL - not expired
     CHECK(stats.isExpired(61001));       // just past TTL - expired
     CHECK(stats.isExpired(200000));      // way past TTL - expired
+}
+
+TEST_CASE("CorpusStats: expiration check is overflow-safe", "[unit][corpus_stats]") {
+    SECTION("non-positive TTL expires immediately") {
+        CorpusStats stats;
+        stats.computedAtMs = 1000;
+        stats.ttlMs = 0;
+        CHECK(stats.isExpired(1000));
+
+        stats.ttlMs = -1;
+        CHECK(stats.isExpired(999));
+    }
+
+    SECTION("future or equal computed timestamp is not expired") {
+        CorpusStats stats;
+        stats.computedAtMs = std::numeric_limits<int64_t>::max();
+        stats.ttlMs = 60000;
+        CHECK_FALSE(stats.isExpired(std::numeric_limits<int64_t>::max()));
+        CHECK_FALSE(stats.isExpired(std::numeric_limits<int64_t>::max() - 1));
+    }
+
+    SECTION("deadline addition overflow is treated as not expired") {
+        CorpusStats stats;
+        stats.computedAtMs = std::numeric_limits<int64_t>::max() - 10;
+        stats.ttlMs = 60000;
+        CHECK_FALSE(stats.isExpired(std::numeric_limits<int64_t>::max()));
+    }
+
+    SECTION("large negative computed timestamp can expire without subtraction overflow") {
+        CorpusStats stats;
+        stats.computedAtMs = std::numeric_limits<int64_t>::min();
+        stats.ttlMs = 60000;
+        CHECK(stats.isExpired(std::numeric_limits<int64_t>::max()));
+    }
 }
 
 TEST_CASE("CorpusStats: JSON roundtrip", "[unit][corpus_stats]") {

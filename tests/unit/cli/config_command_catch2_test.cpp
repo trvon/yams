@@ -8,6 +8,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 
@@ -31,6 +32,38 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+TEST_CASE("config parse_bool handles common truthy and falsy values", "[cli][config]") {
+    CHECK(yams::config::parse_bool("true", false));
+    CHECK(yams::config::parse_bool(" YES ", false));
+    CHECK(yams::config::parse_bool("on", false));
+    CHECK(yams::config::parse_bool("1", false));
+
+    CHECK_FALSE(yams::config::parse_bool("false", true));
+    CHECK_FALSE(yams::config::parse_bool(" NO ", true));
+    CHECK_FALSE(yams::config::parse_bool("off", true));
+    CHECK_FALSE(yams::config::parse_bool("0", true));
+
+    CHECK(yams::config::parse_bool("maybe", true));
+    CHECK_FALSE(yams::config::parse_bool("maybe", false));
+    CHECK(yams::config::parse_bool("", true));
+}
+
+TEST_CASE("CLI config write helper returns Result on write", "[cli][config]") {
+    auto dir = fs::temp_directory_path() /
+               ("yams_config_write_result_" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto path = dir / "config.toml";
+
+    auto result = yams::cli::writeConfigValueResult(path, "daemon.plugin_dir_strict", "true");
+    REQUIRE(result.has_value());
+
+    auto parsed = yams::config::parse_simple_toml(path);
+    CHECK(parsed["daemon.plugin_dir_strict"] == "true");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
 
 /**
  * Test fixture for config command embeddings tests with model directory setup.

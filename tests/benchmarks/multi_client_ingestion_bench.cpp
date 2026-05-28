@@ -52,6 +52,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,139 @@ using namespace yams::test;
 
 namespace {
 
+constexpr int kMaxBenchClients = 512;
+constexpr int kMaxBenchDocsPerClient = 1'000'000;
+constexpr int kMaxBenchWarmupDocs = 1'000'000;
+constexpr int kMaxBenchSeconds = 24 * 60 * 60;
+constexpr int kMaxBenchMilliseconds = 60 * 60 * 1000;
+constexpr int kMaxBenchStressRounds = 1000;
+constexpr int kMaxBenchOpsPerClient = 1'000'000;
+constexpr int kMaxBenchPageSize = 1'000'000;
+constexpr int kMaxBenchHashLimit = 10'000'000;
+constexpr std::size_t kMaxBenchDocSizeBytes = 1024ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxBenchSearchLimit = 1'000'000;
+constexpr std::int64_t kMaxBenchmarkLatencyUs = 30LL * 24 * 60 * 60 * 1'000'000;
+constexpr std::int64_t kMaxBenchmarkWallMs = 30LL * 24 * 60 * 60 * 1000;
+
+int clampInt64ToInt(std::int64_t value, int minValue, int maxValue) noexcept {
+    if (value < static_cast<std::int64_t>(minValue)) {
+        return minValue;
+    }
+    if (value > static_cast<std::int64_t>(maxValue)) {
+        return maxValue;
+    }
+    return static_cast<int>(value);
+}
+
+int parseEnvIntClamped(const char* name, int defaultValue, int minValue, int maxValue) noexcept {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(raw, &end, 10);
+    if (end == raw || (end != nullptr && *end != '\0')) {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    if (errno == ERANGE) {
+        return parsed < 0 ? minValue : maxValue;
+    }
+    return clampInt64ToInt(static_cast<std::int64_t>(parsed), minValue, maxValue);
+}
+
+std::size_t parseEnvSizeClamped(const char* name, std::size_t defaultValue, std::size_t minValue,
+                                std::size_t maxValue) noexcept {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0' || *raw == '-') {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw || (end != nullptr && *end != '\0')) {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    if (errno == ERANGE) {
+        return maxValue;
+    }
+    return std::clamp(static_cast<std::size_t>(parsed), minValue, maxValue);
+}
+
+double parseEnvDoubleClamped(const char* name, double defaultValue, double minValue,
+                             double maxValue) noexcept {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    char* end = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(raw, &end);
+    if (end == raw || (end != nullptr && *end != '\0') || errno == ERANGE ||
+        !std::isfinite(parsed)) {
+        return std::clamp(defaultValue, minValue, maxValue);
+    }
+    return std::clamp(parsed, minValue, maxValue);
+}
+
+int checkedMulToInt(int lhs, int rhs, int maxValue = std::numeric_limits<int>::max()) noexcept {
+    const auto product = static_cast<std::int64_t>(lhs) * static_cast<std::int64_t>(rhs);
+    return clampInt64ToInt(product, 0, maxValue);
+}
+
+int checkedAddToInt(std::initializer_list<int> values,
+                    int maxValue = std::numeric_limits<int>::max()) noexcept {
+    std::int64_t total = 0;
+    for (int value : values) {
+        total += static_cast<std::int64_t>(value);
+        if (total > static_cast<std::int64_t>(maxValue)) {
+            return maxValue;
+        }
+    }
+    return clampInt64ToInt(total, 0, maxValue);
+}
+
+std::int64_t clampMetricSample(std::int64_t value,
+                               std::int64_t maxValue = kMaxBenchmarkLatencyUs) noexcept {
+    if (value <= 0) {
+        return 0;
+    }
+    return std::min(value, maxValue);
+}
+
+std::int64_t clampUnsignedMetricSample(std::uint64_t value,
+                                       std::int64_t maxValue = kMaxBenchmarkLatencyUs) noexcept {
+    const auto unsignedMax = static_cast<std::uint64_t>(maxValue);
+    return value > unsignedMax ? maxValue : static_cast<std::int64_t>(value);
+}
+
+void pushMetricSample(std::vector<std::int64_t>& values, std::int64_t value,
+                      std::int64_t maxValue = kMaxBenchmarkLatencyUs) {
+    if (value >= 0) {
+        values.push_back(clampMetricSample(value, maxValue));
+    }
+}
+
+std::int64_t checkedMetricAdd(std::int64_t lhs, std::int64_t rhs,
+                              std::int64_t maxValue = std::numeric_limits<std::int64_t>::max()) {
+    lhs = clampMetricSample(lhs, maxValue);
+    rhs = clampMetricSample(rhs, maxValue);
+    if (lhs > maxValue - rhs) {
+        return maxValue;
+    }
+    return lhs + rhs;
+}
+
+std::int64_t checkedMetricMul(std::int64_t lhs, std::int64_t rhs,
+                              std::int64_t maxValue = std::numeric_limits<std::int64_t>::max()) {
+    lhs = clampMetricSample(lhs, maxValue);
+    rhs = clampMetricSample(rhs, maxValue);
+    if (lhs != 0 && rhs > maxValue / lhs) {
+        return maxValue;
+    }
+    return lhs * rhs;
+}
+
 struct BenchConfig {
     int numClients{4};
     int docsPerClient{100};
@@ -169,65 +303,67 @@ struct BenchConfig {
 
     static BenchConfig fromEnv() {
         BenchConfig cfg;
-        if (auto* v = std::getenv("YAMS_BENCH_NUM_CLIENTS"))
-            cfg.numClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_DOCS_PER_CLIENT"))
-            cfg.docsPerClient = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_DOC_SIZE_BYTES"))
-            cfg.docSizeBytes = std::max<size_t>(64, std::stoull(v));
-        if (auto* v = std::getenv("YAMS_BENCH_SEARCH_RATIO"))
-            cfg.searchRatio = std::clamp(std::stod(v), 0.0, 1.0);
-        if (auto* v = std::getenv("YAMS_BENCH_WARMUP_DOCS"))
-            cfg.warmupDocs = std::max(0, std::atoi(v));
+        cfg.numClients =
+            parseEnvIntClamped("YAMS_BENCH_NUM_CLIENTS", cfg.numClients, 1, kMaxBenchClients);
+        cfg.docsPerClient = parseEnvIntClamped("YAMS_BENCH_DOCS_PER_CLIENT", cfg.docsPerClient, 1,
+                                               kMaxBenchDocsPerClient);
+        cfg.docSizeBytes = parseEnvSizeClamped("YAMS_BENCH_DOC_SIZE_BYTES", cfg.docSizeBytes, 64,
+                                               kMaxBenchDocSizeBytes);
+        cfg.searchRatio =
+            parseEnvDoubleClamped("YAMS_BENCH_SEARCH_RATIO", cfg.searchRatio, 0.0, 1.0);
+        cfg.warmupDocs =
+            parseEnvIntClamped("YAMS_BENCH_WARMUP_DOCS", cfg.warmupDocs, 0, kMaxBenchWarmupDocs);
         if (auto* v = std::getenv("YAMS_BENCH_OUTPUT"))
             cfg.outputPath = v;
-        if (auto* v = std::getenv("YAMS_BENCH_DRAIN_TIMEOUT_S"))
-            cfg.drainTimeoutSecs = std::max(10, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_SCALING_MAX_CLIENTS"))
-            cfg.scalingMaxClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_STRESS_ROUNDS"))
-            cfg.stressRounds = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_CLI_PROBE_OPS"))
-            cfg.cliProbeOpsPerCommand = std::max(0, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_CLI_PROBE_TIMEOUT_S"))
-            cfg.cliProbeTimeoutSecs = std::max(1, std::atoi(v));
+        cfg.drainTimeoutSecs = parseEnvIntClamped("YAMS_BENCH_DRAIN_TIMEOUT_S",
+                                                  cfg.drainTimeoutSecs, 10, kMaxBenchSeconds);
+        cfg.scalingMaxClients = parseEnvIntClamped("YAMS_BENCH_SCALING_MAX_CLIENTS",
+                                                   cfg.scalingMaxClients, 1, kMaxBenchClients);
+        cfg.stressRounds = parseEnvIntClamped("YAMS_BENCH_STRESS_ROUNDS", cfg.stressRounds, 1,
+                                              kMaxBenchStressRounds);
+        cfg.cliProbeOpsPerCommand = parseEnvIntClamped(
+            "YAMS_BENCH_CLI_PROBE_OPS", cfg.cliProbeOpsPerCommand, 0, kMaxBenchOpsPerClient);
+        cfg.cliProbeTimeoutSecs = parseEnvIntClamped("YAMS_BENCH_CLI_PROBE_TIMEOUT_S",
+                                                     cfg.cliProbeTimeoutSecs, 1, kMaxBenchSeconds);
         if (auto* v = std::getenv("YAMS_BENCH_CLI_BIN"))
             cfg.cliBinary = fs::path(v);
         if (auto* v = std::getenv("YAMS_BENCH_SEARCH_QUERY"))
             cfg.searchQuery = v;
         if (auto* v = std::getenv("YAMS_BENCH_SEARCH_TYPE"))
             cfg.searchType = v;
-        if (auto* v = std::getenv("YAMS_BENCH_SEARCH_LIMIT"))
-            cfg.searchLimit = std::max<size_t>(1, std::stoull(v));
+        cfg.searchLimit = parseEnvSizeClamped("YAMS_BENCH_SEARCH_LIMIT", cfg.searchLimit, 1,
+                                              kMaxBenchSearchLimit);
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_QUERY"))
             cfg.cliSearchQuery = v;
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_TYPE"))
             cfg.cliSearchType = v;
-        if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_LIMIT"))
-            cfg.cliSearchLimit = std::max<size_t>(1, std::stoull(v));
+        cfg.cliSearchLimit = parseEnvSizeClamped("YAMS_BENCH_CLI_SEARCH_LIMIT", cfg.cliSearchLimit,
+                                                 1, kMaxBenchSearchLimit);
         if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE")) {
             std::string s(v);
             cfg.idleProbeEnabled = !(s == "0" || s == "false" || s == "no" || s == "off");
         }
-        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_BASELINE_MS"))
-            cfg.idleProbeBaselineMs = std::max(0, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_SAMPLE_MS"))
-            cfg.idleProbeSampleMs = std::max(10, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS"))
-            cfg.idleProbeDetectTimeoutMs = std::max(250, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_WRITERS"))
-            cfg.mixedWriterClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_SEARCHERS"))
-            cfg.mixedSearchClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_LISTERS"))
-            cfg.mixedListClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_STATUS"))
-            cfg.mixedStatusClients = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_READER_OPS"))
-            cfg.mixedOpsPerReader = std::max(1, std::atoi(v));
-        if (auto* v = std::getenv("YAMS_BENCH_MIXED_MAX_FAIL_RATE"))
-            cfg.mixedMaxFailRate = std::max(0.0, std::stod(v));
-        cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
+        cfg.idleProbeBaselineMs = parseEnvIntClamped(
+            "YAMS_BENCH_IDLE_PROBE_BASELINE_MS", cfg.idleProbeBaselineMs, 0, kMaxBenchMilliseconds);
+        cfg.idleProbeSampleMs = parseEnvIntClamped(
+            "YAMS_BENCH_IDLE_PROBE_SAMPLE_MS", cfg.idleProbeSampleMs, 10, kMaxBenchMilliseconds);
+        cfg.idleProbeDetectTimeoutMs =
+            parseEnvIntClamped("YAMS_BENCH_IDLE_PROBE_DETECT_TIMEOUT_MS",
+                               cfg.idleProbeDetectTimeoutMs, 250, kMaxBenchMilliseconds);
+        cfg.mixedWriterClients = parseEnvIntClamped("YAMS_BENCH_MIXED_WRITERS",
+                                                    cfg.mixedWriterClients, 1, kMaxBenchClients);
+        cfg.mixedSearchClients = parseEnvIntClamped("YAMS_BENCH_MIXED_SEARCHERS",
+                                                    cfg.mixedSearchClients, 1, kMaxBenchClients);
+        cfg.mixedListClients = parseEnvIntClamped("YAMS_BENCH_MIXED_LISTERS", cfg.mixedListClients,
+                                                  1, kMaxBenchClients);
+        cfg.mixedStatusClients = parseEnvIntClamped("YAMS_BENCH_MIXED_STATUS",
+                                                    cfg.mixedStatusClients, 1, kMaxBenchClients);
+        cfg.mixedOpsPerReader = parseEnvIntClamped("YAMS_BENCH_MIXED_READER_OPS",
+                                                   cfg.mixedOpsPerReader, 1, kMaxBenchOpsPerClient);
+        cfg.mixedMaxFailRate =
+            parseEnvDoubleClamped("YAMS_BENCH_MIXED_MAX_FAIL_RATE", cfg.mixedMaxFailRate, 0.0, 1.0);
+        cfg.scalingMaxClients =
+            std::max(cfg.scalingMaxClients, checkedMulToInt(cfg.numClients, 2, kMaxBenchClients));
         cfg.cliProbeOpsPerCommand = std::max(cfg.cliProbeOpsPerCommand, cfg.stressRounds);
         if (cfg.cliSearchQuery.empty())
             cfg.cliSearchQuery = cfg.searchQuery;
@@ -283,6 +419,25 @@ struct BenchConfig {
         return cfg;
     }
 };
+
+TEST_CASE("Multi-client benchmark env parsing clamps extreme numeric values",
+          "[multi-client][config]") {
+    ScopedEnvVar clients("YAMS_BENCH_NUM_CLIENTS", std::string("999999999999999999999"));
+    ScopedEnvVar docs("YAMS_BENCH_DOCS_PER_CLIENT", std::string("999999999999999999999"));
+    ScopedEnvVar docSize("YAMS_BENCH_DOC_SIZE_BYTES", std::string("999999999999999999999"));
+    ScopedEnvVar ratio("YAMS_BENCH_SEARCH_RATIO", std::string("inf"));
+    ScopedEnvVar scaling("YAMS_BENCH_SCALING_MAX_CLIENTS", std::string("999999999999999999999"));
+    ScopedEnvVar mixedReaders("YAMS_BENCH_MIXED_READER_OPS", std::string("999999999999999999999"));
+
+    const auto cfg = BenchConfig::fromEnv();
+
+    CHECK(cfg.numClients == kMaxBenchClients);
+    CHECK(cfg.docsPerClient == kMaxBenchDocsPerClient);
+    CHECK(cfg.docSizeBytes == kMaxBenchDocSizeBytes);
+    CHECK(cfg.searchRatio == 0.2);
+    CHECK(cfg.scalingMaxClients == kMaxBenchClients);
+    CHECK(cfg.mixedOpsPerReader == kMaxBenchOpsPerClient);
+}
 
 std::vector<std::string> buildCliSearchArgs(const BenchConfig& cfg) {
     std::vector<std::string> args{
@@ -500,6 +655,10 @@ struct ClientResult {
     std::vector<OpLatency> latencies;
 };
 
+double safeRate(double numerator, double elapsedSeconds) {
+    return (numerator > 0.0 && elapsedSeconds > 0.0) ? numerator / elapsedSeconds : 0.0;
+}
+
 struct PercentileStats {
     int64_t min{0};
     int64_t p50{0};
@@ -511,20 +670,34 @@ struct PercentileStats {
     size_t count{0};
 
     static PercentileStats compute(std::vector<int64_t>& values) {
+        values.erase(
+            std::remove_if(values.begin(), values.end(), [](int64_t value) { return value < 0; }),
+            values.end());
+        for (auto& value : values) {
+            value = clampMetricSample(value);
+        }
+
         PercentileStats stats;
         stats.count = values.size();
         if (values.empty())
             return stats;
 
         std::sort(values.begin(), values.end());
+        const auto percentileIndex = [&](double percentile) {
+            return std::min(values.size() - 1,
+                            static_cast<size_t>(percentile * static_cast<double>(values.size())));
+        };
         stats.min = values.front();
         stats.max = values.back();
-        stats.p50 = values[values.size() / 2];
-        stats.p90 = values[static_cast<size_t>(values.size() * 0.90)];
-        stats.p95 = values[static_cast<size_t>(values.size() * 0.95)];
-        stats.p99 = values[static_cast<size_t>(values.size() * 0.99)];
-        stats.mean =
-            std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+        stats.p50 = values[percentileIndex(0.50)];
+        stats.p90 = values[percentileIndex(0.90)];
+        stats.p95 = values[percentileIndex(0.95)];
+        stats.p99 = values[percentileIndex(0.99)];
+        const long double total =
+            std::accumulate(values.begin(), values.end(), 0.0L, [](long double sum, int64_t value) {
+                return sum + static_cast<long double>(value);
+            });
+        stats.mean = static_cast<double>(total / static_cast<long double>(values.size()));
         return stats;
     }
 
@@ -1725,7 +1898,7 @@ json summarizeLatencyHotspots(const std::vector<TimedLatencySample>& samples,
     std::unordered_map<std::string, std::vector<int64_t>> byOp;
     for (const auto& sample : samples) {
         if (sample.success) {
-            byOp[sample.opType].push_back(sample.latencyUs);
+            pushMetricSample(byOp[sample.opType], sample.latencyUs);
         }
     }
     std::vector<std::pair<std::string, PercentileStats>> ranked;
@@ -1746,24 +1919,35 @@ json summarizeLatencyHotspots(const std::vector<TimedLatencySample>& samples,
     int64_t currentSumUs = 0;
     size_t bestCount = 0;
     int64_t bestSumUs = 0;
-    uint64_t bestStartMs = samples.front().wallClockMs;
-    uint64_t bestEndMs = samples.front().wallClockMs;
+    uint64_t bestStartMs = static_cast<uint64_t>(
+        clampUnsignedMetricSample(samples.front().wallClockMs, kMaxBenchmarkWallMs));
+    uint64_t bestEndMs = bestStartMs;
     auto byTime = samples;
     std::sort(byTime.begin(), byTime.end(),
               [](const auto& a, const auto& b) { return a.wallClockMs < b.wallClockMs; });
+    const uint64_t boundedWindowMs =
+        std::max<uint64_t>(1, std::min<uint64_t>(windowMs, kMaxBenchmarkWallMs));
     for (size_t right = 0; right < byTime.size(); ++right) {
-        currentSumUs += byTime[right].latencyUs;
-        while (byTime[right].wallClockMs - byTime[left].wallClockMs > windowMs) {
-            currentSumUs -= byTime[left].latencyUs;
+        const auto rightLatency = clampMetricSample(byTime[right].latencyUs);
+        currentSumUs = checkedMetricAdd(currentSumUs, rightLatency);
+        auto rightWallMs = static_cast<uint64_t>(
+            clampUnsignedMetricSample(byTime[right].wallClockMs, kMaxBenchmarkWallMs));
+        auto leftWallMs = static_cast<uint64_t>(
+            clampUnsignedMetricSample(byTime[left].wallClockMs, kMaxBenchmarkWallMs));
+        while (rightWallMs >= leftWallMs && rightWallMs - leftWallMs > boundedWindowMs) {
+            currentSumUs =
+                std::max<int64_t>(0, currentSumUs - clampMetricSample(byTime[left].latencyUs));
             ++left;
+            leftWallMs = static_cast<uint64_t>(
+                clampUnsignedMetricSample(byTime[left].wallClockMs, kMaxBenchmarkWallMs));
         }
         const size_t count = right - left + 1;
         if (count > 0 &&
             (currentSumUs > bestSumUs || (currentSumUs == bestSumUs && count > bestCount))) {
             bestSumUs = currentSumUs;
             bestCount = count;
-            bestStartMs = byTime[left].wallClockMs;
-            bestEndMs = byTime[right].wallClockMs;
+            bestStartMs = leftWallMs;
+            bestEndMs = rightWallMs;
         }
     }
     out["worst_window"] = json{
@@ -2675,8 +2859,8 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
 
     // Print summary
     std::cout << "\n=== Concurrent Pure Ingest (N=" << cfg.numClients << ") ===\n";
-    std::cout << "  Total docs: " << totalDocsIngested.load() << "/"
-              << (cfg.numClients * cfg.docsPerClient) << "\n";
+    const int expectedDocs = checkedMulToInt(cfg.numClients, cfg.docsPerClient);
+    std::cout << "  Total docs: " << totalDocsIngested.load() << "/" << expectedDocs << "\n";
     std::cout << "  Total failures: " << totalFailures.load() << "\n";
     std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
     std::cout << "  Aggregate throughput: " << aggregateThroughput << " docs/s\n";
@@ -2728,7 +2912,7 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n";
     std::cout << "  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
 
-    CHECK(totalDocsIngested.load() == cfg.numClients * cfg.docsPerClient);
+    CHECK(totalDocsIngested.load() == expectedDocs);
     CHECK(drained);
     CHECK(recovery.ok());
 
@@ -3098,9 +3282,11 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
     sampler.start(monitorClient, 100ms);
 
     const int writerClients = std::max(2, cfg.numClients);
-    const int uxClients = std::max(4, cfg.numClients * 3);
-    const int writerOpsPerClient = cfg.docsPerClient * cfg.stressRounds;
-    const int uxOpsPerClient = std::max(24, cfg.docsPerClient) * cfg.stressRounds;
+    const int uxClients = std::max(4, checkedMulToInt(cfg.numClients, 3, kMaxBenchClients * 3));
+    const int writerOpsPerClient =
+        checkedMulToInt(cfg.docsPerClient, cfg.stressRounds, kMaxBenchOpsPerClient);
+    const int uxOpsPerClient =
+        checkedMulToInt(std::max(24, cfg.docsPerClient), cfg.stressRounds, kMaxBenchOpsPerClient);
     const int cliProbeOpsPerCommand = cfg.cliProbeOpsPerCommand;
     const size_t grownSlotTarget = std::min(kSlotMax, kInitialSlotLimit + kSlotStep);
     // Allow one lingering request/observer connection beyond the steady monitor connection.
@@ -3652,8 +3838,10 @@ TEST_CASE("Multi-client ingestion: socket scaling vs ux latency",
          << controlHeldConnections.lastError() << "'");
     REQUIRE(controlHeldConnectionsOpened);
 
-    const int controlAddsPerWriter = std::max(8, cfg.docsPerClient * 2) * cfg.stressRounds;
-    const int controlUxOpsPerClient = 12 * cfg.stressRounds;
+    const int controlAddsPerWriter =
+        checkedMulToInt(std::max(8, checkedMulToInt(cfg.docsPerClient, 2, kMaxBenchOpsPerClient)),
+                        cfg.stressRounds, kMaxBenchOpsPerClient);
+    const int controlUxOpsPerClient = checkedMulToInt(12, cfg.stressRounds, kMaxBenchOpsPerClient);
 
     std::thread controlWriter([&]() {
         ClientConfig ccfg;
@@ -3945,7 +4133,7 @@ TEST_CASE("Multi-client ingestion: scaling curve", "[!benchmark][multi-client][s
                   << " MB"
                   << "  Drained: " << (drained ? "yes" : "NO") << "\n";
 
-        CHECK(totalDocs.load() == numClients * baseCfg.docsPerClient);
+        CHECK(totalDocs.load() == checkedMulToInt(numClients, baseCfg.docsPerClient));
 
         scalingResults.push_back(json{
             {"num_clients", numClients},
@@ -4003,7 +4191,8 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
     const int kSearchClients = cfg.mixedSearchClients;
     const int kListClients = cfg.mixedListClients;
     const int kStatusClients = cfg.mixedStatusClients;
-    const int kTotalClients = kWriterClients + kSearchClients + kListClients + kStatusClients;
+    const int kTotalClients = checkedAddToInt(
+        {kWriterClients, kSearchClients, kListClients, kStatusClients}, kMaxBenchClients * 4);
 
     // Each reader client runs for a fixed number of operations
     const int kOpsPerReader = cfg.mixedOpsPerReader;
@@ -4487,11 +4676,6 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         (cfg.usageProfile == "external_agent_churn" || cfg.usageProfile == "agent_churn");
 
     // --- Configurable layout ---
-    auto envInt = [](const char* name, int def) {
-        if (auto* v = std::getenv(name))
-            return std::atoi(v);
-        return def;
-    };
     const int defaultSearchClients = externalAgentChurnProfile ? 4 : (extensionLikeProfile ? 6 : 4);
     const int defaultListClients = externalAgentChurnProfile ? 4 : (extensionLikeProfile ? 6 : 4);
     const int defaultGrepClients = externalAgentChurnProfile ? 1 : (extensionLikeProfile ? 1 : 2);
@@ -4505,29 +4689,39 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         externalAgentChurnProfile ? 1 : (extensionLikeProfile ? 2 : 0);
 
     const int kSearchClients =
-        std::max(0, envInt("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients));
-    const int kListClients = std::max(0, envInt("YAMS_BENCH_LIST_CLIENTS", defaultListClients));
-    const int kGrepClients = std::max(0, envInt("YAMS_BENCH_GREP_CLIENTS", defaultGrepClients));
-    const int kStatusGetClients =
-        std::max(0, envInt("YAMS_BENCH_STATUS_GET_CLIENTS", defaultStatusGetClients));
-    const int kTotalClients = kSearchClients + kListClients + kGrepClients + kStatusGetClients;
-    const int kOpsPerClient = std::max(1, envInt("YAMS_BENCH_OPS_PER_CLIENT", defaultOpsPerClient));
-    const int kOpTimeoutS = std::max(1, envInt("YAMS_BENCH_OP_TIMEOUT_S", 60));
+        parseEnvIntClamped("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients, 0, kMaxBenchClients);
+    const int kListClients =
+        parseEnvIntClamped("YAMS_BENCH_LIST_CLIENTS", defaultListClients, 0, kMaxBenchClients);
+    const int kGrepClients =
+        parseEnvIntClamped("YAMS_BENCH_GREP_CLIENTS", defaultGrepClients, 0, kMaxBenchClients);
+    const int kStatusGetClients = parseEnvIntClamped("YAMS_BENCH_STATUS_GET_CLIENTS",
+                                                     defaultStatusGetClients, 0, kMaxBenchClients);
+    const int kTotalClients = checkedAddToInt(
+        {kSearchClients, kListClients, kGrepClients, kStatusGetClients}, kMaxBenchClients * 4);
+    const int kOpsPerClient = parseEnvIntClamped("YAMS_BENCH_OPS_PER_CLIENT", defaultOpsPerClient,
+                                                 1, kMaxBenchOpsPerClient);
+    const int kOpTimeoutS = parseEnvIntClamped("YAMS_BENCH_OP_TIMEOUT_S", 60, 1, kMaxBenchSeconds);
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
-    const int kStatusEveryN = std::max(1, envInt("YAMS_BENCH_STATUS_EVERY_N", defaultStatusEveryN));
-    const int kCatEveryN = std::max(1, envInt("YAMS_BENCH_CAT_EVERY_N", defaultCatEveryN));
-    const int kListInflightCap =
-        std::max(0, envInt("YAMS_BENCH_LIST_INFLIGHT_CAP", defaultListInflightCap));
-    const int kDiscoverPageSize = std::max(1, envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500));
-    const int kDiscoverHashLimit = std::max(1, envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000));
-    const int kHotspotWindowMs = std::max(1, envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000));
+    const int kStatusEveryN = parseEnvIntClamped("YAMS_BENCH_STATUS_EVERY_N", defaultStatusEveryN,
+                                                 1, kMaxBenchOpsPerClient);
+    const int kCatEveryN =
+        parseEnvIntClamped("YAMS_BENCH_CAT_EVERY_N", defaultCatEveryN, 1, kMaxBenchOpsPerClient);
+    const int kListInflightCap = parseEnvIntClamped("YAMS_BENCH_LIST_INFLIGHT_CAP",
+                                                    defaultListInflightCap, 0, kMaxBenchClients);
+    const int kDiscoverPageSize =
+        parseEnvIntClamped("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500, 1, kMaxBenchPageSize);
+    const int kDiscoverHashLimit =
+        parseEnvIntClamped("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000, 1, kMaxBenchHashLimit);
+    const int kHotspotWindowMs =
+        parseEnvIntClamped("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000, 1, kMaxBenchMilliseconds);
     const bool useMcpPath = cfg.useMcpPath;
-    const bool useSessionGrep = envInt("YAMS_BENCH_GREP_USE_SESSION", 0) != 0;
+    const bool useSessionGrep = parseEnvIntClamped("YAMS_BENCH_GREP_USE_SESSION", 0, 0, 1) != 0;
     const int defaultMcpSessionChurnEveryN = (externalAgentChurnProfile && useMcpPath) ? 6 : 0;
     const int kMcpSessionChurnEveryN =
-        std::max(0, envInt("YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N", defaultMcpSessionChurnEveryN));
-    const size_t mcpPoolSize =
-        static_cast<size_t>(std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", kTotalClients)));
+        parseEnvIntClamped("YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N", defaultMcpSessionChurnEveryN, 0,
+                           kMaxBenchOpsPerClient);
+    const size_t mcpPoolSize = static_cast<size_t>(parseEnvIntClamped(
+        "YAMS_BENCH_MCP_POOL_SIZE", std::max(1, kTotalClients), 1, kMaxBenchClients * 4));
 
     std::cout << "\n=== Large Corpus Read Benchmark (instrumented) ===\n";
     std::cout << "  Data dir:       " << cfg.dataDir->string() << "\n";
@@ -4565,7 +4759,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   ipcTimeoutMs:         [500, 600000]
     //   streamChunkTimeoutMs: [1000, 600000]
     //   searchBuildTimeout:   unclamped
-    std::string timeoutStr = std::to_string(std::min(kOpTimeoutS * 2000, 600000));
+    std::string timeoutStr =
+        std::to_string(std::min(checkedMulToInt(kOpTimeoutS, 2000, 600000), 600000));
 #ifdef _WIN32
     if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
         _putenv_s("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000");
@@ -4678,10 +4873,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     std::vector<std::string> knownHashes;
     {
-        auto discoverDirectPage = [&](int offset, int& itemsInPage) -> bool {
+        auto discoverDirectPage = [&](std::int64_t offset, int& itemsInPage) -> bool {
+            if (offset > std::numeric_limits<int>::max()) {
+                WARN("Discovery list offset exceeds ListRequest range: " << offset);
+                return false;
+            }
             ListRequest listReq;
             listReq.limit = kDiscoverPageSize;
-            listReq.offset = offset;
+            listReq.offset = static_cast<int>(offset);
             auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
             if (!listRes) {
                 WARN("Discovery list failed at offset " << offset << ": "
@@ -4702,8 +4901,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
         bool useDirectDiscoveryFallback = false;
         bool done = false;
-        for (int offset = 0; !done && static_cast<int>(knownHashes.size()) < kDiscoverHashLimit;
-             offset += kDiscoverPageSize) {
+        for (std::int64_t offset = 0;
+             !done && static_cast<int>(knownHashes.size()) < kDiscoverHashLimit;
+             offset += static_cast<std::int64_t>(kDiscoverPageSize)) {
             int itemsInPage = 0;
             if (useMcpPath && !useDirectDiscoveryFallback) {
                 auto listRes = queryMcpStepForSlot(
@@ -4928,7 +5128,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         catFails{0};
     std::atomic<int> totalCompleted{0};
     std::atomic<int> listInFlight{0};
-    const int totalExpected = kTotalClients * kOpsPerClient;
+    const int totalExpected = checkedMulToInt(kTotalClients, kOpsPerClient);
     std::mutex invalidHashMutex;
     std::unordered_set<std::string> invalidHashes;
 
@@ -5986,17 +6186,17 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             allTraces.push_back(tr);
             if (tr.success) {
                 if (tr.opType == "search")
-                    allSearchLat.push_back(tr.latencyUs);
+                    pushMetricSample(allSearchLat, tr.latencyUs);
                 else if (tr.opType == "list")
-                    allListLat.push_back(tr.latencyUs);
+                    pushMetricSample(allListLat, tr.latencyUs);
                 else if (tr.opType == "grep")
-                    allGrepLat.push_back(tr.latencyUs);
+                    pushMetricSample(allGrepLat, tr.latencyUs);
                 else if (tr.opType == "status")
-                    allStatusLat.push_back(tr.latencyUs);
+                    pushMetricSample(allStatusLat, tr.latencyUs);
                 else if (tr.opType == "get")
-                    allGetLat.push_back(tr.latencyUs);
+                    pushMetricSample(allGetLat, tr.latencyUs);
                 else if (tr.opType == "cat")
-                    allCatLat.push_back(tr.latencyUs);
+                    pushMetricSample(allCatLat, tr.latencyUs);
             } else {
                 errorCategories[classifyFailureMessage(tr.errorMsg)]++;
             }
@@ -6030,8 +6230,21 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                          static_cast<size_t>(pct * static_cast<double>(sortedValues.size())));
             return sortedValues[idx];
         };
+        sortedValues.erase(std::remove_if(sortedValues.begin(), sortedValues.end(),
+                                          [](int64_t value) { return value < 0; }),
+                           sortedValues.end());
+        for (auto& value : sortedValues) {
+            value = clampMetricSample(value);
+        }
+        if (sortedValues.empty()) {
+            return summary;
+        }
+        std::sort(sortedValues.begin(), sortedValues.end());
+        const long double total = std::accumulate(
+            sortedValues.begin(), sortedValues.end(), 0.0L,
+            [](long double sum, int64_t value) { return sum + static_cast<long double>(value); });
         const auto mean =
-            std::accumulate(sortedValues.begin(), sortedValues.end(), 0.0) / sortedValues.size();
+            static_cast<double>(total / static_cast<long double>(sortedValues.size()));
         summary["min"] = sortedValues.front();
         summary["p50"] = atPct(0.50);
         summary["p90"] = atPct(0.90);
@@ -6112,7 +6325,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                    getOps.load() + catOps.load();
     int totalFails = searchFails.load() + listFails.load() + grepFails.load() + statusFails.load() +
                      getFails.load() + catFails.load();
-    double opsPerSec = totalOps > 0 ? totalOps / globalElapsed : 0.0;
+    double opsPerSec = safeRate(static_cast<double>(totalOps), globalElapsed);
     size_t invalidHashCount = 0;
     {
         std::lock_guard<std::mutex> lk(invalidHashMutex);
@@ -6290,7 +6503,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::map<int, int> perThreadFails;
     for (const auto& tr : allTraces) {
         if (tr.success) {
-            perThreadSuccessLatUs[tr.threadId].push_back(tr.latencyUs);
+            pushMetricSample(perThreadSuccessLatUs[tr.threadId], tr.latencyUs);
         } else {
             perThreadFails[tr.threadId]++;
         }
@@ -6337,10 +6550,12 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     };
     std::map<int, WindowStats> windows;
     for (const auto& tr : allTraces) {
-        const int bucket = static_cast<int>(tr.wallClockMs / std::max(1, kHotspotWindowMs));
+        const auto boundedWallMs = clampMetricSample(tr.wallClockMs, kMaxBenchmarkWallMs);
+        const int bucket = clampInt64ToInt(boundedWallMs / std::max(1, kHotspotWindowMs), 0,
+                                           std::numeric_limits<int>::max());
         auto& ws = windows[bucket];
         ws.ops++;
-        ws.totalLatUs += tr.latencyUs;
+        ws.totalLatUs = checkedMetricAdd(ws.totalLatUs, tr.latencyUs);
         if (!tr.success) {
             ws.fails++;
         }
@@ -6372,8 +6587,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Slowest time windows:\n";
     for (int i = 0; i < 5 && i < static_cast<int>(windowHotspots.size()); ++i) {
         const auto& hw = windowHotspots[i];
-        const int64_t startMs = static_cast<int64_t>(hw.bucket) * kHotspotWindowMs;
-        const int64_t endMs = startMs + kHotspotWindowMs;
+        const int64_t startMs = checkedMetricMul(hw.bucket, kHotspotWindowMs, kMaxBenchmarkWallMs);
+        const int64_t endMs = checkedMetricAdd(startMs, kHotspotWindowMs, kMaxBenchmarkWallMs);
         std::cout << "    [" << startMs << ", " << endMs << ")ms"
                   << " avg=" << std::fixed << std::setprecision(1) << hw.avgMs
                   << "ms ops=" << hw.ops << " fail=" << hw.fails << "\n";
@@ -6766,8 +6981,8 @@ TEST_CASE("Multi-client ingestion: embeddings pipeline", "[!benchmark][multi-cli
 
     int totalOps = addOps.load() + searchOps.load();
     int totalFails = addFails.load() + searchFails.load();
-    double addThroughput = addOps.load() > 0 ? addOps.load() / globalElapsed : 0.0;
-    double searchThroughput = searchOps.load() > 0 ? searchOps.load() / globalElapsed : 0.0;
+    double addThroughput = safeRate(static_cast<double>(addOps.load()), globalElapsed);
+    double searchThroughput = safeRate(static_cast<double>(searchOps.load()), globalElapsed);
 
     std::cout << "\n=== Embeddings Pipeline Results ===\n";
     std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
@@ -6829,8 +7044,9 @@ TEST_CASE("Multi-client ingestion: connection contention",
           "[!benchmark][multi-client][contention]") {
     // Stress test: many clients making rapid short-lived connections
     auto cfg = BenchConfig::fromEnv();
-    int burstClients = cfg.numClients * 4; // Higher contention than normal
-    int opsPerClient = 20;                 // Shorter burst per client
+    int burstClients =
+        checkedMulToInt(cfg.numClients, 4, kMaxBenchClients * 4); // Higher contention
+    int opsPerClient = 20;                                        // Shorter burst per client
 
     DaemonHarness harness(benchHarnessOptions());
     REQUIRE(harness.start(kStartTimeout));
@@ -7059,7 +7275,7 @@ TEST_CASE("Multi-client ingestion: reader starvation under ingest load",
     // This threshold can be tuned based on baseline measurements
     if (readerStats.count > 0) {
         std::cout << "  Reader throughput: "
-                  << static_cast<double>(readerOps.load()) / globalElapsed << " ops/s\n\n";
+                  << safeRate(static_cast<double>(readerOps.load()), globalElapsed) << " ops/s\n\n";
     }
 
     CHECK(readerOps.load() > 0);                  // Readers must make progress

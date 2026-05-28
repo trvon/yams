@@ -5,18 +5,68 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 namespace yams::test {
+
+/**
+ * @brief Decrement a failure budget and report whether a synthetic failure was consumed.
+ *
+ * Useful for flaky test doubles that should fail the next N calls and then delegate to the
+ * production implementation.
+ */
+inline constexpr bool consume_failure(std::size_t& counter) noexcept {
+    if (counter == 0) {
+        return false;
+    }
+    --counter;
+    return true;
+}
+
+/**
+ * @brief Convert fixture buffer sizes to stream sizes without signed overflow/truncation.
+ */
+inline std::streamsize checked_streamsize(std::size_t size,
+                                          std::string_view context = "test fixture") {
+    constexpr auto maxStream =
+        static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max());
+    if (size > maxStream) {
+        throw std::length_error(std::string(context) + " exceeds std::streamsize max");
+    }
+    return static_cast<std::streamsize>(size);
+}
+
+/**
+ * @brief Convert tellg()/seek positions to size_t only after checking for failure/negative values.
+ */
+inline std::size_t checked_streampos_to_size(std::streampos pos,
+                                             std::string_view context = "test file") {
+    if (pos == std::streampos{-1}) {
+        throw std::runtime_error(std::string(context) + " tellg failed");
+    }
+    const auto off = static_cast<std::streamoff>(pos);
+    if (off < 0) {
+        throw std::runtime_error(std::string(context) + " has negative stream position");
+    }
+    constexpr auto maxSize = static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max());
+    const auto unsignedOff = static_cast<std::uintmax_t>(off);
+    if (unsignedOff > maxSize) {
+        throw std::length_error(std::string(context) + " exceeds size_t max");
+    }
+    return static_cast<std::size_t>(unsignedOff);
+}
 
 /**
  * @brief Creates a unique temporary directory with the given prefix.
@@ -44,7 +94,7 @@ inline std::filesystem::path make_temp_dir(std::string_view prefix = "yams_test_
 inline std::filesystem::path write_file(const std::filesystem::path& path, std::string_view data) {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream stream(path, std::ios::binary);
-    stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+    stream.write(data.data(), checked_streamsize(data.size(), "write_file payload"));
     stream.close();
     return path;
 }

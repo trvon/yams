@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -85,6 +86,19 @@ bool isPathTrusted(const fs::path& pluginPath, const std::set<fs::path>& trusted
 // ============================================================================
 // Plugin Resolution
 // ============================================================================
+
+std::vector<fs::path> dedupePluginRoots(std::vector<fs::path> roots) {
+    std::set<std::string> seen;
+    std::vector<fs::path> unique;
+    unique.reserve(roots.size());
+    for (const auto& root : roots) {
+        const auto key = root.lexically_normal().string();
+        if (seen.insert(key).second) {
+            unique.push_back(root);
+        }
+    }
+    return unique;
+}
 
 std::vector<fs::path> getPluginSearchDirs() {
     std::vector<fs::path> dirs;

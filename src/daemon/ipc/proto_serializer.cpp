@@ -12,6 +12,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <type_traits>
@@ -46,11 +47,43 @@ from_kv_pairs(const google::protobuf::RepeatedPtrField<pb::KvPair>& in) {
     return out;
 }
 
+namespace {
+
+constexpr std::size_t proto_size_to_size(int size) noexcept {
+    return size > 0 ? static_cast<std::size_t>(size) : std::size_t{0};
+}
+
+template <typename Container> void reserve_from_proto_size(Container& out, int size) {
+    // Protobuf repeated-field size accessors are non-negative int values. Keep the conversion in
+    // one place so vector/map reserve calls do not each rely on implicit signed/unsigned casts.
+    out.reserve(proto_size_to_size(size));
+}
+
+std::int64_t size_to_proto_int64(std::size_t value, const char* fieldName) {
+    constexpr auto max = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+    if (value <= max) {
+        return static_cast<std::int64_t>(value);
+    }
+    try {
+        spdlog::warn("clamping {} from {} to INT64_MAX for protobuf serialization", fieldName,
+                     value);
+    } catch (...) {
+    }
+    return std::numeric_limits<std::int64_t>::max();
+}
+
+int size_to_proto_reserve(std::size_t value) noexcept {
+    constexpr auto max = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    return value > max ? std::numeric_limits<int>::max() : static_cast<int>(value);
+}
+
+} // namespace
+
 // Repeated string helpers (common in many messages)
 static void set_string_list(const std::vector<std::string>& in,
                             google::protobuf::RepeatedPtrField<std::string>* out) {
     out->Clear();
-    out->Reserve(static_cast<int>(in.size()));
+    out->Reserve(size_to_proto_reserve(in.size()));
     for (const auto& s : in)
         *out->Add() = yams::common::sanitizeUtf8(s);
 }
@@ -58,7 +91,7 @@ static void set_string_list(const std::vector<std::string>& in,
 static std::vector<std::string>
 get_string_list(const google::protobuf::RepeatedPtrField<std::string>& in) {
     std::vector<std::string> out;
-    out.reserve(in.size());
+    reserve_from_proto_size(out, in.size());
     for (const auto& s : in)
         out.emplace_back(s);
     return out;
@@ -1109,7 +1142,7 @@ template <> struct ProtoBinding<SearchResponse> {
         r.traceId = i.trace_id();
         r.queryInfo = i.query_info();
         r.searchStats = from_kv_pairs(i.search_stats());
-        r.results.reserve(i.results_size());
+        reserve_from_proto_size(r.results, i.results_size());
         for (const auto& pr : i.results()) {
             SearchResult sr{};
             sr.id = pr.id();
@@ -1218,7 +1251,7 @@ template <> struct ProtoBinding<ListResponse> {
         r.totalCount = i.total_count();
         r.queryInfo = i.query_info();
         r.listStats = from_kv_pairs(i.list_stats());
-        r.items.reserve(i.items_size());
+        reserve_from_proto_size(r.items, i.items_size());
         for (const auto& le : i.items()) {
             ListEntry e{};
             e.hash = le.hash();
@@ -1682,7 +1715,7 @@ template <> struct ProtoBinding<EmbeddingResponse> {
     static EmbeddingResponse get(const Envelope& env) {
         const auto& i = env.embedding_response();
         EmbeddingResponse r{};
-        r.embedding.reserve(i.embedding_size());
+        reserve_from_proto_size(r.embedding, i.embedding_size());
         for (float f : i.embedding())
             r.embedding.push_back(f);
         r.dimensions = i.dimensions();
@@ -1718,10 +1751,10 @@ template <> struct ProtoBinding<BatchEmbeddingResponse> {
         r.processingTimeMs = i.processing_time_ms();
         r.successCount = i.success_count();
         r.failureCount = i.failure_count();
-        r.embeddings.reserve(i.embeddings_size());
+        reserve_from_proto_size(r.embeddings, i.embeddings_size());
         for (const auto& pe : i.embeddings()) {
             std::vector<float> v;
-            v.reserve(pe.embedding_size());
+            reserve_from_proto_size(v, pe.embedding_size());
             for (float f : pe.embedding())
                 v.push_back(f);
             r.embeddings.emplace_back(std::move(v));
@@ -1880,7 +1913,7 @@ template <> struct ProtoBinding<GrepResponse> {
         for (const auto& match : r.matches) {
             auto* m = o->add_matches();
             m->set_file(match.file);
-            m->set_line_number(match.lineNumber);
+            m->set_line_number(size_to_proto_int64(match.lineNumber, "grep.match.line_number"));
             // Use bytes setter to support binary/non-UTF-8 content
             m->set_line(match.line.data(), match.line.size());
             for (const auto& before : match.contextBefore) {
@@ -1906,7 +1939,7 @@ template <> struct ProtoBinding<GrepResponse> {
     static GrepResponse get(const Envelope& env) {
         const auto& i = env.grep_response();
         GrepResponse r{};
-        r.matches.reserve(i.matches_size());
+        reserve_from_proto_size(r.matches, i.matches_size());
         for (const auto& m : i.matches()) {
             GrepMatch match{};
             match.file = m.file();
@@ -1955,7 +1988,7 @@ template <> struct ProtoBinding<PluginScanResponse> {
     static PluginScanResponse get(const Envelope& env) {
         const auto& i = env.plugin_scan_response();
         PluginScanResponse r{};
-        r.plugins.reserve(i.plugins_size());
+        reserve_from_proto_size(r.plugins, i.plugins_size());
         for (const auto& rec : i.plugins()) {
             PluginRecord pr{};
             pr.name = rec.name();
@@ -2158,7 +2191,7 @@ template <> struct ProtoBinding<ListDownloadJobsResponse> {
     static ListDownloadJobsResponse get(const Envelope& env) {
         const auto& i = env.list_download_jobs_response();
         ListDownloadJobsResponse r{};
-        r.jobs.reserve(static_cast<std::size_t>(i.jobs_size()));
+        reserve_from_proto_size(r.jobs, i.jobs_size());
         for (const auto& item : i.jobs()) {
             DownloadResponse job{};
             job.url = item.url();
@@ -2352,7 +2385,7 @@ template <> struct ProtoBinding<ListTreeDiffResponse> {
     static ListTreeDiffResponse get(const Envelope& env) {
         const auto& i = env.list_tree_diff_response();
         ListTreeDiffResponse r{};
-        r.changes.reserve(static_cast<size_t>(i.changes_size()));
+        reserve_from_proto_size(r.changes, i.changes_size());
         for (const auto& entry : i.changes()) {
             TreeChangeEntry ce;
             ce.changeType = entry.change_type();
@@ -2404,7 +2437,7 @@ template <> struct ProtoBinding<FileHistoryResponse> {
         const auto& i = env.file_history_response();
         FileHistoryResponse r{};
         r.filepath = i.filepath();
-        r.versions.reserve(static_cast<size_t>(i.versions_size()));
+        reserve_from_proto_size(r.versions, i.versions_size());
         for (const auto& v : i.versions()) {
             FileVersion fv;
             fv.snapshotId = v.snapshot_id();
@@ -2685,7 +2718,7 @@ template <> struct ProtoBinding<GraphQueryResponse> {
         r.originNode.distance = origin.distance();
         r.originNode.properties = origin.properties();
         // Get connected nodes
-        r.connectedNodes.reserve(i.connected_nodes_size());
+        reserve_from_proto_size(r.connectedNodes, i.connected_nodes_size());
         for (const auto& node : i.connected_nodes()) {
             GraphNode n{};
             n.nodeId = node.node_id();
@@ -2699,7 +2732,7 @@ template <> struct ProtoBinding<GraphQueryResponse> {
             n.properties = node.properties();
             r.connectedNodes.push_back(std::move(n));
         }
-        r.edges.reserve(i.edges_size());
+        reserve_from_proto_size(r.edges, i.edges_size());
         for (const auto& edge : i.edges()) {
             GraphEdge e{};
             e.edgeId = edge.edge_id();
@@ -2718,12 +2751,12 @@ template <> struct ProtoBinding<GraphQueryResponse> {
         r.kgAvailable = i.kg_available();
         r.warning = i.warning();
         // yams-66h: Node type counts
-        r.nodeTypeCounts.reserve(i.node_type_counts_size());
+        reserve_from_proto_size(r.nodeTypeCounts, i.node_type_counts_size());
         for (const auto& tc : i.node_type_counts()) {
             r.nodeTypeCounts.emplace_back(tc.type(), tc.count());
         }
         // yams-kt5t: Relation type counts
-        r.relationTypeCounts.reserve(i.relation_type_counts_size());
+        reserve_from_proto_size(r.relationTypeCounts, i.relation_type_counts_size());
         for (const auto& rc : i.relation_type_counts()) {
             r.relationTypeCounts.emplace_back(rc.relation(), rc.count());
         }
@@ -2765,7 +2798,7 @@ template <> struct ProtoBinding<GraphPathHistoryResponse> {
         const auto& i = env.graph_path_history_response();
         GraphPathHistoryResponse r{};
         r.queryPath = i.query_path();
-        r.history.reserve(i.history_size());
+        reserve_from_proto_size(r.history, i.history_size());
         for (const auto& entry : i.history()) {
             PathHistoryEntry e{};
             e.path = entry.path();
@@ -2790,7 +2823,7 @@ template <> struct ProtoBinding<MetadataValueCountsRequest> {
     static MetadataValueCountsRequest get(const Envelope& env) {
         const auto& i = env.metadata_value_counts_request();
         MetadataValueCountsRequest r{};
-        r.keys.reserve(i.keys_size());
+        reserve_from_proto_size(r.keys, i.keys_size());
         for (const auto& key : i.keys()) {
             r.keys.push_back(key);
         }
@@ -2816,7 +2849,7 @@ template <> struct ProtoBinding<MetadataValueCountsResponse> {
         MetadataValueCountsResponse r{};
         for (const auto& [key, valueList] : i.value_counts()) {
             auto& vec = r.valueCounts[key];
-            vec.reserve(valueList.items_size());
+            reserve_from_proto_size(vec, valueList.items_size());
             for (const auto& item : valueList.items()) {
                 vec.emplace_back(item.value(), static_cast<size_t>(item.count()));
             }

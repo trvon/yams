@@ -18,10 +18,14 @@
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include <yams/content/audio_content_handler.h>
 #include <yams/content/binary_content_handler.h>
 #include <yams/content/content_handler_registry.h>
 #include <yams/content/image_content_handler.h>
+#include <yams/content/processing_error.h>
+#include <yams/content/processing_stats.h>
 #include <yams/content/text_content_handler.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
@@ -46,6 +50,20 @@ constexpr bool kThreadSanitizerEnabled = false;
 
 constexpr int kSanitizerTimeoutMultiplier = kThreadSanitizerEnabled ? 3 : 1;
 } // namespace
+
+TEST_CASE("processing stats helpers share rate and average math", "[content][stats][catch2]") {
+    CHECK(successRate(0, 0) == 0.0);
+    CHECK(successRate(10, 7) == 0.7);
+    CHECK(averageProcessingTimeMs(std::chrono::milliseconds{0}, 0) == 0.0);
+    CHECK(averageProcessingTimeMs(std::chrono::milliseconds{1500}, 3) == 500.0);
+    CHECK(averageCount(9, 3) == 3.0);
+}
+
+TEST_CASE("processing error helper shares user-facing diagnostic format",
+          "[content][error][catch2]") {
+    const auto message = formatProcessingError("Image", "decode", "/tmp/picture.png", "bad {}", 7);
+    CHECK(message == "Image processing failed: decode for '/tmp/picture.png' - bad 7");
+}
 
 // ===========================================================================
 // Test Fixtures & Helpers
@@ -76,7 +94,8 @@ public: // Public access for test cases
     fs::path createBinaryFile(const std::string& name, const std::vector<uint8_t>& content) {
         fs::path filePath = testDir_ / name;
         std::ofstream file(filePath, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(content.data()), content.size());
+        file.write(reinterpret_cast<const char*>(content.data()),
+                   yams::test::checked_streamsize(content.size(), "content handler fixture"));
         file.close();
         return filePath;
     }

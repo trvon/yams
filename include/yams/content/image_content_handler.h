@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 #include <yams/content/content_handler.h>
+#include <yams/content/processing_error.h>
 #include <yams/core/format.h>
 #include <yams/detection/file_type_detector.h>
 
@@ -226,9 +227,8 @@ private:
     [[nodiscard]] std::string formatError(std::string_view operation,
                                           const std::filesystem::path& path, std::string_view fmt,
                                           Args&&... args) const {
-        auto details = yams::format(fmt, std::forward<Args>(args)...);
-        return yams::format("Image processing failed: {} for '{}' - {}", operation, path.string(),
-                            details);
+        return content::formatProcessingError("Image", operation, path, fmt,
+                                              std::forward<Args>(args)...);
     }
 
     /**

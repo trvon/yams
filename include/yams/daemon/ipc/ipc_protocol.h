@@ -33,6 +33,60 @@ concept IsDeserializer = requires(T& t) {
     { t.template read<uint32_t>() } -> std::same_as<Result<uint32_t>>;
 };
 
+namespace ipc_detail {
+
+template <typename Deserializer, typename T>
+requires IsDeserializer<Deserializer>
+Result<void> readField(Deserializer& deser, T& field) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<T>, std::string>) {
+        auto value = deser.readString();
+        if (!value)
+            return value.error();
+        field = std::move(value.value());
+    } else if constexpr (std::is_same_v<std::remove_cvref_t<T>, std::vector<std::string>>) {
+        auto value = deser.readStringVector();
+        if (!value)
+            return value.error();
+        field = std::move(value.value());
+    } else if constexpr (std::is_same_v<std::remove_cvref_t<T>,
+                                        std::map<std::string, std::string>>) {
+        auto value = deser.readStringMap();
+        if (!value)
+            return value.error();
+        field = std::move(value.value());
+    } else {
+        auto value = deser.template read<std::remove_cvref_t<T>>();
+        if (!value)
+            return value.error();
+        field = value.value();
+    }
+    return {};
+}
+
+template <typename Duration, typename Deserializer>
+requires IsDeserializer<Deserializer>
+Result<void> readDurationField(Deserializer& deser, Duration& field) {
+    auto value = deser.template readDuration<Duration>();
+    if (!value)
+        return value.error();
+    field = value.value();
+    return {};
+}
+
+template <typename Deserializer, typename T, typename... Rest>
+requires IsDeserializer<Deserializer>
+Result<void> readFields(Deserializer& deser, T& field, Rest&... rest) {
+    auto result = readField(deser, field);
+    if (!result)
+        return result.error();
+    if constexpr (sizeof...(Rest) > 0) {
+        return readFields(deser, rest...);
+    }
+    return {};
+}
+
+} // namespace ipc_detail
+
 // ============================================================================
 // Request Types
 // ============================================================================
@@ -1319,17 +1373,8 @@ struct ShutdownRequest {
     requires IsDeserializer<Deserializer>
     static Result<ShutdownRequest> deserialize(Deserializer& deser) {
         ShutdownRequest req;
-
-        auto gracefulResult = deser.template read<bool>();
-        if (!gracefulResult)
-            return gracefulResult.error();
-        req.graceful = gracefulResult.value();
-
-        auto timeoutResult = deser.template readDuration<std::chrono::seconds>();
-        if (!timeoutResult)
-            return timeoutResult.error();
-        req.timeout = timeoutResult.value();
-
+        YAMS_TRY(ipc_detail::readField(deser, req.graceful));
+        YAMS_TRY(ipc_detail::readDurationField(deser, req.timeout));
         return req;
     }
 };
@@ -1347,12 +1392,7 @@ struct StatusRequest {
     requires IsDeserializer<Deserializer>
     static Result<StatusRequest> deserialize(Deserializer& deser) {
         StatusRequest req;
-
-        auto detailedResult = deser.template read<bool>();
-        if (!detailedResult)
-            return detailedResult.error();
-        req.detailed = detailedResult.value();
-
+        YAMS_TRY(ipc_detail::readField(deser, req.detailed));
         return req;
     }
 };
@@ -1368,10 +1408,7 @@ struct CancelRequest {
     requires IsDeserializer<Deserializer>
     static Result<CancelRequest> deserialize(Deserializer& deser) {
         CancelRequest r;
-        auto v = deser.template read<uint64_t>();
-        if (!v)
-            return v.error();
-        r.targetRequestId = v.value();
+        YAMS_TRY(ipc_detail::readField(deser, r.targetRequestId));
         return r;
     }
 };
@@ -1389,13 +1426,10 @@ struct PingRequest {
     requires IsDeserializer<Deserializer>
     static Result<PingRequest> deserialize(Deserializer& deser) {
         PingRequest req;
-
-        auto timestampResult = deser.template read<uint64_t>();
-        if (!timestampResult)
-            return timestampResult.error();
-        req.timestamp = std::chrono::steady_clock::time_point{
-            std::chrono::steady_clock::duration{timestampResult.value()}};
-
+        uint64_t timestamp{};
+        YAMS_TRY(ipc_detail::readField(deser, timestamp));
+        req.timestamp =
+            std::chrono::steady_clock::time_point{std::chrono::steady_clock::duration{timestamp}};
         return req;
     }
 };
@@ -1419,22 +1453,7 @@ struct GenerateEmbeddingRequest {
     requires IsDeserializer<Deserializer>
     static Result<GenerateEmbeddingRequest> deserialize(Deserializer& deser) {
         GenerateEmbeddingRequest req;
-
-        auto textResult = deser.readString();
-        if (!textResult)
-            return textResult.error();
-        req.text = std::move(textResult.value());
-
-        auto modelResult = deser.readString();
-        if (!modelResult)
-            return modelResult.error();
-        req.modelName = std::move(modelResult.value());
-
-        auto normalizeResult = deser.template read<bool>();
-        if (!normalizeResult)
-            return normalizeResult.error();
-        req.normalize = normalizeResult.value();
-
+        YAMS_TRY(ipc_detail::readFields(deser, req.text, req.modelName, req.normalize));
         return req;
     }
 };
@@ -2029,30 +2048,8 @@ struct DownloadRequest {
     requires IsDeserializer<Deserializer>
     static Result<DownloadRequest> deserialize(Deserializer& deser) {
         DownloadRequest req;
-        auto u = deser.readString();
-        if (!u)
-            return u.error();
-        req.url = std::move(u.value());
-        auto op = deser.readString();
-        if (!op)
-            return op.error();
-        req.outputPath = std::move(op.value());
-        auto cs = deser.readString();
-        if (!cs)
-            return cs.error();
-        req.checksum = std::move(cs.value());
-        auto t = deser.readStringVector();
-        if (!t)
-            return t.error();
-        req.tags = std::move(t.value());
-        auto m = deser.readStringMap();
-        if (!m)
-            return m.error();
-        req.metadata = std::move(m.value());
-        auto q = deser.template read<bool>();
-        if (!q)
-            return q.error();
-        req.quiet = q.value();
+        YAMS_TRY(ipc_detail::readFields(deser, req.url, req.outputPath, req.checksum, req.tags,
+                                        req.metadata, req.quiet));
         return req;
     }
 };
@@ -2070,10 +2067,7 @@ struct DownloadStatusRequest {
     requires IsDeserializer<Deserializer>
     static Result<DownloadStatusRequest> deserialize(Deserializer& deser) {
         DownloadStatusRequest req;
-        auto job = deser.readString();
-        if (!job)
-            return job.error();
-        req.jobId = std::move(job.value());
+        YAMS_TRY(ipc_detail::readField(deser, req.jobId));
         return req;
     }
 };
@@ -2091,10 +2085,7 @@ struct CancelDownloadJobRequest {
     requires IsDeserializer<Deserializer>
     static Result<CancelDownloadJobRequest> deserialize(Deserializer& deser) {
         CancelDownloadJobRequest req;
-        auto job = deser.readString();
-        if (!job)
-            return job.error();
-        req.jobId = std::move(job.value());
+        YAMS_TRY(ipc_detail::readField(deser, req.jobId));
         return req;
     }
 };

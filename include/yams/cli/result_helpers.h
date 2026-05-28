@@ -1,9 +1,11 @@
 #pragma once
 
+#include <filesystem>
 #include <iostream>
 #include <string>
 
 #include <spdlog/spdlog.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 
 namespace yams::cli {
@@ -63,6 +65,14 @@ inline std::shared_ptr<T>& exitOnNull(const std::shared_ptr<T>& ptr,
         std::exit(1);
     }
     return ptr;
+}
+
+inline Result<void> writeConfigValueResult(const std::filesystem::path& configPath,
+                                           const std::string& key, const std::string& value) {
+    if (yams::config::write_config_value(configPath, key, value)) {
+        return Result<void>();
+    }
+    return Error{ErrorCode::WriteError, "Failed to write config key: " + key};
 }
 
 inline void returnOnError(const Result<void>& result, const std::string& operationLabel) {

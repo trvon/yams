@@ -2,7 +2,6 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/vector/vector_utils.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/doctor_checks.h>
@@ -25,7 +24,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
-#include <yams/config/config_helpers.h>
 #include <yams/search/benchmark_history_store.h>
 #include <yams/search/internal_benchmark.h>
 #include <yams/search/relevance_label_store.h>
@@ -34,27 +32,28 @@
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_utils.h>
 
+#include <yams/cli/doctor/benchmark.h>
+#include <yams/cli/doctor/checks/daemon_check.h>
 #include <yams/cli/doctor/checks/db_integrity.h>
 #include <yams/cli/doctor/checks/dim_consistency.h>
+#include <yams/cli/doctor/checks/embedding_health.h>
 #include <yams/cli/doctor/checks/model_check.h>
 #include <yams/cli/doctor/checks/orphan_summary.h>
-#include <yams/cli/doctor/checks/vec0_check.h>
-#include <yams/cli/doctor/checks/embedding_health.h>
-#include <yams/cli/doctor/checks/storage_blob_check.h>
+#include <yams/cli/doctor/checks/plugin_check.h>
 #include <yams/cli/doctor/checks/ref_count_check.h>
+#include <yams/cli/doctor/checks/storage_blob_check.h>
+#include <yams/cli/doctor/checks/vec0_check.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/doctor/plugin_trust.h>
+#include <yams/cli/doctor/prune.h>
 #include <yams/cli/doctor/rendering/display.h>
 #include <yams/cli/doctor/rendering/render.h>
-#include <yams/cli/doctor/repairs/vector_fix.h>
-#include <yams/cli/doctor/repairs/dedupe_helpers.h>
 #include <yams/cli/doctor/repairs/db_repair.h>
-#include <yams/cli/doctor/prune.h>
-#include <yams/cli/doctor/benchmark.h>
-#include <yams/cli/doctor/plugin_trust.h>
-#include <yams/cli/doctor/checks/daemon_check.h>
-#include <yams/cli/doctor/checks/plugin_check.h>
 #include <yams/cli/doctor/repairs/dedupe.h>
+#include <yams/cli/doctor/repairs/dedupe_helpers.h>
+#include <yams/cli/doctor/repairs/vector_fix.h>
 
 #include "yams/cli/prompt_util.h"
 #include <sqlite3.h>
@@ -394,31 +393,18 @@ public:
 
 private:
     // ============ UI Helpers ============
-    struct StepResult {
-        std::string name;
-        bool ok{false};
-        std::string message; // optional detail
-    };
+    using StepResult = doctor::DoctorRender::StepResult;
 
     static void printHeader(const std::string& title) {
-        std::cout << "\n" << title << "\n";
-        for (size_t i = 0; i < title.size(); ++i)
-            std::cout << '-';
-        std::cout << "\n";
+        doctor::DoctorRender::printHeader(std::cout, title);
     }
 
     static void printStatusLine(const std::string& label, const std::string& value) {
-        std::cout << "- " << label << ": " << value << "\n";
+        doctor::DoctorRender::printStatusLine(std::cout, label, value);
     }
 
     static void printSummary(const std::string& title, const std::vector<StepResult>& steps) {
-        printHeader(title);
-        for (const auto& s : steps) {
-            std::cout << "  " << (s.ok ? ui::status_ok(s.name) : ui::status_error(s.name));
-            if (!s.message.empty())
-                std::cout << " — " << s.message;
-            std::cout << "\n";
-        }
+        doctor::DoctorRender::printSummary(std::cout, title, steps);
     }
     // Step helpers to make doctor logic composable (delegating to extracted utilities)
     Result<void> touchDbFile(const std::filesystem::path& dbPath) {
@@ -569,15 +555,6 @@ private:
     void checkDaemon(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
         doctor::DaemonCheck check;
         check.execute(std::cout, cli_, cachedStatus);
-    }
-
-    static bool parseBoolValue(std::string value, bool fallback) {
-        if (value.empty()) {
-            return fallback;
-        }
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
     }
 
     using DoctorCachedState = doctor::CachedDaemonState;
@@ -1117,11 +1094,7 @@ std::filesystem::path DoctorCommand::getConfigPath() const {
 }
 
 Result<void> DoctorCommand::writeConfigValue(const std::string& key, const std::string& value) {
-    auto configPath = getConfigPath();
-    if (yams::config::write_config_value(configPath, key, value)) {
-        return Result<void>();
-    }
-    return Error{ErrorCode::WriteError, "Failed to write config key: " + key};
+    return writeConfigValueResult(getConfigPath(), key, value);
 }
 
 Result<void> DoctorCommand::applyTuningBaseline(bool apply) {
@@ -1438,8 +1411,10 @@ void DoctorCommand::runVectorsFix() {
 
         // Write model preference
         if (!matchingModel.empty()) {
-            yams::config::write_config_value(
-                configPath, "embeddings." + std::string("preferred_model"), matchingModel);
+            auto writeModel = writeConfigValue("embeddings.preferred_model", matchingModel);
+            if (!writeModel) {
+                throw std::runtime_error(writeModel.error().message);
+            }
         }
 
         configUpdated = true;

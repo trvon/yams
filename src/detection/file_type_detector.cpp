@@ -1,3 +1,4 @@
+#include <yams/common/string_utils.h>
 #include <yams/core/magic_numbers.hpp> // C++23 constexpr patterns
 #include <yams/detection/file_type_detector.h>
 
@@ -30,9 +31,7 @@ namespace yams::detection {
 
 namespace {
 std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 std::string normalizeExtensionCopy(std::string extension) {

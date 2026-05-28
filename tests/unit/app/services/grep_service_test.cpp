@@ -50,7 +50,7 @@ public:
 
     Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) override {
-        if (consume(getAllMetadataFailures_)) {
+        if (yams::test::consume_failure(getAllMetadataFailures_)) {
             return Error{ErrorCode::NotInitialized, "metadata warming up"};
         }
         return MetadataRepository::getAllMetadata(documentId);
@@ -58,7 +58,7 @@ public:
 
     Result<std::vector<DocumentInfo>>
     queryDocuments(const metadata::DocumentQueryOptions& options) override {
-        if (consume(queryFailures_)) {
+        if (yams::test::consume_failure(queryFailures_)) {
             return Error{ErrorCode::DatabaseError, "database is locked"};
         }
         return MetadataRepository::queryDocuments(options);
@@ -66,7 +66,7 @@ public:
 
     Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t> documentIds) override {
-        if (consume(getAllMetadataFailures_)) {
+        if (yams::test::consume_failure(getAllMetadataFailures_)) {
             return Error{ErrorCode::NotInitialized, "metadata warming up"};
         }
         return MetadataRepository::getMetadataForDocuments(documentIds);
@@ -74,7 +74,7 @@ public:
 
     Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
                                                           bool matchAll = false) override {
-        if (consume(findDocumentsByTagsFailures_)) {
+        if (yams::test::consume_failure(findDocumentsByTagsFailures_)) {
             return Error{ErrorCode::NotInitialized, "tag index warming up"};
         }
         return MetadataRepository::findDocumentsByTags(tags, matchAll);
@@ -85,13 +85,6 @@ public:
     }
 
 private:
-    static constexpr bool consume(std::size_t& counter) noexcept {
-        if (counter == 0)
-            return false;
-        --counter;
-        return true;
-    }
-
     std::size_t getAllMetadataFailures_{0};
     std::size_t queryFailures_{0};
     std::size_t findDocumentsByTagsFailures_{0};

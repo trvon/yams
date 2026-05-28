@@ -1,6 +1,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_wait_config.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
@@ -77,15 +78,6 @@ bool isExpectedDisconnectMessage(const std::string& message) {
            message.find("End of file") != std::string::npos ||
            message.find("EPIPE") != std::string::npos ||
            message.find("ECONNRESET") != std::string::npos;
-}
-
-bool ipc_wait_trace_enabled() {
-    return false;
-}
-
-int ipc_wait_warn_ms() {
-    static constexpr int warn_ms = 250;
-    return warn_ms;
 }
 
 void retire_connection(const std::shared_ptr<AsioConnection>& conn, const char* reason) {

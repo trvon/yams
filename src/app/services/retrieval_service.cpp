@@ -240,6 +240,52 @@ static boost::asio::any_io_executor selectExecutor(const RetrievalOptions& opts)
     return yams::daemon::GlobalIOContext::global_executor();
 }
 
+template <typename T, typename AwaitableFactory>
+Result<T> runClientCallWithTimeout(const RetrievalOptions& opts, std::string_view opName,
+                                   AwaitableFactory&& makeAwaitable) {
+    std::promise<Result<T>> promise;
+    std::promise<void> done;
+    auto future = promise.get_future();
+    auto doneFuture = done.get_future();
+    const auto opNameString = std::string(opName);
+
+    boost::asio::co_spawn(
+        selectExecutor(opts),
+        [promise = std::move(promise), done = std::move(done),
+         makeAwaitable = std::forward<AwaitableFactory>(makeAwaitable),
+         opNameString]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto result = co_await makeAwaitable();
+                promise.set_value(std::move(result));
+            } catch (const std::exception& e) {
+                promise.set_value(Error{ErrorCode::InternalError,
+                                        opNameString + " failed with exception: " + e.what()});
+            } catch (...) {
+                promise.set_value(Error{ErrorCode::InternalError,
+                                        opNameString + " failed with unknown exception"});
+            }
+            done.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (future.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = future.get();
+            doneFuture.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        doneFuture.wait();
+        return Error{ErrorCode::InternalError,
+                     opNameString + " failed with exception: " + e.what()};
+    }
+
+    doneFuture.wait();
+    return Error{ErrorCode::Timeout, opNameString + " timed out"};
+}
+
 std::shared_ptr<yams::daemon::DaemonClient>
 RetrievalService::getOrCreateClient(const RetrievalOptions& opts) const {
     if (client_)
@@ -252,36 +298,8 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
     auto req = makeGetRequest(req_opts, opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::GetResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->get(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("get failed with exception: ") + e.what()};
-    }
-
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "get timed out"};
+    return runClientCallWithTimeout<yams::daemon::GetResponse>(
+        opts, "get", [client, req]() { return client->get(req); });
 }
 
 Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req_opts,
@@ -296,36 +314,8 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     auto req = makeGrepRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::GrepResponse>> p;
-    std::promise<void> done;
-    auto future = p.get_future();
-    auto done_future = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->streamingGrep(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (future.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = future.get();
-            done_future.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_future.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("grep failed with exception: ") + e.what()};
-    }
-
-    done_future.wait();
-    return Error{ErrorCode::Timeout, "grep timed out"};
+    return runClientCallWithTimeout<yams::daemon::GrepResponse>(
+        opts, "grep", [client, req]() { return client->streamingGrep(req); });
 }
 
 Result<yams::daemon::GrepResponse>
@@ -342,41 +332,8 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
     auto req = makeListRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::ListResponse>> p2;
-    std::promise<void> done;
-    auto f2 = p2.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p2),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto r = co_await client->streamingList(req);
-                p.set_value(std::move(r));
-            } catch (const std::exception& e) {
-                p.set_value(Error{ErrorCode::InternalError,
-                                  std::string("list failed with exception: ") + e.what()});
-            } catch (...) {
-                p.set_value(Error{ErrorCode::InternalError, "list failed with unknown exception"});
-            }
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-    try {
-        if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f2.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("list failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "list timed out"};
+    return runClientCallWithTimeout<yams::daemon::ListResponse>(
+        opts, "list", [client, req]() { return client->streamingList(req); });
 }
 
 Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
@@ -384,28 +341,8 @@ Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
     auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<void>> p2;
-    std::promise<void> done;
-    auto f2 = p2.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p2),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->getToStdout(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-    if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-        std::future_status::ready) {
-        auto result = f2.get();
-        done_f.wait();
-        return result;
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "get timed out"};
+    return runClientCallWithTimeout<void>(opts, "get",
+                                          [client, req]() { return client->getToStdout(req); });
 }
 
 Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
@@ -414,28 +351,8 @@ Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
     auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<void>> p2;
-    std::promise<void> done;
-    auto f2 = p2.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, outputPath, p = std::move(p2),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->getToFile(req, outputPath);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-    if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-        std::future_status::ready) {
-        auto result = f2.get();
-        done_f.wait();
-        return result;
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "get timed out"};
+    return runClientCallWithTimeout<void>(
+        opts, "get", [client, req, outputPath]() { return client->getToFile(req, outputPath); });
 }
 
 Result<RetrievalService::ChunkedGetResult>
@@ -560,29 +477,8 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     sreq.pathsOnly = false;
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::SearchResponse>> promise;
-    std::promise<void> done;
-    auto future = promise.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, sreq, p = std::move(promise),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->streamingSearch(sreq);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    if (future.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) !=
-        std::future_status::ready) {
-        done_f.wait();
-        return Error{ErrorCode::Timeout, "search timed out"};
-    }
-
-    auto searchResult = future.get();
-    done_f.wait();
+    auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
+        opts, "search", [client, sreq]() { return client->streamingSearch(sreq); });
     if (!searchResult)
         return searchResult.error();
 
@@ -882,27 +778,8 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         sreq.searchType = "hybrid";
         sreq.limit = 1;
         sreq.pathsOnly = false;
-        std::promise<Result<yams::daemon::SearchResponse>> p;
-        std::promise<void> done;
-        auto f = p.get_future();
-        auto done_f = done.get_future();
-        boost::asio::co_spawn(
-            selectExecutor(opts),
-            [client, sreq, p = std::move(p),
-             d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-                auto r = co_await client->streamingSearch(sreq);
-                p.set_value(std::move(r));
-                d.set_value();
-                co_return;
-            },
-            boost::asio::detached);
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) !=
-            std::future_status::ready) {
-            done_f.wait();
-            return Error{ErrorCode::Timeout, "search timed out"};
-        }
-        auto sres = f.get();
-        done_f.wait();
+        auto sres = runClientCallWithTimeout<yams::daemon::SearchResponse>(
+            opts, "search", [client, sreq]() { return client->streamingSearch(sreq); });
         if (sres && !sres.value().results.empty()) {
             const auto& best = sres.value().results.front();
             std::string hash;
@@ -936,29 +813,10 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
 bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
     try {
         auto client = getOrCreateClient(opts);
-        std::promise<Result<yams::daemon::StatusResponse>> p;
-        std::promise<void> done;
-        auto f = p.get_future();
-        auto done_f = done.get_future();
-        boost::asio::co_spawn(
-            selectExecutor(opts),
-            [client, p = std::move(p),
-             d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-                auto r = co_await client->status();
-                p.set_value(std::move(r));
-                d.set_value();
-                co_return;
-            },
-            boost::asio::detached);
-
-        // Fast timeout for readiness check (500ms)
-        if (f.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
-            done_f.wait();
-            return false; // Daemon not responsive -> not ready
-        }
-
-        auto status = f.get();
-        done_f.wait();
+        auto fastOpts = opts;
+        fastOpts.requestTimeoutMs = 500;
+        auto status = runClientCallWithTimeout<yams::daemon::StatusResponse>(
+            fastOpts, "status", [client]() { return client->status(); });
         if (!status) {
             return false; // Status query failed -> not ready
         }
@@ -978,171 +836,39 @@ Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOption
     auto req = makeSearchRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::SearchResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->streamingSearch(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("search failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "search timed out"};
+    return runClientCallWithTimeout<yams::daemon::SearchResponse>(
+        opts, "search", [client, req]() { return client->streamingSearch(req); });
 }
 
 Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOptions& opts) const {
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::StatusResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, p = std::move(p), d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->status();
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("status failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "status timed out"};
+    return runClientCallWithTimeout<yams::daemon::StatusResponse>(
+        opts, "status", [client]() { return client->status(); });
 }
 
 Result<yams::daemon::CatResponse> RetrievalService::cat(const yams::daemon::CatRequest& req,
                                                         const RetrievalOptions& opts) const {
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::CatResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->cat(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("cat failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "cat timed out"};
+    return runClientCallWithTimeout<yams::daemon::CatResponse>(
+        opts, "cat", [client, req]() { return client->cat(req); });
 }
 
 Result<yams::daemon::GraphQueryResponse>
 RetrievalService::graphQuery(const yams::daemon::GraphQueryRequest& req,
                              const RetrievalOptions& opts) const {
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::GraphQueryResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->call<yams::daemon::GraphQueryRequest>(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("graphQuery failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "graphQuery timed out"};
+    return runClientCallWithTimeout<yams::daemon::GraphQueryResponse>(
+        opts, "graphQuery",
+        [client, req]() { return client->call<yams::daemon::GraphQueryRequest>(req); });
 }
 
 Result<yams::daemon::DownloadResponse>
 RetrievalService::download(const yams::daemon::DownloadRequest& req,
                            const RetrievalOptions& opts) const {
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::DownloadResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [client, req, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->call<yams::daemon::DownloadRequest>(req);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("download failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "download timed out"};
+    return runClientCallWithTimeout<yams::daemon::DownloadResponse>(
+        opts, "download",
+        [client, req]() { return client->call<yams::daemon::DownloadRequest>(req); });
 }
 
 } // namespace yams::app::services

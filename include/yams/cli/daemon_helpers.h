@@ -27,6 +27,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/app/services/retrieval_service.h>
+#include <yams/common/string_utils.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -776,9 +777,7 @@ inline bool cli_perf_trace_enabled() {
     if (raw == nullptr || *raw == '\0') {
         return false;
     }
-    std::string mode(raw);
-    std::transform(mode.begin(), mode.end(), mode.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string mode = yams::common::asciiToLowerCopy(raw);
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 
@@ -800,9 +799,7 @@ inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds ela
 }
 
 inline std::string to_lower_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 inline std::string trim_copy(std::string_view sv) {
@@ -838,9 +835,7 @@ inline bool explicit_socket_without_autostart() {
         return false;
     }
 
-    std::string mode(disableAutoStart);
-    std::transform(mode.begin(), mode.end(), mode.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string mode = yams::common::asciiToLowerCopy(disableAutoStart);
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 

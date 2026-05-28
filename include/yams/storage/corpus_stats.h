@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,7 +90,21 @@ struct CorpusStats {
 
     // --- Helpers ---
     [[nodiscard]] bool isExpired(int64_t nowMs) const noexcept {
-        return (nowMs - computedAtMs) > ttlMs;
+        // Non-positive TTL means the snapshot should not be reused.
+        if (ttlMs <= 0) {
+            return true;
+        }
+        // Future/equal computed timestamps are not expired. This also avoids subtracting values
+        // with opposite signs, which can overflow for corrupted/deserialized timestamps.
+        if (nowMs <= computedAtMs) {
+            return false;
+        }
+        // If computedAtMs + ttlMs would overflow int64_t, the expiration deadline is beyond any
+        // representable nowMs and the snapshot cannot be considered expired by this clock value.
+        if (computedAtMs > (std::numeric_limits<int64_t>::max() - ttlMs)) {
+            return false;
+        }
+        return nowMs > (computedAtMs + ttlMs);
     }
 
     [[nodiscard]] bool isEmpty() const noexcept { return docCount == 0; }

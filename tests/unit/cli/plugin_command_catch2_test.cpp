@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/cli/plugin_util.h>
 #include <yams/cli/yams_cli.h>
 
 #include <filesystem>
@@ -76,6 +77,18 @@ private:
 };
 
 } // namespace
+
+TEST_CASE("plugin dedupe roots preserves first lexical identity", "[cli][plugin][catch2]") {
+    const fs::path first = fs::path("/tmp") / "yams" / ".." / "yams" / "plugins";
+    const fs::path duplicate = fs::path("/tmp") / "yams" / "plugins";
+    const fs::path second = fs::path("/tmp") / "other" / "plugins";
+
+    const auto roots = yams::cli::plugin::dedupePluginRoots({first, duplicate, second, first});
+
+    REQUIRE(roots.size() == 2);
+    CHECK(roots[0] == first);
+    CHECK(roots[1] == second);
+}
 
 TEST_CASE("PluginCommand - trust status reports defaults cleanly", "[cli][plugin][catch2]") {
     CliTestHelper helper;

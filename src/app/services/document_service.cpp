@@ -1,5 +1,6 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/common/time_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteBatchCoalescer.h>
@@ -741,7 +742,7 @@ public:
             info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
                                                           : metadata::ExtractionStatus::Pending;
 
-            populatePathDerivedFields(info);
+            metadata::populatePathDerivedFields(info);
 
             // Build metadata tags as key-value pairs for the combined insert
             std::vector<std::pair<std::string, metadata::MetadataValue>> tagPairs;
@@ -754,8 +755,7 @@ public:
             metadata::TreeSnapshotRecord snapshotRecord;
             snapshotRecord.snapshotId = snapshotId;
             // ingestDocumentId is set by insertDocumentWithMetadata
-            snapshotRecord.createdTime =
-                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            snapshotRecord.createdTime = yams::common::timePointToEpochSeconds(now);
             snapshotRecord.fileCount = 1;
             snapshotRecord.totalBytes = info.fileSize;
             snapshotRecord.metadata["directory_path"] = info.filePath;

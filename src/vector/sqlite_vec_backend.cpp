@@ -4,7 +4,9 @@
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
 
+#include <yams/common/time_utils.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/storage/sqlite_retry.h>
 
 #include "simeon_pq_persistence.h"
 
@@ -253,22 +255,12 @@ inline bool updateOnDuplicateEnabled() {
 // Libsql-aware database helpers
 // ============================================================================
 
-// Retry parameters vary by backend:
-// - libsql MVCC: fewer retries needed since concurrent writers don't block
-// - SQLite: more retries with longer backoff for single-writer model
-#if YAMS_LIBSQL_BACKEND
-constexpr int kMaxRetries = 3;
-constexpr int kInitialBackoffMs = 5;
-#else
-constexpr int kMaxRetries = 5;
-constexpr int kInitialBackoffMs = 10;
-#endif
-
 // Begin transaction with retry logic and backend-appropriate semantics
 inline bool beginTransactionWithRetry(sqlite3* db) {
-    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+    const auto retryPolicy = yams::storage::sqlite_retry::vectorWritePolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
 #if YAMS_LIBSQL_BACKEND
         // libsql MVCC: use regular BEGIN (deferred) for better concurrency
         int rc = sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
@@ -280,13 +272,12 @@ inline bool beginTransactionWithRetry(sqlite3* db) {
             return true;
         }
         // Check for transient lock errors
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2;
+        if (yams::storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
+            yams::storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
         spdlog::warn("[VectorDB] beginTransaction failed: {} (attempt {}/{})", sqlite3_errstr(rc),
-                     attempt + 1, kMaxRetries);
+                     attempt + 1, retryPolicy.maxRetries);
         break;
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
@@ -295,20 +286,20 @@ inline bool beginTransactionWithRetry(sqlite3* db) {
 
 // Execute SQL with retry logic for transient lock errors
 inline bool execWithRetry(sqlite3* db, const char* sql) {
-    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+    const auto retryPolicy = yams::storage::sqlite_retry::vectorWritePolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         int rc = sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
         if (rc == SQLITE_OK) {
             return true;
         }
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2;
+        if (yams::storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
+            yams::storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
         spdlog::warn("[VectorDB] exec '{}' failed: {} (attempt {}/{})", sql, sqlite3_errstr(rc),
-                     attempt + 1, kMaxRetries);
+                     attempt + 1, retryPolicy.maxRetries);
         break;
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
@@ -317,17 +308,17 @@ inline bool execWithRetry(sqlite3* db, const char* sql) {
 
 // Step statement with retry logic (for statements expecting SQLITE_DONE)
 inline int stepWithRetry(sqlite3_stmt* stmt) {
-    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+    const auto retryPolicy = yams::storage::sqlite_retry::vectorWritePolicy();
+    auto backoff = retryPolicy.initialBackoff;
 
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         int rc = sqlite3_step(stmt);
         if (rc == SQLITE_DONE || rc == SQLITE_ROW) {
             return rc;
         }
-        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+        if (yams::storage::sqlite_retry::canRetry(rc, attempt, retryPolicy)) {
             sqlite3_reset(stmt);
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2;
+            yams::storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
         return rc; // Non-retryable error
@@ -544,16 +535,6 @@ constexpr const char* kHasEntityEmbedding =
     "SELECT 1 FROM entity_vectors WHERE node_key = ? LIMIT 1";
 constexpr const char* kMarkEntityStale =
     "UPDATE entity_vectors SET is_stale = 1 WHERE node_key = ?";
-
-// Helper: serialize time_point to Unix timestamp
-int64_t toUnixTimestamp(const std::chrono::system_clock::time_point& tp) {
-    return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
-}
-
-// Helper: deserialize Unix timestamp to time_point
-std::chrono::system_clock::time_point fromUnixTimestamp(int64_t ts) {
-    return std::chrono::system_clock::time_point(std::chrono::seconds(ts));
-}
 
 // Helper: serialize metadata map to JSON
 std::string serializeMetadata(const std::map<std::string, std::string>& meta) {
@@ -2090,7 +2071,7 @@ public:
         sqlite3_bind_text(stmt, 4, record.content.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 5, record.model_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 6, record.model_version.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 7, toUnixTimestamp(record.embedded_at));
+        sqlite3_bind_int64(stmt, 7, yams::common::timePointToEpochSeconds(record.embedded_at));
         sqlite3_bind_int(stmt, 8, record.is_stale ? 1 : 0);
         sqlite3_bind_text(stmt, 9, record.node_type.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 10, record.qualified_name.c_str(), -1, SQLITE_TRANSIENT);
@@ -2143,7 +2124,7 @@ public:
             sqlite3_bind_text(stmt, 4, record.content.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 5, record.model_id.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 6, record.model_version.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(stmt, 7, toUnixTimestamp(record.embedded_at));
+            sqlite3_bind_int64(stmt, 7, yams::common::timePointToEpochSeconds(record.embedded_at));
             sqlite3_bind_int(stmt, 8, record.is_stale ? 1 : 0);
             sqlite3_bind_text(stmt, 9, record.node_type.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 10, record.qualified_name.c_str(), -1, SQLITE_TRANSIENT);
@@ -2433,7 +2414,7 @@ private:
         record.content = safeColumnText(stmt, 4);
         record.model_id = safeColumnText(stmt, 5);
         record.model_version = safeColumnText(stmt, 6);
-        record.embedded_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 7));
+        record.embedded_at = yams::common::epochSecondsToTimePoint(sqlite3_column_int64(stmt, 7));
         record.is_stale = sqlite3_column_int(stmt, 8) != 0;
         record.node_type = safeColumnText(stmt, 9);
         record.qualified_name = safeColumnText(stmt, 10);
@@ -2489,8 +2470,10 @@ private:
         sqlite3_bind_text(stmt_insert_, 12, record.content_hash_at_embedding.c_str(), -1,
                           SQLITE_TRANSIENT);
 
-        sqlite3_bind_int64(stmt_insert_, 13, toUnixTimestamp(record.created_at));
-        sqlite3_bind_int64(stmt_insert_, 14, toUnixTimestamp(record.embedded_at));
+        sqlite3_bind_int64(stmt_insert_, 13,
+                           yams::common::timePointToEpochSeconds(record.created_at));
+        sqlite3_bind_int64(stmt_insert_, 14,
+                           yams::common::timePointToEpochSeconds(record.embedded_at));
         sqlite3_bind_int(stmt_insert_, 15, record.is_stale ? 1 : 0);
         sqlite3_bind_int(stmt_insert_, 16, static_cast<int>(record.level));
 
@@ -2621,8 +2604,8 @@ private:
         const char* content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 12));
         record.content_hash_at_embedding = content_hash ? content_hash : "";
 
-        record.created_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 13));
-        record.embedded_at = fromUnixTimestamp(sqlite3_column_int64(stmt, 14));
+        record.created_at = yams::common::epochSecondsToTimePoint(sqlite3_column_int64(stmt, 13));
+        record.embedded_at = yams::common::epochSecondsToTimePoint(sqlite3_column_int64(stmt, 14));
         record.is_stale = sqlite3_column_int(stmt, 15) != 0;
         record.level = static_cast<EmbeddingLevel>(sqlite3_column_int(stmt, 16));
 

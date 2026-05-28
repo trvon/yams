@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../common/test_helpers_catch2.h"
 #include "test_daemon_harness.h"
 
 #include <yams/daemon/components/ServiceManager.h>
@@ -114,7 +115,8 @@ public:
 
         // Write to disk for plugin access
         std::ofstream out(doc.filePath, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(content.data()), content.size());
+        out.write(reinterpret_cast<const char*>(content.data()),
+                  yams::test::checked_streamsize(content.size(), "Ghidra fixture binary"));
         out.close();
 
         return hash;

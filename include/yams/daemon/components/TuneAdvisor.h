@@ -169,6 +169,62 @@ private:
         return std::nullopt;
     }
 
+    static std::optional<int> parseBoundedIntEnvNow(const char* name, int minValue, int maxValue) {
+        if (const char* s = std::getenv(name)) {
+            try {
+                int v = std::stoi(s);
+                if (v >= minValue && v <= maxValue)
+                    return v;
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
+            }
+        }
+        return std::nullopt;
+    }
+
+    static uint32_t readUint32Override(const std::atomic<uint32_t>& overrideValue,
+                                       const char* envName, uint32_t defaultValue,
+                                       uint32_t minValue, uint32_t maxValue) {
+        uint32_t ov = overrideValue.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (auto envValue = parseBoundedUintEnvNow(envName, minValue, maxValue))
+            return *envValue;
+        return defaultValue;
+    }
+
+    static std::uint64_t readUint64Override(const std::atomic<std::uint64_t>& overrideValue,
+                                            const char* envName, std::uint64_t defaultValue,
+                                            std::uint64_t minValue, std::uint64_t maxValue) {
+        std::uint64_t ov = overrideValue.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (auto envValue = parseBoundedUint64EnvNow(envName, minValue, maxValue))
+            return *envValue;
+        return defaultValue;
+    }
+
+    static int readPositiveIntOverride(const std::atomic<int>& overrideValue, const char* envName,
+                                       int defaultValue, int minValue, int maxValue) {
+        int ov = overrideValue.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (auto envValue = parseBoundedIntEnvNow(envName, minValue, maxValue))
+            return *envValue;
+        return defaultValue;
+    }
+
+    static double readPositiveDoubleOverride(const std::atomic<double>& overrideValue,
+                                             const char* envName, double defaultValue,
+                                             double minValue, double maxValue) {
+        double ov = overrideValue.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (auto envValue = parseBoundedDoubleEnvNow(envName, minValue, maxValue))
+            return *envValue;
+        return defaultValue;
+    }
+
     static std::optional<double> parseBoundedDoubleEnvNow(const char* name, double minValue,
                                                           double maxValue, double scale = 1.0) {
         if (const char* s = std::getenv(name)) {
@@ -1069,58 +1125,22 @@ public:
     // Range clamp [500, 600000] — wide enough for large-corpus benchmarks under
     // sanitizer builds where each op can take 30-60s.
     static uint32_t ipcTimeoutMs() {
-        uint32_t ov = ipcTimeoutMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 15000;
-        if (const char* s = std::getenv("YAMS_IPC_TIMEOUT_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 500 && v <= 600000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(ipcTimeoutMsOverride_, "YAMS_IPC_TIMEOUT_MS", 15000u, 500u,
+                                  600000u);
     }
     // Timeout for streaming chunk production (ms). When nonzero, a streaming
     // response will be failed with a Timeout error if next_chunk() exceeds this
     // limit. Default 30000ms; env: YAMS_STREAM_CHUNK_TIMEOUT_MS. Range clamp
     // [1000, 600000].
     static uint32_t streamChunkTimeoutMs() {
-        uint32_t ov = streamChunkTimeoutMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 30000;
-        if (const char* s = std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1000 && v <= 600000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(streamChunkTimeoutMsOverride_, "YAMS_STREAM_CHUNK_TIMEOUT_MS",
+                                  30000u, 1000u, 600000u);
     }
     // -------- New centralized tuning getters (env-driven) --------
     // Backpressure read pause when receiver is backpressured (ms). Default 10.
     static uint32_t backpressureReadPauseMs() {
-        uint32_t ov = backpressureReadPauseMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 10;
-        if (const char* s = std::getenv("YAMS_BACKPRESSURE_READ_PAUSE_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 1000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(backpressureReadPauseMsOverride_,
+                                  "YAMS_BACKPRESSURE_READ_PAUSE_MS", 10u, 0u, 1000u);
     }
     static void setBackpressureReadPauseMs(uint32_t ms) {
         backpressureReadPauseMsOverride_.store(ms, std::memory_order_relaxed);
@@ -1139,20 +1159,7 @@ public:
 
     // Worker pool poll/sleep cadence (ms) for run loop. Default 150.
     static uint32_t workerPollMs() {
-        uint32_t ov = workerPollMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 150;
-        if (const char* s = std::getenv("YAMS_WORKER_POLL_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 50 && v <= 2000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(workerPollMsOverride_, "YAMS_WORKER_POLL_MS", 150u, 50u, 2000u);
     }
     static void setWorkerPollMs(uint32_t ms) {
         workerPollMsOverride_.store(ms, std::memory_order_relaxed);
@@ -1166,69 +1173,27 @@ public:
     static bool workerPollMsPinned() {
         if (workerPollMsPinned_.load(std::memory_order_relaxed))
             return true;
-        if (const char* s = std::getenv("YAMS_WORKER_POLL_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return (v >= 50 && v <= 2000);
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return false;
+        return parseBoundedUintEnvNow("YAMS_WORKER_POLL_MS", 50u, 2000u).has_value();
     }
 
     // Idle shrink policy
     static double idleCpuThresholdPercent() {
-        double ov = idleCpuPctOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        double def = 10.0;
-        if (const char* s = std::getenv("YAMS_IDLE_CPU_PCT")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 0.0 && v <= 100.0)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readPositiveDoubleOverride(idleCpuPctOverride_, "YAMS_IDLE_CPU_PCT", 10.0, 0.0,
+                                          100.0);
     }
     static void setIdleCpuThresholdPercent(double pct) {
         idleCpuPctOverride_.store(pct, std::memory_order_relaxed);
     }
     static std::uint64_t idleMuxLowBytes() {
-        std::uint64_t ov = idleMuxLowBytesOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        std::uint64_t def = 4ull * 1024ull * 1024ull;
-        if (const char* s = std::getenv("YAMS_IDLE_MUX_LOW_BYTES")) {
-            try {
-                return static_cast<std::uint64_t>(std::stoull(s));
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint64Override(idleMuxLowBytesOverride_, "YAMS_IDLE_MUX_LOW_BYTES",
+                                  4ull * 1024ull * 1024ull, 0ull, UINT64_MAX);
     }
     static void setIdleMuxLowBytes(std::uint64_t b) {
         idleMuxLowBytesOverride_.store(b, std::memory_order_relaxed);
     }
     static uint32_t idleShrinkHoldMs() {
-        uint32_t ov = idleShrinkHoldMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 5000;
-        if (const char* s = std::getenv("YAMS_IDLE_SHRINK_HOLD_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 500 && v <= 60000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(idleShrinkHoldMsOverride_, "YAMS_IDLE_SHRINK_HOLD_MS", 5000u,
+                                  500u, 60000u);
     }
     static void setIdleShrinkHoldMs(uint32_t ms) {
         idleShrinkHoldMsOverride_.store(ms, std::memory_order_relaxed);
@@ -1261,37 +1226,13 @@ public:
             default:
                 break;
         }
-        uint32_t def = 500;
-        if (const char* s = std::getenv("YAMS_POOL_COOLDOWN_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                // v is unsigned; the lower-bound check is redundant on some compilers
-                if (v <= 60000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return parseBoundedUintEnvNow("YAMS_POOL_COOLDOWN_MS", 0u, 60000u).value_or(500u);
     }
     static void setPoolCooldownMs(uint32_t ms) {
         poolCooldownMsOverride_.store(ms, std::memory_order_relaxed);
     }
     static int poolScaleStep() {
-        int ov = poolScaleStepOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        int def = 1;
-        if (const char* s = std::getenv("YAMS_POOL_SCALE_STEP")) {
-            try {
-                int v = std::stoi(s);
-                if (v >= 1 && v <= 16)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readPositiveIntOverride(poolScaleStepOverride_, "YAMS_POOL_SCALE_STEP", 1, 1, 16);
     }
     static void setPoolScaleStep(int step) {
         poolScaleStepOverride_.store(step, std::memory_order_relaxed);
@@ -1299,131 +1240,43 @@ public:
 
     // Pool defaults (IPC CPU and IO pools)
     static uint32_t poolMinSizeIpc() {
-        uint32_t ov = poolMinSizeIpcOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 1;
-        if (const char* s = std::getenv("YAMS_POOL_IPC_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolMinSizeIpcOverride_, "YAMS_POOL_IPC_MIN", 1u, 1u, 1024u);
     }
     static void setPoolMinSizeIpc(uint32_t v) {
         poolMinSizeIpcOverride_.store(v, std::memory_order_relaxed);
     }
     static uint32_t poolMaxSizeIpc() {
-        uint32_t ov = poolMaxSizeIpcOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 32;
-        if (const char* s = std::getenv("YAMS_POOL_IPC_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 4096)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolMaxSizeIpcOverride_, "YAMS_POOL_IPC_MAX", 32u, 1u, 4096u);
     }
     static void setPoolMaxSizeIpc(uint32_t v) {
         poolMaxSizeIpcOverride_.store(v, std::memory_order_relaxed);
     }
     static uint32_t poolMinSizeIpcIo() {
-        uint32_t ov = poolMinSizeIpcIoOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 1;
-        if (const char* s = std::getenv("YAMS_POOL_IO_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolMinSizeIpcIoOverride_, "YAMS_POOL_IO_MIN", 1u, 1u, 1024u);
     }
     static void setPoolMinSizeIpcIo(uint32_t v) {
         poolMinSizeIpcIoOverride_.store(v, std::memory_order_relaxed);
     }
     static uint32_t poolMaxSizeIpcIo() {
-        uint32_t ov = poolMaxSizeIpcIoOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 32;
-        if (const char* s = std::getenv("YAMS_POOL_IO_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 4096)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolMaxSizeIpcIoOverride_, "YAMS_POOL_IO_MAX", 32u, 1u, 4096u);
     }
     static void setPoolMaxSizeIpcIo(uint32_t v) {
         poolMaxSizeIpcIoOverride_.store(v, std::memory_order_relaxed);
     }
     static uint32_t poolLowWatermarkPercent() {
-        uint32_t ov = poolLowWatermarkPctOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 25;
-        if (const char* s = std::getenv("YAMS_POOL_LOW_WATERMARK_PCT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolLowWatermarkPctOverride_, "YAMS_POOL_LOW_WATERMARK_PCT", 25u,
+                                  0u, 100u);
     }
     static uint32_t poolHighWatermarkPercent() {
-        uint32_t ov = poolHighWatermarkPctOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 85;
-        if (const char* s = std::getenv("YAMS_POOL_HIGH_WATERMARK_PCT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(poolHighWatermarkPctOverride_, "YAMS_POOL_HIGH_WATERMARK_PCT",
+                                  85u, 0u, 100u);
     }
     // -------- Connection slot dynamic sizing (PBI-085) --------
     // Minimum connection slots (floor for dynamic resizing). Default 256.
     // Environment: YAMS_CONN_SLOTS_MIN (range 1..1024)
     static uint32_t connectionSlotsMin() {
-        uint32_t ov = connectionSlotsMinOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 256;
-        if (const char* s = std::getenv("YAMS_CONN_SLOTS_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(connectionSlotsMinOverride_, "YAMS_CONN_SLOTS_MIN", 256u, 1u,
+                                  1024u);
     }
     static void setConnectionSlotsMin(uint32_t v) {
         connectionSlotsMinOverride_.store(v, std::memory_order_relaxed);
@@ -1432,20 +1285,8 @@ public:
     // Maximum connection slots (ceiling for dynamic resizing). Default 4096.
     // Environment: YAMS_CONN_SLOTS_MAX (range 64..16384)
     static uint32_t connectionSlotsMax() {
-        uint32_t ov = connectionSlotsMaxOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 4096;
-        if (const char* s = std::getenv("YAMS_CONN_SLOTS_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 64 && v <= 16384)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(connectionSlotsMaxOverride_, "YAMS_CONN_SLOTS_MAX", 4096u, 64u,
+                                  16384u);
     }
     static void setConnectionSlotsMax(uint32_t v) {
         connectionSlotsMaxOverride_.store(v, std::memory_order_relaxed);
@@ -1454,20 +1295,8 @@ public:
     // Scale step for connection slot resizing. Default 16.
     // Environment: YAMS_CONN_SLOTS_STEP (range 1..128)
     static uint32_t connectionSlotsScaleStep() {
-        uint32_t ov = connectionSlotsScaleStepOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 16;
-        if (const char* s = std::getenv("YAMS_CONN_SLOTS_STEP")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 128)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
+        return readUint32Override(connectionSlotsScaleStepOverride_, "YAMS_CONN_SLOTS_STEP", 16u,
+                                  1u, 128u);
     }
     static void setConnectionSlotsScaleStep(uint32_t v) {
         connectionSlotsScaleStepOverride_.store(v, std::memory_order_relaxed);
@@ -1499,19 +1328,9 @@ public:
         return static_cast<uint32_t>(computed);
     }
     static uint32_t searchConcurrencyLimit() {
-        uint32_t ov = searchConcurrencyOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_SEARCH_MAX_CONCURRENT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 512)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return defaultReadPathCapacityModel(hardwareConcurrency()).searchConcurrencyLimit;
+        return readUint32Override(
+            searchConcurrencyOverride_, "YAMS_SEARCH_MAX_CONCURRENT",
+            defaultReadPathCapacityModel(hardwareConcurrency()).searchConcurrencyLimit, 1u, 512u);
     }
     static uint32_t readPoolMaxConnections(uint32_t configuredMax) {
         return defaultReadPoolMaxConnectionsForHw(hardwareConcurrency(), configuredMax);

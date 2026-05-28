@@ -37,6 +37,7 @@
 
 #include "common/fixture_manager.h"
 #include "common/test_data_generator.h"
+#include "common/test_helpers_catch2.h"
 
 using namespace yams;
 using namespace yams::app::services;
@@ -57,20 +58,13 @@ public:
     void setGetDocumentByHashFailures(std::size_t count) { getDocumentByHashFailures_ = count; }
 
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override {
-        if (consume(getDocumentByHashFailures_)) {
+        if (yams::test::consume_failure(getDocumentByHashFailures_)) {
             return Error{ErrorCode::NotInitialized, "metadata warming up"};
         }
         return MetadataRepository::getDocumentByHash(hash);
     }
 
 private:
-    static bool consume(std::size_t& counter) {
-        if (counter == 0)
-            return false;
-        --counter;
-        return true;
-    }
-
     std::size_t getDocumentByHashFailures_{0};
 };
 

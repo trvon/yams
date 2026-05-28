@@ -28,6 +28,10 @@ bool isPathTrusted(const std::filesystem::path& pluginPath,
 // Plugin Resolution
 // ============================================================================
 
+/// Remove duplicate plugin roots while preserving first-seen order.
+/// Identity is based on each path's lexical normalization string.
+std::vector<std::filesystem::path> dedupePluginRoots(std::vector<std::filesystem::path> roots);
+
 /// Get default plugin search directories for the current platform
 /// @return Vector of plugin directory paths
 std::vector<std::filesystem::path> getPluginSearchDirs();

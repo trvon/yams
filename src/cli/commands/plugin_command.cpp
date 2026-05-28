@@ -11,6 +11,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/plugin_helpers.h>
+#include <yams/cli/plugin_util.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -22,20 +23,6 @@
 #include <yams/plugins/plugin_repo_client.hpp>
 
 namespace yams::cli {
-
-static auto dedupePluginRoots(std::vector<std::filesystem::path> roots)
-    -> std::vector<std::filesystem::path> {
-    std::set<std::string> seen;
-    std::vector<std::filesystem::path> unique;
-    unique.reserve(roots.size());
-    for (const auto& p : roots) {
-        auto key = p.lexically_normal().string();
-        if (seen.insert(key).second) {
-            unique.push_back(p);
-        }
-    }
-    return unique;
-}
 
 class PluginCommand : public ICommand {
 public:
@@ -860,7 +847,7 @@ void PluginCommand::trustList(bool details) {
                                        "plugins");
 #endif
             }
-            defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+            defaultRoots = plugin::dedupePluginRoots(std::move(defaultRoots));
 
             std::cout << "Strict plugin-dir mode: " << (strictMode ? "on" : "off") << "\n";
             std::cout << "Default plugin roots (" << defaultRoots.size() << "):\n";
@@ -1072,7 +1059,7 @@ void PluginCommand::trustStatus() {
                                "plugins");
 #endif
     }
-    defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+    defaultRoots = plugin::dedupePluginRoots(std::move(defaultRoots));
 
     std::set<std::string> effectiveRoots;
     for (const auto& p : defaultRoots) {

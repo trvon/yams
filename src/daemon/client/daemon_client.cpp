@@ -63,20 +63,6 @@
 namespace yams::daemon {
 
 namespace {
-inline std::string sanitize_for_terminal(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    for (unsigned char c : in) {
-        if (c >= 0x20 && c <= 0x7E) {
-            out.push_back(static_cast<char>(c));
-        } else if (c == '\n' || c == '\r' || c == '\t') {
-            out.push_back(static_cast<char>(c));
-        } else {
-            out.push_back('?');
-        }
-    }
-    return out;
-}
 
 void log_client_debug(const char* message) noexcept {
     try {
@@ -924,7 +910,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Auto-start path
     if (auto result = startDaemon(impl->config_); !result) {
         spdlog::warn("Failed to auto-start daemon: {}",
-                     sanitize_for_terminal(result.error().message));
+                     yams::common::sanitizeForTerminal(result.error().message));
         spdlog::info("Please manually start the daemon with: yams daemon start");
         co_return result.error();
     }

@@ -1,5 +1,5 @@
-#include <yams/cli/doctor/plugin_trust.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor/plugin_trust.h>
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
@@ -7,25 +7,11 @@
 #include <yams/daemon/client/daemon_client.h>
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <system_error>
 
 namespace yams::cli::doctor {
-
-namespace {
-
-bool parseBoolValue(std::string value, bool fallback) {
-    if (value.empty()) {
-        return fallback;
-    }
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value == "1" || value == "true" || value == "yes" || value == "on";
-}
-
-} // namespace
 
 std::set<std::filesystem::path> PluginTrust::readTrusted() {
     return plugin::readTrustedRoots();
@@ -36,12 +22,12 @@ bool PluginTrust::resolveStrictPluginDirMode() {
     try {
         auto cfg = yams::config::parse_simple_toml(yams::config::get_config_path());
         if (auto it = cfg.find("daemon.plugin_dir_strict"); it != cfg.end()) {
-            strictMode = parseBoolValue(it->second, strictMode);
+            strictMode = yams::config::parse_bool(it->second, strictMode);
         }
     } catch (...) {
     }
     if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-        strictMode = parseBoolValue(envStrict, strictMode);
+        strictMode = yams::config::parse_bool(envStrict, strictMode);
     }
     return strictMode;
 }

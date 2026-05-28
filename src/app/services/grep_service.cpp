@@ -6,6 +6,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/metadata/kg_relation_summary.h>
@@ -23,7 +24,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -117,58 +117,10 @@ static std::filesystem::path resolveConfigPath() {
     return {};
 }
 
-static std::map<std::string, std::string> parseConfigForKeys(const std::filesystem::path& path) {
-    std::map<std::string, std::string> out;
-    std::ifstream file(path);
-    if (!file)
-        return out;
-
-    std::string line;
-    std::string currentSection;
-
-    auto trim = [](std::string s) {
-        auto issp = [](unsigned char c) { return std::isspace(c) != 0; };
-        while (!s.empty() && issp(static_cast<unsigned char>(s.front())))
-            s.erase(s.begin());
-        while (!s.empty() && issp(static_cast<unsigned char>(s.back())))
-            s.pop_back();
-        return s;
-    };
-
-    while (std::getline(file, line)) {
-        auto comment = line.find('#');
-        if (comment != std::string::npos)
-            line.resize(comment);
-        line = trim(line);
-        if (line.empty())
-            continue;
-
-        if (line.front() == '[' && line.back() == ']') {
-            currentSection = line.substr(1, line.size() - 2);
-            continue;
-        }
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos)
-            continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-        if (!value.empty() && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-        }
-        if (!currentSection.empty()) {
-            out[currentSection + "." + key] = value;
-        } else {
-            out[key] = value;
-        }
-    }
-    return out;
-}
-
 static PathTreeConfigSettings loadPathTreeConfigSettings() {
     PathTreeConfigSettings cfg;
     if (auto cfgPath = resolveConfigPath(); !cfgPath.empty()) {
-        auto values = parseConfigForKeys(cfgPath);
+        auto values = yams::config::parse_simple_toml(cfgPath);
         if (auto it = values.find("search.path_tree.enable"); it != values.end()) {
             auto v = toLowerCopy(it->second);
             cfg.enabled = (v == "1" || v == "true" || v == "yes" || v == "on");

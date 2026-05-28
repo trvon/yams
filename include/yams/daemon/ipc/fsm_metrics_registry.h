@@ -33,6 +33,8 @@
 #include <thread>
 #include <type_traits>
 
+#include <yams/common/metric_helpers.h>
+
 namespace yams {
 namespace daemon {
 
@@ -84,49 +86,31 @@ public:
 
     // Incremental counters (fast-path; relaxed atomics)
     inline void incrementTransitions(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().transitions.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.transitions; }, n);
     }
     inline void incrementHeaderReads(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().headerReads.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.headerReads; }, n);
     }
     inline void incrementPayloadReads(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().payloadReads.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.payloadReads; }, n);
     }
     inline void incrementPayloadWrites(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().payloadWrites.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.payloadWrites; }, n);
     }
     inline void addBytesSent(uint64_t n) noexcept {
-        if (!enabled())
-            return;
-        shard().bytesSent.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.bytesSent; }, n);
     }
     inline void addBytesReceived(uint64_t n) noexcept {
-        if (!enabled())
-            return;
-        shard().bytesReceived.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.bytesReceived; }, n);
     }
     inline void incrementTimeouts(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().timeouts.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.timeouts; }, n);
     }
     inline void incrementRetries(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().retries.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.retries; }, n);
     }
     inline void incrementErrors(uint64_t n = 1) noexcept {
-        if (!enabled())
-            return;
-        shard().errors.fetch_add(n, std::memory_order_relaxed);
+        incrementCounter([](auto& s) -> auto& { return s.errors; }, n);
     }
 
     // Aggregate a snapshot across shards (read-only)
@@ -217,6 +201,12 @@ private:
 
     inline Shard& shard() noexcept { return shards_[shard_index()]; }
     inline const Shard& shard() const noexcept { return shards_[shard_index()]; }
+
+    template <typename CounterSelector>
+    inline void incrementCounter(CounterSelector&& selectCounter, uint64_t n) noexcept {
+        yams::common::metrics::incrementIfEnabled(
+            enabled(), [&]() -> auto& { return selectCounter(shard()); }, n);
+    }
 
     std::atomic<bool> enabled_;
     std::array<Shard, kDefaultShards> shards_{};

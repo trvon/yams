@@ -13,6 +13,8 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/content/content_handler.h>
+#include <yams/content/processing_error.h>
+#include <yams/content/processing_stats.h>
 #include <yams/core/format.h>
 #include <yams/detection/file_type_detector.h>
 
@@ -223,21 +225,15 @@ public:
         size_t totalArchiveEntriesProcessed = 0;
 
         [[nodiscard]] double successRate() const noexcept {
-            return totalFilesProcessed > 0
-                       ? static_cast<double>(successfulProcessing) / totalFilesProcessed
-                       : 0.0;
+            return content::successRate(totalFilesProcessed, successfulProcessing);
         }
 
         [[nodiscard]] double averageProcessingTimeMs() const noexcept {
-            return totalFilesProcessed > 0
-                       ? static_cast<double>(totalProcessingTime.count()) / totalFilesProcessed
-                       : 0.0;
+            return content::averageProcessingTimeMs(totalProcessingTime, totalFilesProcessed);
         }
 
         [[nodiscard]] double averageEntriesPerArchive() const noexcept {
-            return totalFilesProcessed > 0
-                       ? static_cast<double>(totalArchiveEntriesProcessed) / totalFilesProcessed
-                       : 0.0;
+            return content::averageCount(totalArchiveEntriesProcessed, totalFilesProcessed);
         }
     };
 
@@ -300,9 +296,8 @@ private:
     [[nodiscard]] std::string formatError(std::string_view operation,
                                           const std::filesystem::path& path, auto fmt,
                                           Args&&... args) const {
-        auto details = yams::format(fmt, std::forward<Args>(args)...);
-        return yams::format("Archive processing failed: {} for '{}' - {}", operation, path.string(),
-                            details);
+        return content::formatProcessingError("Archive", operation, path, fmt,
+                                              std::forward<Args>(args)...);
     }
 
     /**

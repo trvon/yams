@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <yams/common/time_utils.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/core/atomic_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -29,6 +30,7 @@
 #include <yams/profiling.h>
 #include <yams/search/symspell_search.h>
 #include <yams/storage/corpus_stats.h>
+#include <yams/storage/sqlite_retry.h>
 
 // Phase 2: MetadataRepository refactor - ADR-0004
 // Using result helpers for reduced error handling boilerplate
@@ -311,22 +313,21 @@ beginTransactionWithRetry(Database& db, int maxRetries = 5,
     // Standard SQLite: single-writer model. BEGIN IMMEDIATE acquires write lock
     // immediately but fails fast when another writer holds a lock.
     // Retry with exponential backoff to handle transient lock contention.
-    auto backoff = initialBackoff;
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+    const storage::sqlite_retry::BusyRetryPolicy retryPolicy{maxRetries, initialBackoff};
+    auto backoff = retryPolicy.initialBackoff;
+    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
         auto result = db.execute("BEGIN IMMEDIATE");
         if (result) {
             return result;
         }
         // Check if it's a lock error (worth retrying)
         const auto& errMsg = result.error().message;
-        if (errMsg.find("locked") == std::string::npos &&
-            errMsg.find("busy") == std::string::npos) {
+        if (!storage::sqlite_retry::isBusyOrLockedMessage(errMsg)) {
             // Not a lock error, don't retry.
             return Error{result.error().code, result.error().message};
         }
-        if (attempt + 1 < maxRetries) {
-            std::this_thread::sleep_for(backoff);
-            backoff *= 2; // Exponential backoff
+        if (attempt + 1 < retryPolicy.maxRetries) {
+            storage::sqlite_retry::sleepAndBackoff(backoff);
         }
     }
     return Error{ErrorCode::DatabaseError, "BEGIN IMMEDIATE failed after retries: database locked"};
@@ -3284,8 +3285,7 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
-            auto sinceUnix =
-                std::chrono::duration_cast<std::chrono::seconds>(since.time_since_epoch()).count();
+            const auto sinceUnix = yams::common::timePointToEpochSeconds(since);
 
             QuerySpec spec{};
             spec.table = "documents";
@@ -6597,8 +6597,7 @@ MetadataQueryBuilder& MetadataQueryBuilder::withPathContaining(const std::string
 MetadataQueryBuilder&
 MetadataQueryBuilder::modifiedAfter(std::chrono::system_clock::time_point time) {
     conditions_.push_back("modified_time >= ?");
-    auto unixTime =
-        std::chrono::duration_cast<std::chrono::seconds>(time.time_since_epoch()).count();
+    const auto unixTime = yams::common::timePointToEpochSeconds(time);
     parameters_.push_back(std::to_string(unixTime));
     return *this;
 }
@@ -6606,8 +6605,7 @@ MetadataQueryBuilder::modifiedAfter(std::chrono::system_clock::time_point time) 
 MetadataQueryBuilder&
 MetadataQueryBuilder::modifiedBefore(std::chrono::system_clock::time_point time) {
     conditions_.push_back("modified_time <= ?");
-    auto unixTime =
-        std::chrono::duration_cast<std::chrono::seconds>(time.time_since_epoch()).count();
+    const auto unixTime = yams::common::timePointToEpochSeconds(time);
     parameters_.push_back(std::to_string(unixTime));
     return *this;
 }
@@ -6615,8 +6613,7 @@ MetadataQueryBuilder::modifiedBefore(std::chrono::system_clock::time_point time)
 MetadataQueryBuilder&
 MetadataQueryBuilder::indexedAfter(std::chrono::system_clock::time_point time) {
     conditions_.push_back("indexed_time >= ?");
-    auto unixTime =
-        std::chrono::duration_cast<std::chrono::seconds>(time.time_since_epoch()).count();
+    const auto unixTime = yams::common::timePointToEpochSeconds(time);
     parameters_.push_back(std::to_string(unixTime));
     return *this;
 }

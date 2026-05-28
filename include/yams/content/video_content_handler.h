@@ -12,6 +12,8 @@
 #include <vector>
 #include <yams/common/format.h>
 #include <yams/content/content_handler.h>
+#include <yams/content/processing_error.h>
+#include <yams/content/processing_stats.h>
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::content {
@@ -341,15 +343,11 @@ public:
         size_t totalBytesProcessed = 0;
 
         [[nodiscard]] double successRate() const noexcept {
-            return totalFilesProcessed > 0
-                       ? static_cast<double>(successfulProcessing) / totalFilesProcessed
-                       : 0.0;
+            return content::successRate(totalFilesProcessed, successfulProcessing);
         }
 
         [[nodiscard]] double averageProcessingTimeMs() const noexcept {
-            return totalFilesProcessed > 0
-                       ? static_cast<double>(totalProcessingTime.count()) / totalFilesProcessed
-                       : 0.0;
+            return content::averageProcessingTimeMs(totalProcessingTime, totalFilesProcessed);
         }
     };
 
@@ -443,9 +441,8 @@ private:
                                           fmt::format_string<Args...> fmt,
 #endif
                                           Args&&... args) const {
-        auto details = yams::fmt_format(fmt, std::forward<Args>(args)...);
-        return yams::fmt_format("Video processing failed: {} for '{}' - {}", operation,
-                                path.string(), details);
+        return content::formatProcessingError("Video", operation, path, fmt,
+                                              std::forward<Args>(args)...);
     }
 
     /**

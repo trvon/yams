@@ -8,6 +8,7 @@
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/common/string_utils.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
@@ -486,9 +487,7 @@ static bool looksLikePathQuery(const std::string& raw) {
 }
 
 static std::string toLowerAscii(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 static std::size_t pathDepth(std::string_view path) {

@@ -9,6 +9,7 @@
 #include <set>
 #include <sstream>
 #include <yams/cli/command.h>
+#include <yams/cli/plugin_util.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
@@ -21,19 +22,6 @@
 namespace yams::cli {
 
 namespace fs = std::filesystem;
-
-static auto dedupePluginRoots(std::vector<fs::path> roots) -> std::vector<fs::path> {
-    std::set<std::string> seen;
-    std::vector<fs::path> unique;
-    unique.reserve(roots.size());
-    for (const auto& p : roots) {
-        auto key = p.lexically_normal().string();
-        if (seen.insert(key).second) {
-            unique.push_back(p);
-        }
-    }
-    return unique;
-}
 
 class ConfigCommand : public ICommand {
 public:
@@ -744,11 +732,7 @@ private:
 
     // Helper method to write config values
     Result<void> writeConfigValue(const std::string& key, const std::string& value) {
-        auto configPath = getConfigPath();
-        if (yams::config::write_config_value(configPath, key, value)) {
-            return Result<void>();
-        }
-        return Error{ErrorCode::WriteError, "Failed to write config key: " + key};
+        return writeConfigValueResult(getConfigPath(), key, value);
     }
 
     Result<void> executeTuningProfile() {
@@ -830,18 +814,10 @@ private:
                 return fallback;
             };
 
-            auto parseBool = [](std::string value, bool fallback) {
-                if (value.empty())
-                    return fallback;
-                std::ranges::transform(value, value.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                });
-                return value == "1" || value == "true" || value == "yes" || value == "on";
-            };
-
-            bool strictMode = parseBool(getValue("daemon.plugin_dir_strict", "false"), false);
+            bool strictMode =
+                yams::config::parse_bool(getValue("daemon.plugin_dir_strict", "false"), false);
             if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-                strictMode = parseBool(envStrict, strictMode);
+                strictMode = yams::config::parse_bool(envStrict, strictMode);
             }
 
             std::vector<std::filesystem::path> defaultRoots;
@@ -864,7 +840,7 @@ private:
                                        "plugins");
 #endif
             }
-            defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+            defaultRoots = plugin::dedupePluginRoots(std::move(defaultRoots));
 
             std::cout << ui::section_header("Daemon Plugin Configuration") << "\n";
             std::cout << "Config file: " << configPath << "\n";
@@ -1308,17 +1284,9 @@ private:
             bool hasConfig = fs::exists(configPath);
             auto config = parseSimpleToml(configPath);
 
-            auto toLower = [](std::string v) {
-                std::ranges::transform(v, v.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                });
-                return v;
-            };
-
             bool enabled = false;
             if (auto it = config.find("search.path_tree.enable"); it != config.end()) {
-                auto lowered = toLower(it->second);
-                enabled = (lowered == "true" || lowered == "1" || lowered == "yes");
+                enabled = yams::config::parse_bool(it->second, false);
             }
 
             std::string mode = "fallback";

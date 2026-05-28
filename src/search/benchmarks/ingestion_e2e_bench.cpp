@@ -44,6 +44,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -56,6 +57,25 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 using json = nlohmann::json;
+
+namespace {
+
+int64_t nonNegativeDeltaMs(int64_t endMs, int64_t startMs) noexcept {
+    return endMs > startMs ? endMs - startMs : 0;
+}
+
+uint64_t counterDelta(uint64_t current, uint64_t baseline) noexcept {
+    return current > baseline ? current - baseline : 0;
+}
+
+uint64_t saturatedAdd(uint64_t lhs, uint64_t rhs) noexcept {
+    if (lhs > std::numeric_limits<uint64_t>::max() - rhs) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return lhs + rhs;
+}
+
+} // namespace
 
 // ============================================================================
 // SimpleDaemonHarness - Minimal daemon lifecycle for benchmarking
@@ -411,7 +431,7 @@ struct StageMetrics {
     uint64_t count = 0;
     uint64_t failures = 0;
 
-    int64_t duration_ms() const { return end_ms > start_ms ? end_ms - start_ms : 0; }
+    int64_t duration_ms() const { return nonNegativeDeltaMs(end_ms, start_ms); }
 
     json toJson() const {
         return json{{"name", name},
@@ -734,7 +754,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     result.metadata_storage.failures = failCount;
 
     spdlog::info("Ingestion complete: {} succeeded, {} failed in {} ms", successCount, failCount,
-                 ingestEndMs - ingestStartMs);
+                 nonNegativeDeltaMs(ingestEndMs, ingestStartMs));
 
     // Phase 5: Monitor pipeline completion via InternalEventBus
     spdlog::info("Phase 5: Monitoring pipeline completion...");
@@ -774,26 +794,25 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.max_post_ingest = std::max(result.max_post_ingest, postDepth);
 
         // Track dropped batches (excluding warmup baseline)
-        uint64_t embedDroppedDelta = snap.embed_dropped > baselineEmbedDropped
-                                         ? snap.embed_dropped - baselineEmbedDropped
-                                         : 0;
-        uint64_t postDroppedDelta =
-            snap.post_dropped > baselinePostDropped ? snap.post_dropped - baselinePostDropped : 0;
-        result.dropped_batches = snap.fts5_dropped + embedDroppedDelta + postDroppedDelta;
+        uint64_t embedDroppedDelta = counterDelta(snap.embed_dropped, baselineEmbedDropped);
+        uint64_t postDroppedDelta = counterDelta(snap.post_dropped, baselinePostDropped);
+        result.dropped_batches =
+            saturatedAdd(saturatedAdd(snap.fts5_dropped, embedDroppedDelta), postDroppedDelta);
 
         // Check if all stages have processed all documents (relative to baseline)
         // FTS5 happens in post-ingest, so we only check post and embed completion
-        uint64_t embedProcessedDelta = (snap.embed_consumed - baselineEmbedConsumed) +
-                                       (snap.embed_dropped - baselineEmbedDropped);
+        uint64_t embedProcessedDelta = saturatedAdd(
+            counterDelta(snap.embed_consumed, baselineEmbedConsumed), embedDroppedDelta);
         uint64_t postProcessedDelta =
-            (snap.post_consumed - baselinePostConsumed) + (snap.post_dropped - baselinePostDropped);
+            saturatedAdd(counterDelta(snap.post_consumed, baselinePostConsumed), postDroppedDelta);
 
         bool embedComplete = embedProcessedDelta >= expectedEmbed;
         bool postComplete = postProcessedDelta >= expectedPost;
 
         allStagesComplete = embedComplete && postComplete;
 
-        if ((snap.timestamp_ms - initialSnap.timestamp_ms) % 1000 < pollIntervalMs) {
+        if (nonNegativeDeltaMs(snap.timestamp_ms, initialSnap.timestamp_ms) % 1000 <
+            pollIntervalMs) {
             spdlog::info("Pipeline status: post={}/{} (includes FTS5) embed={}/{}",
                          postProcessedDelta, expectedPost, embedProcessedDelta, expectedEmbed);
         }
@@ -812,14 +831,15 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             result.embedding_generation.name = "embedding_generation";
             result.embedding_generation.start_ms = ingestStartMs;
             result.embedding_generation.end_ms = now;
-            result.embedding_generation.count = snap.embed_consumed - baselineEmbedConsumed;
-            result.embedding_generation.failures = snap.embed_dropped - baselineEmbedDropped;
+            result.embedding_generation.count =
+                counterDelta(snap.embed_consumed, baselineEmbedConsumed);
+            result.embedding_generation.failures = embedDroppedDelta;
 
             result.kg_extraction.name = "kg_extraction";
             result.kg_extraction.start_ms = ingestStartMs;
             result.kg_extraction.end_ms = now;
-            result.kg_extraction.count = snap.post_consumed - baselinePostConsumed;
-            result.kg_extraction.failures = snap.post_dropped - baselinePostDropped;
+            result.kg_extraction.count = counterDelta(snap.post_consumed, baselinePostConsumed);
+            result.kg_extraction.failures = postDroppedDelta;
 
             spdlog::info("All pipeline stages complete!");
             break;
@@ -831,8 +851,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     }
 
     int64_t totalEndMs = nowMs();
-    result.total_duration_ms = totalEndMs - ingestStartMs;
-    result.throughput_docs_per_sec = successCount / (result.total_duration_ms / 1000.0);
+    result.total_duration_ms = nonNegativeDeltaMs(totalEndMs, ingestStartMs);
+    result.throughput_docs_per_sec =
+        result.total_duration_ms > 0 ? successCount / (result.total_duration_ms / 1000.0) : 0.0;
     if (serviceManager) {
         result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {

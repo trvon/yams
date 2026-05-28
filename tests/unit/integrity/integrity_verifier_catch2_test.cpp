@@ -86,7 +86,9 @@ struct IntegrityVerifierFixture {
             std::ofstream file(blockPath, std::ios::binary | std::ios::out);
             if (file.is_open()) {
                 std::string corruptData = "CORRUPTED DATA";
-                file.write(corruptData.data(), corruptData.size());
+                file.write(corruptData.data(),
+                           yams::test::checked_streamsize(corruptData.size(),
+                                                          "integrity corrupt fixture"));
                 file.close();
             }
         }

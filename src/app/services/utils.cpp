@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 
+#include <yams/common/string_utils.h>
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::app::services::utils {
@@ -30,9 +31,7 @@ std::string trimCopy(const std::string& value) {
 }
 
 std::string toLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
+    return yams::common::asciiToLowerCopy(std::move(value));
 }
 
 std::int64_t nowEpochSeconds() {
@@ -366,11 +365,7 @@ NormalizedLookupPath normalizeLookupPath(const std::string& path) {
 }
 
 std::string classifyFileType(const std::string& mimeType, const std::string& extension) {
-    auto toLower = [](std::string in) {
-        std::transform(in.begin(), in.end(), in.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return in;
-    };
+    auto toLower = [](std::string in) { return yams::common::asciiToLowerCopy(std::move(in)); };
 
     std::string normalizedExt = extension;
     if (!normalizedExt.empty() && normalizedExt.front() != '.')

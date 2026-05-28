@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/compat/unistd.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -98,6 +99,52 @@ struct EnvGuard {
 };
 
 } // namespace
+
+TEST_CASE("TuneAdvisor bounded override readers share env and override behavior",
+          "[daemon][components][tuning][catch2]") {
+    TuneAdvisor::setWorkerPollMs(0);
+    TuneAdvisor::setPoolScaleStep(0);
+    TuneAdvisor::setConnectionSlotsScaleStep(0);
+
+    {
+        EnvGuard env("YAMS_WORKER_POLL_MS", "75");
+        CHECK(TuneAdvisor::workerPollMs() == 75u);
+
+        TuneAdvisor::setWorkerPollMs(90u);
+        CHECK(TuneAdvisor::workerPollMs() == 90u);
+        TuneAdvisor::setWorkerPollMs(0);
+        CHECK(TuneAdvisor::workerPollMs() == 75u);
+    }
+
+    {
+        EnvGuard env("YAMS_WORKER_POLL_MS", "49");
+        CHECK(TuneAdvisor::workerPollMs() == 150u);
+    }
+
+    {
+        EnvGuard env("YAMS_POOL_SCALE_STEP", "16");
+        CHECK(TuneAdvisor::poolScaleStep() == 16);
+    }
+
+    {
+        EnvGuard env("YAMS_POOL_SCALE_STEP", "17");
+        CHECK(TuneAdvisor::poolScaleStep() == 1);
+    }
+
+    {
+        EnvGuard env("YAMS_CONN_SLOTS_STEP", "128");
+        CHECK(TuneAdvisor::connectionSlotsScaleStep() == 128u);
+    }
+
+    {
+        EnvGuard env("YAMS_CONN_SLOTS_STEP", "129");
+        CHECK(TuneAdvisor::connectionSlotsScaleStep() == 16u);
+    }
+
+    TuneAdvisor::setWorkerPollMs(0);
+    TuneAdvisor::setPoolScaleStep(0);
+    TuneAdvisor::setConnectionSlotsScaleStep(0);
+}
 
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
           "[daemon][components][config][chunking][catch2]") {
@@ -272,6 +319,28 @@ key2 = "value2"
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
         CHECK(config["section1.key1"] == "value1");
         CHECK(config["section2.key2"] == "value2");
+    }
+
+    SECTION("daemon resolver delegates to shared parser semantics") {
+        auto configPath = writeToml("shared_semantics.toml", R"(
+top_level = "root" # inline comment
+
+[search.path_tree]
+enable = true
+mode = "preferred"
+quoted_hash = "# not a comment"
+
+[daemon]
+socket_path = "/tmp/yams.sock"
+)");
+
+        auto resolverConfig = ConfigResolver::parseSimpleTomlFlat(configPath);
+        auto sharedConfig = yams::config::parse_simple_toml(configPath);
+        CHECK(resolverConfig == sharedConfig);
+        CHECK(resolverConfig["top_level"] == "root");
+        CHECK(resolverConfig["search.path_tree.enable"] == "true");
+        CHECK(resolverConfig["search.path_tree.mode"] == "preferred");
+        CHECK(resolverConfig["search.path_tree.quoted_hash"] == "# not a comment");
     }
 }
 

@@ -14,20 +14,6 @@ namespace yams::api {
 
 using json = nlohmann::json;
 
-namespace {
-
-void populateDerivedPathFields(metadata::DocumentInfo& info) {
-    auto derived = metadata::computePathDerivedValues(info.filePath);
-    info.filePath = std::move(derived.normalizedPath);
-    info.pathPrefix = std::move(derived.pathPrefix);
-    info.reversePath = std::move(derived.reversePath);
-    info.pathHash = std::move(derived.pathHash);
-    info.parentHash = std::move(derived.parentHash);
-    info.pathDepth = derived.pathDepth;
-}
-
-} // namespace
-
 MetadataApi::MetadataApi(std::shared_ptr<metadata::MetadataRepository> repository,
                          const MetadataApiConfig& config)
     : repository_(repository), config_(config) {
@@ -45,7 +31,7 @@ CreateMetadataResponse MetadataApi::createMetadata(const CreateMetadataRequest& 
 
     try {
         metadata::DocumentMetadata requestCopy = request.metadata;
-        populateDerivedPathFields(requestCopy.info);
+        metadata::populatePathDerivedFields(requestCopy.info);
 
         // Validate request
         if (config_.enableValidation) {
@@ -561,7 +547,7 @@ ImportMetadataResponse MetadataApi::importMetadata(const ImportMetadataRequest& 
 
         // Process each document
         for (auto& doc : documents) {
-            populateDerivedPathFields(doc.info);
+            metadata::populatePathDerivedFields(doc.info);
 
             // Check for existing document using normalized hash lookup
             auto existing = repository_->findDocumentByExactPath(doc.info.filePath);
@@ -646,7 +632,7 @@ ValidateMetadataResponse MetadataApi::validateMetadata(const ValidateMetadataReq
         // Check uniqueness if requested
         if (request.checkUniqueness) {
             auto infoCopy = request.metadata.info;
-            populateDerivedPathFields(infoCopy);
+            metadata::populatePathDerivedFields(infoCopy);
             auto existing = repository_->findDocumentByExactPath(infoCopy.filePath);
             if (existing && existing.value().has_value()) {
                 ValidateMetadataResponse::ValidationError error;
