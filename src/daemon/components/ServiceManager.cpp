@@ -1414,12 +1414,15 @@ void ServiceManager::shutdown() {
     std::unique_ptr<CheckpointManager> checkpointManagerHold;
 
     // Phase 0: Signal async init coroutine to stop and wait for it to complete
-    // This prevents the coroutine from accessing resources we're about to tear down
+    // This prevents the coroutine from accessing resources we're about to tear down.
+    // Give the coroutine enough time to react to the stop token — database open,
+    // integrity check, and WAL recovery can take many seconds on large DBs.
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
-    if (asyncInit_.requestStopAndWait(std::chrono::seconds(5))) {
+    if (asyncInit_.requestStopAndWait(std::chrono::seconds(30))) {
         spdlog::info("[ServiceManager] Phase 0: Async init completed");
     } else {
-        spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
+        spdlog::warn("[ServiceManager] Phase 0: Async init future timed out after 30s; "
+                     "continuing shutdown anyway");
     }
 
     stopBackgroundTaskManagerForShutdown();
@@ -1912,9 +1915,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
     const auto dbPath = dataDir / "yams.db";
-    (void)(co_await initializeMetadataDatabaseAt(dbPath, token));
+    const bool dbOk = co_await initializeMetadataDatabaseAt(dbPath, token);
     if (token.stop_requested()) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
+    }
+    if (!dbOk) {
+        const std::string errMsg =
+            "Failed to open or migrate the metadata database at " + dbPath.string();
+        spdlog::error("[ServiceManager] {}", errMsg);
+        serviceFsm_.dispatch(InitializationFailedEvent{errMsg});
+        co_return Error{ErrorCode::InternalError, errMsg};
     }
 
     // Phase: mark vectors ready (vector backend initialization is opportunistic)
@@ -2880,11 +2890,32 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
 
 bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
     try {
+        // Phase A: recover stale WAL (can be slow on large DBs).
         recoverStaleWalIfPresent(dbPath);
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after WAL "
+                         "recovery");
+            return false;
+        }
+
+        // Phase B: open the database file.
         if (!openDatabaseOnce(dbPath)) {
             return false;
         }
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after open");
+            database_->close();
+            return false;
+        }
+
+        // Phase C: integrity check (can be very slow on large DBs).
         if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
+            return false;
+        }
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after integrity "
+                         "check");
+            database_->close();
             return false;
         }
 

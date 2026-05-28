@@ -122,7 +122,7 @@ namespace yams::daemon {
 
 static bool isTerminal(ServiceManagerState s) {
     return s == ServiceManagerState::Ready || s == ServiceManagerState::Failed ||
-           s == ServiceManagerState::Stopped;
+           s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
 }
 
 template <typename Event>
