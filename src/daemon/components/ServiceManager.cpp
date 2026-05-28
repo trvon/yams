@@ -1799,6 +1799,26 @@ void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath
                     "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
                 state_.readiness.databaseSalvaged = true;
             }
+            // Clean up corrupt files so the next startup doesn't re-trigger
+            // the same salvage on already-recovered DBs.
+            auto cleanup = removeCorruptDbFiles(salvageDir);
+            spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s) after salvage",
+                         cleanup.removed.size());
+            // Also clean up .recovered-* sentinel files left by quarantineAndRecreate;
+            // they are stale once corrupt files have been salvaged and removed.
+            {
+                std::error_code ec;
+                const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
+                for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
+                    if (ec) {
+                        ec.clear();
+                        continue;
+                    }
+                    if (entry.path().filename().string().rfind(sentinelPrefix, 0) == 0) {
+                        fs::remove(entry.path(), ec);
+                    }
+                }
+            }
         } else {
             spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
         }
@@ -2783,6 +2803,7 @@ void ServiceManager::setDatabasePhase(std::string_view phase) {
 
 void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPath) {
     const std::filesystem::path walPath(dbPath.string() + "-wal");
+    const std::filesystem::path shmPath(dbPath.string() + "-shm");
     if (!std::filesystem::exists(walPath) || !std::filesystem::exists(dbPath)) {
         return;
     }
@@ -2793,7 +2814,12 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
     auto tempDb = std::make_unique<metadata::Database>();
     auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
     if (!openR) {
-        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}", openR.error().message);
+        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}; removing stale WAL to "
+                     "prevent re-triggering recovery on next startup",
+                     openR.error().message);
+        std::error_code ec;
+        std::filesystem::remove(walPath, ec);
+        std::filesystem::remove(shmPath, ec);
         return;
     }
 
@@ -2803,7 +2829,17 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
                      "successfully",
                      walSize);
     } else {
-        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}", cpR.error().message);
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; removing stale WAL "
+                     "to prevent re-triggering recovery on next startup",
+                     cpR.error().message);
+        // The WAL cannot be checkpointed — it is likely from a different daemon
+        // instance or is corrupted.  Remove it so we don't re-trigger recovery
+        // on every startup.
+        tempDb->close();
+        std::error_code ec;
+        std::filesystem::remove(walPath, ec);
+        std::filesystem::remove(shmPath, ec);
+        return;
     }
     tempDb->close();
 }

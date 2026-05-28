@@ -1994,6 +1994,9 @@ private:
                 // when the corpus exceeded the size budget, the daemon stays on
                 // FTS5 only — these keys reflect runtime state, not a blocker
                 // on readiness. Only surface during an active build.
+                // Additionally, once the main search engine is Ready, the Simeon
+                // sub-features (fragment geometry, concept mining) are best-effort
+                // enhancements that should not appear as blockers.
                 auto find = [&](std::string_view k) {
                     auto it = s.readinessStates.find(std::string(k));
                     return it != s.readinessStates.end() && it->second;
@@ -2002,11 +2005,12 @@ private:
                     find(readiness::kSearchEngineLexicalEnhancementConfigured);
                 const bool simeonBuilding =
                     find(readiness::kSearchEngineLexicalEnhancementBuilding);
+                const bool searchEngineReady = find(readiness::kSearchEngine);
                 if ((key == readiness::kSearchEngineLexicalEnhancementConfigured ||
                      key == readiness::kSearchEngineLexicalEnhancementReady ||
                      key == readiness::kSearchEngineLexicalEnhancementBuilding ||
                      key == readiness::kSearchEngineFragmentGeometryReady) &&
-                    !(simeonConfigured && simeonBuilding)) {
+                    (!(simeonConfigured && simeonBuilding) || searchEngineReady)) {
                     return true;
                 }
                 return false;
@@ -3154,6 +3158,7 @@ private:
                 const bool simeonActiveBuild =
                     matchesReady(readiness::kSearchEngineLexicalEnhancementConfigured) &&
                     matchesReady(readiness::kSearchEngineLexicalEnhancementBuilding);
+                const bool searchEngineReady = matchesReady(readiness::kSearchEngine);
                 for (const auto& rd : readinessList) {
                     // Skip "degraded" flags (inverses of ready flags) and items already shown
                     // elsewhere
@@ -3166,7 +3171,8 @@ private:
                     // Skip "build reason" keys - they're informational, not readiness indicators.
                     // The search_engine key itself indicates readiness.
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
-                    bool isSimeonSteady = isSimeonKey(rd.key) && !simeonActiveBuild;
+                    bool isSimeonSteady = (isSimeonKey(rd.key) && !simeonActiveBuild) ||
+                                          (isSimeonKey(rd.key) && searchEngineReady);
 
                     if (!isDegraded && !isAlreadyShown && !isBuildReason && !isSimeonSteady &&
                         rd.issue && !suppressDetailedIssue(lowerLabel)) {
