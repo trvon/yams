@@ -260,10 +260,14 @@ public:
         auto fut = prom->get_future();
         boost::asio::co_spawn(
             getExecutor(),
-            [leaseHandle, req, prom, onEvent]() mutable -> boost::asio::awaitable<void> {
+            [leaseHandle, req, prom, onEvent, &lastProgressAtMs,
+             nowMillis]() mutable -> boost::asio::awaitable<void> {
                 try {
                     auto& client = **leaseHandle;
-                    auto r = co_await client.callRepair(req, onEvent);
+                    auto onActivity = [&lastProgressAtMs, nowMillis]() {
+                        lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
+                    };
+                    auto r = co_await client.callRepair(req, onEvent, onActivity);
                     prom->set_value(std::move(r));
                 } catch (const std::exception& e) {
                     prom->set_value(Error{ErrorCode::InternalError,

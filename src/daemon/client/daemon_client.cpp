@@ -2217,16 +2217,19 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
 }
 
 boost::asio::awaitable<Result<RepairResponse>>
-DaemonClient::callRepair(const RepairRequest& req,
-                         std::function<void(const RepairEvent&)> onEvent) {
+DaemonClient::callRepair(const RepairRequest& req, std::function<void(const RepairEvent&)> onEvent,
+                         std::function<void()> onActivity) {
     struct Handler : public ChunkedResponseHandler {
-        explicit Handler(std::function<void(const RepairEvent&)> cb) : onEvent_(std::move(cb)) {}
+        explicit Handler(std::function<void(const RepairEvent&)> cb, std::function<void()> activity)
+            : onEvent_(std::move(cb)), onActivity_(std::move(activity)) {}
         void onHeaderReceived(const Response& headerResponse) override {
             if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
                 error = makeErrorFromResponse(*err);
             }
         }
         bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (onActivity_)
+                onActivity_();
             if (auto* ev = std::get_if<RepairEvent>(&r)) {
                 if (onEvent_)
                     onEvent_(*ev);
@@ -2245,11 +2248,12 @@ DaemonClient::callRepair(const RepairRequest& req,
         void onError(const Error& e) override { error = e; }
         void onComplete() override {}
         std::function<void(const RepairEvent&)> onEvent_;
+        std::function<void()> onActivity_;
         std::optional<Error> error;
         std::optional<RepairResponse> finalResponse;
     };
 
-    auto handler = std::make_shared<Handler>(std::move(onEvent));
+    auto handler = std::make_shared<Handler>(std::move(onEvent), std::move(onActivity));
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result)
         co_return result.error();

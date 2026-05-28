@@ -240,7 +240,8 @@ private:
     RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,
                                                    const ProgressFn& progress);
     RepairOperationResult applySemanticDedupe(const RepairRequest& req, const ProgressFn& progress);
-    RepairOperationResult rebuildFts5Index(const RepairRequest& req, const ProgressFn& progress);
+    RepairOperationResult rebuildFts5Index(const RepairRequest& req, const ProgressFn& progress,
+                                           std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req,
                                                     const ProgressFn& progress,
                                                     std::atomic<bool>* cancelRequested = nullptr);
