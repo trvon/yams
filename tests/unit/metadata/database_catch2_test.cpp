@@ -10,6 +10,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
+#include <yams/storage/sqlite_retry.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -604,4 +605,40 @@ TEST_CASE("Database: close clears statement cache", "[unit][metadata][database]"
 
     auto statsAfter = db.getStatementCacheStats();
     CHECK(statsAfter.currentSize == 0);
+}
+
+TEST_CASE("Database: FTS5 integrity errors are not transient lock errors",
+          "[unit][metadata][database][fts5]") {
+    // Reproduces the issue: when quick_check reports FTS5 inverted-index
+    // validation errors that happen to contain the word "locked", the
+    // isBusyOrLockedMessage heuristic falsely classifies them as transient
+    // SQLite contention.  The daemon then calls ensureDatabaseIntegrityOrRecover
+    // which sees ResourceBusy, closes the DB, returns false, and the FSM
+    // stays stuck in OpeningDatabase.
+    //
+    // These are real FTS5 index corruption errors that require `yams repair
+    // --fts5`, not a transient lock that would resolve on retry.
+
+    // Simulate the exact message the user sees in logs:
+    // "unable to validate the inverted index for FTS5 table main.documents_fts:
+    //  database is locked"
+    const std::string fts5LockedMsg =
+        "unable to validate the inverted index for FTS5 table main.documents_fts: "
+        "database is locked";
+
+    // NOTE: Because the message contains "locked", isBusyOrLockedMessage returns
+    // true (this is the root of the false-classification bug).
+    REQUIRE(yams::storage::sqlite_retry::isBusyOrLockedMessage(fts5LockedMsg));
+
+    // After the fix: the FTS5 + "inverted index" combination must cause
+    // is_transient_integrity_check_message to return false — the error is
+    // persistent FTS5 index corruption, not transient SQLite contention.
+    REQUIRE_FALSE(yams::metadata::testing_isTransientIntegrityCheckMessage(fts5LockedMsg));
+
+    // Non-FTS5 transient lock messages should still be classified as transient.
+    const std::string plainLockedMsg = "database table is locked";
+    REQUIRE(yams::metadata::testing_isTransientIntegrityCheckMessage(plainLockedMsg));
+
+    const std::string busyMsg = "database is busy";
+    REQUIRE(yams::metadata::testing_isTransientIntegrityCheckMessage(busyMsg));
 }

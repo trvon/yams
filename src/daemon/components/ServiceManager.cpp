@@ -2823,12 +2823,32 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
         return true;
     }
 
+    // Transient SQLite lock — close and let the caller retry.
     if (integrity.error().code == ErrorCode::ResourceBusy) {
         spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due to transient "
                      "SQLite contention: {}",
                      integrity.error().message);
         database_->close();
         return false;
+    }
+
+    // FTS5 inverted-index corruption is repairable via `yams repair --fts5`.
+    // The metadata rows are intact; only the FTS token-index is inconsistent.
+    // Quarantining a 45 GB DB for a repairable FTS5 issue would lose hours of
+    // metadata rebuild work, so we open the DB degraded and let the repair
+    // subsystem rebuild the index.
+    if (integrity.error().code == ErrorCode::DatabaseError) {
+        const auto& msg = integrity.error().message;
+        // quick_check reports FTS5 inverted-index errors with this pattern.
+        if (msg.find("inverted index") != std::string::npos &&
+            msg.find("FTS5") != std::string::npos) {
+            spdlog::warn("[ServiceManager] Metadata DB integrity check found repairable FTS5 "
+                         "index corruption: {}.  Opening database degraded; run "
+                         "'yams repair --fts5' to rebuild the index.",
+                         msg);
+            // Keep the DB open — metadata is intact, FTS5 can be rebuilt.
+            return true;
+        }
     }
 
     spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
