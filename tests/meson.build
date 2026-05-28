@@ -1091,6 +1091,7 @@ if catch2_dep.found()
       'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
+      'unit/storage/garbage_collector_catch2_test.cpp',
       'unit/storage/sqlite_retry_catch2_test.cpp',
       'unit/storage/s3_signer_catch2_test.cpp',
       'unit/storage/storage_backend_factory_catch2_test.cpp',
