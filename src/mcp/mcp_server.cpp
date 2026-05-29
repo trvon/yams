@@ -2362,13 +2362,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
         // Call daemon to add/index the downloaded document via ingestion service
         app::services::AddOptions postOpts;
-        postOpts.path = addReq.path;
-        postOpts.name = addReq.name;
-        postOpts.tags = addReq.tags;
-        postOpts.metadata = addReq.metadata;
-        postOpts.collection = addReq.collection;
-        postOpts.snapshotId = addReq.snapshotId;
-        postOpts.snapshotLabel = addReq.snapshotLabel;
+        postOpts.path = std::move(addReq.path);
+        postOpts.name = std::move(addReq.name);
+        postOpts.tags = std::move(addReq.tags);
+        postOpts.metadata = std::move(addReq.metadata);
+        postOpts.collection = std::move(addReq.collection);
+        postOpts.snapshotId = std::move(addReq.snapshotId);
+        postOpts.snapshotLabel = std::move(addReq.snapshotLabel);
         postOpts.noEmbeddings = addReq.noEmbeddings;
         postOpts.retries = 2;
         postOpts.timeoutMs = 30000;
