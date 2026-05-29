@@ -299,7 +299,7 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
 
     auto client = getOrCreateClient(opts);
     return runClientCallWithTimeout<yams::daemon::GetResponse>(
-        opts, "get", [client, req]() { return client->get(req); });
+        opts, "get", [client, req = std::move(req)]() { return client->get(req); });
 }
 
 Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req_opts,
@@ -315,7 +315,7 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
 
     auto client = getOrCreateClient(opts);
     return runClientCallWithTimeout<yams::daemon::GrepResponse>(
-        opts, "grep", [client, req]() { return client->streamingGrep(req); });
+        opts, "grep", [client, req = std::move(req)]() { return client->streamingGrep(req); });
 }
 
 Result<yams::daemon::GrepResponse>
@@ -333,7 +333,7 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
 
     auto client = getOrCreateClient(opts);
     return runClientCallWithTimeout<yams::daemon::ListResponse>(
-        opts, "list", [client, req]() { return client->streamingList(req); });
+        opts, "list", [client, req = std::move(req)]() { return client->streamingList(req); });
 }
 
 Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
@@ -341,8 +341,8 @@ Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
     auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    return runClientCallWithTimeout<void>(opts, "get",
-                                          [client, req]() { return client->getToStdout(req); });
+    return runClientCallWithTimeout<void>(
+        opts, "get", [client, req = std::move(req)]() { return client->getToStdout(req); });
 }
 
 Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
@@ -351,8 +351,10 @@ Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
     auto req = makeGetInitRequest(req_opts);
 
     auto client = getOrCreateClient(opts);
-    return runClientCallWithTimeout<void>(
-        opts, "get", [client, req, outputPath]() { return client->getToFile(req, outputPath); });
+    return runClientCallWithTimeout<void>(opts, "get",
+                                          [client, req = std::move(req), outputPath]() {
+                                              return client->getToFile(req, outputPath);
+                                          });
 }
 
 Result<RetrievalService::ChunkedGetResult>
@@ -478,7 +480,8 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
 
     auto client = getOrCreateClient(opts);
     auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
-        opts, "search", [client, sreq]() { return client->streamingSearch(sreq); });
+        opts, "search",
+        [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
     if (!searchResult)
         return searchResult.error();
 
@@ -779,7 +782,8 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         sreq.limit = 1;
         sreq.pathsOnly = false;
         auto sres = runClientCallWithTimeout<yams::daemon::SearchResponse>(
-            opts, "search", [client, sreq]() { return client->streamingSearch(sreq); });
+            opts, "search",
+            [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
         if (sres && !sres.value().results.empty()) {
             const auto& best = sres.value().results.front();
             std::string hash;
@@ -837,7 +841,7 @@ Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOption
 
     auto client = getOrCreateClient(opts);
     return runClientCallWithTimeout<yams::daemon::SearchResponse>(
-        opts, "search", [client, req]() { return client->streamingSearch(req); });
+        opts, "search", [client, req = std::move(req)]() { return client->streamingSearch(req); });
 }
 
 Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOptions& opts) const {

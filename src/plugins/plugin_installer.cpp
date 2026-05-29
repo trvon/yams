@@ -8,8 +8,8 @@
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -330,16 +330,17 @@ public:
         RemotePluginInfo info;
         if (isUrl) {
             // Direct URL install - minimal metadata
-            info.name = fs::path(nameOrUrl).stem().string();
             info.downloadUrl = nameOrUrl;
-            info.version = version.value_or("unknown");
-            // Try to extract name from URL pattern:
+            // Try to extract name from URL pattern first, fall back to stem-based extraction:
             // /plugins/<name>/<version>/<name>-<version>.tar.gz
             std::regex urlPattern(R"(/plugins/([^/]+)/([^/]+)/[^/]+\.tar\.gz$)");
             std::smatch match;
             if (std::regex_search(nameOrUrl, match, urlPattern)) {
                 info.name = match[1].str();
                 info.version = match[2].str();
+            } else {
+                info.name = fs::path(nameOrUrl).stem().string();
+                info.version = version.value_or("unknown");
             }
         } else {
             auto infoRes = repoClient_->get(pluginName, version);
