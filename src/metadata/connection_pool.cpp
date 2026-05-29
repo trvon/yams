@@ -714,7 +714,11 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     db.execute("PRAGMA cache_size = " +
                std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
                                              // PRAGMA from bounded cache size calculation.
-    db.execute("PRAGMA wal_autocheckpoint = 0");
+    // Auto-checkpoint WAL after 10000 pages (≈40 MB) to prevent unbounded
+    // WAL growth during normal operation.  The default SQLite value is 1000
+    // pages; we use a larger threshold to reduce checkpoint frequency on
+    // large databases while keeping the WAL bounded and restart times short.
+    db.execute("PRAGMA wal_autocheckpoint = 10000");
 
     if (sqlite_profile_trace_enabled()) {
         sqlite3_trace_v2(db.rawHandle(), SQLITE_TRACE_PROFILE, sqlite_profile_trace_callback,
