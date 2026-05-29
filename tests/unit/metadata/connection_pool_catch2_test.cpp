@@ -391,3 +391,126 @@ TEST_CASE("Connection pool handles concurrent acquire/release",
 
     pool.shutdown();
 }
+
+TEST_CASE("Connection pool fails acquire on exhaustion with zero timeout",
+          "[metadata][connection_pool][exhaustion]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1; // single-connection pool
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_exhaust_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    // Hold the only connection
+    auto held = pool.acquire();
+    REQUIRE(held.has_value());
+
+    // Second acquire with zero timeout should fail
+    auto blocked = pool.acquire(std::chrono::milliseconds(0));
+    REQUIRE_FALSE(blocked.has_value());
+    CHECK(blocked.error().code == yams::ErrorCode::Timeout);
+
+    // Release and re-acquire should succeed
+    held = {}; // return to pool
+    auto retry = pool.acquire(std::chrono::milliseconds(200));
+    REQUIRE(retry.has_value());
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool stats reflect active and available counts",
+          "[metadata][connection_pool][stats]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 2;
+    cfg.maxConnections = 4;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_stats_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    // After init, minConnections should be available
+    auto s0 = pool.getStats();
+    CHECK(s0.availableConnections >= cfg.minConnections);
+    CHECK(s0.activeConnections == 0u);
+
+    // Acquire one: available down by 1, active up by 1
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+    auto s1 = pool.getStats();
+    CHECK(s1.availableConnections == s0.availableConnections - 1);
+    CHECK(s1.activeConnections == 1u);
+
+    // Return it: stats recover
+    conn = {}; // triggers PooledConnection destructor -> returnConnection
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let return settle
+    auto s2 = pool.getStats();
+    CHECK(s2.availableConnections >= s1.availableConnections);
+    CHECK(s2.activeConnections == 0u);
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool shutdown invalidates all connections",
+          "[metadata][connection_pool][lifecycle]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    cfg.enableWAL = false;
+
+    auto dbPath = make_db_path("pool_lifecycle_");
+    ConnectionPool pool(dbPath.string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    // Hold a connection before shutdown
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+
+    // Shutdown while a connection is held should still succeed
+    pool.shutdown();
+
+    // Stats should show zero after shutdown
+    auto stats = pool.getStats();
+    CHECK(stats.totalConnections == 0u);
+
+    // Re-acquire should fail with InvalidState
+    auto retry = pool.acquire(std::chrono::milliseconds(100));
+    REQUIRE_FALSE(retry.has_value());
+    CHECK(retry.error().code == yams::ErrorCode::InvalidState);
+
+    // Cleanup
+    std::error_code ec;
+    fs::remove(dbPath, ec);
+}
+
+TEST_CASE("Connection pool read-only connections skip WAL pragmas",
+          "[metadata][connection_pool][readonly]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    cfg.readOnly = true;
+    cfg.enableWAL = true; // should be ignored for read-only
+
+    auto dbPath = make_db_path("pool_ro_");
+    // Create the DB first so read-only can open it
+    {
+        Database db;
+        REQUIRE(db.open(dbPath.string(), ConnectionMode::Create).has_value());
+        REQUIRE(db.execute("CREATE TABLE ro_test(x)").has_value());
+        db.close();
+    }
+
+    ConnectionPool pool(dbPath.string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    // Read-only pool should still allow acquire and read
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+    auto stmt = (*conn.value())->prepare("SELECT COUNT(*) FROM ro_test");
+    REQUIRE(stmt.has_value());
+
+    pool.shutdown();
+
+    std::error_code ec;
+    fs::remove(dbPath, ec);
+}
