@@ -127,10 +127,8 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: dry run does not delete",
 
     const auto& stats = result.value();
     CHECK(stats.blocksScanned >= 1);
-    // BUG: dry-run increments blocksDeleted/bytesReclaimed even though the
-    // block wasn't actually removed.  When fixed, these should be 0.
-    // CHECK(stats.blocksDeleted == 0);
-    // CHECK(stats.bytesReclaimed == 0);
+    CHECK(stats.blocksDeleted == 0);
+    CHECK(stats.bytesReclaimed == 0);
 
     // Block should still exist in storage (the key dry-run property)
     auto existsResult = storage_->exists(hash);
