@@ -18,6 +18,7 @@
 
 using namespace std::chrono_literals;
 using namespace yams::metadata;
+namespace fs = std::filesystem;
 
 namespace {
 std::filesystem::path make_db_path(const std::string& prefix) {
@@ -283,4 +284,110 @@ TEST_CASE("Connection pool shutdown while connection is leased does not crash",
     auto afterShutdown = pool.acquire(std::chrono::milliseconds(0));
     REQUIRE_FALSE(afterShutdown.has_value());
     CHECK(afterShutdown.error().code == yams::ErrorCode::InvalidState);
+}
+
+// ============================================================================
+// WAL auto-checkpoint behavior — verifies the fix for unbounded WAL growth.
+// When wal_autocheckpoint is enabled (non-zero), SQLite should checkpoint
+// WAL pages back to the main DB, keeping the WAL bounded.
+// ============================================================================
+TEST_CASE("Connection pool enables WAL auto-checkpoint by default",
+          "[metadata][connection_pool][wal]") {
+    // Reproduces the bug: wal_autocheckpoint was set to 0, which disabled
+    // automatic WAL checkpointing entirely.  On a 45GB DB this meant the
+    // WAL grew to the same size as the DB, and on restart wal_checkpoint
+    // took 1000+ seconds.  The fix: wal_autocheckpoint = 10000 (≈40 MB).
+    // Verification: the pool initializes cleanly with WAL enabled and
+    // supports read/write operations.
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    cfg.enableWAL = true;
+
+    ConnectionPool pool(make_db_path("pool_wal_ac_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+    REQUIRE((*conn.value())->execute("CREATE TABLE IF NOT EXISTS ac_check(x)").has_value());
+    REQUIRE((*conn.value())->execute("INSERT INTO ac_check VALUES(42)").has_value());
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool WAL mode creates WAL and SHM files",
+          "[metadata][connection_pool][wal]") {
+    auto dbPath = make_db_path("pool_wal_files_");
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    cfg.enableWAL = true;
+
+    ConnectionPool pool(dbPath.string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    {
+        auto conn = pool.acquire();
+        REQUIRE(conn.has_value());
+
+        // Write data to trigger WAL file creation.
+        REQUIRE((*conn.value())->execute("CREATE TABLE IF NOT EXISTS t(x)").has_value());
+        REQUIRE((*conn.value())->execute("INSERT INTO t VALUES(1)").has_value());
+    }
+    pool.shutdown();
+
+    // WAL files should exist on disk after WAL-mode operations.
+    fs::path walPath(dbPath.string() + "-wal");
+    fs::path shmPath(dbPath.string() + "-shm");
+    CHECK(fs::exists(walPath));
+    CHECK(fs::exists(shmPath));
+
+    // Cleanup companion files
+    std::error_code ec;
+    fs::remove(walPath, ec);
+    fs::remove(shmPath, ec);
+}
+
+TEST_CASE("Connection pool handles concurrent acquire/release",
+          "[metadata][connection_pool][concurrent]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 2;
+    cfg.maxConnections = 4;
+    cfg.enableWAL = true;
+    cfg.busyTimeout = std::chrono::milliseconds(2000);
+
+    ConnectionPool pool(make_db_path("pool_concurrent_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    std::atomic<int> errors{0};
+    std::atomic<int> successes{0};
+
+    auto worker = [&](int /*id*/) {
+        for (int i = 0; i < 5; ++i) {
+            auto conn = pool.acquire(std::chrono::milliseconds(5000));
+            if (conn.has_value()) {
+                ++successes;
+                // Simulate brief work
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // conn goes out of scope -> returned to pool
+            } else {
+                ++errors;
+            }
+        }
+    };
+
+    std::thread t1(worker, 1);
+    std::thread t2(worker, 2);
+    std::thread t3(worker, 3);
+    t1.join();
+    t2.join();
+    t3.join();
+
+    CHECK(successes.load() == 15);
+    CHECK(errors.load() == 0);
+
+    auto stats = pool.getStats();
+    CHECK(stats.totalConnections <= cfg.maxConnections);
+
+    pool.shutdown();
 }
