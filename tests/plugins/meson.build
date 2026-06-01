@@ -125,6 +125,7 @@ if get_option('plugin-zyp')
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,
     },
+    depends: [zyp_plugin],
     timeout: 60,
   )
 endif

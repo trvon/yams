@@ -19,6 +19,7 @@ yams_mcp_deps = [
   dependency('yams_core'),
   dependency('nlohmann_json'),
   dependency('spdlog'),
+  version_generated_dep,
   boost_dep,
   dependency('threads'),
 ]
