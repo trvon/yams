@@ -10,8 +10,10 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 
+#include <future>
 #include <memory>
 #include <sstream>
+#include <thread>
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
@@ -285,6 +287,78 @@ TEST_CASE("ServiceManagerFSM: Enum values are stable",
     REQUIRE(static_cast<int>(ServiceManagerState::Uninitialized) == 0);
     REQUIRE(static_cast<int>(ServiceManagerState::OpeningDatabase) == 1);
     REQUIRE(static_cast<int>(ServiceManagerState::DatabaseReady) == 2);
+}
+
+TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachable from failed init",
+          "[daemon][fsm][service-manager][regression]") {
+    // Reproduces the bug: when initializeMetadataDatabaseAt returns false
+    // (e.g. SQLite contention, integrity check fails), the FSM stays at
+    // OpeningDatabase forever.  After observing the failure the init path
+    // must dispatch InitializationFailedEvent to break the deadlock.
+    ServiceManagerFsm fsm;
+
+    SECTION("Without failure event, FSM stays in OpeningDatabase") {
+        fsm.dispatch(OpeningDatabaseEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::OpeningDatabase);
+
+        // waitForTerminalState would block here indefinitely — demonstrate
+        // that isTerminalState() returns false.
+        REQUIRE_FALSE(fsm.isTerminalState());
+    }
+
+    SECTION("InitializationFailedEvent transitions to Failed from OpeningDatabase") {
+        fsm.dispatch(OpeningDatabaseEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::OpeningDatabase);
+
+        // When the ServiceManager detects the DB-open failure it should
+        // dispatch this event, which must bring the FSM to a terminal state.
+        fsm.dispatch(InitializationFailedEvent{"Database open failed: SQLite lock contention"});
+
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::Failed);
+        REQUIRE(fsm.isTerminalState());
+        REQUIRE(fsm.snapshot().lastError.find("SQLite") != std::string::npos);
+    }
+
+    SECTION("Shutdown during OpeningDatabase reaches terminal state") {
+        // Simulate the scenario: DB open is in progress, shutdown is requested.
+        // The init code calls serviceFsm_.dispatch(ShutdownEvent{}), which
+        // transitions to ShuttingDown, a terminal state from which we can
+        // dispatch ServiceManagerStoppedEvent to reach Stopped.
+        fsm.dispatch(OpeningDatabaseEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::OpeningDatabase);
+        REQUIRE_FALSE(fsm.isTerminalState());
+
+        fsm.dispatch(ShutdownEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
+        REQUIRE(fsm.isTerminalState());
+
+        fsm.dispatch(ServiceManagerStoppedEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::Stopped);
+        REQUIRE(fsm.isTerminalState());
+    }
+
+    SECTION("waitForTerminalState unblocks after failure event") {
+        // waitForTerminalState blocks until a terminal state is reached.
+        // After dispatching InitializationFailedEvent, it should unblock.
+        fsm.dispatch(OpeningDatabaseEvent{});
+        REQUIRE_FALSE(fsm.isTerminalState());
+
+        // Dispatch the failure from another "thread" — the condition
+        // variable in waitForTerminalState should wake up.
+        std::promise<ServiceManagerSnapshot> waiterResult;
+        auto waiterFuture = waiterResult.get_future();
+        std::thread waiter(
+            [&fsm, &waiterResult]() { waiterResult.set_value(fsm.waitForTerminalState(5)); });
+
+        // Small sleep to let the waiter start blocking
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        fsm.dispatch(InitializationFailedEvent{"forced failure for test"});
+
+        waiter.join();
+        REQUIRE(waiterFuture.get().state == ServiceManagerState::Failed);
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::Failed);
+    }
 }
 
 // =============================================================================

@@ -2388,6 +2388,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
 
         auto requestContext = find_request_context(request_id);
+        auto abortRepair = [state, requestContext]() {
+            if (requestContext) {
+                requestContext->canceled.store(true, std::memory_order_relaxed);
+            }
+            std::lock_guard<std::mutex> lk(state->mu);
+            state->aborted = true;
+            state->queued.clear();
+        };
 
         // Producer runs the synchronous repair logic and pushes events into a queue.
         // We use a separate thread so the streaming loop can write chunks concurrently.
@@ -2451,20 +2459,16 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         auto next_keepalive = std::chrono::steady_clock::now() + wait_timeout;
         while (true) {
             // Honor cancellation
-            auto cancel_result = co_await maybe_write_canceled_stream_response(
-                socket, request_id,
-                [state]() {
-                    std::lock_guard<std::mutex> lk(state->mu);
-                    state->aborted = true;
-                    state->queued.clear();
-                },
-                fsm);
+            auto cancel_result =
+                co_await maybe_write_canceled_stream_response(socket, request_id, abortRepair, fsm);
             if (!cancel_result) {
+                abortRepair();
                 if (producer.joinable())
                     producer.detach();
                 co_return cancel_result.error();
             }
             if (cancel_result.value()) {
+                abortRepair();
                 if (producer.joinable())
                     producer.detach();
                 co_return Result<void>();
@@ -2496,11 +2500,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 auto wr = co_await write_chunk(socket, std::move(next), request_id,
                                                /*last_chunk=*/false, /*flush=*/true, fsm);
                 if (!wr) {
-                    {
-                        std::lock_guard<std::mutex> lk(state->mu);
-                        state->aborted = true;
-                        state->queued.clear();
-                    }
+                    abortRepair();
                     if (producer.joinable())
                         producer.detach();
                     co_return wr.error();
@@ -2517,8 +2517,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                                                /*last_chunk=*/last, /*flush=*/true, fsm);
                 if (producer.joinable())
                     producer.join();
-                if (!wr)
+                if (!wr) {
+                    abortRepair();
                     co_return wr.error();
+                }
                 chunk_count++;
                 break;
             }
@@ -2542,11 +2544,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 auto wr = co_await write_chunk(socket, Response{std::move(ok)}, request_id,
                                                /*last_chunk=*/false, /*flush=*/true, fsm);
                 if (!wr) {
-                    {
-                        std::lock_guard<std::mutex> lk(state->mu);
-                        state->aborted = true;
-                        state->queued.clear();
-                    }
+                    abortRepair();
                     if (producer.joinable())
                         producer.detach();
                     co_return wr.error();

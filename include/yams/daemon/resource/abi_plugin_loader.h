@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -45,18 +46,30 @@ public:
 
     // Configuration
     void setTrustFile(const std::filesystem::path& f) {
-        trustFile_ = f;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            trustFile_ = f;
+        }
         // Load existing trust entries from disk (if any)
         loadTrust();
     }
-    void setNamePolicy(NamePolicy p) { namePolicy_ = p; }
-    NamePolicy getNamePolicy() const { return namePolicy_; }
+    void setNamePolicy(NamePolicy p) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        namePolicy_ = p;
+    }
+    NamePolicy getNamePolicy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return namePolicy_;
+    }
 
     struct SkipInfo {
         std::filesystem::path path;
         std::string reason;
     };
-    const std::vector<SkipInfo>& getLastSkips() const { return lastSkips_; }
+    std::vector<SkipInfo> getLastSkips() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastSkips_;
+    }
 
 private:
     struct HandleInfo {
@@ -66,6 +79,7 @@ private:
         ~HandleInfo();
     };
 
+    mutable std::mutex mutex_;
     mutable std::map<std::string, std::shared_ptr<HandleInfo>> loaded_;
     std::filesystem::path trustFile_;
     std::set<std::filesystem::path> trusted_;

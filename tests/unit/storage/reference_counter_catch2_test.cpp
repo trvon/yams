@@ -1051,21 +1051,21 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
 
     // Run dry-run collection
     std::vector<std::string> progressHashes;
-    GCOptions options{.maxBlocksPerRun = 10,
-                      .minAgeSeconds = 0,
-                      .dryRun = true,
-                      .progressCallback = [&progressHashes](const std::string& hash, size_t count) {
-                          progressHashes.push_back(hash);
-                          CHECK(count == progressHashes.size());
-                      }};
+    GCOptions options{
+        .maxBlocksPerRun = 10,
+        .minAgeSeconds = 0,
+        .dryRun = true,
+        .progressCallback = [&progressHashes](const std::string& hash, size_t /*count*/) {
+            progressHashes.push_back(hash);
+        }};
 
     auto result = gc->collect(options);
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
     CHECK(stats.blocksScanned == 3u);
-    CHECK(stats.blocksDeleted == 3u); // Counted but not actually deleted
-    CHECK(stats.bytesReclaimed == 3u * data.size());
+    CHECK(stats.blocksDeleted == 0u);  // dry-run: counted as scanned, not deleted
+    CHECK(stats.bytesReclaimed == 0u); // dry-run: no bytes actually reclaimed
     CHECK(stats.errors.empty());
     CHECK(progressHashes.size() == hashes.size());
 

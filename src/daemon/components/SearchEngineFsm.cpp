@@ -126,7 +126,7 @@ FSM_INITIAL_STATE(yams::daemon::detail::SearchEngineMachine, yams::daemon::detai
 namespace yams::daemon {
 
 SearchEngineFsm::SearchEngineFsm() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::snap = {};
     detail::SearchEngineMachine::dispatchAccepted = false;
     detail::SearchEngineMachine::callbackPending = false;
@@ -137,35 +137,35 @@ SearchEngineFsm::SearchEngineFsm() {
 }
 
 SearchEngineSnapshot SearchEngineFsm::snapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     return detail::SearchEngineMachine::snap;
 }
 
 void SearchEngineFsm::setRebuildCallback(RebuildCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     rebuildCallback_ = std::move(cb);
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildStartedEvent& ev) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildCompletedEvent& ev) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildFailedEvent& ev) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildDegradedEvent& ev) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
@@ -175,7 +175,7 @@ bool SearchEngineFsm::dispatch(const SearchEngineRebuildRequestedEvent& ev) {
     std::string reason;
     bool includeVector = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::SearchEngineMachine::callbackPending = false;
         detail::SearchEngineMachine::dispatchAccepted = false;
         detail::SearchEngineMachine::dispatch(ev);
@@ -203,7 +203,7 @@ void SearchEngineFsm::dispatch(const SearchEngineIndexingDrainedEvent& ev) {
     std::string reason;
     bool includeVector = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::SearchEngineMachine::callbackPending = false;
         detail::SearchEngineMachine::dispatch(ev);
         syncAtomicState();
@@ -221,7 +221,7 @@ void SearchEngineFsm::dispatch(const SearchEngineIndexingDrainedEvent& ev) {
 }
 
 bool SearchEngineFsm::hasRebuildPending() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     return detail::SearchEngineMachine::snap.rebuildPending;
 }
 

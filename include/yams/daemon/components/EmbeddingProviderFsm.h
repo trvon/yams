@@ -149,44 +149,47 @@ namespace yams::daemon {
 class EmbeddingProviderFsm {
 public:
     EmbeddingProviderFsm() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::EmbeddingProviderMachine::snap = {};
         detail::EmbeddingProviderMachine::start();
     }
 
     ProviderSnapshot snapshot() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::EmbeddingProviderMachine::snap;
     }
 
     template <typename E> void dispatch(const E& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::EmbeddingProviderMachine::dispatch(ev);
     }
 
     bool isReady() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::EmbeddingProviderMachine::snap.state == EmbeddingProviderState::ModelReady;
     }
 
     bool isDegraded() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::EmbeddingProviderMachine::snap.state == EmbeddingProviderState::Degraded;
     }
 
     bool isLoadingOrReady() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         auto s = detail::EmbeddingProviderMachine::snap.state;
         return s == EmbeddingProviderState::ModelLoading || s == EmbeddingProviderState::ModelReady;
     }
 
     std::size_t dimension() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::EmbeddingProviderMachine::snap.embeddingDimension;
     }
 
 private:
-    mutable std::mutex mutex_;
+    static std::mutex& sharedMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
 };
 
 } // namespace yams::daemon

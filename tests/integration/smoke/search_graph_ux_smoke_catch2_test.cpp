@@ -17,7 +17,15 @@
 
 namespace fs = std::filesystem;
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+
 namespace {
+
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+constexpr int kSmokeDaemonReadyTimeoutMs = std::clamp(10000 * kTestTimeoutScale, 10000, 120000);
+constexpr int kSmokeIpcTimeoutMs = std::clamp(15000 * kTestTimeoutScale, 15000, 120000);
 
 class CaptureStdout {
 public:
@@ -52,6 +60,13 @@ private:
 int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
             std::optional<std::string> stdinData = std::nullopt) {
     std::vector<std::string> effectiveArgs = args;
+    const bool hasDaemonReadyTimeoutFlag =
+        std::find(effectiveArgs.begin(), effectiveArgs.end(), "--daemon-ready-timeout-ms") !=
+        effectiveArgs.end();
+    if (effectiveArgs.size() > 1 && effectiveArgs[1] == "add" && !hasDaemonReadyTimeoutFlag) {
+        effectiveArgs.push_back("--daemon-ready-timeout-ms");
+        effectiveArgs.push_back(std::to_string(kSmokeDaemonReadyTimeoutMs));
+    }
     const bool hasDataDirFlag =
         std::find(effectiveArgs.begin(), effectiveArgs.end(), "--data-dir") !=
             effectiveArgs.end() ||
@@ -114,6 +129,9 @@ struct SearchGraphUxFixture {
     fs::path worktree{root / "repo"};
     fs::path sourceFile{worktree / "src" / "example.cpp"};
     fs::path externalFile{root / "corpus" / "external.txt"};
+    yams::test::ScopedEnvVar ipcTimeout{"YAMS_IPC_TIMEOUT_MS", std::to_string(kSmokeIpcTimeoutMs)};
+    yams::test::ScopedEnvVar streamChunkTimeout{"YAMS_STREAM_CHUNK_TIMEOUT_MS",
+                                                std::to_string(kSmokeIpcTimeoutMs)};
 
     SearchGraphUxFixture() {
         fs::create_directories(dataDir);
@@ -352,7 +370,8 @@ TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand"
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded(
+        "YAMS_EMBEDDED", kTestTimeoutScale > 1 ? std::optional<std::string>{"1"} : std::nullopt);
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());

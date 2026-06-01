@@ -993,7 +993,7 @@ void MCPServer::start() {
                                 if (completed->compare_exchange_strong(expected, true)) {
                                     json err = {{"code", -32603}, {"message", e.what()}};
                                     self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                        {"error", err},
+                                                        {"error", std::move(err)},
                                                         {"id", id_copy}});
                                 }
                             } catch (...) {
@@ -1001,7 +1001,7 @@ void MCPServer::start() {
                                 if (completed->compare_exchange_strong(expected, true)) {
                                     json err = {{"code", -32603}, {"message", "Tool call failed"}};
                                     self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
-                                                        {"error", err},
+                                                        {"error", std::move(err)},
                                                         {"id", id_copy}});
                                 }
                             }
@@ -1758,7 +1758,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             MCPGrepResponse early;
             std::ostringstream oss_;
             for (const auto& item : sr.results) {
-                std::string p = !item.path.empty() ? item.path : item.title;
+                const auto& p = !item.path.empty() ? item.path : item.title;
                 if (!p.empty()) {
                     oss_ << "[S] " << p << "\n";
                 }
@@ -1783,7 +1783,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (!__session.empty()) {
         spdlog::debug("[MCP] grep: using session '{}'", __session);
         dreq.useSession = true;
-        dreq.sessionName = __session;
+        dreq.sessionName = std::move(__session);
     }
     // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
     auto res = co_await daemon_client_->streamingGrep(dreq);
@@ -2045,7 +2045,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 dataRoot = fs::current_path() / "yams_data";
             }
         }
-        resolvedDataRoot = dataRoot;
+        resolvedDataRoot = std::move(dataRoot);
 
         // Allow explicit overrides via [storage] objects_dir/staging_dir
         fs::path objectsDir;
@@ -2265,7 +2265,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         std::error_code __canon_ec;
         auto __canon = std::filesystem::weakly_canonical(__abs, __canon_ec);
         if (!__canon_ec && !__canon.empty()) {
-            __abs = __canon;
+            __abs = std::move(__canon);
         }
         if (verbose) {
             spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'",
@@ -2362,13 +2362,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
         // Call daemon to add/index the downloaded document via ingestion service
         app::services::AddOptions postOpts;
-        postOpts.path = addReq.path;
-        postOpts.name = addReq.name;
-        postOpts.tags = addReq.tags;
-        postOpts.metadata = addReq.metadata;
-        postOpts.collection = addReq.collection;
-        postOpts.snapshotId = addReq.snapshotId;
-        postOpts.snapshotLabel = addReq.snapshotLabel;
+        postOpts.path = std::move(addReq.path);
+        postOpts.name = std::move(addReq.name);
+        postOpts.tags = std::move(addReq.tags);
+        postOpts.metadata = std::move(addReq.metadata);
+        postOpts.collection = std::move(addReq.collection);
+        postOpts.snapshotId = std::move(addReq.snapshotId);
+        postOpts.snapshotLabel = std::move(addReq.snapshotLabel);
         postOpts.noEmbeddings = addReq.noEmbeddings;
         postOpts.retries = 2;
         postOpts.timeoutMs = 30000;
@@ -2607,7 +2607,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 std::filesystem::path cand = base / (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
                 std::error_code ec;
                 if (std::filesystem::exists(cand, ec)) {
-                    chosen = cand;
+                    chosen = std::move(cand);
                     resolved = true;
                     break;
                 }
@@ -2621,7 +2621,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 _p = __canon.string();
             }
         }
-        aopts.path = _p;
+        aopts.path = std::move(_p);
     }
     aopts.content = req.content;
     aopts.name = resolvedName.empty() ? req.name : resolvedName;
@@ -2685,7 +2685,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (!aopts.recursive) {
         yams::daemon::GetRequest probe;
         if (!aopts.name.empty()) {
-            probe.name = aopts.name;
+            probe.name = std::move(aopts.name);
             probe.byName = true;
         } else {
             probe.hash = addRes.value().hash;
@@ -2714,7 +2714,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         std::filesystem::is_directory(aopts.path, ec)) {
         co_return out;
     }
-    out.hash = addRes.value().hash;
+    out.hash = std::move(addRes.value().hash);
     out.bytesStored = 0;
     out.bytesDeduped = 0;
     co_return out;
@@ -2914,7 +2914,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     }
     if (!__session.empty()) {
         spdlog::debug("[MCP] list: using session '{}'", __session);
-        daemon_req.sessionId = __session;
+        daemon_req.sessionId = std::move(__session);
     }
     // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
     // per request (was the primary cause of ~70x MCP list slowdown vs daemon IPC).
@@ -3498,7 +3498,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 co_return grres.error();
             // Use resolved hash for daemon fast update
             daemon::UpdateDocumentRequest daemon_req;
-            daemon_req.hash = cand->hash;
+            daemon_req.hash = std::move(cand->hash);
             daemon_req.addTags = req.tags;
             daemon_req.removeTags = req.removeTags;
             for (const auto& [key, value] : req.metadata.items()) {
@@ -5332,7 +5332,7 @@ void MCPServer::initializeToolRegistry() {
                 if (!cand)
                     co_return Error{ErrorCode::NotFound, "document not found by name"};
                 yams::app::services::GetOptions greq;
-                greq.hash = cand->hash;
+                greq.hash = std::move(cand->hash);
                 greq.metadataOnly = false;
                 auto grres = rsvc.get(greq, ropts);
                 if (!grres)
@@ -5645,7 +5645,7 @@ void MCPServer::initializeToolRegistry() {
             }
 
             yams::daemon::RestoreSnapshotRequest daemonReq;
-            daemonReq.snapshotId = snapshotId;
+            daemonReq.snapshotId = std::move(snapshotId);
             daemonReq.outputDirectory = req.outputDirectory;
             daemonReq.layoutTemplate = req.layoutTemplate;
             daemonReq.includePatterns = req.includePatterns;
@@ -5803,8 +5803,10 @@ void MCPServer::initializeToolRegistry() {
             return suggestContextRepo.get();
         }
 
-        const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
-                                                                    : yams::config::get_data_dir();
+        auto dataDir = daemon_client_config_.dataDir;
+        if (dataDir.empty()) {
+            dataDir = yams::config::get_data_dir();
+        }
         metadata::ConnectionPoolConfig poolConfig;
         poolConfig.minConnections = 1;
         poolConfig.maxConnections = 2;
@@ -6060,8 +6062,10 @@ suggest_context_metadata_loaded:
             co_return Error{ErrorCode::NotSupported,
                             "semantic_dedupe is not supported on WASI build"};
 #else
-    const auto dataDir = !daemon_client_config_.dataDir.empty() ? daemon_client_config_.dataDir
-                                                                : yams::config::get_data_dir();
+    auto dataDir = daemon_client_config_.dataDir;
+    if (dataDir.empty()) {
+        dataDir = yams::config::get_data_dir();
+    }
     metadata::ConnectionPoolConfig poolConfig;
     poolConfig.minConnections = 1;
     poolConfig.maxConnections = 2;
@@ -6099,7 +6103,8 @@ suggest_context_metadata_loaded:
             if (it != grouped.value().end()) {
                 details.push_back(it->second);
             } else {
-                details.push_back(metadata::SemanticDuplicateGroupDetail{*groupResult.value(), {}});
+                details.push_back(
+                    metadata::SemanticDuplicateGroupDetail{std::move(*groupResult.value()), {}});
             }
         }
     } else if (!req.documentIds.empty()) {

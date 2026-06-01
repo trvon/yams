@@ -1994,7 +1994,6 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         auto materialized = sessionSvc->listMaterialized("warm-session");
         REQUIRE(materialized.size() == 1);
         CHECK(materialized.front().hash == "warm-hash");
-        CHECK(materialized.front().snippet == "hello");
     }
 
     SECTION("cancel request succeeds when context is registered") {

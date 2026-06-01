@@ -80,8 +80,7 @@ struct AsyncContentStore::Impl {
     template <typename F>
     auto runStoreAsync(F&& func)
         -> std::future<std::invoke_result_t<F, std::shared_ptr<IContentStore>>> {
-        return runAsync(
-            [store = store, func = std::forward<F>(func)]() mutable { return func(store); });
+        return runAsync([this, func = std::forward<F>(func)]() mutable { return func(store); });
     }
 };
 

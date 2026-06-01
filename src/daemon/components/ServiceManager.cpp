@@ -1127,17 +1127,17 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
             const bool benchmarkFastShutdown = std::getenv("YAMS_BENCH_OPT_LOOP") != nullptr ||
                                                std::getenv("YAMS_BENCH_DATASET") != nullptr;
             if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
-                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
+                spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 constexpr auto kExtendedShutdownTimeout = std::chrono::seconds(30);
                 if (!workCoordinator_->joinWithTimeout(kExtendedShutdownTimeout)) {
                     if (benchmarkFastShutdown) {
-                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired during "
+                        spdlog::info("[ServiceManager] Phase 5: Extended timeout expired during "
                                      "benchmark shutdown; detaching remaining workers to avoid "
                                      "losing completed benchmark results");
                         workCoordinator_->abandonWorkersForShutdown();
                     } else {
-                        spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired; "
+                        spdlog::info("[ServiceManager] Phase 5: Extended timeout expired; "
                                      "falling back to blocking join() to ensure clean teardown");
                         workCoordinator_->join();
                     }
@@ -1414,12 +1414,15 @@ void ServiceManager::shutdown() {
     std::unique_ptr<CheckpointManager> checkpointManagerHold;
 
     // Phase 0: Signal async init coroutine to stop and wait for it to complete
-    // This prevents the coroutine from accessing resources we're about to tear down
+    // This prevents the coroutine from accessing resources we're about to tear down.
+    // Give the coroutine enough time to react to the stop token — database open,
+    // integrity check, and WAL recovery can take many seconds on large DBs.
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
-    if (asyncInit_.requestStopAndWait(std::chrono::seconds(5))) {
+    if (asyncInit_.requestStopAndWait(std::chrono::seconds(30))) {
         spdlog::info("[ServiceManager] Phase 0: Async init completed");
     } else {
-        spdlog::warn("[ServiceManager] Phase 0: Async init future timed out");
+        spdlog::warn("[ServiceManager] Phase 0: Async init future timed out after 30s; "
+                     "continuing shutdown anyway");
     }
 
     stopBackgroundTaskManagerForShutdown();
@@ -1796,6 +1799,26 @@ void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath
                     "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
                 state_.readiness.databaseSalvaged = true;
             }
+            // Clean up corrupt files so the next startup doesn't re-trigger
+            // the same salvage on already-recovered DBs.
+            auto cleanup = removeCorruptDbFiles(salvageDir);
+            spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s) after salvage",
+                         cleanup.removed.size());
+            // Also clean up .recovered-* sentinel files left by quarantineAndRecreate;
+            // they are stale once corrupt files have been salvaged and removed.
+            {
+                std::error_code ec;
+                const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
+                for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
+                    if (ec) {
+                        ec.clear();
+                        continue;
+                    }
+                    if (entry.path().filename().string().rfind(sentinelPrefix, 0) == 0) {
+                        fs::remove(entry.path(), ec);
+                    }
+                }
+            }
         } else {
             spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
         }
@@ -1912,9 +1935,16 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
     const auto dbPath = dataDir / "yams.db";
-    (void)(co_await initializeMetadataDatabaseAt(dbPath, token));
+    const bool dbOk = co_await initializeMetadataDatabaseAt(dbPath, token);
     if (token.stop_requested()) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
+    }
+    if (!dbOk) {
+        const std::string errMsg =
+            "Failed to open or migrate the metadata database at " + dbPath.string();
+        spdlog::error("[ServiceManager] {}", errMsg);
+        serviceFsm_.dispatch(InitializationFailedEvent{errMsg});
+        co_return Error{ErrorCode::InternalError, errMsg};
     }
 
     // Phase: mark vectors ready (vector backend initialization is opportunistic)
@@ -2773,6 +2803,7 @@ void ServiceManager::setDatabasePhase(std::string_view phase) {
 
 void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPath) {
     const std::filesystem::path walPath(dbPath.string() + "-wal");
+    const std::filesystem::path shmPath(dbPath.string() + "-shm");
     if (!std::filesystem::exists(walPath) || !std::filesystem::exists(dbPath)) {
         return;
     }
@@ -2783,7 +2814,9 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
     auto tempDb = std::make_unique<metadata::Database>();
     auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
     if (!openR) {
-        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}", openR.error().message);
+        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}; leaving WAL/SHM in "
+                     "place for a later retry",
+                     openR.error().message);
         return;
     }
 
@@ -2793,7 +2826,11 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
                      "successfully",
                      walSize);
     } else {
-        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}", cpR.error().message);
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; leaving WAL/SHM in "
+                     "place for a later retry",
+                     cpR.error().message);
+        tempDb->close();
+        return;
     }
     tempDb->close();
 }
@@ -2813,12 +2850,32 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
         return true;
     }
 
+    // Transient SQLite lock — close and let the caller retry.
     if (integrity.error().code == ErrorCode::ResourceBusy) {
         spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due to transient "
                      "SQLite contention: {}",
                      integrity.error().message);
         database_->close();
         return false;
+    }
+
+    // FTS5 inverted-index corruption is repairable via `yams repair --fts5`.
+    // The metadata rows are intact; only the FTS token-index is inconsistent.
+    // Quarantining a 45 GB DB for a repairable FTS5 issue would lose hours of
+    // metadata rebuild work, so we open the DB degraded and let the repair
+    // subsystem rebuild the index.
+    if (integrity.error().code == ErrorCode::DatabaseError) {
+        const auto& msg = integrity.error().message;
+        // quick_check reports FTS5 inverted-index errors with this pattern.
+        if (msg.find("inverted index") != std::string::npos &&
+            msg.find("FTS5") != std::string::npos) {
+            spdlog::info("[ServiceManager] Metadata DB integrity check found repairable FTS5 "
+                         "index corruption: {}.  Opening database degraded; run "
+                         "'yams repair --fts5' to rebuild the index.",
+                         msg);
+            // Keep the DB open — metadata is intact, FTS5 can be rebuilt.
+            return true;
+        }
     }
 
     spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
@@ -2867,7 +2924,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
                  dbSize / (1024 * 1024), spaceInfo.available / (1024 * 1024));
     auto vacuumR = database_->execute("VACUUM");
     if (!vacuumR) {
-        spdlog::warn("[ServiceManager] auto-VACUUM failed: {}", vacuumR.error().message);
+        spdlog::info("[ServiceManager] auto-VACUUM skipped (DB busy): {}", vacuumR.error().message);
         return;
     }
 
@@ -2880,11 +2937,32 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
 
 bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
     try {
+        // Phase A: recover stale WAL (can be slow on large DBs).
         recoverStaleWalIfPresent(dbPath);
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after WAL "
+                         "recovery");
+            return false;
+        }
+
+        // Phase B: open the database file.
         if (!openDatabaseOnce(dbPath)) {
             return false;
         }
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after open");
+            database_->close();
+            return false;
+        }
+
+        // Phase C: integrity check (can be very slow on large DBs).
         if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
+            return false;
+        }
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after integrity "
+                         "check");
+            database_->close();
             return false;
         }
 

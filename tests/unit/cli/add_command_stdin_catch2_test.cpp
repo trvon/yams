@@ -27,6 +27,12 @@ namespace fs = std::filesystem;
 namespace {
 
 auto findBuiltYamsCli() -> fs::path {
+    std::vector<fs::path> candidates;
+
+    if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+        candidates.emplace_back(fs::path(buildRoot) / "tools" / "yams-cli" / "yams-cli");
+    }
+
     std::vector<fs::path> bases;
     if (const char* sourceRoot = std::getenv("MESON_SOURCE_ROOT")) {
         bases.emplace_back(sourceRoot);
@@ -36,42 +42,41 @@ auto findBuiltYamsCli() -> fs::path {
     auto cwd = fs::current_path(ec);
     if (!ec) {
         bases.push_back(cwd);
-        if (cwd.parent_path().filename() == "builddir-tsan" ||
-            cwd.parent_path().filename() == "builddir-asan" ||
-            cwd.parent_path().filename() == "builddir-ubsan" ||
-            cwd.parent_path().filename() == "builddir-nosan" ||
-            cwd.parent_path().filename() == "builddir") {
-            bases.push_back(cwd.parent_path().parent_path());
+        if (cwd.has_parent_path()) {
             bases.push_back(cwd.parent_path());
         }
-        if (cwd.filename() == "asan" || cwd.filename() == "debug" || cwd.filename() == "release" ||
-            cwd.filename() == "coverage") {
+        if (cwd.has_parent_path() && cwd.parent_path().has_parent_path()) {
             bases.push_back(cwd.parent_path().parent_path());
-        } else if (cwd.filename() == "builddir" || cwd.filename() == "builddir-nosan" ||
-                   cwd.filename() == "builddir-asan" || cwd.filename() == "builddir-tsan" ||
-                   cwd.filename() == "builddir-ubsan") {
-            bases.push_back(cwd.parent_path());
         }
     }
 
     const std::vector<fs::path> suffixes = {
-        fs::path("builddir-tsan") / "tools" / "yams-cli" / "yams-cli",
-        fs::path("builddir-asan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("tools") / "yams-cli" / "yams-cli",
+        fs::path("builddir-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-asan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-ubsan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-tsan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-nosan-local") / "tools" / "yams-cli" / "yams-cli",
         fs::path("builddir") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-asan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-ubsan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-tsan") / "tools" / "yams-cli" / "yams-cli",
         fs::path("builddir-nosan") / "tools" / "yams-cli" / "yams-cli",
         fs::path("build") / "asan" / "tools" / "yams-cli" / "yams-cli",
         fs::path("build") / "coverage" / "tools" / "yams-cli" / "yams-cli",
         fs::path("build") / "release" / "tools" / "yams-cli" / "yams-cli",
         fs::path("build") / "debug" / "tools" / "yams-cli" / "yams-cli",
-        fs::path("tools") / "yams-cli" / "yams-cli",
     };
 
     for (const auto& base : bases) {
         for (const auto& suffix : suffixes) {
-            const auto candidate = base / suffix;
-            if (fs::exists(candidate)) {
-                return candidate;
-            }
+            candidates.push_back(base / suffix);
+        }
+    }
+
+    for (const auto& candidate : candidates) {
+        if (fs::exists(candidate)) {
+            return candidate;
         }
     }
     return {};

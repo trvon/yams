@@ -97,13 +97,21 @@ AbiPluginLoader::HandleInfo::~HandleInfo() {
 }
 
 std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
+    std::filesystem::path trustFile;
+    std::set<std::filesystem::path> trusted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trustFile = trustFile_;
+        trusted = trusted_;
+    }
+
     // If a trust file has been set and is empty, treat the trust set as empty for callers
     // to ensure a clean start in unit tests.
     try {
-        if (!trustFile_.empty()) {
+        if (!trustFile.empty()) {
             std::error_code ec;
-            if (std::filesystem::exists(trustFile_, ec) && !ec) {
-                auto sz = std::filesystem::file_size(trustFile_, ec);
+            if (std::filesystem::exists(trustFile, ec) && !ec) {
+                auto sz = std::filesystem::file_size(trustFile, ec);
                 if (!ec && sz == 0) {
                     return {};
                 }
@@ -111,7 +119,7 @@ std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
         }
     } catch (...) {
     }
-    return std::vector<std::filesystem::path>(trusted_.begin(), trusted_.end());
+    return std::vector<std::filesystem::path>(trusted.begin(), trusted.end());
 }
 
 Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
@@ -137,14 +145,20 @@ Result<void> AbiPluginLoader::trustAdd(const std::filesystem::path& p) {
     }
 #endif
 
-    trusted_.insert(canon);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trusted_.insert(canon);
+    }
     saveTrust();
     return Result<void>();
 }
 
 Result<void> AbiPluginLoader::trustRemove(const std::filesystem::path& p) {
     std::filesystem::path canon = plugin_trust::normalizePath(p);
-    trusted_.erase(canon);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trusted_.erase(canon);
+    }
     saveTrust();
     return Result<void>();
 }
@@ -174,7 +188,15 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
     if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
         return Error{ErrorCode::InvalidPath, "Not a directory: " + dir.string()};
     }
-    lastSkips_.clear();
+    const auto namePolicy = getNamePolicy();
+    auto appendSkip = [this](SkipInfo skip) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastSkips_.push_back(std::move(skip));
+    };
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastSkips_.clear();
+    }
     std::vector<ScanResult> out;
     // Collect candidates first to allow de-duplication by base name, preferring non-'lib'
     // prefix on UNIX-like systems. This keeps Linux and macOS behavior consistent and avoids
@@ -199,8 +221,8 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         } catch (...) {
         }
         if (!looks_like_yams) {
-            if (namePolicy_ == NamePolicy::Spec) {
-                lastSkips_.push_back(SkipInfo{p, "name policy: require libyams_* or yams_*"});
+            if (namePolicy == NamePolicy::Spec) {
+                appendSkip(SkipInfo{p, "name policy: require libyams_* or yams_*"});
             }
             return;
         }
@@ -211,7 +233,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
             if (fname.rfind("lib", 0) == 0) {
                 auto alt = p.parent_path() / fname.substr(3);
                 if (std::filesystem::exists(alt) && std::filesystem::is_regular_file(alt)) {
-                    lastSkips_.push_back(SkipInfo{p, "duplicate variant; prefer non-lib prefix"});
+                    appendSkip(SkipInfo{p, "duplicate variant; prefer non-lib prefix"});
                     return;
                 }
             }
@@ -223,7 +245,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         if (sr) {
             out.push_back(sr.value());
         } else {
-            lastSkips_.push_back(SkipInfo{p, sr.error().message});
+            appendSkip(SkipInfo{p, sr.error().message});
         }
     };
 
@@ -253,7 +275,9 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     if (ec)
         canon = file;
 
+    const auto namePolicy = getNamePolicy();
     const auto recordSkip = [&](std::string reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
         lastSkips_.push_back(SkipInfo{canon, std::move(reason)});
     };
 
@@ -356,7 +380,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
                     std::regex nameRe("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
                     std::regex verRe("\\\"version\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
                     std::smatch m;
-                    if (namePolicy_ == NamePolicy::Spec &&
+                    if (namePolicy == NamePolicy::Spec &&
                         std::regex_search(hi->info.manifestJson, m, nameRe)) {
                         hi->info.name = m[1].str();
                     }
@@ -378,47 +402,61 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
             canonical = canonical.substr(3);
         }
         // If manifest provided a spec-compliant name, keep it; otherwise apply canonical.
-        if (namePolicy_ != NamePolicy::Spec) {
+        if (namePolicy != NamePolicy::Spec) {
             hi->info.name = canonical;
         }
         // Dedupe if an entry already exists for the canonical name
-        auto itExisting = loaded_.find(hi->info.name);
-        if (itExisting != loaded_.end()) {
-            // Prefer existing if it came from a non-lib path; else replace
-            auto preferExisting = [](const std::filesystem::path& p) {
-                auto fn = p.filename().string();
-                return fn.rfind("lib", 0) != 0; // true if not starting with 'lib'
-            };
-            bool keepExisting = preferExisting(itExisting->second->info.path);
-            if (keepExisting) {
-                // Close newly opened handle and return existing
-                if (host_ctx)
-                    yams_free_host_context(host_ctx);
-                dlclose(handle);
-                return Result<ScanResult>(itExisting->second->info);
-            } else {
-                // Replace existing lib-prefixed variant with this one
-                (void)unload(itExisting->second->info.name);
+        std::shared_ptr<HandleInfo> existingHandle;
+        bool keepExisting = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto itExisting = loaded_.find(hi->info.name);
+            if (itExisting != loaded_.end()) {
+                existingHandle = itExisting->second;
+                auto preferExisting = [](const std::filesystem::path& p) {
+                    auto fn = p.filename().string();
+                    return fn.rfind("lib", 0) != 0; // true if not starting with 'lib'
+                };
+                keepExisting = preferExisting(existingHandle->info.path);
+                if (!keepExisting) {
+                    loaded_.erase(itExisting);
+                }
             }
+        }
+        if (existingHandle && keepExisting) {
+            // Close newly opened handle and return existing
+            if (host_ctx)
+                yams_free_host_context(host_ctx);
+            dlclose(handle);
+            return Result<ScanResult>(existingHandle->info);
         }
     } catch (...) {
     }
 #endif
 
-    loaded_[hi->info.name] = hi;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        loaded_[hi->info.name] = hi;
+    }
     return Result<ScanResult>(hi->info);
 }
 
 Result<void> AbiPluginLoader::unload(const std::string& name) {
-    auto it = loaded_.find(name);
-    if (it == loaded_.end())
-        return Result<void>();
-    loaded_.erase(it);
+    std::shared_ptr<HandleInfo> removed;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = loaded_.find(name);
+        if (it == loaded_.end())
+            return Result<void>();
+        removed = std::move(it->second);
+        loaded_.erase(it);
+    }
     return Result<void>();
 }
 
 std::vector<AbiPluginLoader::ScanResult> AbiPluginLoader::loaded() const {
     std::vector<ScanResult> v;
+    std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [name, hi] : loaded_) {
         if (hi) {
             v.push_back(hi->info);
@@ -428,11 +466,16 @@ std::vector<AbiPluginLoader::ScanResult> AbiPluginLoader::loaded() const {
 }
 
 Result<std::string> AbiPluginLoader::health(const std::string& name) const {
-    auto it = loaded_.find(name);
-    if (it == loaded_.end() || !it->second || !it->second->handle) {
-        return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+    std::shared_ptr<HandleInfo> handleInfo;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = loaded_.find(name);
+        if (it == loaded_.end() || !it->second || !it->second->handle) {
+            return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+        }
+        handleInfo = it->second;
     }
-    void* handle = it->second->handle;
+    void* handle = handleInfo->handle;
     using HealthFn = int (*)(char**);
     dlerror();
     auto get_health = reinterpret_cast<HealthFn>(dlsym(handle, "yams_plugin_get_health_json"));
@@ -457,14 +500,22 @@ Result<std::string> AbiPluginLoader::health(const std::string& name) const {
 }
 
 void AbiPluginLoader::loadTrust() {
-    trusted_.clear();
-    if (trustFile_.empty())
+    std::filesystem::path trustFile;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trusted_.clear();
+        trustFile = trustFile_;
+    }
+    if (trustFile.empty())
         return;
 
     const auto loadResult =
-        plugin_trust::loadTrustStore(trustFile_, yams::config::get_daemon_plugin_trust_file(),
+        plugin_trust::loadTrustStore(trustFile, yams::config::get_daemon_plugin_trust_file(),
                                      yams::config::get_legacy_plugin_trust_file());
-    trusted_ = loadResult.entries;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trusted_ = loadResult.entries;
+    }
 
     if (!loadResult.loaded) {
         return;
@@ -472,27 +523,39 @@ void AbiPluginLoader::loadTrust() {
 
     if (loadResult.migrated) {
         spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
-                     yams::config::get_legacy_plugin_trust_file().string(), trustFile_.string());
+                     yams::config::get_legacy_plugin_trust_file().string(), trustFile.string());
         saveTrust();
         spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries (from legacy)",
-                      trusted_.size());
+                      loadResult.entries.size());
         return;
     }
 
-    spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries", trusted_.size());
+    spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries", loadResult.entries.size());
 }
 
 void AbiPluginLoader::saveTrust() const {
-    if (trustFile_.empty())
+    std::filesystem::path trustFile;
+    std::set<std::filesystem::path> trusted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trustFile = trustFile_;
+        trusted = trusted_;
+    }
+    if (trustFile.empty())
         return;
 
-    if (!plugin_trust::writeTrustStore(trustFile_, trusted_)) {
-        spdlog::warn("AbiPluginLoader::saveTrust failed to persist '{}'", trustFile_.string());
+    if (!plugin_trust::writeTrustStore(trustFile, trusted)) {
+        spdlog::warn("AbiPluginLoader::saveTrust failed to persist '{}'", trustFile.string());
     }
 }
 
 bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
-    if (trusted_.empty()) {
+    std::set<std::filesystem::path> trusted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trusted = trusted_;
+    }
+    if (trusted.empty()) {
         // Allow implicit trust in controlled dev/test scenarios:
         // 1. If YAMS_PLUGIN_TRUST_ALL is set to a truthy value (1,true,on,yes)
         // 2. If YAMS_PLUGIN_DIR is set and the candidate path is under that directory
@@ -573,7 +636,7 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
         canon = p.lexically_normal();
     }
 
-    for (const auto& t : trusted_) {
+    for (const auto& t : trusted) {
         std::error_code tec;
         auto tcanon = std::filesystem::weakly_canonical(t, tec);
         if (tec) {
@@ -593,11 +656,16 @@ namespace yams::daemon {
 
 Result<void*> AbiPluginLoader::getInterface(const std::string& name, const std::string& ifaceId,
                                             uint32_t version) const {
-    auto it = loaded_.find(name);
-    if (it == loaded_.end() || !it->second || !it->second->handle) {
-        return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+    std::shared_ptr<HandleInfo> handleInfo;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = loaded_.find(name);
+        if (it == loaded_.end() || !it->second || !it->second->handle) {
+            return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+        }
+        handleInfo = it->second;
     }
-    void* handle = it->second->handle;
+    void* handle = handleInfo->handle;
     using GetIfaceFn = int (*)(const char*, uint32_t, void**);
     dlerror();
     auto get_iface = reinterpret_cast<GetIfaceFn>(dlsym(handle, "yams_plugin_get_interface"));
@@ -614,11 +682,16 @@ Result<void*> AbiPluginLoader::getInterface(const std::string& name, const std::
 }
 
 Result<std::shared_ptr<void>> AbiPluginLoader::acquireKeepAlive(const std::string& name) const {
-    auto it = loaded_.find(name);
-    if (it == loaded_.end() || !it->second) {
-        return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+    std::shared_ptr<HandleInfo> handleInfo;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = loaded_.find(name);
+        if (it == loaded_.end() || !it->second) {
+            return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+        }
+        handleInfo = it->second;
     }
-    return Result<std::shared_ptr<void>>(std::static_pointer_cast<void>(it->second));
+    return Result<std::shared_ptr<void>>(std::static_pointer_cast<void>(handleInfo));
 }
 
 } // namespace yams::daemon

@@ -273,7 +273,8 @@ public:
 
     // Repair: streaming call that collects RepairEvent progress + final RepairResponse
     boost::asio::awaitable<Result<RepairResponse>>
-    callRepair(const RepairRequest& req, std::function<void(const RepairEvent&)> onEvent = nullptr);
+    callRepair(const RepairRequest& req, std::function<void(const RepairEvent&)> onEvent = nullptr,
+               std::function<void()> onActivity = nullptr);
 
     boost::asio::awaitable<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
     boost::asio::awaitable<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);

@@ -655,6 +655,10 @@ version_header = custom_target(
 # Make builddir available as include path for generated headers
 # CLI will include as "version_generated.h" directly
 generated_inc = include_directories('.')
+version_generated_dep = declare_dependency(
+  include_directories: generated_inc,
+  sources: version_header,
+)
 
 yams_build_cli = get_option('build-cli') and not wasi_enabled
 yams_build_mcp = get_option('build-mcp-server')

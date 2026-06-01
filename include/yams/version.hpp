@@ -12,7 +12,10 @@
 #pragma once
 
 #if __has_include(<version_generated.h>)
+#define YAMS_HAS_GENERATED_VERSION_HEADER 1
 #include <version_generated.h>
+#else
+#define YAMS_HAS_GENERATED_VERSION_HEADER 0
 #endif
 
 // Semantic version components (fallback to 0.0.0)

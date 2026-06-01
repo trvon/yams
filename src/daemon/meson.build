@@ -249,6 +249,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('zlib'),
     nlohmann_json_dep,
     protobuf_dep,
+    version_generated_dep,
   ] + tracy_deps,
   cpp_args: tracy_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: [
@@ -263,6 +264,7 @@ yams_daemon_lib = static_library('yams_daemon',
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
   include_directories: [include_directories('../../include'), generated_inc],
+  dependencies: [version_generated_dep],
 )
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)

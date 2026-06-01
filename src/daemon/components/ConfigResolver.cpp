@@ -391,7 +391,7 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
     policy.strategy = yams::vector::ChunkingStrategy::PARAGRAPH_BASED;
     policy.config.preserve_sentences = false;
     policy.config.use_token_count = false;
-    policy.config.strategy = policy.strategy;
+    policy.config.strategy = yams::vector::ChunkingStrategy::PARAGRAPH_BASED;
 
     auto applyFromKv = [&](const std::map<std::string, std::string>& kv) {
         if (auto it = kv.find("embeddings.chunking.strategy"); it != kv.end()) {
@@ -976,11 +976,10 @@ std::optional<float> parseTomlFloat(const std::string& s) {
     return static_cast<float>(*parsed);
 }
 
-std::optional<bool> parseTomlBool(const std::string& s) {
-    std::string v;
-    v.reserve(s.size());
-    for (char c : s)
-        v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+std::optional<bool> parseTomlBool(std::string_view s) {
+    std::string v(s);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (v == "true" || v == "1" || v == "yes" || v == "on")
         return true;
     if (v == "false" || v == "0" || v == "no" || v == "off")
@@ -1109,7 +1108,7 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     }
 
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ENABLED")) {
-        if (auto b = parseTomlBool(std::string(raw)))
+        if (auto b = parseTomlBool(raw))
             policy.enabled = b;
     }
     if (auto v = readEnvString("YAMS_SIMEON_BM25_VARIANT"))
@@ -1125,7 +1124,7 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
         policy.buildDocMaxChunks = parseSize(*v);
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED")) {
-        if (auto b = parseTomlBool(std::string(raw)))
+        if (auto b = parseTomlBool(raw))
             policy.fragmentGeometryEnabled = b;
     }
     if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
@@ -1137,14 +1136,14 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
     if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
         policy.fragmentGeometryPmiSampleBytes = parseSize(*v);
     if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ROUTER_ENABLED")) {
-        if (auto b = parseTomlBool(std::string(raw)))
+        if (auto b = parseTomlBool(raw))
             policy.routerEnabled = b;
     }
     if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
         policy.routerPreset = std::move(v);
 
     if (const char* raw = std::getenv("YAMS_SIMEON_STRATEGY_ROUTER_ENABLED")) {
-        if (auto b = parseTomlBool(std::string(raw)))
+        if (auto b = parseTomlBool(raw))
             policy.strategyRouterEnabled = b;
     }
 

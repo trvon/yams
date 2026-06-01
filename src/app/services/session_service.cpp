@@ -135,9 +135,9 @@ public:
             json m = json::object();
             for (auto& kv : meta)
                 m[kv.first] = kv.second;
-            sel["metadata"] = m;
+            sel["metadata"] = std::move(m);
         }
-        j["selectors"].push_back(sel);
+        j["selectors"].push_back(std::move(sel));
         save_json(p, j);
     }
 
@@ -206,15 +206,15 @@ public:
                 if (!docsResult)
                     continue;
 
-                for (const auto& doc : docsResult.value()) {
+                for (auto& doc : docsResult.value()) {
                     if (remaining == 0)
                         break;
 
                     json m;
-                    m["name"] = doc.fileName;
-                    m["path"] = doc.filePath;
-                    m["hash"] = doc.sha256Hash;
-                    m["mime"] = doc.mimeType;
+                    m["name"] = std::move(doc.fileName);
+                    m["path"] = std::move(doc.filePath);
+                    m["hash"] = std::move(doc.sha256Hash);
+                    m["mime"] = std::move(doc.mimeType);
                     m["size"] = doc.fileSize;
 
                     // Optionally fetch snippet if requested
@@ -224,7 +224,7 @@ public:
                             std::string content(
                                 reinterpret_cast<const char*>(contentResult.value().data()),
                                 std::min(contentResult.value().size(), snippetLen));
-                            m["snippet"] = content;
+                            m["snippet"] = std::move(content);
                         } else {
                             m["snippet"] = "";
                         }
@@ -413,15 +413,15 @@ public:
             if (!docsResult)
                 continue;
 
-            for (const auto& doc : docsResult.value()) {
+            for (auto& doc : docsResult.value()) {
                 if (remaining == 0)
                     break;
 
                 MaterializedItem item;
-                item.name = doc.fileName;
-                item.path = doc.filePath;
-                item.hash = doc.sha256Hash;
-                item.mime = doc.mimeType;
+                item.name = std::move(doc.fileName);
+                item.path = std::move(doc.filePath);
+                item.hash = std::move(doc.sha256Hash);
+                item.mime = std::move(doc.mimeType);
                 item.size = doc.fileSize;
                 out.push_back(std::move(item));
                 --remaining;

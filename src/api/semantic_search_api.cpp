@@ -69,9 +69,9 @@ public:
 
             // 3. Generate embeddings for chunks
             std::vector<std::string> chunk_contents;
-            for (const auto& chunk : chunks) {
-                chunk_contents.push_back(chunk.content);
-                result.chunk_ids.push_back(chunk.chunk_id);
+            for (auto& chunk : chunks) {
+                chunk_contents.push_back(std::move(chunk.content));
+                result.chunk_ids.push_back(std::move(chunk.chunk_id));
             }
 
             if (!embedder_->isInitialized()) {
@@ -154,7 +154,7 @@ private:
 
         size_t max_keywords = std::min(size_t(10), freq_words.size());
         for (size_t i = 0; i < max_keywords; ++i) {
-            keywords.push_back(freq_words[i].second);
+            keywords.push_back(std::move(freq_words[i].second));
         }
 
         return keywords;
@@ -308,7 +308,7 @@ public:
         info.created_at = std::chrono::system_clock::now();
         info.last_accessed = info.created_at;
 
-        sessions_[session_id] = info;
+        sessions_[session_id] = std::move(info);
         return session_id;
     }
 
@@ -458,7 +458,7 @@ public:
         // Store document metadata
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
-            documents_[result.document_id] = {content, result.enriched_metadata};
+            documents_[result.document_id] = {content, std::move(result.enriched_metadata)};
         }
 
         return Result<std::string>(result.document_id);
@@ -543,13 +543,13 @@ public:
                 session_manager_->addQuery(request.session_id, request.query);
             }
 
-            return Result<SearchResponse>(response);
+            return Result<SearchResponse>(std::move(response));
 
         } catch (const std::exception& e) {
             SearchResponse error_response;
             error_response.success = false;
             error_response.error_message = e.what();
-            return Result<SearchResponse>(error_response);
+            return Result<SearchResponse>(std::move(error_response));
         }
     }
 
@@ -835,7 +835,7 @@ std::vector<TextSnippet> generateSnippets(const std::string& content,
         snippet.start_position = 0;
         snippet.end_position = snippet.text.length();
         snippet.relevance_score = 0.1f;
-        snippets.push_back(snippet);
+        snippets.push_back(std::move(snippet));
         return snippets;
     }
 
@@ -893,7 +893,7 @@ std::vector<TextSnippet> generateSnippets(const std::string& content,
             }
         }
 
-        snippets.push_back(snippet);
+        snippets.push_back(std::move(snippet));
         used_positions.insert(match_pos);
     }
 

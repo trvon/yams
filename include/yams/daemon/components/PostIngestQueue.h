@@ -546,14 +546,19 @@ private:
     std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
 
-    // Event-driven wake timers: the enqueuer cancels the timer to immediately
-    // wake the corresponding poller coroutine.  The timer is armed with a 10ms
-    // safety-net expiry that handles cancel() race windows.
+    // Event-driven wake timers: the enqueuer signals the timer's strand to
+    // cancel the wait and immediately wake the corresponding poller coroutine.
+    // Access to the shared_ptr holders is synchronized here because enqueue and
+    // shutdown happen from arbitrary threads while the pollers own the timers.
+    mutable std::mutex wakeTimerMutex_;
     std::shared_ptr<boost::asio::steady_timer> extractionWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> kgWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> symbolWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> entityWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> titleWakeTimer_;
+    void setWakeTimer(Stage stage, std::shared_ptr<boost::asio::steady_timer> timer);
+    void signalWakeTimer(Stage stage);
+    void clearWakeTimers();
 
     /// Initialize cached channel pointers from InternalEventBus
     void initializeChannels();

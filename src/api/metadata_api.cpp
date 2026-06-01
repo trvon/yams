@@ -68,7 +68,7 @@ CreateMetadataResponse MetadataApi::createMetadata(const CreateMetadataRequest& 
         }
 
         response.documentId = result.value();
-        response.createdMetadata = requestCopy;
+        response.createdMetadata = std::move(requestCopy);
         response.createdMetadata.info.id = response.documentId;
 
         response.setSuccess("Document created successfully");
@@ -373,10 +373,10 @@ QueryMetadataResponse MetadataApi::queryMetadata(const QueryMetadataRequest& req
 
         // Convert DocumentInfo to DocumentMetadata
         std::vector<metadata::DocumentMetadata> allDocs;
-        for (const auto& info : allDocsResult.value()) {
+        for (auto& info : allDocsResult.value()) {
             metadata::DocumentMetadata docMeta;
-            docMeta.info = info;
-            allDocs.push_back(docMeta);
+            docMeta.info = std::move(info);
+            allDocs.push_back(std::move(docMeta));
         }
 
         // Apply filters
@@ -455,10 +455,10 @@ ExportMetadataResponse MetadataApi::exportMetadata(const ExportMetadataRequest& 
 
         // Convert DocumentInfo to DocumentMetadata
         std::vector<metadata::DocumentMetadata> allDocs;
-        for (const auto& info : allDocsResult.value()) {
+        for (auto& info : allDocsResult.value()) {
             metadata::DocumentMetadata docMeta;
-            docMeta.info = info;
-            allDocs.push_back(docMeta);
+            docMeta.info = std::move(info);
+            allDocs.push_back(std::move(docMeta));
         }
 
         auto docsToExport = applyFilter(allDocs, request.filter);
@@ -823,7 +823,7 @@ MetadataApi::importFromJson(const std::string& path) {
                 doc.info.sha256Hash = item["contentHash"];
             // Parse more fields as needed
 
-            documents.push_back(doc);
+            documents.push_back(std::move(doc));
         }
 
         return documents;
@@ -880,7 +880,7 @@ MetadataApi::importFromCsv(const std::string& path) {
                 fieldIndex++;
             }
 
-            documents.push_back(doc);
+            documents.push_back(std::move(doc));
         }
 
         return documents;
@@ -1126,10 +1126,10 @@ GetStatisticsResponse MetadataApi::getStatistics(const GetStatisticsRequest& req
 
         // Convert DocumentInfo to DocumentMetadata
         std::vector<metadata::DocumentMetadata> allDocs;
-        for (const auto& info : allDocsResult.value()) {
+        for (auto& info : allDocsResult.value()) {
             metadata::DocumentMetadata docMeta;
-            docMeta.info = info;
-            allDocs.push_back(docMeta);
+            docMeta.info = std::move(info);
+            allDocs.push_back(std::move(docMeta));
         }
 
         auto filteredDocs = applyFilter(allDocs, request.filter);

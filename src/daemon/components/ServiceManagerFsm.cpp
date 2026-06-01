@@ -122,7 +122,7 @@ namespace yams::daemon {
 
 static bool isTerminal(ServiceManagerState s) {
     return s == ServiceManagerState::Ready || s == ServiceManagerState::Failed ||
-           s == ServiceManagerState::Stopped;
+           s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
 }
 
 template <typename Event>
@@ -138,14 +138,14 @@ void dispatchNoThrow(std::mutex& mutex, std::condition_variable& cv, const Event
 }
 
 ServiceManagerFsm::ServiceManagerFsm() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sharedMutex());
     detail::ServiceManagerMachine::snap = {};
     detail::ServiceManagerMachine::start();
 }
 
 ServiceManagerSnapshot ServiceManagerFsm::snapshot() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::ServiceManagerMachine::snap;
     } catch (...) {
         return detail::ServiceManagerMachine::snap;
@@ -153,48 +153,48 @@ ServiceManagerSnapshot ServiceManagerFsm::snapshot() const noexcept {
 }
 
 void ServiceManagerFsm::dispatch(const OpeningDatabaseEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const DatabaseOpenedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationStartedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationCompletedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const VectorsInitializedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuildStartedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuiltEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const InitializationFailedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const ShutdownEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const ServiceManagerStoppedEvent& ev) noexcept {
-    dispatchNoThrow(mutex_, cv_, ev);
+    dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 bool ServiceManagerFsm::canInitializeVectors() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::ServiceManagerMachine::snap.state == ServiceManagerState::SchemaReady;
     } catch (...) {
         return false;
@@ -203,7 +203,7 @@ bool ServiceManagerFsm::canInitializeVectors() const noexcept {
 
 bool ServiceManagerFsm::canBuildSearchEngine() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         auto s = detail::ServiceManagerMachine::snap.state;
         return s == ServiceManagerState::VectorsReady || s == ServiceManagerState::SchemaReady;
     } catch (...) {
@@ -213,7 +213,7 @@ bool ServiceManagerFsm::canBuildSearchEngine() const noexcept {
 
 bool ServiceManagerFsm::isReady() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::ServiceManagerMachine::snap.state == ServiceManagerState::Ready;
     } catch (...) {
         return false;
@@ -222,7 +222,7 @@ bool ServiceManagerFsm::isReady() const noexcept {
 
 bool ServiceManagerFsm::hasShutdown() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         auto s = detail::ServiceManagerMachine::snap.state;
         return s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
     } catch (...) {
@@ -232,7 +232,7 @@ bool ServiceManagerFsm::hasShutdown() const noexcept {
 
 bool ServiceManagerFsm::isTerminalState() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return isTerminal(detail::ServiceManagerMachine::snap.state);
     } catch (...) {
         return true;
@@ -241,7 +241,7 @@ bool ServiceManagerFsm::isTerminalState() const noexcept {
 
 ServiceManagerSnapshot ServiceManagerFsm::waitForTerminalState(int timeoutSeconds) noexcept {
     try {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(sharedMutex());
         auto pred = []() { return isTerminal(detail::ServiceManagerMachine::snap.state); };
         bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
         if (!completed) {
@@ -262,7 +262,7 @@ ServiceManagerSnapshot ServiceManagerFsm::waitForTerminalState(int timeoutSecond
 
 void ServiceManagerFsm::cancelWait() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         cv_.notify_all();
     } catch (...) {
         // Intentional best-effort path; keep the primary operation unaffected.
@@ -271,7 +271,7 @@ void ServiceManagerFsm::cancelWait() noexcept {
 
 void ServiceManagerFsm::reset() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::ServiceManagerMachine::snap = {};
         detail::ServiceManagerMachine::start();
     } catch (...) {

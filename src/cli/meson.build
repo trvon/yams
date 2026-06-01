@@ -95,6 +95,7 @@ cli_deps = [
   dependency('spdlog'),
   dependency('OpenSSL'),
   dependency('sqlite3'),
+  version_generated_dep,
   boost_dep,
   cli11_dep,
 ]

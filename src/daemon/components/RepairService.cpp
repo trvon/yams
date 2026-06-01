@@ -1167,7 +1167,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
 
     // Phase 3: Search index repair
     if (doFts5)
-        if (!runOp("fts5", [&] { return rebuildFts5Index(request, progress); }))
+        if (!runOp("fts5", [&] { return rebuildFts5Index(request, progress, cancelRequested); }))
             goto finalize;
     if (doEmbeddings)
         if (!runOp("embeddings",
@@ -1398,7 +1398,8 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
         keepGoing = runOp("graph", [&] { return repairKnowledgeGraph(request, progress); });
     }
     if (keepGoing && doFts5) {
-        keepGoing = runOp("fts5", [&] { return rebuildFts5Index(request, progress); });
+        keepGoing =
+            runOp("fts5", [&] { return rebuildFts5Index(request, progress, cancelRequested); });
     }
     if (keepGoing && doEmbeddings) {
         if (request.foreground) {
@@ -2741,9 +2742,14 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
 }
 
 RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
-                                                      const ProgressFn& progress) {
+                                                      const ProgressFn& progress,
+                                                      std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "fts5";
+
+    auto isCanceled = [&]() {
+        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
+    };
 
     const bool dryRun = req.dryRun;
     const bool force = req.force;
@@ -2791,6 +2797,12 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     }
 
     while (!finished) {
+        if (isCanceled()) {
+            result.message =
+                "FTS5 rebuild canceled after scanning " + std::to_string(docsSeen) + " documents";
+            return result;
+        }
+
         RepairSlice slice;
         slice.cursorDocumentId = cursorDocumentId;
 
@@ -2816,6 +2828,12 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
             }
 
             for (const auto& d : docs.value()) {
+                if (isCanceled()) {
+                    result.message = "FTS5 rebuild canceled after scanning " +
+                                     std::to_string(docsSeen) + " documents";
+                    return result;
+                }
+
                 cursorDocumentId = std::max(cursorDocumentId, d.id);
                 slice.cursorDocumentId = cursorDocumentId;
                 ++slice.processed;

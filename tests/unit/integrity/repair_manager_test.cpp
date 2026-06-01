@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/crypto/hasher.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/storage/storage_engine.h>
 
@@ -174,4 +175,130 @@ TEST_CASE("RepairManager rejects P2P data with wrong hash", "[integrity][repair]
     CHECK_FALSE(repaired);
 
     CHECK_FALSE(storage.exists(targetHash).value());
+}
+
+TEST_CASE("RepairManager recovers block from P2P with verified hash", "[integrity][repair]") {
+    TempDir tempDir;
+    StorageConfig storageConfig;
+    storageConfig.basePath = tempDir.path / "storage";
+    std::filesystem::create_directories(storageConfig.basePath);
+    StorageEngine storage(storageConfig);
+
+    // Pre-compute hash of the recovery data so it matches
+    const std::string recoveryData = "known-good-recovery-data-0123456789";
+    std::string recoveryHash;
+    {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        auto bytes = toBytes(recoveryData);
+        recoveryHash = hasher->hash(bytes);
+    }
+
+    RepairManagerConfig config;
+    config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
+    };
+    config.p2pFetcher =
+        [&recoveryData](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return toBytes(recoveryData);
+    };
+    config.defaultOrder = {RepairStrategy::FromP2P};
+
+    RepairManager manager(storage, config);
+    auto repaired = manager.attemptRepair(recoveryHash);
+    CHECK(repaired);
+
+    // Verify the data was actually stored with the correct hash
+    CHECK(storage.exists(recoveryHash).value());
+
+    // Content should match
+    auto retrieved = storage.retrieve(recoveryHash);
+    REQUIRE(retrieved.has_value());
+    std::string retrievedStr(reinterpret_cast<const char*>(retrieved.value().data()),
+                             retrieved.value().size());
+    CHECK(retrievedStr == recoveryData);
+}
+
+TEST_CASE("RepairManager: backup fetcher preferred over P2P", "[integrity][repair]") {
+    TempDir tempDir;
+    StorageConfig storageConfig;
+    storageConfig.basePath = tempDir.path / "storage";
+    std::filesystem::create_directories(storageConfig.basePath);
+    StorageEngine storage(storageConfig);
+
+    const std::string backupData = "data-from-backup-0123456789";
+    const std::string p2pData = "data-from-p2p-0123456789";
+    std::string recoveryHash;
+    {
+        auto hasher = yams::crypto::createSHA256Hasher();
+        auto bytes = toBytes(backupData);
+        recoveryHash = hasher->hash(bytes);
+    }
+
+    bool backupUsed = false;
+    bool p2pUsed = false;
+
+    RepairManagerConfig config;
+    config.backupFetcher =
+        [&backupUsed, &backupData](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        backupUsed = true;
+        return toBytes(backupData);
+    };
+    config.p2pFetcher = [&p2pUsed](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        p2pUsed = true;
+        return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
+    };
+    config.defaultOrder = {RepairStrategy::FromBackup, RepairStrategy::FromP2P};
+
+    RepairManager manager(storage, config);
+    auto repaired = manager.attemptRepair(recoveryHash);
+    REQUIRE(repaired);
+
+    // Backup should have been tried (and succeeded)
+    CHECK(backupUsed);
+    // P2P should NOT have been tried if backup succeeded
+    CHECK_FALSE(p2pUsed);
+
+    CHECK(storage.exists(recoveryHash).value());
+}
+
+TEST_CASE("RepairManager: canRepair reflects source availability", "[integrity][repair]") {
+    TempDir tempDir;
+    StorageConfig storageConfig;
+    storageConfig.basePath = tempDir.path / "storage";
+    std::filesystem::create_directories(storageConfig.basePath);
+    StorageEngine storage(storageConfig);
+
+    SECTION("canRepair false when no repair sources configured") {
+        RepairManagerConfig config; // no fetchers set at all
+        RepairManager manager(storage, config);
+        CHECK_FALSE(manager.canRepair("any-hash"));
+    }
+
+    SECTION("canRepair true when backup fetcher is configured") {
+        RepairManagerConfig config;
+        config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+            std::string data = "backup-data";
+            return toBytes(data);
+        };
+        config.p2pFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+            return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
+        };
+
+        RepairManager manager(storage, config);
+        CHECK(manager.canRepair("any-hash"));
+    }
+
+    SECTION("canRepair true when p2p fetcher returns data") {
+        RepairManagerConfig config;
+        config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+            return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
+        };
+        config.p2pFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+            std::string data = "p2p-data";
+            return toBytes(data);
+        };
+
+        RepairManager manager(storage, config);
+        CHECK(manager.canRepair("any-hash"));
+    }
 }

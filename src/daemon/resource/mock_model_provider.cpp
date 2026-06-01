@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <cctype>
 #include <mutex>
 #include <string>
@@ -283,8 +284,8 @@ public:
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ModelInfo> loadedModels_;
-    bool isInitialized_ = false;
-    bool shutdown_ = false;
+    std::atomic<bool> isInitialized_{false};
+    std::atomic<bool> shutdown_{false};
     size_t embeddingDim_ = 384; // Default embedding dimension
     mutable size_t requestCount_ = 0;
 };

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <climits>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -426,12 +427,27 @@ public:
                 const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
                                                  ? cli_->getDataPath()
                                                  : std::filesystem::path{};
+                const int effectiveDaemonTimeoutMs = [&]() {
+                    int timeoutMs = std::max(1, daemonTimeoutMs_);
+                    if (!waitForProcessing_) {
+                        return timeoutMs;
+                    }
+                    if (waitTimeoutSeconds_ <= 0) {
+                        return std::max(timeoutMs, 300000);
+                    }
+                    constexpr int kSyncCompletionSlackMs = 5000;
+                    const long long requested =
+                        static_cast<long long>(waitTimeoutSeconds_) * 1000LL +
+                        kSyncCompletionSlackMs;
+                    return std::max(timeoutMs,
+                                    static_cast<int>(std::min<long long>(requested, INT_MAX)));
+                }();
+
                 yams::cli::CliDaemonRequestOptions daemonOpts;
                 daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
                 daemonOpts.readyTimeout =
                     std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
-                daemonOpts.requestTimeout =
-                    std::chrono::milliseconds(std::max(1, daemonTimeoutMs_));
+                daemonOpts.requestTimeout = std::chrono::milliseconds(effectiveDaemonTimeoutMs);
 
                 auto daemonClientCfg = yams::cli::build_cli_daemon_client_config(
                     getExecutor(), explicitDataDir, daemonOpts);
@@ -648,7 +664,7 @@ public:
                     aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
                     if (cli_->hasExplicitDataDir())
                         aopts.explicitDataDir = cli_->getDataPath();
-                    aopts.timeoutMs = daemonTimeoutMs_;
+                    aopts.timeoutMs = effectiveDaemonTimeoutMs;
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
                     aopts.verify = verify_;
@@ -1242,7 +1258,7 @@ private:
     bool bypassSession_ = false;
 
     // Daemon interaction controls
-    int daemonTimeoutMs_ = 5000; // AddDocument just pushes to queue, 5s is plenty
+    int daemonTimeoutMs_ = 5000; // Raised automatically for --sync / wait-for-processing paths
     int daemonRetries_ = 3;
     int daemonBackoffMs_ = 250;
     int maxConcurrent_ = 0;

@@ -90,12 +90,11 @@ void processCollectibleBlock(ReferenceCounter& refCounter, StorageEngine& storag
             return;
         }
         txn.pruneReference(blockHash);
+        if (blockSizeResult) {
+            stats.bytesReclaimed += blockSizeResult.value();
+        }
+        ++stats.blocksDeleted;
     }
-
-    if (blockSizeResult) {
-        stats.bytesReclaimed += blockSizeResult.value();
-    }
-    ++stats.blocksDeleted;
     notifyCollectionProgress(options, blockHash, stats);
 }
 

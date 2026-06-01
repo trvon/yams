@@ -108,7 +108,11 @@ if get_option('build-plugins') and get_option('plugin-s3')
 endif
 
 # zyp (Zig YAMS PDF) plugin tests
-if get_option('plugin-zyp')
+zyp_plugin_runtime_deps = []
+if is_variable('zyp_plugin')
+  zyp_plugin_runtime_deps = [zyp_plugin]
+endif
+if get_option('plugin-zyp') and zyp_plugin_runtime_deps.length() > 0
   zyp_plugin_path = join_paths(plugin_build_dir, 'plugins/zyp/yams_zyp' + plugin_ext)
 
   zyp_test_exe = executable('yams_zyp_tests',
@@ -125,6 +129,7 @@ if get_option('plugin-zyp')
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,
     },
+    depends: zyp_plugin_runtime_deps,
     timeout: 60,
   )
 endif

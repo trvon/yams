@@ -66,6 +66,18 @@ bool is_transient_integrity_check_message(std::string_view message) {
     lower.reserve(message.size());
     std::transform(message.begin(), message.end(), std::back_inserter(lower),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    // Exclude FTS5 inverted-index validation errors from the transient-lock
+    // heuristic.  These errors contain the word "locked" because SQLite
+    // FTS5 reports them as "unable to validate the inverted index for FTS5
+    // table … : database is locked", but they indicate persistent FTS5
+    // index corruption rather than transient SQLite contention.
+    // Throwing away the DB would lose metadata; instead we let the error
+    // propagate as DatabaseError so the caller can schedule an FTS5 repair.
+    if (lower.find("fts5") != std::string::npos &&
+        lower.find("inverted index") != std::string::npos) {
+        return false;
+    }
     return storage::sqlite_retry::isBusyOrLockedMessage(lower);
 }
 
