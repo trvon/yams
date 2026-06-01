@@ -159,6 +159,7 @@ incs = [
   include_directories('common'),         # shared helpers
   include_directories('../include'),     # headers
   include_directories('../tools/yams-tools/include'),
+  generated_inc,                         # builddir/version_generated.h
 ] + catch2_incs
 
 #Keep project strict, but don’t fail unit tests on common test - only warnings.
@@ -1315,6 +1316,7 @@ if catch2_dep.found()
 #CLI submodule tests(Commands, Data Resolution, Error Hints, Prompt Utils, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - cli
   catch2_cli_submodule_exe = executable('catch2_cli_submodule',
+    version_header,
     files(
       'unit/common/format_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
@@ -1358,7 +1360,7 @@ if catch2_dep.found()
       'unit/cli/version_generated_header_catch2_test.cpp',
     ),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    dependencies: [version_generated_dep, catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -3094,7 +3096,9 @@ if catch2_dep.found()
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,
       'YAMS_SOURCE_DIR': meson.project_source_root(),
+      'MESON_BUILD_ROOT': meson.project_build_root(),
     },
+    depends: [yams_cli_exe, version_header],
     timeout: 300  # Tests take ~200s
   )
 

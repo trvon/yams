@@ -168,12 +168,41 @@ private:
 };
 
 auto findBuiltYamsCli() -> fs::path {
+    std::vector<fs::path> candidates;
+
+    if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+        candidates.emplace_back(fs::path(buildRoot) / "tools" / "yams-cli" / "yams-cli");
+    }
+
     const fs::path cwd = fs::current_path();
-    const std::vector<fs::path> candidates = {
-        cwd / "build" / "coverage" / "tools" / "yams-cli" / "yams-cli",
-        cwd / "build" / "release" / "tools" / "yams-cli" / "yams-cli",
-        cwd / "build" / "debug" / "tools" / "yams-cli" / "yams-cli",
+    const std::vector<fs::path> bases = {
+        cwd,
+        cwd.parent_path(),
+        cwd.parent_path().parent_path(),
     };
+    const std::vector<fs::path> suffixes = {
+        fs::path("tools") / "yams-cli" / "yams-cli",
+        fs::path("builddir-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-asan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-ubsan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-tsan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-nosan-local") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-asan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-ubsan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-tsan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("builddir-nosan") / "tools" / "yams-cli" / "yams-cli",
+        fs::path("build") / "coverage" / "tools" / "yams-cli" / "yams-cli",
+        fs::path("build") / "release" / "tools" / "yams-cli" / "yams-cli",
+        fs::path("build") / "debug" / "tools" / "yams-cli" / "yams-cli",
+    };
+
+    for (const auto& base : bases) {
+        for (const auto& suffix : suffixes) {
+            candidates.push_back(base / suffix);
+        }
+    }
+
     for (const auto& candidate : candidates) {
         if (fs::exists(candidate)) {
             return candidate;

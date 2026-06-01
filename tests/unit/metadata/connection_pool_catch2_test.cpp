@@ -330,19 +330,21 @@ TEST_CASE("Connection pool WAL mode creates WAL and SHM files",
         auto conn = pool.acquire();
         REQUIRE(conn.has_value());
 
-        // Write data to trigger WAL file creation.
+        // Write data to trigger WAL file creation while the pool still owns live connections.
         REQUIRE((*conn.value())->execute("CREATE TABLE IF NOT EXISTS t(x)").has_value());
         REQUIRE((*conn.value())->execute("INSERT INTO t VALUES(1)").has_value());
     }
-    pool.shutdown();
 
-    // WAL files should exist on disk after WAL-mode operations.
+    // WAL companion files are only guaranteed while at least one connection remains open.
+    // After the final close, SQLite may checkpoint and remove them immediately.
     fs::path walPath(dbPath.string() + "-wal");
     fs::path shmPath(dbPath.string() + "-shm");
     CHECK(fs::exists(walPath));
     CHECK(fs::exists(shmPath));
 
-    // Cleanup companion files
+    pool.shutdown();
+
+    // Cleanup companion files if SQLite left them behind.
     std::error_code ec;
     fs::remove(walPath, ec);
     fs::remove(shmPath, ec);

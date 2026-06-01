@@ -1285,7 +1285,7 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
 
     REQUIRE(largeResult.has_value());
     REQUIRE_FALSE(largeResult.value().hash.empty());
-    REQUIRE(getWithRetry(client, largeResult.value().hash).has_value());
+    REQUIRE(getWithRetry(client, largeResult.value().hash, 50, 200ms).has_value());
 
     auto smallDocResult = metadataRepo->getDocumentByHash(addResult.value().hash);
     REQUIRE(smallDocResult.has_value());

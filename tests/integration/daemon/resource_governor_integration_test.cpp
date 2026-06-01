@@ -23,6 +23,15 @@
 #include <thread>
 #include <vector>
 
+#if defined(__has_feature)
+#if __has_feature(undefined_behavior_sanitizer)
+#define YAMS_UBSAN_ACTIVE 1
+#endif
+#endif
+#if defined(__SANITIZE_UNDEFINED__)
+#define YAMS_UBSAN_ACTIVE 1
+#endif
+
 using namespace yams::daemon;
 using namespace yams::test;
 using namespace std::chrono_literals;
@@ -321,6 +330,10 @@ TEST_CASE("ResourceGovernor phase-4 policy surfaces respond during daemon operat
 
 TEST_CASE("Governor detects pressure with low CPU threshold", "[integration][governor][pressure]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
+#ifdef YAMS_UBSAN_ACTIVE
+    SKIP("Boost.Asio kqueue reactor teardown currently trips a known UBSan descriptor_state race "
+         "in this pressure integration path");
+#endif
 
     // Set a very low CPU threshold so that normal daemon operation triggers Warning
     CpuThresholdGuard thresholdGuard(5.0); // 5% - very low threshold

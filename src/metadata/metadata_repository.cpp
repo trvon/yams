@@ -1539,8 +1539,15 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         }
 
         // Pre-check statement to determine counter increments before the combined UPDATE.
-        auto checkStmtResult = db.prepareCached(R"(
-            SELECT COALESCE(content_extracted, 0), extraction_status
+        auto checkStmtResult = db.prepareCached(hasFts5 ? R"(
+            SELECT COALESCE(content_extracted, 0),
+                   CASE WHEN EXISTS(
+                       SELECT 1 FROM documents_fts WHERE rowid = documents.id
+                   ) THEN 1 ELSE 0 END
+            FROM documents WHERE id = ?
+        )"
+                                                        : R"(
+            SELECT COALESCE(content_extracted, 0), 0
             FROM documents WHERE id = ?
         )");
         if (!checkStmtResult) {
@@ -1579,6 +1586,32 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             titleStorage.clear();
             const auto sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
             const auto sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
+
+            bool wasExtracted = entry.priorContentExtracted;
+            bool wasIndexed = false;
+            if (!entry.priorStateKnown || hasFts5) {
+                if (auto r = checkStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.clearBindings(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                auto checkStep = checkStmt.step();
+                if (!checkStep) {
+                    db.execute("ROLLBACK");
+                    return checkStep.error();
+                }
+                if (checkStep.value()) {
+                    wasExtracted = checkStmt.getInt(0) == 1;
+                    wasIndexed = checkStmt.getInt(1) == 1;
+                }
+            }
 
             // 1. Insert content
             if (auto r = contentStmt.reset(); !r) {
@@ -1663,30 +1696,6 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     return ftsExec.error();
                 }
                 indexedDocIds.push_back(entry.documentId);
-            }
-
-            bool wasExtracted = entry.priorContentExtracted;
-            bool wasIndexed = entry.priorExtractionStatus == ExtractionStatus::Success;
-            if (!entry.priorStateKnown) {
-                if (auto r = checkStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                auto checkStep = checkStmt.step();
-                if (!checkStep) {
-                    db.execute("ROLLBACK");
-                    return checkStep.error();
-                }
-                wasExtracted = checkStep.value() && checkStmt.getInt(0) == 1;
-                wasIndexed = checkStep.value() && checkStmt.getString(1) == "Success";
             }
 
             if (auto r = combinedStmt.reset(); !r) {
