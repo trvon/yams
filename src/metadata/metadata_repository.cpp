@@ -1588,7 +1588,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             const auto sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
 
             bool wasExtracted = entry.priorContentExtracted;
-            bool wasIndexed = false;
+            // Without FTS5 there is no documents_fts state to reconcile, so avoid
+            // double-counting "indexed" documents in non-FTS builds.
+            bool wasIndexed = !hasFts5;
             if (!entry.priorStateKnown || hasFts5) {
                 if (auto r = checkStmt.reset(); !r) {
                     db.execute("ROLLBACK");

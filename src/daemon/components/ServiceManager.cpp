@@ -2814,12 +2814,9 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
     auto tempDb = std::make_unique<metadata::Database>();
     auto openR = tempDb->open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
     if (!openR) {
-        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}; removing stale WAL to "
-                     "prevent re-triggering recovery on next startup",
+        spdlog::warn("[ServiceManager] Cannot open DB for WAL recovery: {}; leaving WAL/SHM in "
+                     "place for a later retry",
                      openR.error().message);
-        std::error_code ec;
-        std::filesystem::remove(walPath, ec);
-        std::filesystem::remove(shmPath, ec);
         return;
     }
 
@@ -2829,16 +2826,10 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
                      "successfully",
                      walSize);
     } else {
-        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; removing stale WAL "
-                     "to prevent re-triggering recovery on next startup",
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; leaving WAL/SHM in "
+                     "place for a later retry",
                      cpR.error().message);
-        // The WAL cannot be checkpointed — it is likely from a different daemon
-        // instance or is corrupted.  Remove it so we don't re-trigger recovery
-        // on every startup.
         tempDb->close();
-        std::error_code ec;
-        std::filesystem::remove(walPath, ec);
-        std::filesystem::remove(shmPath, ec);
         return;
     }
     tempDb->close();

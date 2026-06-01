@@ -10,6 +10,7 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 
+#include <future>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -344,10 +345,10 @@ TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachabl
 
         // Dispatch the failure from another "thread" — the condition
         // variable in waitForTerminalState should wake up.
-        std::thread waiter([&fsm]() {
-            auto snap = fsm.waitForTerminalState(5);
-            REQUIRE(snap.state == ServiceManagerState::Failed);
-        });
+        std::promise<ServiceManagerSnapshot> waiterResult;
+        auto waiterFuture = waiterResult.get_future();
+        std::thread waiter(
+            [&fsm, &waiterResult]() { waiterResult.set_value(fsm.waitForTerminalState(5)); });
 
         // Small sleep to let the waiter start blocking
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -355,6 +356,7 @@ TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachabl
         fsm.dispatch(InitializationFailedEvent{"forced failure for test"});
 
         waiter.join();
+        REQUIRE(waiterFuture.get().state == ServiceManagerState::Failed);
         REQUIRE(fsm.snapshot().state == ServiceManagerState::Failed);
     }
 }
