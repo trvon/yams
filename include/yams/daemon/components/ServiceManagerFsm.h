@@ -71,7 +71,11 @@ public:
     void reset() noexcept;
 
 private:
-    mutable std::mutex mutex_;
+    static std::mutex& sharedMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
     std::condition_variable cv_;
 };
 

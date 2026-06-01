@@ -56,7 +56,7 @@ public:
                               const std::string& reason = std::string());
     bool isSubsystemDegraded(const std::string& name) const;
     std::map<std::string, bool> degradedSubsystems() const {
-        MutexLock lock(mutex_);
+        MutexLock lock(sharedMutex());
         return degraded_;
     }
     std::string degradationReason(const std::string& name) const;
@@ -68,7 +68,11 @@ private:
     using MutexLock = std::lock_guard<std::mutex>;
 #endif
 
-    mutable std::mutex mutex_;
+    static std::mutex& sharedMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
     std::map<std::string, bool> degraded_;
     std::map<std::string, std::string> degradeReasons_;
 };

@@ -133,57 +133,57 @@ FSM_INITIAL_STATE(yams::daemon::detail::LifecycleMachine, yams::daemon::detail::
 namespace yams::daemon {
 
 DaemonLifecycleFsm::DaemonLifecycleFsm() {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::snap = {};
     detail::LifecycleMachine::start();
 }
 
 LifecycleSnapshot DaemonLifecycleFsm::snapshot() const {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     return detail::LifecycleMachine::snap;
 }
 
 void DaemonLifecycleFsm::tick() {}
 
 void DaemonLifecycleFsm::dispatch(const BootstrappedEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const HealthyEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const DegradedEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const FailureEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const StoppedEvent& ev) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::reset() {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     detail::LifecycleMachine::snap = {};
     detail::LifecycleMachine::start();
 }
 
 void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degraded,
                                               const std::string& reason) {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     auto it = degraded_.find(name);
     if (it == degraded_.end() || it->second != degraded) {
         degraded_[name] = degraded;
@@ -204,13 +204,13 @@ void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degr
 }
 
 bool DaemonLifecycleFsm::isSubsystemDegraded(const std::string& name) const {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     auto it = degraded_.find(name);
     return it != degraded_.end() && it->second;
 }
 
 std::string DaemonLifecycleFsm::degradationReason(const std::string& name) const {
-    MutexLock lock(mutex_);
+    MutexLock lock(sharedMutex());
     auto it = degradeReasons_.find(name);
     return it == degradeReasons_.end() ? std::string() : it->second;
 }

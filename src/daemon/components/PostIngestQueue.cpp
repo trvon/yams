@@ -319,6 +319,7 @@ PostIngestQueue::~PostIngestQueue() {
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
     // The timers hold references to io_context service objects that may be
     // destroyed before PostIngestQueue member destructors run during shutdown.
+    std::lock_guard<std::mutex> wakeLock(wakeTimerMutex_);
     if (extractionWakeTimer_) {
         (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
     }
@@ -334,6 +335,66 @@ PostIngestQueue::~PostIngestQueue() {
     if (titleWakeTimer_) {
         (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
     }
+}
+
+void PostIngestQueue::setWakeTimer(Stage stage, std::shared_ptr<boost::asio::steady_timer> timer) {
+    std::lock_guard<std::mutex> lock(wakeTimerMutex_);
+    switch (stage) {
+        case Stage::Extraction:
+            extractionWakeTimer_ = std::move(timer);
+            break;
+        case Stage::KnowledgeGraph:
+            kgWakeTimer_ = std::move(timer);
+            break;
+        case Stage::Symbol:
+            symbolWakeTimer_ = std::move(timer);
+            break;
+        case Stage::Entity:
+            entityWakeTimer_ = std::move(timer);
+            break;
+        case Stage::Title:
+            titleWakeTimer_ = std::move(timer);
+            break;
+    }
+}
+
+void PostIngestQueue::signalWakeTimer(Stage stage) {
+    std::shared_ptr<boost::asio::steady_timer> timer;
+    {
+        std::lock_guard<std::mutex> lock(wakeTimerMutex_);
+        switch (stage) {
+            case Stage::Extraction:
+                timer = extractionWakeTimer_;
+                break;
+            case Stage::KnowledgeGraph:
+                timer = kgWakeTimer_;
+                break;
+            case Stage::Symbol:
+                timer = symbolWakeTimer_;
+                break;
+            case Stage::Entity:
+                timer = entityWakeTimer_;
+                break;
+            case Stage::Title:
+                timer = titleWakeTimer_;
+                break;
+        }
+    }
+    if (timer) {
+        boost::asio::post(timer->get_executor(), [timer = std::move(timer)]() mutable {
+            boost::system::error_code ec;
+            timer->cancel(ec);
+        });
+    }
+}
+
+void PostIngestQueue::clearWakeTimers() {
+    std::lock_guard<std::mutex> lock(wakeTimerMutex_);
+    extractionWakeTimer_.reset();
+    kgWakeTimer_.reset();
+    symbolWakeTimer_.reset();
+    entityWakeTimer_.reset();
+    titleWakeTimer_.reset();
 }
 
 void PostIngestQueue::start() {
@@ -358,17 +419,17 @@ void PostIngestQueue::start() {
     initializeGradientLimiters();
 
     spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
+    boost::asio::co_spawn(coordinator_->makeStrand(), channelPoller(), boost::asio::detached);
     spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
+    boost::asio::co_spawn(coordinator_->makeStrand(), kgPoller(), boost::asio::detached);
     spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
+    boost::asio::co_spawn(coordinator_->makeStrand(), symbolPoller(), boost::asio::detached);
     spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
     auto entityExec =
-        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
+        entityCoordinator_ ? entityCoordinator_->makeStrand() : coordinator_->makeStrand();
     boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
     spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-    boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
+    boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
 
     auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     auto allPollersStarted = [this]() {
@@ -394,16 +455,11 @@ void PostIngestQueue::stop() {
     const bool alreadyStopping = stop_.exchange(true, std::memory_order_acq_rel);
     notifyLifecycle();
     if (!alreadyStopping) {
-        auto cancelTimer = [](auto& timer) {
-            if (timer) {
-                timer->cancel();
-            }
-        };
-        cancelTimer(extractionWakeTimer_);
-        cancelTimer(kgWakeTimer_);
-        cancelTimer(symbolWakeTimer_);
-        cancelTimer(entityWakeTimer_);
-        cancelTimer(titleWakeTimer_);
+        signalWakeTimer(Stage::Extraction);
+        signalWakeTimer(Stage::KnowledgeGraph);
+        signalWakeTimer(Stage::Symbol);
+        signalWakeTimer(Stage::Entity);
+        signalWakeTimer(Stage::Title);
     }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
@@ -435,11 +491,7 @@ void PostIngestQueue::stop() {
         }
     }
     if (!alreadyStopping) {
-        extractionWakeTimer_.reset();
-        kgWakeTimer_.reset();
-        symbolWakeTimer_.reset();
-        entityWakeTimer_.reset();
-        titleWakeTimer_.reset();
+        clearWakeTimers();
     }
 }
 
@@ -758,8 +810,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cached)");
     }
 
-    extractionWakeTimer_ =
+    auto extractionWakeTimer =
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+    setWakeTimer(Stage::Extraction, extractionWakeTimer);
 
     PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
     cfg.stageName = "extraction";
@@ -813,7 +866,8 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     // CPU throttle adds 2-25ms delays after every productive batch, compounding
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;
-    cfg.wakeTimer = extractionWakeTimer_;
+    cfg.wakeTimer = extractionWakeTimer;
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
 
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
@@ -830,8 +884,7 @@ void PostIngestQueue::enqueue(Task t) {
     while (!stop_.load(std::memory_order_acquire)) {
         if (channel->push_wait(task, kEnqueueTimeout)) {
             TuningManager::notifyWakeup();
-            if (extractionWakeTimer_)
-                extractionWakeTimer_->cancel();
+            signalWakeTimer(Stage::Extraction);
             return;
         }
         ++waits;
@@ -1292,8 +1345,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     if (channel->try_push(std::move(job))) {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
-        if (kgWakeTimer_)
-            kgWakeTimer_->cancel();
+        signalWakeTimer(Stage::KnowledgeGraph);
         return;
     }
 
@@ -1310,15 +1362,15 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     } else {
         InternalEventBus::instance().incKgQueued();
         TuningManager::notifyWakeup();
-        if (kgWakeTimer_)
-            kgWakeTimer_->cancel();
+        signalWakeTimer(Stage::KnowledgeGraph);
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto channel = kgChannel_;
-    kgWakeTimer_ =
+    auto kgWakeTimer =
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+    setWakeTimer(Stage::KnowledgeGraph, kgWakeTimer);
 
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
@@ -1348,14 +1400,16 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         processKnowledgeGraphBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = kgWakeTimer_;
+    cfg.wakeTimer = kgWakeTimer;
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     auto channel = symbolChannel_;
-    symbolWakeTimer_ =
+    auto symbolWakeTimer =
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+    setWakeTimer(Stage::Symbol, symbolWakeTimer);
 
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
@@ -1387,7 +1441,8 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         processSymbolExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = symbolWakeTimer_;
+    cfg.wakeTimer = symbolWakeTimer;
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1482,8 +1537,7 @@ void PostIngestQueue::dispatchToSymbolChannel(
                      filePath, hash.substr(0, 12), language);
         InternalEventBus::instance().incSymbolQueued();
         TuningManager::notifyWakeup();
-        if (symbolWakeTimer_)
-            symbolWakeTimer_->cancel();
+        signalWakeTimer(Stage::Symbol);
     }
 }
 
@@ -1563,8 +1617,7 @@ void PostIngestQueue::dispatchToEntityChannel(
     } else {
         InternalEventBus::instance().incEntityQueued();
         TuningManager::notifyWakeup();
-        if (entityWakeTimer_)
-            entityWakeTimer_->cancel();
+        signalWakeTimer(Stage::Entity);
 
         // Throttled dispatch logging: per-document is too spammy for 5k+ docs.
         const auto nth = entityDispatched_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1577,8 +1630,9 @@ void PostIngestQueue::dispatchToEntityChannel(
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     auto channel = entityChannel_;
-    entityWakeTimer_ =
+    auto entityWakeTimer =
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+    setWakeTimer(Stage::Entity, entityWakeTimer);
 
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
@@ -1610,7 +1664,8 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         processEntityExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = entityWakeTimer_;
+    cfg.wakeTimer = entityWakeTimer;
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1927,15 +1982,15 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleQueued();
         TuningManager::notifyWakeup();
-        if (titleWakeTimer_)
-            titleWakeTimer_->cancel();
+        signalWakeTimer(Stage::Title);
     }
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     auto channel = titleChannel_;
-    titleWakeTimer_ =
+    auto titleWakeTimer =
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
+    setWakeTimer(Stage::Title, titleWakeTimer);
 
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";
@@ -1967,7 +2022,8 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         processTitleExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = titleWakeTimer_;
+    cfg.wakeTimer = titleWakeTimer;
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 

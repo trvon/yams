@@ -105,23 +105,26 @@ namespace yams::daemon {
 class PluginHostFsm {
 public:
     PluginHostFsm() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::PluginHostMachine::snap = {};
         detail::PluginHostMachine::start();
     }
 
     PluginHostSnapshot snapshot() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         return detail::PluginHostMachine::snap;
     }
 
     template <typename E> void dispatch(const E& ev) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(sharedMutex());
         detail::PluginHostMachine::dispatch(ev);
     }
 
 private:
-    mutable std::mutex mutex_;
+    static std::mutex& sharedMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
 };
 
 } // namespace yams::daemon

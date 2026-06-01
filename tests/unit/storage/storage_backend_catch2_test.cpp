@@ -124,7 +124,6 @@ private:
         tcp::socket wake(io_);
         wake.connect(tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port_), ec);
         wake.close(ec);
-        acceptor_.close(ec);
         if (worker_.joinable()) {
             worker_.join();
         }

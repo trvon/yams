@@ -79,8 +79,11 @@ public:
 
 private:
     void syncAtomicState();
+    static std::mutex& sharedMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
 
-    mutable std::mutex mutex_;
     std::atomic<SearchEngineState> state_{SearchEngineState::NotBuilt};
     RebuildCallback rebuildCallback_;
 };
