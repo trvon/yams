@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.16.2](https://github.com/trvon/yams/compare/v0.16.1...v0.16.2) (2026-06-01)
+
+
+### Fixed
+
+* **build:** remove aho_corasick_da.cpp ref — removed upstream in simeon cleanup ([563ec0d](https://github.com/trvon/yams/commit/563ec0d17c065f477cd787d9e73492cdc3165129))
+* **build:** restore src/storage/meson.build newlines mangled in PR [#38](https://github.com/trvon/yams/issues/38) ([1500886](https://github.com/trvon/yams/commit/150088699e4139867a4c39d4655ddf8538d89849))
+* **build:** warnings cleanup + url_backend brace/initializer fixes ([1afe85e](https://github.com/trvon/yams/commit/1afe85ef4916149237a9b276ede313ae820c7907))
+* **ci:** disable ccache for build — conflicts with OpenBLAS ASM compilation ([5f2a21d](https://github.com/trvon/yams/commit/5f2a21da1dc250e101b62db7a719d439652cf7a2))
+* **vector:** use faiss::read_index instead of read_index_up for Faiss 1.13.x compat ([c2aac50](https://github.com/trvon/yams/commit/c2aac5024c778b4f8f1079a3c79b50949d6a8b37))
+
 ## [0.16.1](https://github.com/trvon/yams/compare/v0.16.0...v0.16.1) (2026-05-24)
 
 
