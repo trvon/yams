@@ -18,6 +18,11 @@
 #include <cstdlib>
 #include <filesystem>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 using namespace yams::daemon;
 
 namespace {
@@ -138,6 +143,46 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         mgr.resetInitAttempt();
         CHECK_FALSE(mgr.wasInitAttempted());
     }
+
+    SECTION("retryable dimension deferral clears initAttempted latch") {
+        yams::test::ScopedEnvVar embedDimEnv("YAMS_EMBED_DIM", std::nullopt);
+        yams::test::ScopedEnvVar preferredModelEnv("YAMS_PREFERRED_MODEL", std::nullopt);
+        yams::test::ScopedEnvVar configEnv("YAMS_CONFIG",
+                                           (tempDir / "missing-config.toml").string());
+
+        auto unresolvedDeps = makeDeps();
+        unresolvedDeps.resolvePreferredModel = {};
+        unresolvedDeps.getEmbeddingDimension = {};
+        VectorSystemManager unresolvedMgr(unresolvedDeps);
+
+        CHECK_FALSE(unresolvedMgr.wasInitAttempted());
+        auto result = unresolvedMgr.initializeOnce(tempDir);
+        REQUIRE(result.has_value());
+        CHECK_FALSE(result.value());
+        CHECK_FALSE(unresolvedMgr.wasInitAttempted());
+    }
+
+#ifndef _WIN32
+    SECTION("lock busy path clears initAttempted latch") {
+        auto lockPath = tempDir / "vectors.lock";
+        int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+        REQUIRE(lockFd >= 0);
+
+        struct flock fl{};
+        fl.l_type = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        REQUIRE(::fcntl(lockFd, F_SETLK, &fl) == 0);
+
+        auto result = mgr.initializeOnce(tempDir);
+        REQUIRE(result.has_value());
+        CHECK_FALSE(result.value());
+        CHECK_FALSE(mgr.wasInitAttempted());
+
+        fl.l_type = F_UNLCK;
+        REQUIRE(::fcntl(lockFd, F_SETLK, &fl) == 0);
+        ::close(lockFd);
+    }
+#endif
 
     SECTION("initializeOnce prepares persisted search index for warm vectors") {
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",

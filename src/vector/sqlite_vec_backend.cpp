@@ -1,3 +1,4 @@
+#include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_database.h>
@@ -598,6 +599,9 @@ public:
     }
 
     std::uint32_t normalizedSimeonPqSubquantizers(size_t dim) const {
+        YAMS_PRECONDITION(config_.simeon_pq_subquantizers <=
+                              static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
+                          "simeon_pq_subquantizers must fit in uint32_t");
         const std::uint32_t requested =
             static_cast<std::uint32_t>(std::max<size_t>(1, config_.simeon_pq_subquantizers));
         if (dim == 0) {
@@ -2966,7 +2970,12 @@ private:
             return Result<void>{};
         }
 
+        YAMS_PRECONDITION(dim > 0, "Simeon PQ rebuild requires a positive dimension");
+        YAMS_PRECONDITION(dim <= static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
+                          "Simeon PQ rebuild dimension must fit in uint32_t");
         const std::uint32_t m = normalizedSimeonPqSubquantizers(dim);
+        YAMS_ASSERT(m > 0 && dim % m == 0,
+                    "Normalized Simeon PQ subquantizers must evenly divide the dimension");
         const std::uint32_t k = static_cast<std::uint32_t>(
             std::clamp<std::size_t>(config_.simeon_pq_centroids, 2, 256));
         simeon::PQConfig pqConfig{
@@ -3540,14 +3549,15 @@ void SqliteVecBackend::Impl::persistVec0AnnIndexUnlocked() {
     // Find the vec0 table via registry and persist its ANN index to shadow tables.
     for (size_t dim : vec0_ready_dims_) {
         std::shared_ptr<sqlite_vec_cpp::sqlite::Vec0AnnIndex> ann_index;
-        sqlite_vec_cpp::sqlite::vec0_with_table(
-            db_, std::to_string(dim) + "_vec0", [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
-                if (!table) {
-                    return;
-                }
-                std::lock_guard<std::mutex> ann_lock(table->ann_mutex);
-                ann_index = table->ann_index;
-            });
+        sqlite_vec_cpp::sqlite::vec0_with_table(db_, "main", std::to_string(dim) + "_vec0",
+                                                [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
+                                                    if (!table) {
+                                                        return;
+                                                    }
+                                                    std::lock_guard<std::mutex> ann_lock(
+                                                        table->ann_mutex);
+                                                    ann_index = table->ann_index;
+                                                });
         if (!ann_index) {
             continue;
         }

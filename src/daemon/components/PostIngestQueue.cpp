@@ -489,10 +489,13 @@ constexpr TuneAdvisor::PostIngestStage kTuneAdvisorStages[] = {
     TuneAdvisor::PostIngestStage::Symbol,     TuneAdvisor::PostIngestStage::Entity,
     TuneAdvisor::PostIngestStage::Title,
 };
+static_assert(std::size(kTuneAdvisorStages) == 5,
+              "kTuneAdvisorStages must stay in sync with PostIngestQueue::Stage");
 } // namespace
 
 void PostIngestQueue::pauseStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "pauseStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(true, std::memory_order_release);
     TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], false);
     spdlog::info("[PostIngestQueue] Paused {} stage", kStageNames[idx]);
@@ -500,13 +503,16 @@ void PostIngestQueue::pauseStage(Stage stage) {
 
 void PostIngestQueue::resumeStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "resumeStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(false, std::memory_order_release);
     TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], true);
     spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
 bool PostIngestQueue::isStagePaused(Stage stage) const {
-    return stagePaused_[static_cast<std::size_t>(stage)].load(std::memory_order_acquire);
+    const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "isStagePaused requires a valid PostIngestQueue::Stage");
+    return stagePaused_[idx].load(std::memory_order_acquire);
 }
 
 void PostIngestQueue::pauseAll() {
@@ -3278,6 +3284,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 
     using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
     const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
+    YAMS_ASSERT(numChunks > 0, "PostIngestQueue::processBatch requires at least one worker chunk");
     const std::size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
     std::vector<std::future<std::vector<TaskResult>>> futures;
     futures.reserve(numChunks);

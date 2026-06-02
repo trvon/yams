@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -333,6 +334,8 @@ public:
                 record.embedding.size() == config_.embedding_dim) {
                 // Get owned TurboQuantMSE (creates/configures on first call)
                 TurboQuantMSE* tq = ensureTurboQuant();
+                YAMS_ASSERT(tq != nullptr,
+                            "TurboQuant must be initialized before packed quantization");
 
                 // Use packed format for storage
                 to_insert.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
@@ -438,6 +441,8 @@ public:
             TurboQuantMSE* tq = useTurboQuant ? ensureTurboQuant() : nullptr;
 
             if (useTurboQuant) {
+                YAMS_ASSERT(tq != nullptr,
+                            "TurboQuant must be initialized before batch packed quantization");
                 // Get owned TurboQuantMSE (creates/configures on first call)
                 std::vector<VectorRecord> compressed_records;
                 compressed_records.reserve(records.size());
@@ -509,6 +514,8 @@ public:
                 record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
                 record.embedding.size() == config_.embedding_dim) {
                 TurboQuantMSE* tq = ensureTurboQuant();
+                YAMS_ASSERT(tq != nullptr,
+                            "TurboQuant must be initialized before packed quantization");
                 to_update.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
                 to_update.quantized.bits_per_channel = config_.turboquant_bits;
                 to_update.quantized.seed = config_.turboquant_seed;
@@ -707,6 +714,8 @@ public:
             !opt_record->quantized.packed_codes.empty()) {
             // Dequantize from packed storage using owned quantizer
             TurboQuantMSE* tq = ensureTurboQuant();
+            YAMS_ASSERT(tq != nullptr,
+                        "TurboQuant must be initialized before packed dequantization");
             opt_record->embedding = vector_utils::packedDequantizeVector(
                 opt_record->quantized.packed_codes, config_.embedding_dim, tq);
         }
@@ -730,6 +739,8 @@ public:
         auto records = std::move(result.value());
         if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
             TurboQuantMSE* tq = ensureTurboQuant();
+            YAMS_ASSERT(tq != nullptr,
+                        "TurboQuant must be initialized before packed dequantization");
             for (auto& [id, rec] : records) {
                 if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
                     !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
@@ -753,6 +764,8 @@ public:
         auto records = std::move(result.value());
         if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
             TurboQuantMSE* tq = ensureTurboQuant();
+            YAMS_ASSERT(tq != nullptr,
+                        "TurboQuant must be initialized before packed dequantization");
             for (auto& rec : records) {
                 if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
                     !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
@@ -776,6 +789,8 @@ public:
         auto records = std::move(result.value());
         if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
             TurboQuantMSE* tq = ensureTurboQuant();
+            YAMS_ASSERT(tq != nullptr,
+                        "TurboQuant must be initialized before packed dequantization");
             for (auto& [_hash, rec] : records) {
                 if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
                     !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
@@ -798,6 +813,10 @@ public:
         TurboQuantMSE* tq = (config_.enable_turboquant_storage || config_.quantized_primary_storage)
                                 ? ensureTurboQuant()
                                 : nullptr;
+        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
+            YAMS_ASSERT(tq != nullptr,
+                        "TurboQuant must be initialized before packed dequantization");
+        }
 
         return backend_->forEachDocumentLevelVector([&](VectorRecord&& rec) {
             if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
