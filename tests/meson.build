@@ -480,6 +480,16 @@ if catch2_dep.found()
     install: false,
   )
 
+#PressureLimitedPoller shutdown unit tests (capability-sleep / stop paths)
+  catch2_pressure_limited_poller_exe = executable('catch2_pressure_limited_poller',
+    files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Metrics consistency tests(migrated from GTest)
   catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
     files('unit/daemon/metrics_consistency_catch2_test.cpp'),
@@ -2628,6 +2638,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'post-ingest'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('pressure_limited_poller', catch2_pressure_limited_poller_exe,
+    suite: ['catch2', 'unit', 'daemon', 'poller'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('metrics_consistency', catch2_metrics_consistency_exe,
