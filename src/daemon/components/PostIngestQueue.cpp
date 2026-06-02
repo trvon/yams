@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -253,12 +254,23 @@ std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
     return variants;
 }
 
+// Copy an environment variable under a static mutex so thread-safety
+// checkers can see we're serializing access to the env block.
+inline std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
     static const bool disabled = []() {
-        const char* env = std::getenv("YAMS_DISABLE_GLINER_TITLES");
-        return env && std::string(env) == "1";
+        auto env = getenvCopy("YAMS_DISABLE_GLINER_TITLES");
+        return env && *env == "1";
     }();
     return disabled;
 }
@@ -324,21 +336,27 @@ PostIngestQueue::~PostIngestQueue() {
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
     // The timers hold references to io_context service objects that may be
     // destroyed before PostIngestQueue member destructors run during shutdown.
+    // Each new-expression intentionally leaks a moved-from shared_ptr; the
+    // try-catch silences the allocation-failure static-analysis warning.
     std::lock_guard<std::mutex> wakeLock(wakeTimerMutex_);
-    if (extractionWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
-    }
-    if (kgWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
-    }
-    if (symbolWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
-    }
-    if (entityWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
-    }
-    if (titleWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
+    try {
+        if (extractionWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
+        }
+        if (kgWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
+        }
+        if (symbolWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
+        }
+        if (entityWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
+        }
+        if (titleWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
+        }
+    } catch (...) {
+        spdlog::debug("[PostIngestQueue] timer detach allocation failed during shutdown");
     }
 }
 
@@ -2831,7 +2849,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
     auto cached = metadataCache_.infoCache.get(hash);
     if (cached) {
-        return *cached;
+        return cached.value();
     }
 
     // Cache miss - query DB
@@ -2853,7 +2871,7 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
     // Try cache first
     auto cached = metadataCache_.tagsCache.get(docId);
     if (cached) {
-        return *cached;
+        return cached.value();
     }
 
     // Cache miss - query DB
@@ -3015,8 +3033,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     std::vector<std::string> embedHashBatch;
     std::size_t embedPreparedBatchPayloadBytes = 0;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
-    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
-    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16u * 1024u * 1024u;
+    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
+    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));

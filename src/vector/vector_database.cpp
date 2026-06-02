@@ -28,6 +28,17 @@
 
 namespace yams::vector {
 
+namespace {
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+} // namespace
+
 /**
  * Private implementation class (PIMPL pattern)
  * Uses vector backend abstraction for storage
@@ -94,14 +105,14 @@ public:
                     }
                 }
             } catch (...) {
-                // best-effort: continue
+                spdlog::debug("[VectorDB] best-effort create_if_missing check failed");
             }
 
             // Allow test/CI override to force in-memory vector DB
             std::string db_path = config_.database_path;
             bool force_in_memory = config_.use_in_memory;
-            if (const char* env_mem = std::getenv("YAMS_VDB_IN_MEMORY")) {
-                std::string v(env_mem);
+            if (auto env_mem = getenvCopy("YAMS_VDB_IN_MEMORY"); env_mem) {
+                std::string v(*env_mem);
                 std::transform(v.begin(), v.end(), v.begin(),
                                [](unsigned char c) { return (char)std::tolower(c); });
                 force_in_memory =
@@ -124,23 +135,23 @@ public:
             bool vec_bypass = false;
             bool vec_bypass_protected = false; // do not auto-enable during tests if set via env
             try {
-                if (const char* env = std::getenv("YAMS_DISABLE_VECTORS")) {
-                    std::string v(env);
+                if (auto env = getenvCopy("YAMS_DISABLE_VECTORS"); env) {
+                    std::string v(*env);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
                     vec_bypass_protected = vec_bypass_protected || vec_bypass;
                 }
                 if (!vec_bypass) {
-                    if (const char* env = std::getenv("YAMS_SQLITE_VEC_SKIP_INIT")) {
-                        std::string v(env);
+                    if (auto env = getenvCopy("YAMS_SQLITE_VEC_SKIP_INIT"); env) {
+                        std::string v(*env);
                         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                         vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
                         vec_bypass_protected = vec_bypass_protected || vec_bypass;
                     }
                 }
                 if (vec_bypass && !vec_bypass_protected) {
-                    if (const char* testEnv = std::getenv("YAMS_TESTING")) {
-                        std::string v(testEnv);
+                    if (auto testEnv = getenvCopy("YAMS_TESTING"); testEnv) {
+                        std::string v(*testEnv);
                         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                         if (v == "1" || v == "true" || v == "yes" || v == "on") {
                             spdlog::debug(
@@ -150,6 +161,7 @@ public:
                     }
                 }
             } catch (...) {
+                spdlog::debug("[VectorDB] env-based vector bypass probe failed");
             }
 
             // Create tables only when explicitly allowed (and not bypassed)
@@ -201,6 +213,7 @@ public:
                                     if (j.contains("embedding_dim"))
                                         return j["embedding_dim"].get<size_t>();
                                 } catch (...) {
+                                    spdlog::debug("[VectorDB] sentinel read failed");
                                 }
                                 return std::nullopt;
                             };
@@ -223,6 +236,7 @@ public:
                                 auto count = backend_->getVectorCount();
                                 allow_autofix = (count && count.value() == 0);
                             } catch (...) {
+                                spdlog::debug("[VectorDB] vector count probe for autofix failed");
                             }
                             // explicit env flag removed; rely on empty DB condition only
                             if (allow_autofix) {
@@ -246,7 +260,7 @@ public:
                         }
                     }
                 } catch (...) {
-                    // Non-fatal: continue with existing schema
+                    spdlog::debug("[VectorDB] schema verification/healing probe failed");
                 }
             }
 
@@ -1113,6 +1127,7 @@ public:
             auto result = backend_->hasReusablePersistedSearchIndex();
             return result && result.value();
         } catch (...) {
+            spdlog::debug("[VectorDB] hasReusablePersistedSearchIndex probe failed");
             return false;
         }
     }

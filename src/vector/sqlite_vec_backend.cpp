@@ -25,10 +25,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <shared_mutex>
 #include <span>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -56,6 +56,15 @@ struct SimeonPqIndexState {
 
 namespace {
 
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -63,8 +72,8 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    auto env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env.has_value() && !env->empty() && *env != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -553,6 +562,7 @@ std::map<std::string, std::string> deserializeMetadata(const std::string& json_s
     try {
         return nlohmann::json::parse(json_str).get<std::map<std::string, std::string>>();
     } catch (...) {
+        spdlog::debug("sqlite_vec_backend: deserializeMetadata JSON parse failed");
         return {};
     }
 }
@@ -571,6 +581,7 @@ std::vector<std::string> deserializeStringVector(const std::string& json_str) {
     try {
         return nlohmann::json::parse(json_str).get<std::vector<std::string>>();
     } catch (...) {
+        spdlog::debug("sqlite_vec_backend: deserializeStringVector JSON parse failed");
         return {};
     }
 }
