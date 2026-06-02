@@ -29,10 +29,10 @@
 #include <yams/vector/turboquant.h>
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <yams/core/assert.hpp>
 
 // M_PI is not defined by default on Windows; define it for portability
 #ifndef M_PI
@@ -131,8 +131,9 @@ const std::vector<std::vector<float>>& getLloydMaxBoundaries() {
 TurboQuantMSE::TurboQuantMSE(const TurboQuantConfig& config) : config_(config) {
     // bits_per_channel supports 1–8. Bits 1–6 have static Lloyd-Max tables;
     // bits 7–8 generate centroids via k-means at construction time.
-    assert(config.bits_per_channel >= 1 && config.bits_per_channel <= 8);
-    assert(config.dimension > 0);
+    YAMS_PRECONDITION(config.bits_per_channel >= 1 && config.bits_per_channel <= 8,
+                      "TurboQuant bits_per_channel must be in [1, 8]");
+    YAMS_PRECONDITION(config.dimension > 0, "TurboQuant dimension must be positive");
 
     // Generate random diagonal signs (stored as vector for Hadamard pre/post multiplication)
     generateDiagonalSigns();
@@ -288,13 +289,13 @@ uint8_t TurboQuantMSE::scalarQuantize(float value) const {
 
 float TurboQuantMSE::scalarDequantize(uint8_t index) const {
     size_t idx = static_cast<size_t>(index);
-    assert(idx < centroids_.size());
+    YAMS_PRECONDITION(idx < centroids_.size(), "TurboQuant centroid index must be within bounds");
     return centroids_[idx];
 }
 
 std::vector<uint8_t> TurboQuantMSE::encode(const std::vector<float>& vector) {
     const size_t d = config_.dimension;
-    assert(vector.size() == d);
+    YAMS_PRECONDITION(vector.size() == d, "TurboQuant::encode expects vector.size() == dimension");
 
     // Pad to power of 2 for FWHT (required by Hadamard transform)
     // NOTE: This is an engineering workaround for non-power-of-2 dimensions.
@@ -362,7 +363,8 @@ std::vector<uint8_t> TurboQuantMSE::encode(const std::vector<float>& vector) {
 
 std::vector<float> TurboQuantMSE::decode(const std::vector<uint8_t>& indices) {
     const size_t d = config_.dimension;
-    assert(indices.size() == d);
+    YAMS_PRECONDITION(indices.size() == d,
+                      "TurboQuant::decode expects indices.size() == dimension");
 
     // Pad to power of 2 for FWHT
     size_t n = 1;
@@ -454,7 +456,8 @@ std::vector<uint8_t> TurboQuantMSE::packedEncode(const std::vector<float>& vecto
 std::vector<float> TurboQuantMSE::packedDecode(const std::vector<uint8_t>& packed) {
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
-    assert(packed.size() == (d * bits + 7) / 8);
+    YAMS_PRECONDITION(packed.size() == (d * bits + 7) / 8,
+                      "TurboQuant::packedDecode expects packed byte count to match dimension");
 
     std::vector<uint8_t> indices(d);
 
@@ -486,7 +489,8 @@ std::vector<float> TurboQuantMSE::packedDecode(const std::vector<uint8_t>& packe
 
 double TurboQuantMSE::computeMSE(const std::vector<float>& original,
                                  const std::vector<float>& reconstructed) {
-    assert(original.size() == reconstructed.size());
+    YAMS_PRECONDITION(original.size() == reconstructed.size(),
+                      "TurboQuant::computeMSE expects vectors of equal length");
 
     double mse = 0.0;
     for (size_t i = 0; i < original.size(); ++i) {
@@ -499,7 +503,8 @@ double TurboQuantMSE::computeMSE(const std::vector<float>& original,
 
 std::vector<float> TurboQuantMSE::transformQuery(const std::vector<float>& query) const {
     const size_t d = config_.dimension;
-    assert(query.size() == d);
+    YAMS_PRECONDITION(query.size() == d,
+                      "TurboQuant::transformQuery expects query.size() == dimension");
 
     // Pad to power of 2 for FWHT
     size_t n = 1;
@@ -533,8 +538,10 @@ std::vector<float> TurboQuantMSE::transformQuery(const std::vector<float>& query
 void TurboQuantMSE::transformQueryInPlace(const std::vector<float>& query,
                                           std::span<float> output) const {
     const size_t d = config_.dimension;
-    assert(query.size() == d);
-    assert(output.size() >= d);
+    YAMS_PRECONDITION(query.size() == d,
+                      "TurboQuant::transformQueryInPlace expects query.size() == dimension");
+    YAMS_PRECONDITION(output.size() >= d,
+                      "TurboQuant::transformQueryInPlace expects output span to fit dimension");
 
     // Pad to power of 2 for FWHT
     size_t n = 1;
@@ -581,10 +588,14 @@ float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query
 
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
-    assert(transformed_query.size() == d);
-    assert(!centroids_.empty());
+    YAMS_PRECONDITION(
+        transformed_query.size() == d,
+        "TurboQuant::scoreFromPacked expects transformed query size to match dimension");
+    YAMS_ASSERT(!centroids_.empty(),
+                "TurboQuant centroid table must be initialized before scoring");
 
-    assert(packed_codes.size() == (d * bits + 7) / 8);
+    YAMS_PRECONDITION(packed_codes.size() == (d * bits + 7) / 8,
+                      "TurboQuant::scoreFromPacked expects packed byte count to match dimension");
 
     const float* y_q = transformed_query.data();
     const float* scales = per_coord_scales_.data();
@@ -625,9 +636,13 @@ float TurboQuantMSE::scoreFromPacked(std::span<const float> transformed_query,
                                      std::span<const uint8_t> packed_codes) const {
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
-    assert(transformed_query.size() == d);
+    YAMS_PRECONDITION(
+        transformed_query.size() == d,
+        "TurboQuant::scoreFromPacked expects transformed query span size to match dimension");
 
-    assert(packed_codes.size() == (d * bits + 7) / 8);
+    YAMS_PRECONDITION(
+        packed_codes.size() == (d * bits + 7) / 8,
+        "TurboQuant::scoreFromPacked expects packed code span size to match dimension");
 
     const float* y_q = transformed_query.data();
     const float* scales = per_coord_scales_.data();
@@ -683,8 +698,11 @@ void TurboQuantMSE::transformPackedCode(std::span<const uint8_t> packed_code,
 
     const size_t d = config_.dimension;
     const uint8_t bits = config_.bits_per_channel;
-    assert(packed_code.size() == (d * bits + 7) / 8);
-    assert(output.size() >= d);
+    YAMS_PRECONDITION(
+        packed_code.size() == (d * bits + 7) / 8,
+        "TurboQuant::transformPackedCode expects packed byte count to match dimension");
+    YAMS_PRECONDITION(output.size() >= d,
+                      "TurboQuant::transformPackedCode expects output span to fit dimension");
 
     const float* scales = per_coord_scales_.data();
     const uint8_t* packed = packed_code.data();

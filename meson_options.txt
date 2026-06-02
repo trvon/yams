@@ -41,6 +41,7 @@ option('enable-bench-tests', type: 'boolean', value: false, description: 'Regist
 option('enable-profiling', type: 'boolean', value: false, description: 'Enable Tracy profiling instrumentation')
 option('enable-rocprofiler-tracy', type: 'feature', value: 'auto', description: 'Link Tracy client against ROCm rocprofiler (auto-detect ROCm; disabled otherwise)')
 option('enable-stress-tests', type: 'boolean', value: false, description: 'Register stress test binary')
+option('enable-dcheck', type: 'boolean', value: false, description: 'Enable YAMS_DCHECK even when NDEBUG is set (useful for debugoptimized/canary builds)')
 
 # libc++ hardening modes (only effective when using libc++)
 option('libcxx-hardening', type: 'combo', choices: ['none', 'fast', 'extensive', 'debug'], value: 'none', description: 'libc++ hardening mode: none (default), fast (minimal overhead), extensive (more checks), debug (maximum validation)')

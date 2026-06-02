@@ -14,6 +14,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -307,14 +308,18 @@ PostIngestQueue::PostIngestQueue(
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
+    signalAllWakeTimers();
     notifyLifecycle();
-    // Wait for all in-flight operations to complete before destroying members.
-    // This prevents data races where workers access members during destruction.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+
+    // Wait for all pollers and in-flight operations to quiesce before
+    // destroying members. Otherwise detached coroutines can outlive `this`.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     std::unique_lock<std::mutex> lock(lifecycleMutex_);
-    lifecycleCv_.wait_until(lock, deadline, [this]() {
-        return totalInFlight() == 0 && callbacksInFlight_.load(std::memory_order_acquire) == 0;
-    });
+    lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
+    lock.unlock();
+
+    YAMS_ASSERT(shutdownQuiesced(),
+                "PostIngestQueue destroyed before pollers and callbacks quiesced");
 
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
     // The timers hold references to io_context service objects that may be
@@ -388,6 +393,14 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
     }
 }
 
+void PostIngestQueue::signalAllWakeTimers() {
+    signalWakeTimer(Stage::Extraction);
+    signalWakeTimer(Stage::KnowledgeGraph);
+    signalWakeTimer(Stage::Symbol);
+    signalWakeTimer(Stage::Entity);
+    signalWakeTimer(Stage::Title);
+}
+
 void PostIngestQueue::clearWakeTimers() {
     std::lock_guard<std::mutex> lock(wakeTimerMutex_);
     extractionWakeTimer_.reset();
@@ -431,18 +444,10 @@ void PostIngestQueue::start() {
     spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
     boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
 
-    auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-    auto allPollersStarted = [this]() {
-        for (std::size_t s = 0; s < kStageCount; ++s) {
-            if (!stageStarted_[s].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
-    };
+    const auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, startupDeadline, allPollersStarted);
+        lifecycleCv_.wait_until(lock, startupDeadline, [this]() { return allStagesStarted(); });
     }
 
     spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={}, "
@@ -452,15 +457,9 @@ void PostIngestQueue::start() {
 }
 
 void PostIngestQueue::stop() {
-    const bool alreadyStopping = stop_.exchange(true, std::memory_order_acq_rel);
+    stop_.exchange(true, std::memory_order_acq_rel);
     notifyLifecycle();
-    if (!alreadyStopping) {
-        signalWakeTimer(Stage::Extraction);
-        signalWakeTimer(Stage::KnowledgeGraph);
-        signalWakeTimer(Stage::Symbol);
-        signalWakeTimer(Stage::Entity);
-        signalWakeTimer(Stage::Title);
-    }
+    signalAllWakeTimers();
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
@@ -469,30 +468,17 @@ void PostIngestQueue::stop() {
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
-    auto allPollersStopped = [this]() {
-        for (std::size_t s = 0; s < kStageCount; ++s) {
-            if (stageStarted_[s].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, deadline, [&]() {
-            return allPollersStopped() && totalInFlight() == 0 &&
-                   callbacksInFlight_.load(std::memory_order_acquire) == 0;
-        });
-        if (allPollersStopped() && totalInFlight() == 0 &&
-            callbacksInFlight_.load(std::memory_order_acquire) == 0) {
-            startGuard_.store(false, std::memory_order_release);
-        }
+        lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
     }
-    if (!alreadyStopping) {
-        clearWakeTimers();
-    }
+
+    YAMS_POSTCONDITION(shutdownQuiesced(),
+                       "PostIngestQueue::stop() must quiesce pollers and callbacks before "
+                       "returning");
+    startGuard_.store(false, std::memory_order_release);
+    clearWakeTimers();
 }
 
 // ============================================================================

@@ -78,6 +78,7 @@ endif
 enable_tsan = get_option('enable-tsan')
 enable_asan = get_option('enable-asan')
 enable_ubsan = get_option('enable-ubsan')
+enable_dcheck = get_option('enable-dcheck')
 
 if enable_tsan and enable_asan
   error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
@@ -142,6 +143,11 @@ if enable_ubsan
   else
     error('UBSan requested but compiler does not support -fsanitize=undefined')
   endif
+endif
+
+if enable_dcheck
+  add_project_arguments('-DYAMS_ENABLE_DCHECK=1', language: 'cpp')
+  message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')
 endif
 
 

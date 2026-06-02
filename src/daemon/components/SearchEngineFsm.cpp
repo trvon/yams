@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <tinyfsm.hpp>
+#include <yams/core/assert.hpp>
 
 namespace yams::daemon {
 namespace detail {
@@ -125,6 +126,33 @@ FSM_INITIAL_STATE(yams::daemon::detail::SearchEngineMachine, yams::daemon::detai
 
 namespace yams::daemon {
 
+namespace {
+
+bool canDispatch(SearchEngineState state, const SearchEngineRebuildStartedEvent&) {
+    return state != SearchEngineState::Building;
+}
+
+bool canDispatch(SearchEngineState state, const SearchEngineRebuildCompletedEvent&) {
+    return state == SearchEngineState::Building || state == SearchEngineState::NotBuilt ||
+           state == SearchEngineState::Ready || state == SearchEngineState::Failed ||
+           state == SearchEngineState::Degraded;
+}
+
+bool canDispatch(SearchEngineState state, const SearchEngineRebuildFailedEvent&) {
+    return state == SearchEngineState::Building;
+}
+
+bool canDispatch(SearchEngineState state, const SearchEngineRebuildDegradedEvent&) {
+    return state != SearchEngineState::AwaitingDrain;
+}
+
+template <typename Event>
+void validateDispatch(SearchEngineState state, const Event& ev, const char* message) {
+    YAMS_DCHECK(canDispatch(state, ev), message);
+}
+
+} // namespace
+
 SearchEngineFsm::SearchEngineFsm() {
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::snap = {};
@@ -147,24 +175,35 @@ void SearchEngineFsm::setRebuildCallback(RebuildCallback cb) {
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildStartedEvent& ev) {
+    validateDispatch(
+        snapshot().state, ev,
+        "SearchEngineFsm SearchEngineRebuildStartedEvent must not arrive while already building");
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildCompletedEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "SearchEngineFsm SearchEngineRebuildCompletedEvent requires an existing or "
+                     "injected engine lifecycle state");
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildFailedEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "SearchEngineFsm SearchEngineRebuildFailedEvent requires Building state");
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
 }
 
 void SearchEngineFsm::dispatch(const SearchEngineRebuildDegradedEvent& ev) {
+    validateDispatch(
+        snapshot().state, ev,
+        "SearchEngineFsm SearchEngineRebuildDegradedEvent must not arrive while awaiting drain");
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();
@@ -174,6 +213,8 @@ bool SearchEngineFsm::dispatch(const SearchEngineRebuildRequestedEvent& ev) {
     RebuildCallback cb;
     std::string reason;
     bool includeVector = false;
+    bool accepted = false;
+    bool callbackConfigured = false;
     {
         std::lock_guard<std::mutex> lock(sharedMutex());
         detail::SearchEngineMachine::callbackPending = false;
@@ -181,20 +222,33 @@ bool SearchEngineFsm::dispatch(const SearchEngineRebuildRequestedEvent& ev) {
         detail::SearchEngineMachine::dispatch(ev);
         syncAtomicState();
 
-        if (!detail::SearchEngineMachine::dispatchAccepted) {
+        accepted = detail::SearchEngineMachine::dispatchAccepted;
+        if (!accepted) {
             return false;
         }
 
         if (detail::SearchEngineMachine::callbackPending) {
+            callbackConfigured = static_cast<bool>(rebuildCallback_);
             cb = rebuildCallback_;
             reason = detail::SearchEngineMachine::callbackReason;
             includeVector = detail::SearchEngineMachine::callbackIncludeVector;
+        }
+
+        if (ev.waitForDrain) {
+            YAMS_POSTCONDITION(detail::SearchEngineMachine::snap.state ==
+                                       SearchEngineState::AwaitingDrain &&
+                                   detail::SearchEngineMachine::snap.rebuildPending,
+                               "SearchEngineFsm accepted drain-gated rebuilds must enter "
+                               "AwaitingDrain with rebuildPending=true");
         }
     }
 
     if (cb) {
         cb(reason, includeVector);
     }
+    YAMS_POSTCONDITION(!accepted || ev.waitForDrain || cb != nullptr || !callbackConfigured,
+                       "SearchEngineFsm immediate rebuild requests must either hand off to the "
+                       "configured callback or run without one explicitly configured");
     return true;
 }
 
@@ -202,8 +256,11 @@ void SearchEngineFsm::dispatch(const SearchEngineIndexingDrainedEvent& ev) {
     RebuildCallback cb;
     std::string reason;
     bool includeVector = false;
+    bool wasAwaitingDrain = false;
     {
         std::lock_guard<std::mutex> lock(sharedMutex());
+        wasAwaitingDrain =
+            detail::SearchEngineMachine::snap.state == SearchEngineState::AwaitingDrain;
         detail::SearchEngineMachine::callbackPending = false;
         detail::SearchEngineMachine::dispatch(ev);
         syncAtomicState();
@@ -213,6 +270,10 @@ void SearchEngineFsm::dispatch(const SearchEngineIndexingDrainedEvent& ev) {
             reason = detail::SearchEngineMachine::callbackReason;
             includeVector = detail::SearchEngineMachine::callbackIncludeVector;
         }
+
+        YAMS_DCHECK(
+            !wasAwaitingDrain || detail::SearchEngineMachine::callbackPending,
+            "SearchEngineFsm AwaitingDrain state must arm rebuild callback when indexing drains");
     }
 
     if (cb) {

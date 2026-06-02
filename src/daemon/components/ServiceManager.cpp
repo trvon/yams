@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <yams/common/fs_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 
@@ -1051,6 +1052,9 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
                 pluginManager_->setPostIngestQueue(nullptr);
             }
             postIngestHold->stop();
+            YAMS_ASSERT(
+                !postIngestHold->started(),
+                "ServiceManager must not release PostIngestQueue before stop() quiesces it");
             postIngestHold.reset();
             spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
         } catch (const std::exception& e) {
@@ -1445,6 +1449,8 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
     }
 
+    YAMS_ASSERT(serviceFsm_.snapshot().state == ServiceManagerState::Stopped,
+                "ServiceManager FSM must reach Stopped at shutdown completion");
     setOnnxShutdownMarker(false);
 }
 

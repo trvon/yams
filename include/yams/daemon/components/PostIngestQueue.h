@@ -5,42 +5,38 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <deque>
 #include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <semaphore>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/strand.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/query_concept_extractor.h>
 
-namespace yams {
-namespace api {
+namespace yams::api {
 class IContentStore;
 }
-namespace metadata {
+
+namespace yams::metadata {
 class MetadataRepository;
 }
-namespace extraction {
+
+namespace yams::extraction {
 class IContentExtractor;
 }
-namespace vector {
+
+namespace yams::vector {
 class VectorDatabase;
-} // namespace vector
-} // namespace yams
+}
 
 namespace yams::daemon {
 class ExternalEntityProviderAdapter;
@@ -64,7 +60,7 @@ public:
         }
 
         // Check TTL
-        auto now = std::chrono::steady_clock::now();
+        auto now = Clock::now();
         if (now - it->second.timestamp > ttl_) {
             map_.erase(it);
             return std::nullopt;
@@ -86,7 +82,7 @@ public:
             if (map_.size() >= maxSize_) {
                 evict_lru();
             }
-            auto now = std::chrono::steady_clock::now();
+            auto now = Clock::now();
             order_.push_front(key);
             map_.emplace(key, CacheEntry{std::move(value), now, order_.begin()});
         }
@@ -104,7 +100,8 @@ public:
     }
 
 private:
-    using Timestamp = std::chrono::steady_clock::time_point;
+    using Clock = std::chrono::steady_clock;
+    using Timestamp = Clock::time_point;
     using OrderIterator = typename std::list<K>::iterator;
 
     struct CacheEntry {
@@ -293,14 +290,7 @@ public:
         return kgChannelFillRatio(depthOut, capacityOut);
     }
 
-    bool started() const {
-        for (std::size_t i = 0; i < kStageCount; ++i) {
-            if (stageStarted_[i].load(std::memory_order_acquire)) {
-                return true;
-            }
-        }
-        return false;
-    }
+    [[nodiscard]] bool started() const { return anyStageStarted(); }
 
     // Per-stage inflight counts
     std::size_t extractionInFlight() const { return stageInFlight_[0].load(); }
@@ -489,6 +479,38 @@ private:
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
     std::atomic<std::size_t> callbacksInFlight_{0};
 
+    [[nodiscard]] bool anyStageStarted() const {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            if (stageStarted_[i].load(std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool allStagesStarted() const {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            if (!stageStarted_[i].load(std::memory_order_acquire)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool allStagesStopped() const {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            if (stageStarted_[i].load(std::memory_order_acquire)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool shutdownQuiesced() const {
+        return allStagesStopped() && totalInFlight() == 0 &&
+               callbacksInFlight_.load(std::memory_order_acquire) == 0;
+    }
+
     mutable std::mutex lifecycleMutex_;
     std::condition_variable lifecycleCv_;
     void notifyLifecycle() {
@@ -558,6 +580,7 @@ private:
     std::shared_ptr<boost::asio::steady_timer> titleWakeTimer_;
     void setWakeTimer(Stage stage, std::shared_ptr<boost::asio::steady_timer> timer);
     void signalWakeTimer(Stage stage);
+    void signalAllWakeTimers();
     void clearWakeTimers();
 
     /// Initialize cached channel pointers from InternalEventBus

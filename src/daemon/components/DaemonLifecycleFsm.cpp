@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <tinyfsm.hpp>
+#include <yams/core/assert.hpp>
 
 namespace yams::daemon {
 namespace detail {
@@ -132,6 +133,39 @@ FSM_INITIAL_STATE(yams::daemon::detail::LifecycleMachine, yams::daemon::detail::
 
 namespace yams::daemon {
 
+namespace {
+
+bool canDispatch(LifecycleState state, const BootstrappedEvent&) {
+    return state == LifecycleState::Unknown || state == LifecycleState::Starting;
+}
+
+bool canDispatch(LifecycleState state, const HealthyEvent&) {
+    return state == LifecycleState::Initializing || state == LifecycleState::Degraded;
+}
+
+bool canDispatch(LifecycleState state, const DegradedEvent&) {
+    return state == LifecycleState::Initializing || state == LifecycleState::Ready;
+}
+
+bool canDispatch(LifecycleState state, const FailureEvent&) {
+    return state != LifecycleState::Stopped;
+}
+
+bool canDispatch(LifecycleState state, const ShutdownRequestedEvent&) {
+    return state != LifecycleState::Stopped;
+}
+
+bool canDispatch(LifecycleState state, const StoppedEvent&) {
+    return state == LifecycleState::Failed || state == LifecycleState::Stopping;
+}
+
+template <typename Event>
+void validateDispatch(LifecycleState state, const Event& ev, const char* message) {
+    YAMS_DCHECK(canDispatch(state, ev), message);
+}
+
+} // namespace
+
 DaemonLifecycleFsm::DaemonLifecycleFsm() {
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::snap = {};
@@ -146,31 +180,44 @@ LifecycleSnapshot DaemonLifecycleFsm::snapshot() const {
 void DaemonLifecycleFsm::tick() {}
 
 void DaemonLifecycleFsm::dispatch(const BootstrappedEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "DaemonLifecycleFsm BootstrappedEvent requires Unknown or Starting state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const HealthyEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "DaemonLifecycleFsm HealthyEvent requires Initializing or Degraded state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const DegradedEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "DaemonLifecycleFsm DegradedEvent requires Initializing or Ready state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const FailureEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "DaemonLifecycleFsm FailureEvent must not arrive after Stopped state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent& ev) {
+    validateDispatch(
+        snapshot().state, ev,
+        "DaemonLifecycleFsm ShutdownRequestedEvent must not arrive after Stopped state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
 
 void DaemonLifecycleFsm::dispatch(const StoppedEvent& ev) {
+    validateDispatch(snapshot().state, ev,
+                     "DaemonLifecycleFsm StoppedEvent requires Failed or Stopping state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }
@@ -183,6 +230,8 @@ void DaemonLifecycleFsm::reset() {
 
 void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degraded,
                                               const std::string& reason) {
+    YAMS_PRECONDITION(!name.empty(),
+                      "DaemonLifecycleFsm subsystem degradation tracking requires a name");
     MutexLock lock(sharedMutex());
     auto it = degraded_.find(name);
     if (it == degraded_.end() || it->second != degraded) {

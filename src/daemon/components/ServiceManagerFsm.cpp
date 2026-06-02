@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <tinyfsm.hpp>
+#include <yams/core/assert.hpp>
 
 namespace yams::daemon {
 namespace detail {
@@ -120,6 +121,55 @@ FSM_INITIAL_STATE(yams::daemon::detail::ServiceManagerMachine,
 
 namespace yams::daemon {
 
+namespace {
+
+bool canDispatch(ServiceManagerState state, const OpeningDatabaseEvent&) {
+    return state == ServiceManagerState::Uninitialized;
+}
+
+bool canDispatch(ServiceManagerState state, const DatabaseOpenedEvent&) {
+    return state == ServiceManagerState::OpeningDatabase;
+}
+
+bool canDispatch(ServiceManagerState state, const MigrationStartedEvent&) {
+    return state == ServiceManagerState::DatabaseReady;
+}
+
+bool canDispatch(ServiceManagerState state, const MigrationCompletedEvent&) {
+    return state == ServiceManagerState::MigratingSchema;
+}
+
+bool canDispatch(ServiceManagerState state, const VectorsInitializedEvent&) {
+    return state == ServiceManagerState::SchemaReady ||
+           state == ServiceManagerState::VectorsReady ||
+           state == ServiceManagerState::BuildingSearchEngine ||
+           state == ServiceManagerState::Ready;
+}
+
+bool canDispatch(ServiceManagerState state, const SearchEngineBuildStartedEvent&) {
+    return state == ServiceManagerState::SchemaReady || state == ServiceManagerState::VectorsReady;
+}
+
+bool canDispatch(ServiceManagerState state, const SearchEngineBuiltEvent&) {
+    return state == ServiceManagerState::BuildingSearchEngine;
+}
+
+bool canDispatch(ServiceManagerState state, const InitializationFailedEvent&) {
+    return state != ServiceManagerState::Ready && state != ServiceManagerState::ShuttingDown &&
+           state != ServiceManagerState::Stopped && state != ServiceManagerState::Failed;
+}
+
+bool canDispatch(ServiceManagerState state, const ServiceManagerStoppedEvent&) {
+    return state == ServiceManagerState::ShuttingDown;
+}
+
+template <typename Event>
+void validateDispatch(ServiceManagerState state, const Event& ev, const char* message) {
+    YAMS_DCHECK(canDispatch(state, ev), message);
+}
+
+} // namespace
+
 static bool isTerminal(ServiceManagerState s) {
     return s == ServiceManagerState::Ready || s == ServiceManagerState::Failed ||
            s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
@@ -132,8 +182,10 @@ void dispatchNoThrow(std::mutex& mutex, std::condition_variable& cv, const Event
         detail::ServiceManagerMachine::dispatch(ev);
         if (isTerminal(detail::ServiceManagerMachine::snap.state))
             cv.notify_all();
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManagerFSM] dispatchNoThrow swallowed exception: {}", e.what());
     } catch (...) {
-        // FSM dispatch methods are noexcept; callers observe state via snapshot/fallback.
+        spdlog::debug("[ServiceManagerFSM] dispatchNoThrow swallowed unknown exception");
     }
 }
 
@@ -153,34 +205,54 @@ ServiceManagerSnapshot ServiceManagerFsm::snapshot() const noexcept {
 }
 
 void ServiceManagerFsm::dispatch(const OpeningDatabaseEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm OpeningDatabaseEvent requires Uninitialized state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const DatabaseOpenedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm DatabaseOpenedEvent requires OpeningDatabase state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationStartedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm MigrationStartedEvent requires DatabaseReady state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationCompletedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm MigrationCompletedEvent requires MigratingSchema state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const VectorsInitializedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm VectorsInitializedEvent requires SchemaReady or later "
+                     "vector-activation startup states");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuildStartedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm SearchEngineBuildStartedEvent requires SchemaReady or "
+                     "VectorsReady state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuiltEvent& ev) noexcept {
+    validateDispatch(
+        snapshot().state, ev,
+        "ServiceManagerFsm SearchEngineBuiltEvent requires BuildingSearchEngine state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
 void ServiceManagerFsm::dispatch(const InitializationFailedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm InitializationFailedEvent must not arrive after Ready or "
+                     "shutdown terminal states");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
@@ -189,6 +261,8 @@ void ServiceManagerFsm::dispatch(const ShutdownEvent& ev) noexcept {
 }
 
 void ServiceManagerFsm::dispatch(const ServiceManagerStoppedEvent& ev) noexcept {
+    validateDispatch(snapshot().state, ev,
+                     "ServiceManagerFsm ServiceManagerStoppedEvent requires ShuttingDown state");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
@@ -250,8 +324,10 @@ ServiceManagerSnapshot ServiceManagerFsm::waitForTerminalState(int timeoutSecond
                              "current state={}",
                              timeoutSeconds,
                              static_cast<int>(detail::ServiceManagerMachine::snap.state));
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManagerFSM] timeout warning logging failed: {}", e.what());
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug("[ServiceManagerFSM] timeout warning logging failed: unknown error");
             }
         }
         return detail::ServiceManagerMachine::snap;
@@ -264,8 +340,10 @@ void ServiceManagerFsm::cancelWait() noexcept {
     try {
         std::lock_guard<std::mutex> lock(sharedMutex());
         cv_.notify_all();
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManagerFSM] cancelWait swallowed exception: {}", e.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("[ServiceManagerFSM] cancelWait swallowed unknown exception");
     }
 }
 
@@ -274,8 +352,10 @@ void ServiceManagerFsm::reset() noexcept {
         std::lock_guard<std::mutex> lock(sharedMutex());
         detail::ServiceManagerMachine::snap = {};
         detail::ServiceManagerMachine::start();
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManagerFSM] reset swallowed exception: {}", e.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("[ServiceManagerFSM] reset swallowed unknown exception");
     }
 }
 
