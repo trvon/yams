@@ -217,9 +217,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
     // Writes are serialized per-batch below; reads and compute proceed concurrently.
 
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-    if (!vectorDb->initialize()) {
-        return Error{ErrorCode::DatabaseError,
-                     "Vector database initialization failed: " + vectorDb->getLastError()};
+    if (auto init = vectorDb->initializeChecked(); !init) {
+        return Error{init.error()};
     }
 
     // Guard: if an existing DB has a fixed dimension that does not match the model provider,
@@ -271,7 +270,11 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
     std::unordered_set<std::string> embeddedHashes;
     if (config.skipExisting) {
-        embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+        if (auto embedded = vectorDb->getEmbeddedDocumentHashesChecked(); embedded) {
+            embeddedHashes = std::move(embedded.value());
+        } else {
+            return Error{embedded.error()};
+        }
     }
 
     // Process documents in batches
@@ -548,9 +551,9 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                 }
                 VectorDbLock vlock(lockPath);
                 if (vlock.isLocked()) {
-                    if (!vectorDb->insertVectorsBatch(allRecords)) {
+                    if (auto insert = vectorDb->insertVectorsBatchChecked(allRecords); !insert) {
                         spdlog::warn("[repair] batch vector insert failed: {}",
-                                     vectorDb->getLastError());
+                                     insert.error().message);
                         stats.failedOperations += batchDocs.size();
                         break;
                     }
@@ -747,11 +750,12 @@ bool hasEmbedding(const std::string& documentHash, const std::filesystem::path& 
         vdbConfig.create_if_missing = false; // Never create from util
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-        if (!vectorDb->initialize()) {
+        if (auto init = vectorDb->initializeChecked(); !init) {
             return false;
         }
 
-        return vectorDb->hasEmbedding(documentHash);
+        auto hasEmbedding = vectorDb->hasEmbeddingChecked(documentHash);
+        return hasEmbedding && hasEmbedding.value();
     } catch (...) {
         return false;
     }
@@ -773,11 +777,15 @@ getDocumentsMissingEmbeddings(std::shared_ptr<metadata::IMetadataRepository> met
     vdbConfig.create_if_missing = false;
 
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
-    if (!vectorDb->initialize()) {
-        return Error{ErrorCode::DatabaseError, "Failed to initialize vector database"};
+    if (auto init = vectorDb->initializeChecked(); !init) {
+        return Error{init.error()};
     }
 
-    const auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+    auto embeddedHashesResult = vectorDb->getEmbeddedDocumentHashesChecked();
+    if (!embeddedHashesResult) {
+        return Error{embeddedHashesResult.error()};
+    }
+    const auto embeddedHashes = std::move(embeddedHashesResult.value());
 
     std::vector<metadata::DocumentInfo> missingDocs;
     missingDocs.reserve(allDocs.value().size());

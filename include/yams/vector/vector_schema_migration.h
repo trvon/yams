@@ -16,7 +16,7 @@ namespace yams::vector {
  * @brief Schema migration utilities for vector database
  *
  * Handles migration from V1 schema (doc_embeddings vec0 + doc_metadata)
- * to V2 schema (unified vectors table + HNSW persistence tables).
+ * to the unified vectors-table schema used by the current vector backends.
  */
 class VectorSchemaMigration {
 public:
@@ -24,7 +24,7 @@ public:
     enum class SchemaVersion {
         Unknown = 0,
         V1 = 1,   ///< Old schema: doc_embeddings (vec0) + doc_metadata
-        V2 = 2,   ///< New schema: vectors + vectors_hnsw_meta + vectors_hnsw_nodes
+        V2 = 2,   ///< Unified vectors table schema (legacy installs may still carry HNSW tables)
         V2_1 = 3, ///< V2 with embedding_dim column
         V2_2 = 4  ///< V2.1 with quantized sidecar columns (TurboQuant packed codes)
     };
@@ -40,10 +40,10 @@ public:
      * @brief Migrate from V1 to V2 schema
      *
      * Steps:
-     * 1. Create V2 tables (vectors, HNSW shadow tables)
+     * 1. Create V2 tables for the unified vectors schema
      * 2. Copy data from doc_metadata + doc_embeddings to vectors
      * 3. Rename old tables as backup (doc_embeddings_v1_backup, doc_metadata_v1_backup)
-     * 4. Build HNSW index from vectors
+     * 4. Leave fresh search-index state to the active backend (vec0 or Simeon PQ)
      *
      * @param db SQLite database handle
      * @param embedding_dim Embedding dimension

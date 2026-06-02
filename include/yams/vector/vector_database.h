@@ -1,6 +1,5 @@
 #pragma once
 
-#include <yams/core/concepts.h>
 #include <yams/core/types.h>
 #include <yams/vector/vector_types.h>
 
@@ -65,6 +64,24 @@ public:
     bool hasEmbedding(const std::string& document_hash) const;
     std::unordered_set<std::string> getEmbeddedDocumentHashes() const;
 
+    // Result-returning transition APIs for callers that need structured errors
+    // instead of bool/empty-result side channels.
+    Result<void> initializeChecked();
+    Result<void> createTableChecked();
+    Result<void> insertVectorChecked(const VectorRecord& record);
+    Result<void> insertVectorsBatchChecked(const std::vector<VectorRecord>& records);
+    Result<void> updateVectorChecked(const std::string& chunk_id, const VectorRecord& record);
+    Result<void> deleteVectorChecked(const std::string& chunk_id);
+    Result<void> deleteVectorsByDocumentChecked(const std::string& document_hash);
+    Result<std::vector<VectorRecord>>
+    searchSimilarChecked(const std::vector<float>& query_embedding,
+                         const VectorSearchParams& params = {}) const;
+    Result<std::vector<std::vector<VectorRecord>>>
+    searchSimilarBatchChecked(const std::vector<std::vector<float>>& query_embeddings,
+                              const VectorSearchParams& params = {}, size_t num_threads = 0) const;
+    Result<bool> hasEmbeddingChecked(const std::string& document_hash) const;
+    Result<std::unordered_set<std::string>> getEmbeddedDocumentHashesChecked() const;
+
     bool buildIndex();
     bool prepareSearchIndex();
     bool hasReusablePersistedSearchIndex() const;
@@ -74,6 +91,13 @@ public:
     bool rebuildIndex();
     bool beginBulkLoad();
     bool finalizeBulkLoad();
+
+    Result<void> buildIndexChecked();
+    Result<void> prepareSearchIndexChecked();
+    Result<void> optimizeIndexChecked();
+    Result<void> persistIndexChecked();
+    Result<void> beginBulkLoadChecked();
+    Result<void> finalizeBulkLoadChecked();
 
     Result<void> checkpointWal();
 
@@ -110,6 +134,15 @@ public:
     getEntityVectorsByDocument(const std::string& document_hash) const;
     bool hasEntityEmbedding(const std::string& node_key) const;
     size_t getEntityVectorCount() const;
+    Result<std::vector<EntityVectorRecord>>
+    searchEntitiesChecked(const std::vector<float>& query_embedding,
+                          const EntitySearchParams& params = {}) const;
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByNodeChecked(const std::string& node_key) const;
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByDocumentChecked(const std::string& document_hash) const;
+    Result<bool> hasEntityEmbeddingChecked(const std::string& node_key) const;
+    Result<size_t> getEntityVectorCountChecked() const;
     Result<void> markEntityAsStale(const std::string& node_key);
 
     const VectorDatabaseConfig& getConfig() const;

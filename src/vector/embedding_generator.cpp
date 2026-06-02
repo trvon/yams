@@ -24,6 +24,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 // Include daemon client for DaemonBackend
@@ -627,18 +628,21 @@ class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
         auto effective = config.backend;
-        if (const char* env = std::getenv("YAMS_EMBED_BACKEND"); env && *env) {
-            std::string s(env);
-            for (auto& c : s)
+        // Typed config + env override via ConfigResolver (preserves existing YAMS_EMBED_BACKEND)
+        auto runtimePolicy = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        if (runtimePolicy.backend) {
+            const auto& s = *runtimePolicy.backend;
+            std::string lowered(s);
+            for (auto& c : lowered)
                 c = static_cast<char>(std::tolower(c));
-            if (s == "simeon") {
+            if (lowered == "simeon") {
                 effective = EmbeddingConfig::Backend::Simeon;
                 config_.backend = effective;
-            } else if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
-                       s == "local_onnx") {
+            } else if (lowered == "onnx" || lowered == "onnxruntime" || lowered == "onnx-runtime" ||
+                       lowered == "ort" || lowered == "local_onnx") {
                 effective = EmbeddingConfig::Backend::OnnxRuntime;
                 config_.backend = effective;
-            } else if (s == "daemon" || s == "hybrid" || s == "local") {
+            } else if (lowered == "daemon" || lowered == "hybrid" || lowered == "local") {
                 effective = EmbeddingConfig::Backend::Daemon;
                 config_.backend = effective;
             }

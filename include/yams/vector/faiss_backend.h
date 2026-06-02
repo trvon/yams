@@ -98,13 +98,15 @@ public:
     Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) override;
     Result<void> deleteEntityVectorsByNode(const std::string& nodeKey) override;
     Result<void> deleteEntityVectorsByDocument(const std::string& documentHash) override;
-    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& queryEmbedding,
-                                                   const EntitySearchParams& params = {}) override;
-    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& nodeKey) override;
-    std::vector<EntityVectorRecord>
+    Result<std::vector<EntityVectorRecord>>
+    searchEntities(const std::vector<float>& queryEmbedding,
+                   const EntitySearchParams& params = {}) override;
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByNode(const std::string& nodeKey) override;
+    Result<std::vector<EntityVectorRecord>>
     getEntityVectorsByDocument(const std::string& documentHash) override;
-    bool hasEntityEmbedding(const std::string& nodeKey) override;
-    size_t getEntityVectorCount() override;
+    Result<bool> hasEntityEmbedding(const std::string& nodeKey) override;
+    Result<size_t> getEntityVectorCount() override;
     Result<void> markEntityAsStale(const std::string& nodeKey) override;
 
     // ── Transactions (UNSUPPORTED) ──

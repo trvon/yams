@@ -270,11 +270,11 @@ private:
     size_t estimateModelMemory(const std::string& model_id) {
         // Simplified estimation based on model ID
         if (model_id.find("large") != std::string::npos) {
-            return 500 * 1024 * 1024; // 500MB
+            return 500ULL * 1024 * 1024; // 500MB
         } else if (model_id.find("base") != std::string::npos) {
-            return 200 * 1024 * 1024; // 200MB
+            return 200ULL * 1024 * 1024; // 200MB
         } else {
-            return 100 * 1024 * 1024; // 100MB default
+            return 100ULL * 1024 * 1024; // 100MB default
         }
     }
 
@@ -390,11 +390,15 @@ public:
 
     bool isUnderPressure() const {
         std::shared_lock lock(mutex_);
+        if (max_memory_ == 0)
+            return false;
         return static_cast<double>(used_memory_) / max_memory_ > high_watermark_;
     }
 
     double getMemoryPressure() const {
         std::shared_lock lock(mutex_);
+        if (max_memory_ == 0)
+            return 0.0;
         return static_cast<double>(used_memory_) / max_memory_;
     }
 

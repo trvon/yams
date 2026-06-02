@@ -5,10 +5,10 @@
 #include <spdlog/spdlog.h>
 
 #include <faiss/Index.h>
+#include <faiss/index_io.h>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIDMap.h>
-#include <faiss/index_io.h>
 
 #include <algorithm>
 #include <cmath>
@@ -396,8 +396,7 @@ Result<void> FaissBackend::loadOrCreateIndex() {
     auto idxFile = indexFilePath();
     if (std::filesystem::exists(idxFile)) {
         try {
-            std::unique_ptr<faiss::Index> faissIdx(
-                faiss::read_index(idxFile.string().c_str()));
+            std::unique_ptr<faiss::Index> faissIdx(faiss::read_index(idxFile.string().c_str()));
             if (faissIdx) {
                 index_ = std::make_unique<FaissIndex>();
                 index_->index = std::move(faissIdx);
@@ -511,21 +510,22 @@ Result<void> FaissBackend::deleteEntityVectorsByNode(const std::string&) {
 Result<void> FaissBackend::deleteEntityVectorsByDocument(const std::string&) {
     return unsupported("deleteEntityVectorsByDocument");
 }
-std::vector<EntityVectorRecord> FaissBackend::searchEntities(const std::vector<float>&,
-                                                             const EntitySearchParams&) {
-    return {};
+Result<std::vector<EntityVectorRecord>> FaissBackend::searchEntities(const std::vector<float>&,
+                                                                     const EntitySearchParams&) {
+    return unsupported("searchEntities");
 }
-std::vector<EntityVectorRecord> FaissBackend::getEntityVectorsByNode(const std::string&) {
-    return {};
+Result<std::vector<EntityVectorRecord>> FaissBackend::getEntityVectorsByNode(const std::string&) {
+    return unsupported("getEntityVectorsByNode");
 }
-std::vector<EntityVectorRecord> FaissBackend::getEntityVectorsByDocument(const std::string&) {
-    return {};
+Result<std::vector<EntityVectorRecord>>
+FaissBackend::getEntityVectorsByDocument(const std::string&) {
+    return unsupported("getEntityVectorsByDocument");
 }
-bool FaissBackend::hasEntityEmbedding(const std::string&) {
-    return false;
+Result<bool> FaissBackend::hasEntityEmbedding(const std::string&) {
+    return unsupported("hasEntityEmbedding");
 }
-size_t FaissBackend::getEntityVectorCount() {
-    return 0;
+Result<size_t> FaissBackend::getEntityVectorCount() {
+    return unsupported("getEntityVectorCount");
 }
 Result<void> FaissBackend::markEntityAsStale(const std::string&) {
     return unsupported("markEntityAsStale");

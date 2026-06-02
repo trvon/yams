@@ -571,7 +571,7 @@ void TurboQuantMSE::transformQueryInPlace(const std::vector<float>& query,
 
 float TurboQuantMSE::scoreFromPacked(const std::vector<float>& transformed_query,
                                      const std::vector<uint8_t>& packed_codes) const {
-    // Asymmetric packed-code scoring for compressed ANN / HNSW reranking.
+    // Asymmetric packed-code scoring for compressed ANN reranking.
     // Returns unnormalized inner product (higher = more similar).
     //
     // Mathematical derivation:

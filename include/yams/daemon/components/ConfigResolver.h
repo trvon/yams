@@ -158,6 +158,17 @@ public:
         std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
     };
 
+    /// Runtime operational knobs for the embedding pipeline. Replaces ad-hoc
+    /// YAMS_EMBED_* and YAMS_REPAIR_* env vars with typed config resolved
+    /// through the standard TOML + env-overlay path.
+    struct EmbeddingRuntimePolicy {
+        std::optional<std::string> backend;               // "simeon" | "daemon" | "onnx"
+        std::optional<std::string> preferredModel;        // model name override
+        std::optional<std::size_t> batchSize;             // max texts per batch
+        std::optional<std::size_t> batchTarget;           // adaptive batch token target
+        std::optional<std::uint64_t> repairLockTimeoutMs; // repair DB lock timeout (ms)
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -435,6 +446,9 @@ public:
      * overrides YAMS_SIMEON_NGRAM_MODE, YAMS_SIMEON_NGRAM_MIN, etc.
      */
     static SimeonEncoderPolicy resolveSimeonEncoderPolicy();
+
+    /// Resolve embedding-pipeline runtime settings (backend, model, batch, repair lock).
+    static EmbeddingRuntimePolicy resolveEmbeddingRuntimePolicy();
 
     /**
      * @brief Resolve Simeon BM25 reranker config from env + config file.

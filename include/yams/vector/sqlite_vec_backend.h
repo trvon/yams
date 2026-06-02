@@ -49,9 +49,17 @@ public:
         VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
         bool vec0_phss_enabled = false;
         size_t vec0_phss_candidates = 64;
+        /// PQ subquantizers. Jégou et al. 2011: subvector-dim=dim/m. At 1024d,
+        /// m=32 gives subdim=32 → ~50% recall@10 (benchmarks). Literature
+        /// suggests subdim 8-16 for recall-sensitive apps. Consider m=64 (subdim=16)
+        /// or m=96 (subdim≈10.7) at higher memory cost.
         size_t simeon_pq_subquantizers = 32;
+        /// Centroids per subspace. Jégou et al 2011: k=256 is standard (1 byte/code).
         size_t simeon_pq_centroids = 256;
+        /// Training corpus size limit (>> k). 4096 provides good convergence.
         size_t simeon_pq_train_limit = 4096;
+        /// ADC rerank factor. Jégou et al 2011: fetch rerank_factor * k candidates
+        /// from compressed search then score exactly. 2-4 typical; 2 favors speed.
         size_t simeon_pq_rerank_factor = 2;
         uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
         bool suppress_search_index_builds =
@@ -128,13 +136,15 @@ public:
     Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) override;
     Result<void> deleteEntityVectorsByNode(const std::string& node_key) override;
     Result<void> deleteEntityVectorsByDocument(const std::string& document_hash) override;
-    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
-                                                   const EntitySearchParams& params = {}) override;
-    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) override;
-    std::vector<EntityVectorRecord>
+    Result<std::vector<EntityVectorRecord>>
+    searchEntities(const std::vector<float>& query_embedding,
+                   const EntitySearchParams& params = {}) override;
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByNode(const std::string& node_key) override;
+    Result<std::vector<EntityVectorRecord>>
     getEntityVectorsByDocument(const std::string& document_hash) override;
-    bool hasEntityEmbedding(const std::string& node_key) override;
-    size_t getEntityVectorCount() override;
+    Result<bool> hasEntityEmbedding(const std::string& node_key) override;
+    Result<size_t> getEntityVectorCount() override;
     Result<void> markEntityAsStale(const std::string& node_key) override;
 
     // ==================== Backend-specific helpers ====================

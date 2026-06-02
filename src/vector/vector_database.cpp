@@ -14,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
@@ -73,7 +74,6 @@ public:
         // Contract: quantized-primary storage requires a TurboQuant sidecar to be present.
         // Without it, there is no way to reconstruct embeddings from packed codes on read.
         if (config_.quantized_primary_storage && !config_.enable_turboquant_storage) {
-            has_error_ = true;
             setError(
                 "quantized_primary_storage=true requires enable_turboquant_storage=true: "
                 "cannot reconstruct embeddings from packed codes without TurboQuant configuration");
@@ -250,7 +250,7 @@ public:
             }
 
             initialized_.store(true, std::memory_order_release);
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -272,8 +272,7 @@ public:
             backend_->close();
         }
         initialized_.store(false, std::memory_order_release);
-        has_error_ = false;
-        last_error_.clear();
+        clearError();
     }
 
     bool createTable() {
@@ -352,7 +351,7 @@ public:
             // Update component-owned metrics
             cachedVectorCount_.fetch_add(1, std::memory_order_relaxed);
 
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -480,7 +479,7 @@ public:
             cachedVectorCount_.fetch_add(records.size(), std::memory_order_relaxed);
 
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -523,7 +522,7 @@ public:
                 return false;
             }
 
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -550,7 +549,7 @@ public:
             // Update component-owned metrics atomically (avoid underflow)
             core::decrement_if_positive(cachedVectorCount_);
 
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -585,7 +584,7 @@ public:
                 core::saturating_sub(cachedVectorCount_, static_cast<size_t>(countToDelete));
             }
 
-            has_error_ = false;
+            clearError();
             return true;
 
         } catch (const std::exception& e) {
@@ -611,14 +610,15 @@ public:
                                                   params.similarity_threshold, params.document_hash,
                                                   params.candidate_hashes, params.metadata_filters);
             if (!result) {
-                // Can't modify has_error_ from const method
+                setError("Vector search failed: " + result.error().message);
                 return {};
             }
 
+            clearError();
             return result.value();
 
         } catch (const std::exception& e) {
-            // Can't modify has_error_ from const method
+            setError("Vector search failed: " + std::string(e.what()));
             return {};
         }
     }
@@ -626,26 +626,64 @@ public:
     std::vector<std::vector<VectorRecord>>
     searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
                        const VectorSearchParams& params, size_t num_threads) const {
+        auto result = searchSimilarBatchChecked(query_embeddings, params, num_threads);
+        if (!result) {
+            return {};
+        }
+        return std::move(result.value());
+    }
+
+    Result<std::vector<VectorRecord>>
+    searchSimilarChecked(const std::vector<float>& query_embedding,
+                         const VectorSearchParams& params) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
-        if (!initialized_ || query_embeddings.empty()) {
-            return {};
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (query_embedding.size() != config_.embedding_dim) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Query embedding dimension mismatch (expected=" +
+                             std::to_string(config_.embedding_dim) +
+                             ", got=" + std::to_string(query_embedding.size()) + ")"};
+        }
+
+        try {
+            return backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,
+                                           params.document_hash, params.candidate_hashes,
+                                           params.metadata_filters);
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, "Vector search failed: " + std::string(e.what())};
+        }
+    }
+
+    Result<std::vector<std::vector<VectorRecord>>>
+    searchSimilarBatchChecked(const std::vector<std::vector<float>>& query_embeddings,
+                              const VectorSearchParams& params, size_t num_threads) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (query_embeddings.empty()) {
+            return std::vector<std::vector<VectorRecord>>{};
         }
         for (const auto& query : query_embeddings) {
             if (query.size() != config_.embedding_dim) {
-                return {};
+                return Error{ErrorCode::InvalidArgument,
+                             "Batch query embedding dimension mismatch (expected=" +
+                                 std::to_string(config_.embedding_dim) +
+                                 ", got=" + std::to_string(query.size()) + ")"};
             }
         }
 
         try {
-            auto result = backend_->searchSimilarBatch(query_embeddings, params.k,
-                                                       params.similarity_threshold, num_threads);
-            if (!result) {
-                return {};
-            }
-            return result.value();
-        } catch (const std::exception&) {
-            return {};
+            return backend_->searchSimilarBatch(query_embeddings, params.k,
+                                                params.similarity_threshold, num_threads);
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown,
+                         "Batch vector search failed: " + std::string(e.what())};
         }
     }
 
@@ -773,18 +811,32 @@ public:
     }
 
     bool hasEmbedding(const std::string& document_hash) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        auto result = backend_->hasEmbedding(document_hash);
+        auto result = hasEmbeddingChecked(document_hash);
         return result && result.value();
     }
 
-    std::unordered_set<std::string> getEmbeddedDocumentHashes() const {
+    Result<bool> hasEmbeddingChecked(const std::string& document_hash) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
-        auto result = backend_->getEmbeddedDocumentHashes();
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        return backend_->hasEmbedding(document_hash);
+    }
+
+    std::unordered_set<std::string> getEmbeddedDocumentHashes() const {
+        auto result = getEmbeddedDocumentHashesChecked();
         if (result) {
             return std::move(result.value());
         }
         return {};
+    }
+
+    Result<std::unordered_set<std::string>> getEmbeddedDocumentHashesChecked() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        return backend_->getEmbeddedDocumentHashes();
     }
 
     Result<VectorDatabase::OrphanCleanupStats> cleanupOrphanRows() {
@@ -917,53 +969,55 @@ public:
         return scales.size();
     }
 
-    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
-                                                   const EntitySearchParams& params) const {
+    Result<std::vector<EntityVectorRecord>>
+    searchEntitiesChecked(const std::vector<float>& query_embedding,
+                          const EntitySearchParams& params) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
-            return {};
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         return backend_->searchEntities(query_embedding, params);
     }
 
-    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) const {
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByNodeChecked(const std::string& node_key) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
-            return {};
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         return backend_->getEntityVectorsByNode(node_key);
     }
 
-    std::vector<EntityVectorRecord>
-    getEntityVectorsByDocument(const std::string& document_hash) const {
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByDocumentChecked(const std::string& document_hash) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
-            return {};
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         return backend_->getEntityVectorsByDocument(document_hash);
     }
 
-    bool hasEntityEmbedding(const std::string& node_key) const {
+    Result<bool> hasEntityEmbeddingChecked(const std::string& node_key) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         return backend_->hasEntityEmbedding(node_key);
     }
 
-    size_t getEntityVectorCount() const {
+    Result<size_t> getEntityVectorCountChecked() const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
-            return 0;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         return backend_->getEntityVectorCount();
@@ -979,49 +1033,53 @@ public:
         return backend_->markEntityAsStale(node_key);
     }
 
-    bool buildIndex() {
+    bool buildIndex() { return buildIndexChecked().has_value(); }
+
+    Result<void> buildIndexChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         try {
             auto result = backend_->buildIndex();
             if (!result) {
                 setError("Backend buildIndex failed: " + result.error().message);
-                return false;
+                return result.error();
             }
-            has_error_ = false;
-            return true;
+            clearError();
+            return Result<void>{};
 
         } catch (const std::exception& e) {
             setError("Index build failed: " + std::string(e.what()));
-            return false;
+            return Error{ErrorCode::Unknown, "Index build failed: " + std::string(e.what())};
         }
     }
 
-    bool prepareSearchIndex() {
+    bool prepareSearchIndex() { return prepareSearchIndexChecked().has_value(); }
+
+    Result<void> prepareSearchIndexChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         try {
             auto result = backend_->prepareSearchIndex();
             if (!result) {
                 setError("Backend prepareSearchIndex failed: " + result.error().message);
-                return false;
+                return result.error();
             }
-            has_error_ = false;
-            return true;
+            clearError();
+            return Result<void>{};
 
         } catch (const std::exception& e) {
             setError("Index prepare failed: " + std::string(e.what()));
-            return false;
+            return Error{ErrorCode::Unknown, "Index prepare failed: " + std::string(e.what())};
         }
     }
 
@@ -1040,94 +1098,102 @@ public:
         }
     }
 
-    bool optimizeIndex() {
+    bool optimizeIndex() { return optimizeIndexChecked().has_value(); }
+
+    Result<void> optimizeIndexChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         try {
             auto result = backend_->optimize();
             if (!result) {
                 setError("Backend optimize failed: " + result.error().message);
-                return false;
+                return result.error();
             }
-            has_error_ = false;
-            return true;
+            clearError();
+            return Result<void>{};
 
         } catch (const std::exception& e) {
             setError("Index optimization failed: " + std::string(e.what()));
-            return false;
+            return Error{ErrorCode::Unknown, "Index optimization failed: " + std::string(e.what())};
         }
     }
 
-    bool persistIndex() {
+    bool persistIndex() { return persistIndexChecked().has_value(); }
+
+    Result<void> persistIndexChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         try {
             auto result = backend_->persistIndex();
             if (!result) {
                 setError("Backend persistIndex failed: " + result.error().message);
-                return false;
+                return result.error();
             }
-            has_error_ = false;
-            return true;
+            clearError();
+            return Result<void>{};
 
         } catch (const std::exception& e) {
             setError("Index persistence failed: " + std::string(e.what()));
-            return false;
+            return Error{ErrorCode::Unknown, "Index persistence failed: " + std::string(e.what())};
         }
     }
 
-    bool beginBulkLoad() {
+    bool beginBulkLoad() { return beginBulkLoadChecked().has_value(); }
+
+    Result<void> beginBulkLoadChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
         if (!sqliteBackend) {
-            return true;
+            return Result<void>{};
         }
 
         auto result = sqliteBackend->beginBulkLoad();
         if (!result) {
             setError("Bulk-load begin failed: " + result.error().message);
-            return false;
+            return result.error();
         }
-        has_error_ = false;
-        return true;
+        clearError();
+        return Result<void>{};
     }
 
-    bool finalizeBulkLoad() {
+    bool finalizeBulkLoad() { return finalizeBulkLoadChecked().has_value(); }
+
+    Result<void> finalizeBulkLoadChecked() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
         if (!sqliteBackend) {
-            return true;
+            return Result<void>{};
         }
 
         auto result = sqliteBackend->finalizeBulkLoad();
         if (!result) {
             setError("Bulk-load finalize failed: " + result.error().message);
-            return false;
+            return result.error();
         }
-        has_error_ = false;
-        return true;
+        clearError();
+        return Result<void>{};
     }
 
     Result<void> checkpointWal() {
@@ -1148,6 +1214,11 @@ public:
 
     VectorDatabase::DatabaseStats getStats() const {
         VectorDatabase::DatabaseStats stats;
+        size_t embeddingDim = 0;
+        {
+            std::shared_lock<std::shared_mutex> lock(mutex_);
+            embeddingDim = config_.embedding_dim;
+        }
 
         // Get basic stats from backend - don't hold our mutex while calling backend
         // to avoid potential deadlock with backend's mutex
@@ -1163,7 +1234,7 @@ public:
         } else {
             // Estimate if backend doesn't provide stats
             stats.total_documents = 0;
-            stats.index_size_bytes = stats.total_vectors * config_.embedding_dim * sizeof(float);
+            stats.index_size_bytes = stats.total_vectors * embeddingDim * sizeof(float);
         }
 
         stats.last_optimized = std::chrono::system_clock::now();
@@ -1174,20 +1245,22 @@ public:
     const VectorDatabaseConfig& getConfig() const { return config_; }
 
     std::string getLastError() const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(error_mutex_);
         return last_error_;
     }
 
-    bool hasError() const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        return has_error_;
-    }
+    bool hasError() const { return has_error_.load(std::memory_order_acquire); }
 
 private:
     void setError(const std::string& error) const {
-        last_error_ = error;
-        has_error_ = true;
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            last_error_ = error;
+        }
+        has_error_.store(true, std::memory_order_release);
     }
+
+    void clearError() const { has_error_.store(false, std::memory_order_release); }
 
     double computeCosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) const {
         if (a.size() != b.size()) {
@@ -1217,8 +1290,9 @@ private:
     VectorDatabaseConfig config_;
     std::unique_ptr<IVectorBackend> backend_;
     std::atomic<bool> initialized_;
-    mutable bool has_error_;
+    mutable std::atomic<bool> has_error_;
     mutable std::string last_error_;
+    mutable std::mutex error_mutex_;
     mutable std::shared_mutex mutex_;
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
@@ -1228,6 +1302,7 @@ private:
     // Owned TurboQuantMSE instance - replaces global/TLS plumbing.
     // Initialized lazily on first use when enable_turboquant_storage is true.
     mutable std::unique_ptr<TurboQuantMSE> turboquant_;
+    mutable std::mutex turboquant_mutex_;
 
     /**
      * Lazily initialize (or re-configure) the owned TurboQuantMSE member.
@@ -1238,6 +1313,8 @@ private:
         if (!config_.enable_turboquant_storage) {
             return nullptr;
         }
+
+        std::lock_guard<std::mutex> lock(turboquant_mutex_);
         if (!turboquant_ || turboquant_->config().dimension != config_.embedding_dim ||
             turboquant_->config().bits_per_channel != config_.turboquant_bits) {
             TurboQuantConfig cfg;
@@ -1267,7 +1344,16 @@ VectorDatabase::VectorDatabase(VectorDatabase&&) noexcept = default;
 VectorDatabase& VectorDatabase::operator=(VectorDatabase&&) noexcept = default;
 
 bool VectorDatabase::initialize() {
-    return pImpl->initialize();
+    return initializeChecked().has_value();
+}
+
+Result<void> VectorDatabase::initializeChecked() {
+    if (pImpl->initialize()) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown,
+                 message.empty() ? "Vector database initialization failed" : message};
 }
 
 bool VectorDatabase::isInitialized() const {
@@ -1283,7 +1369,15 @@ void VectorDatabase::close() {
 }
 
 bool VectorDatabase::createTable() {
-    return pImpl->createTable();
+    return createTableChecked().has_value();
+}
+
+Result<void> VectorDatabase::createTableChecked() {
+    if (pImpl->createTable()) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Vector table creation failed" : message};
 }
 
 bool VectorDatabase::tableExists() const {
@@ -1303,47 +1397,113 @@ size_t VectorDatabase::getEmbeddingDim() const {
 }
 
 bool VectorDatabase::insertVector(const VectorRecord& record) {
+    return insertVectorChecked(record).has_value();
+}
+
+Result<void> VectorDatabase::insertVectorChecked(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("VectorDB::insertVector");
     YAMS_PLOT("vector_db::insert_embedding_dim", static_cast<int64_t>(record.embedding.size()));
-    return pImpl->insertVector(record);
+    if (pImpl->insertVector(record)) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Vector insert failed" : message};
 }
 
 bool VectorDatabase::insertVectorsBatch(const std::vector<VectorRecord>& records) {
+    return insertVectorsBatchChecked(records).has_value();
+}
+
+Result<void> VectorDatabase::insertVectorsBatchChecked(const std::vector<VectorRecord>& records) {
     YAMS_ZONE_SCOPED_N("VectorDB::insertVectorsBatch");
     YAMS_PLOT("vector_db::insert_batch_size", static_cast<int64_t>(records.size()));
-    return pImpl->insertVectorsBatch(records);
+    if (pImpl->insertVectorsBatch(records)) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Vector batch insert failed" : message};
 }
 
 bool VectorDatabase::updateVector(const std::string& chunk_id, const VectorRecord& record) {
-    return pImpl->updateVector(chunk_id, record);
+    return updateVectorChecked(chunk_id, record).has_value();
+}
+
+Result<void> VectorDatabase::updateVectorChecked(const std::string& chunk_id,
+                                                 const VectorRecord& record) {
+    if (pImpl->updateVector(chunk_id, record)) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Vector update failed" : message};
 }
 
 bool VectorDatabase::deleteVector(const std::string& chunk_id) {
-    return pImpl->deleteVector(chunk_id);
+    return deleteVectorChecked(chunk_id).has_value();
+}
+
+Result<void> VectorDatabase::deleteVectorChecked(const std::string& chunk_id) {
+    if (pImpl->deleteVector(chunk_id)) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Vector delete failed" : message};
 }
 
 bool VectorDatabase::deleteVectorsByDocument(const std::string& document_hash) {
-    return pImpl->deleteVectorsByDocument(document_hash);
+    return deleteVectorsByDocumentChecked(document_hash).has_value();
+}
+
+Result<void> VectorDatabase::deleteVectorsByDocumentChecked(const std::string& document_hash) {
+    if (pImpl->deleteVectorsByDocument(document_hash)) {
+        return Result<void>{};
+    }
+    const auto message = pImpl->getLastError();
+    return Error{ErrorCode::Unknown, message.empty() ? "Document vector delete failed" : message};
 }
 
 std::vector<VectorRecord> VectorDatabase::searchSimilar(const std::vector<float>& query_embedding,
                                                         const VectorSearchParams& params) const {
+    auto results = searchSimilarChecked(query_embedding, params);
+    if (!results) {
+        return {};
+    }
+    return std::move(results.value());
+}
+
+Result<std::vector<VectorRecord>>
+VectorDatabase::searchSimilarChecked(const std::vector<float>& query_embedding,
+                                     const VectorSearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::searchSimilar");
     YAMS_PLOT("vector_db::search_query_dim", static_cast<int64_t>(query_embedding.size()));
     YAMS_PLOT("vector_db::search_k", static_cast<int64_t>(params.k));
-    auto results = pImpl->searchSimilar(query_embedding, params);
-    YAMS_PLOT("vector_db::search_results", static_cast<int64_t>(results.size()));
+    auto results = pImpl->searchSimilarChecked(query_embedding, params);
+    if (results) {
+        YAMS_PLOT("vector_db::search_results", static_cast<int64_t>(results->size()));
+    }
     return results;
 }
 
 std::vector<std::vector<VectorRecord>>
 VectorDatabase::searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
                                    const VectorSearchParams& params, size_t num_threads) const {
+    auto results = searchSimilarBatchChecked(query_embeddings, params, num_threads);
+    if (!results) {
+        return {};
+    }
+    return std::move(results.value());
+}
+
+Result<std::vector<std::vector<VectorRecord>>>
+VectorDatabase::searchSimilarBatchChecked(const std::vector<std::vector<float>>& query_embeddings,
+                                          const VectorSearchParams& params,
+                                          size_t num_threads) const {
     YAMS_ZONE_SCOPED_N("VectorDB::searchSimilarBatch");
     YAMS_PLOT("vector_db::batch_search_queries", static_cast<int64_t>(query_embeddings.size()));
     YAMS_PLOT("vector_db::batch_search_k", static_cast<int64_t>(params.k));
-    auto results = pImpl->searchSimilarBatch(query_embeddings, params, num_threads);
-    YAMS_PLOT("vector_db::batch_search_result_sets", static_cast<int64_t>(results.size()));
+    auto results = pImpl->searchSimilarBatchChecked(query_embeddings, params, num_threads);
+    if (results) {
+        YAMS_PLOT("vector_db::batch_search_result_sets", static_cast<int64_t>(results->size()));
+    }
     return results;
 }
 
@@ -1372,8 +1532,7 @@ std::vector<VectorRecord> VectorDatabase::search(const std::vector<float>& query
     YAMS_PLOT("vector_db::search_dispatch_query_dim", static_cast<int64_t>(query_embedding.size()));
     YAMS_PLOT("vector_db::search_dispatch_k", static_cast<int64_t>(params.k));
 
-    // All search uses HNSW - O(log n) approximate nearest neighbor
-    // HNSW achieves 100% recall vs brute-force in benchmarks (see bench_results/hnsw_*.json)
+    // All search dispatches through the configured search engine (vec0 or Simeon PQ).
     auto results = searchSimilar(query_embedding, params);
     YAMS_PLOT("vector_db::search_dispatch_results", static_cast<int64_t>(results.size()));
     return results;
@@ -1425,16 +1584,33 @@ Result<size_t> VectorDatabase::forEachDocumentLevelVector(
 }
 
 bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
+    auto result = hasEmbeddingChecked(document_hash);
+    return result && result.value();
+}
+
+Result<bool> VectorDatabase::hasEmbeddingChecked(const std::string& document_hash) const {
     YAMS_ZONE_SCOPED_N("VectorDB::hasEmbedding");
-    auto has = pImpl->hasEmbedding(document_hash);
-    YAMS_PLOT("vector_db::has_embedding", has ? 1 : 0);
+    auto has = pImpl->hasEmbeddingChecked(document_hash);
+    if (has) {
+        YAMS_PLOT("vector_db::has_embedding", has.value() ? 1 : 0);
+    }
     return has;
 }
 
 std::unordered_set<std::string> VectorDatabase::getEmbeddedDocumentHashes() const {
+    auto result = getEmbeddedDocumentHashesChecked();
+    if (!result) {
+        return {};
+    }
+    return std::move(result.value());
+}
+
+Result<std::unordered_set<std::string>> VectorDatabase::getEmbeddedDocumentHashesChecked() const {
     YAMS_ZONE_SCOPED_N("VectorDB::getEmbeddedDocumentHashes");
-    auto hashes = pImpl->getEmbeddedDocumentHashes();
-    YAMS_PLOT("vector_db::embedded_document_hashes", static_cast<int64_t>(hashes.size()));
+    auto hashes = pImpl->getEmbeddedDocumentHashesChecked();
+    if (hashes) {
+        YAMS_PLOT("vector_db::embedded_document_hashes", static_cast<int64_t>(hashes->size()));
+    }
     return hashes;
 }
 
@@ -1443,13 +1619,21 @@ Result<VectorDatabase::OrphanCleanupStats> VectorDatabase::cleanupOrphanRows() {
 }
 
 bool VectorDatabase::buildIndex() {
+    return buildIndexChecked().has_value();
+}
+
+Result<void> VectorDatabase::buildIndexChecked() {
     YAMS_ZONE_SCOPED_N("VectorDB::buildIndex");
-    return pImpl->buildIndex();
+    return pImpl->buildIndexChecked();
 }
 
 bool VectorDatabase::prepareSearchIndex() {
+    return prepareSearchIndexChecked().has_value();
+}
+
+Result<void> VectorDatabase::prepareSearchIndexChecked() {
     YAMS_ZONE_SCOPED_N("VectorDB::prepareSearchIndex");
-    return pImpl->prepareSearchIndex();
+    return pImpl->prepareSearchIndexChecked();
 }
 
 bool VectorDatabase::hasReusablePersistedSearchIndex() const {
@@ -1457,11 +1641,19 @@ bool VectorDatabase::hasReusablePersistedSearchIndex() const {
 }
 
 bool VectorDatabase::optimizeIndex() {
-    return pImpl->optimizeIndex();
+    return optimizeIndexChecked().has_value();
+}
+
+Result<void> VectorDatabase::optimizeIndexChecked() {
+    return pImpl->optimizeIndexChecked();
 }
 
 bool VectorDatabase::persistIndex() {
-    return pImpl->persistIndex();
+    return persistIndexChecked().has_value();
+}
+
+Result<void> VectorDatabase::persistIndexChecked() {
+    return pImpl->persistIndexChecked();
 }
 
 void VectorDatabase::compactDatabase() {
@@ -1473,11 +1665,19 @@ bool VectorDatabase::rebuildIndex() {
 }
 
 bool VectorDatabase::beginBulkLoad() {
-    return pImpl->beginBulkLoad();
+    return beginBulkLoadChecked().has_value();
+}
+
+Result<void> VectorDatabase::beginBulkLoadChecked() {
+    return pImpl->beginBulkLoadChecked();
 }
 
 bool VectorDatabase::finalizeBulkLoad() {
-    return pImpl->finalizeBulkLoad();
+    return finalizeBulkLoadChecked().has_value();
+}
+
+Result<void> VectorDatabase::finalizeBulkLoadChecked() {
+    return pImpl->finalizeBulkLoadChecked();
 }
 
 Result<void> VectorDatabase::checkpointWal() {
@@ -1574,36 +1774,80 @@ Result<void> VectorDatabase::deleteEntityVectorsByDocument(const std::string& do
 std::vector<EntityVectorRecord>
 VectorDatabase::searchEntities(const std::vector<float>& query_embedding,
                                const EntitySearchParams& params) const {
+    auto results = searchEntitiesChecked(query_embedding, params);
+    if (!results) {
+        return {};
+    }
+    return std::move(results.value());
+}
+
+Result<std::vector<EntityVectorRecord>>
+VectorDatabase::searchEntitiesChecked(const std::vector<float>& query_embedding,
+                                      const EntitySearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::searchEntities");
     YAMS_PLOT("vector_db::entity_search_query_dim", static_cast<int64_t>(query_embedding.size()));
     YAMS_PLOT("vector_db::entity_search_k", static_cast<int64_t>(params.k));
-    auto results = pImpl->searchEntities(query_embedding, params);
-    YAMS_PLOT("vector_db::entity_search_results", static_cast<int64_t>(results.size()));
+    auto results = pImpl->searchEntitiesChecked(query_embedding, params);
+    if (results) {
+        YAMS_PLOT("vector_db::entity_search_results", static_cast<int64_t>(results->size()));
+    }
     return results;
 }
 
 std::vector<EntityVectorRecord>
 VectorDatabase::getEntityVectorsByNode(const std::string& node_key) const {
+    auto results = getEntityVectorsByNodeChecked(node_key);
+    if (!results) {
+        return {};
+    }
+    return std::move(results.value());
+}
+
+Result<std::vector<EntityVectorRecord>>
+VectorDatabase::getEntityVectorsByNodeChecked(const std::string& node_key) const {
     YAMS_ZONE_SCOPED_N("VectorDB::getEntityVectorsByNode");
-    auto results = pImpl->getEntityVectorsByNode(node_key);
-    YAMS_PLOT("vector_db::entity_vectors_by_node", static_cast<int64_t>(results.size()));
+    auto results = pImpl->getEntityVectorsByNodeChecked(node_key);
+    if (results) {
+        YAMS_PLOT("vector_db::entity_vectors_by_node", static_cast<int64_t>(results->size()));
+    }
     return results;
 }
 
 std::vector<EntityVectorRecord>
 VectorDatabase::getEntityVectorsByDocument(const std::string& document_hash) const {
+    auto results = getEntityVectorsByDocumentChecked(document_hash);
+    if (!results) {
+        return {};
+    }
+    return std::move(results.value());
+}
+
+Result<std::vector<EntityVectorRecord>>
+VectorDatabase::getEntityVectorsByDocumentChecked(const std::string& document_hash) const {
     YAMS_ZONE_SCOPED_N("VectorDB::getEntityVectorsByDocument");
-    auto results = pImpl->getEntityVectorsByDocument(document_hash);
-    YAMS_PLOT("vector_db::entity_vectors_by_document", static_cast<int64_t>(results.size()));
+    auto results = pImpl->getEntityVectorsByDocumentChecked(document_hash);
+    if (results) {
+        YAMS_PLOT("vector_db::entity_vectors_by_document", static_cast<int64_t>(results->size()));
+    }
     return results;
 }
 
 bool VectorDatabase::hasEntityEmbedding(const std::string& node_key) const {
-    return pImpl->hasEntityEmbedding(node_key);
+    auto result = hasEntityEmbeddingChecked(node_key);
+    return result && result.value();
+}
+
+Result<bool> VectorDatabase::hasEntityEmbeddingChecked(const std::string& node_key) const {
+    return pImpl->hasEntityEmbeddingChecked(node_key);
 }
 
 size_t VectorDatabase::getEntityVectorCount() const {
-    return pImpl->getEntityVectorCount();
+    auto result = getEntityVectorCountChecked();
+    return result ? result.value() : 0;
+}
+
+Result<size_t> VectorDatabase::getEntityVectorCountChecked() const {
+    return pImpl->getEntityVectorCountChecked();
 }
 
 Result<void> VectorDatabase::markEntityAsStale(const std::string& node_key) {

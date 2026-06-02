@@ -386,10 +386,8 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
         }
     }
     if (timer) {
-        boost::asio::post(timer->get_executor(), [timer = std::move(timer)]() mutable {
-            boost::system::error_code ec;
-            timer->cancel(ec);
-        });
+        boost::asio::post(timer->get_executor(),
+                          [timer = std::move(timer)]() mutable { (void)timer->cancel(); });
     }
 }
 

@@ -91,6 +91,19 @@ vector_backend_engine_compare = executable('vector_backend_engine_compare',
 
 alias_target('bench_vector_backend_engine_compare', vector_backend_engine_compare)
 
+vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
+  files('vector_memory_scaling_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [

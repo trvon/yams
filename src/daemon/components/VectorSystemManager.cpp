@@ -482,7 +482,17 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 try {
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
-                    if (!vectorDbReady) {
+                    if (vectorDbReady) {
+                        // Eagerly prepare the search index so first query doesn't
+                        // pay the O(n log n) ANN build cost (profiler: 99% CPU).
+                        spdlog::info("[VectorInit] preparing search index for {} vectors", rows);
+                        if (vdb->prepareSearchIndex()) {
+                            spdlog::info("[VectorInit] search index ready");
+                        } else {
+                            spdlog::warn("[VectorInit] search index prepare failed: {}",
+                                         vdb->getLastError());
+                        }
+                    } else {
                         spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
                                      "embedding batch (coordinator owns index readiness)");
                     }
