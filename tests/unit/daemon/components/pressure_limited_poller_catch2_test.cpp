@@ -49,6 +49,9 @@ PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& s
     cfg.getHashFn = [](const Task&) -> std::string { return ""; };
     cfg.completeJobFn = [](const std::string&, bool) {};
     cfg.processFn = [](Task&) {};
+    // Required even for capability-sleep path — the template checks at entry.
+    thread_local std::atomic<std::size_t> tlsInFlight{0};
+    cfg.inFlightCounter = &tlsInFlight;
     return cfg;
 }
 
@@ -76,9 +79,7 @@ makeWakeTimerConfig(std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag,
     cfg.processFn = [](Task&) {};
     cfg.wakeTimer = std::move(wakeTimer);
     cfg.wakeTimerMutex = &wakeMutex;
-    // Required — dereferenced in the single-item processing path when
-    // isCapableFn returns true and the channel is empty (the poller tries
-    // to pop before falling through to the wake-timer idle sleep).
+    // Required even for wake-timer path — the template checks at entry.
     thread_local std::atomic<std::size_t> tlsInFlight{0};
     cfg.inFlightCounter = &tlsInFlight;
     return cfg;

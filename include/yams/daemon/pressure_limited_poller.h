@@ -17,6 +17,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -163,6 +164,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     cfg.startedFlag->store(true);
+    YAMS_ASSERT(cfg.inFlightCounter,
+                "PressureLimitedPoller configured without inFlightCounter — required "
+                "for concurrency tracking in both batch and single-item paths");
     if (cfg.notifyLifecycleFn) {
         cfg.notifyLifecycleFn();
     }
