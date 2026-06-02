@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#include <yams/common/string_utils.h>
+#include "yams/common/string_utils.h"
 
 namespace yams::config {
 
@@ -43,15 +43,7 @@ inline std::string unquote(std::string val) {
 }
 
 // Tilde expansion
-inline std::filesystem::path expand_tilde(const std::string& path) {
-    if (!path.empty() && path[0] == '~') {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            return std::filesystem::path(home) / path.substr(2);
-        }
-    }
-    return path;
-}
+std::filesystem::path expand_tilde(const std::string& path);
 
 // Terminal sanitization
 inline std::string sanitize_for_terminal(std::string_view in) {
@@ -119,6 +111,11 @@ std::filesystem::path get_cache_dir();
 /// Windows: %LOCALAPPDATA%\yams
 /// Unix: $XDG_RUNTIME_DIR/yams or /tmp/yams-$UID
 std::filesystem::path get_runtime_dir();
+
+/// Returns the state directory (logs and durable runtime metadata)
+/// Windows: %LOCALAPPDATA%\yams\state
+/// Unix: $XDG_STATE_HOME/yams or ~/.local/state/yams
+std::filesystem::path get_state_dir();
 
 /// Returns the canonical daemon plugin trust file path.
 /// Default: <data_dir>/plugins.trust (or YAMS_PLUGIN_TRUST_FILE override).

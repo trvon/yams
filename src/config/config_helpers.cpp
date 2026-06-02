@@ -13,6 +13,15 @@
 
 namespace yams::config {
 
+std::filesystem::path expand_tilde(const std::string& path) {
+    if (!path.empty() && path[0] == '~') {
+        if (const char* home = std::getenv("HOME")) {
+            return std::filesystem::path(home) / path.substr(2);
+        }
+    }
+    return path;
+}
+
 // Platform-specific directory helpers
 std::filesystem::path get_config_dir() {
 #ifdef _WIN32
@@ -113,6 +122,25 @@ std::filesystem::path get_runtime_dir() {
 #endif
     // Last resort
     return std::filesystem::temp_directory_path() / "yams-runtime";
+}
+
+std::filesystem::path get_state_dir() {
+#ifdef _WIN32
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return std::filesystem::path(localAppData) / "yams" / "state";
+    }
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "state";
+    }
+#else
+    if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
+        return std::filesystem::path(xdgState) / "yams";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::filesystem::path(home) / ".local" / "state" / "yams";
+    }
+#endif
+    return std::filesystem::temp_directory_path() / "yams-state";
 }
 
 std::filesystem::path get_daemon_plugin_trust_file() {

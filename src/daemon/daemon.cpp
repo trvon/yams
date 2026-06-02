@@ -16,6 +16,7 @@
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/LifecycleComponent.h>
@@ -35,6 +36,7 @@
 #include <tracy/Tracy.hpp>
 #endif
 
+#include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 
 #ifdef __linux__
@@ -1106,6 +1108,13 @@ Result<void> YamsDaemon::stop() {
     repairBusySince_ = {};
     repairReadySince_ = {};
 
+    const auto lifecycleBeforeShutdown = lifecycleFsm_.snapshot().state;
+    if (lifecycleBeforeShutdown != LifecycleState::Stopping &&
+        lifecycleBeforeShutdown != LifecycleState::Stopped &&
+        lifecycleBeforeShutdown != LifecycleState::Failed) {
+        lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+    }
+
     if (serviceManager_) {
         serviceManager_->cancelServiceManagerWait();
     }
@@ -1211,6 +1220,8 @@ Result<void> YamsDaemon::stop() {
 
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});
+    YAMS_ASSERT(lifecycleFsm_.snapshot().state == LifecycleState::Stopped,
+                "YamsDaemon stop() must finish with lifecycle state Stopped");
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();
@@ -1238,19 +1249,8 @@ void YamsDaemon::onDocumentRemoved(const std::string& hash) {
 // Path resolution helpers remain static methods of YamsDaemon
 namespace {
 std::filesystem::path getXDGStateHome() {
-#ifdef _WIN32
-    // Windows: Use LOCALAPPDATA for state/log files
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-        return std::filesystem::path(localAppData);
-    }
-    return std::filesystem::path();
-#else
-    const char* xdgState = std::getenv("XDG_STATE_HOME");
-    if (xdgState)
-        return std::filesystem::path(xdgState);
-    const char* home = std::getenv("HOME");
-    return home ? std::filesystem::path(home) / ".local" / "state" : std::filesystem::path();
-#endif
+    auto stateDir = yams::config::get_state_dir();
+    return stateDir.empty() ? std::filesystem::path() : stateDir.parent_path();
 }
 } // namespace
 
@@ -1321,19 +1321,10 @@ bool YamsDaemon::canWriteToDirectory(const std::filesystem::path& dir) {
 }
 
 std::filesystem::path YamsDaemon::getXDGRuntimeDir() {
-#ifdef _WIN32
-    // Windows: Use LOCALAPPDATA for runtime files (no true XDG equivalent)
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-        auto yamDir = std::filesystem::path(localAppData) / "yams";
-        std::error_code ec;
-        yams::common::ensureDirectories(yamDir);
-        return yamDir;
-    }
-    return std::filesystem::temp_directory_path();
-#else
-    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
-    return xdgRuntime ? std::filesystem::path(xdgRuntime) : std::filesystem::path();
-#endif
+    auto runtimeDir = yams::config::get_runtime_dir();
+    std::error_code ec;
+    yams::common::ensureDirectories(runtimeDir, ec);
+    return runtimeDir;
 }
 
 // getXDGStateHome() moved to anonymous namespace helper above
