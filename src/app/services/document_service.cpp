@@ -633,6 +633,39 @@ private:
         return targets;
     }
 
+    std::optional<MetadataMap> captureMetadataForDelete(const metadata::DocumentInfo& doc) {
+        auto metadata = ctx_.metadataRepo->getAllMetadata(doc.id);
+        if (!metadata) {
+            spdlog::warn("Failed to capture metadata for delete rollback on {}: {}", doc.sha256Hash,
+                         metadata.error().message);
+            return std::nullopt;
+        }
+        return std::move(metadata.value());
+    }
+
+    void restoreMetadataAfterContentDeleteFailure(const metadata::DocumentInfo& doc,
+                                                  const std::optional<MetadataMap>& metadata) {
+        auto restoredId = ctx_.metadataRepo->insertDocument(doc);
+        if (!restoredId) {
+            spdlog::error("Failed to restore metadata for {} after content delete failure: {}",
+                          doc.sha256Hash, restoredId.error().message);
+            return;
+        }
+        if (metadata && !metadata->empty()) {
+            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> entries;
+            entries.reserve(metadata->size());
+            for (const auto& [key, value] : *metadata) {
+                entries.emplace_back(restoredId.value(), key, value);
+            }
+            auto restoredMetadata = ctx_.metadataRepo->setMetadataBatch(entries);
+            if (!restoredMetadata) {
+                spdlog::warn(
+                    "Failed to restore metadata fields for {} after content delete failure: {}",
+                    doc.sha256Hash, restoredMetadata.error().message);
+            }
+        }
+    }
+
     bool cleanupMetadataForDelete(const metadata::DocumentInfo& doc, DeleteByNameResult& r) {
         if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
             if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
@@ -645,6 +678,19 @@ private:
         if (!metaResult) {
             r.error = "Failed to delete metadata: " + metaResult.error().message;
             return false;
+        }
+
+        auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
+        if (!lingering) {
+            r.error = "Failed to verify metadata deletion: " + lingering.error().message;
+            return false;
+        }
+        if (lingering.value().has_value()) {
+            auto retryDelete = ctx_.metadataRepo->deleteDocument(lingering.value()->id);
+            if (!retryDelete) {
+                r.error = "Failed to delete lingering metadata: " + retryDelete.error().message;
+                return false;
+            }
         }
 
         if (ctx_.kgStore) {
@@ -669,43 +715,55 @@ private:
             return;
         }
 
-        auto storeResult = ctx_.store->remove(target.hash);
-        if (!storeResult) {
-            const bool canForceMetadataCleanup =
-                req.force && target.doc.has_value() &&
-                storeResult.error().message.find("Corrupted data") != std::string::npos;
-            if (!canForceMetadataCleanup) {
-                r.deleted = false;
-                r.error = storeResult.error().message;
+        if (target.doc.has_value()) {
+            const auto metadataBeforeDelete = captureMetadataForDelete(*target.doc);
+            if (!cleanupMetadataForDelete(*target.doc, r)) {
+                // Content deletion is intentionally ordered after metadata cleanup so a metadata
+                // failure cannot leave the index pointing at missing content.
+                YAMS_DCHECK(!r.contentRemoved, "content removed before metadata cleanup failed");
                 resp.errors.push_back(r);
                 return;
             }
-            spdlog::warn("Storage data is corrupted for {}. Forcing metadata deletion.",
-                         target.name);
+
+            auto storeResult = ctx_.store->remove(target.hash);
+            if (!storeResult) {
+                const bool canForceMetadataCleanup =
+                    req.force &&
+                    storeResult.error().message.find("Corrupted data") != std::string::npos;
+                if (!canForceMetadataCleanup) {
+                    restoreMetadataAfterContentDeleteFailure(*target.doc, metadataBeforeDelete);
+                    r.deleted = false;
+                    r.error = storeResult.error().message;
+                    resp.errors.push_back(r);
+                    return;
+                }
+                spdlog::warn("Storage data is corrupted for {}. Metadata deletion was forced.",
+                             target.name);
+            } else if (storeResult.value()) {
+                r.contentRemoved = true;
+            } else {
+                spdlog::debug("Cleaned orphaned metadata for {}; content was absent", target.name);
+            }
+
+            r.deleted = true;
+            resp.deleted.push_back(r);
+            return;
         }
-        if (storeResult && storeResult.value()) {
-            r.contentRemoved = true;
+
+        auto storeResult = ctx_.store->remove(target.hash);
+        if (!storeResult) {
+            r.deleted = false;
+            r.error = storeResult.error().message;
+            resp.errors.push_back(r);
+            return;
         }
-        if (storeResult && !storeResult.value() && !target.doc.has_value()) {
+        if (!storeResult.value()) {
             r.error = "Document not found in store";
             resp.errors.push_back(r);
             return;
         }
 
-        if (target.doc.has_value()) {
-            if (storeResult && !storeResult.value()) {
-                spdlog::debug("Cleaning orphaned metadata for {}", target.name);
-            }
-            if (!cleanupMetadataForDelete(*target.doc, r)) {
-                // Postcondition: deleting content before metadata is only safe when
-                // metadata cleanup succeeds. If metadata cleanup fails after content
-                // removal, the metadata index may retain an orphaned document entry.
-                YAMS_DCHECK(!r.contentRemoved, "content removed before metadata cleanup failed");
-                resp.errors.push_back(r);
-                return;
-            }
-        }
-
+        r.contentRemoved = true;
         r.deleted = true;
         resp.deleted.push_back(r);
     }

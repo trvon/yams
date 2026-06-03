@@ -1496,6 +1496,8 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
         CHECK(repo->deleteCallCount() == 2);
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
+        const auto removed = store->removedHashes();
+        CHECK(std::find(removed.begin(), removed.end(), std::string(64, 'd')) == removed.end());
     }
 
     SECTION("apply mode removes content through the document deletion service") {
