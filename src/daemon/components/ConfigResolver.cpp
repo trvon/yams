@@ -852,6 +852,7 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         try {
             policy.medoidBoost = std::stof(env);
         } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
         }
     }
 
@@ -1095,18 +1096,21 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
         try {
             policy.batchSize = static_cast<std::size_t>(std::stoull(*v));
         } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH size_t");
         }
     }
     if (auto v = readEnvString("YAMS_EMBED_BATCH_TARGET")) {
         try {
             policy.batchTarget = static_cast<std::size_t>(std::stoull(*v));
         } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH_TARGET size_t");
         }
     }
     if (auto v = readEnvString("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
         try {
             policy.repairLockTimeoutMs = static_cast<std::uint64_t>(std::stoull(*v));
         } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_REPAIR_LOCK_TIMEOUT_MS uint64");
         }
     }
 

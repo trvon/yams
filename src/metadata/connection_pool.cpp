@@ -619,9 +619,9 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
     db.execute(
         "PRAGMA busy_timeout = " +
-        std::to_string(effectiveBusyTimeout
-                           .count())); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric PRAGMA
-                                       // from clamped chrono duration, not external SQL.
+        std::to_string(
+            effectiveBusyTimeout.count())); // nosemgrep: yams.cpp.dynamic-sql-execute
+                                            // from clamped chrono duration, not external SQL.
 
     // Enable WAL mode if requested.
     if (config_.enableWAL && !config_.readOnly) {
@@ -712,7 +712,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     const long long cacheSizeKB =
         -static_cast<long long>(defaultCacheMB) * 1024LL; // negative = KiB for SQLite
     db.execute("PRAGMA cache_size = " +
-               std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute -- numeric
+               std::to_string(cacheSizeKB)); // nosemgrep: yams.cpp.dynamic-sql-execute
                                              // PRAGMA from bounded cache size calculation.
     // Auto-checkpoint WAL after 10000 pages (≈40 MB) to prevent unbounded
     // WAL growth during normal operation.  The default SQLite value is 1000
