@@ -706,6 +706,191 @@ private:
         resp.deleted.push_back(r);
     }
 
+    static metadata::DocumentInfo
+    documentFromProjection(metadata::ListDocumentProjection&& projection) {
+        metadata::DocumentInfo doc;
+        doc.id = projection.id;
+        doc.filePath = std::move(projection.filePath);
+        doc.fileName = std::move(projection.fileName);
+        doc.fileExtension = std::move(projection.fileExtension);
+        doc.fileSize = projection.fileSize;
+        doc.sha256Hash = std::move(projection.sha256Hash);
+        doc.mimeType = std::move(projection.mimeType);
+        doc.createdTime = projection.createdTime;
+        doc.modifiedTime = projection.modifiedTime;
+        doc.indexedTime = projection.indexedTime;
+        doc.extractionStatus = projection.extractionStatus;
+        return doc;
+    }
+
+    static std::vector<metadata::DocumentInfo>
+    documentsFromProjections(std::vector<metadata::ListDocumentProjection>&& projected) {
+        std::vector<metadata::DocumentInfo> docs;
+        docs.reserve(projected.size());
+        for (auto& projection : projected) {
+            docs.push_back(documentFromProjection(std::move(projection)));
+        }
+        return docs;
+    }
+
+    static std::optional<std::string> normalizeSingleListExtension(const std::string& ext) {
+        if (ext.empty() || ext.find(',') != std::string::npos) {
+            return std::nullopt;
+        }
+        return normalizeExtension(ext);
+    }
+
+    static std::string canonicalizeListPattern(const std::string& pattern) {
+        if (pattern.empty()) {
+            return {};
+        }
+
+        std::string canonicalPattern = pattern;
+        auto wildcardPos = pattern.find_first_of("*?");
+        if (wildcardPos != std::string::npos) {
+            std::string prefix = pattern.substr(0, wildcardPos);
+            std::string suffix = pattern.substr(wildcardPos);
+            while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
+                prefix.pop_back();
+                suffix = "/" + suffix;
+            }
+            try {
+                if (!prefix.empty() && std::filesystem::exists(prefix)) {
+                    canonicalPattern = std::filesystem::canonical(prefix).string() + suffix;
+                }
+            } catch (...) {
+                // Ignore errors; use original pattern.
+            }
+            return canonicalPattern;
+        }
+
+        try {
+            if (std::filesystem::exists(pattern)) {
+                canonicalPattern = std::filesystem::canonical(pattern).string();
+            }
+        } catch (...) {
+            // Ignore errors; use original pattern.
+        }
+        return canonicalPattern;
+    }
+
+    static void configureListPatternQuery(const std::string& pattern,
+                                          metadata::DocumentQueryOptions& queryOpts,
+                                          bool& useFallback, bool& useTree,
+                                          std::string& treePrefix) {
+        if (pattern.empty()) {
+            return;
+        }
+
+        auto wildcardPos = pattern.find_first_of("*?");
+        const bool hasWildcard = wildcardPos != std::string::npos;
+        if (!hasWildcard) {
+            std::error_code ec;
+            std::filesystem::path candidate{pattern};
+            if (std::filesystem::exists(candidate, ec) &&
+                std::filesystem::is_directory(candidate, ec)) {
+                queryOpts.pathPrefix = pattern;
+                queryOpts.prefixIsDirectory = true;
+                queryOpts.includeSubdirectories = true;
+            } else {
+                queryOpts.exactPath = pattern;
+            }
+            return;
+        }
+
+        if (pattern.back() == '*') {
+            std::string prefix = pattern;
+            while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?')) {
+                prefix.pop_back();
+            }
+            while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
+                prefix.pop_back();
+            }
+            if (!prefix.empty()) {
+                useTree = true;
+                treePrefix = prefix;
+            }
+            queryOpts.pathPrefix = prefix;
+            queryOpts.prefixIsDirectory = true;
+            return;
+        }
+
+        if (pattern.front() == '*' &&
+            pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
+            queryOpts.containsFragment = pattern.substr(1);
+            queryOpts.containsUsesFts = true;
+            return;
+        }
+
+        useFallback = true;
+    }
+
+    static bool listDocumentMatchesTypeFilters(const metadata::DocumentInfo& doc,
+                                               const ListDocumentsRequest& req,
+                                               const std::string& requestedType) {
+        if (req.text && !isTextMime(doc.mimeType)) {
+            return false;
+        }
+        if (req.binary && isTextMime(doc.mimeType)) {
+            return false;
+        }
+        if (requestedType.empty()) {
+            return true;
+        }
+        if (requestedType == "text") {
+            return isTextMime(doc.mimeType);
+        }
+        if (requestedType == "binary") {
+            return !isTextMime(doc.mimeType);
+        }
+        return utils::classifyFileType(doc.mimeType, doc.fileExtension) == requestedType;
+    }
+
+    static std::optional<size_t> listConcurrencyOverride() {
+        const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); // NOLINT(concurrency-mt-unsafe)
+        if (!env || !*env) {
+            return std::nullopt;
+        }
+        try {
+            auto value = static_cast<size_t>(std::stoul(env));
+            if (value > 0) {
+                return value;
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Ignoring invalid YAMS_LIST_CONCURRENCY='{}': {}", env, e.what());
+        } catch (...) {
+            spdlog::debug("Ignoring invalid YAMS_LIST_CONCURRENCY='{}'", env);
+        }
+        return std::nullopt;
+    }
+
+    static DocumentEntry makeBaseListEntry(const metadata::DocumentInfo& doc) {
+        DocumentEntry entry;
+        entry.name = doc.fileName;
+        entry.fileName = doc.fileName;
+        entry.hash = doc.sha256Hash;
+        entry.path = doc.filePath;
+        entry.extension = doc.fileExtension;
+        entry.size = static_cast<uint64_t>(doc.fileSize);
+        entry.mimeType = doc.mimeType;
+        entry.fileType = utils::classifyFileType(doc.mimeType, doc.fileExtension);
+        entry.created = toEpochSeconds(doc.createdTime);
+        entry.modified = toEpochSeconds(doc.modifiedTime);
+        entry.indexed = toEpochSeconds(doc.indexedTime);
+        entry.extractionStatus = metadata::ExtractionStatusUtils::toString(doc.extractionStatus);
+        return entry;
+    }
+
+    static std::vector<int64_t>
+    collectDocumentIds(const std::vector<metadata::DocumentInfo>& docs) {
+        std::vector<int64_t> ids;
+        ids.reserve(docs.size());
+        for (const auto& doc : docs) {
+            ids.push_back(doc.id);
+        }
+        return ids;
+    }
+
 public:
     explicit DocumentServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
 
@@ -1705,26 +1890,6 @@ public:
         metadata::MetadataOpScope metadataScope("client_list");
 
         std::vector<metadata::DocumentInfo> docs;
-        auto appendProjectedToDocs =
-            [&](std::vector<metadata::ListDocumentProjection>&& projected) {
-                docs.clear();
-                docs.reserve(projected.size());
-                for (auto& p : projected) {
-                    metadata::DocumentInfo d;
-                    d.id = p.id;
-                    d.filePath = std::move(p.filePath);
-                    d.fileName = std::move(p.fileName);
-                    d.fileExtension = std::move(p.fileExtension);
-                    d.fileSize = p.fileSize;
-                    d.sha256Hash = std::move(p.sha256Hash);
-                    d.mimeType = std::move(p.mimeType);
-                    d.createdTime = p.createdTime;
-                    d.modifiedTime = p.modifiedTime;
-                    d.indexedTime = p.indexedTime;
-                    d.extractionStatus = p.extractionStatus;
-                    docs.push_back(std::move(d));
-                }
-            };
         bool usedQuery = false;
         std::size_t totalFoundApprox = 0;
 
@@ -1733,15 +1898,7 @@ public:
         queryOpts.offset = std::max(0, req.offset);
         queryOpts.pathsOnly = req.pathsOnly;
 
-        auto normalizeSingleExtension = [&](const std::string& ext) -> std::optional<std::string> {
-            if (ext.empty())
-                return std::nullopt;
-            if (ext.find(',') != std::string::npos)
-                return std::nullopt; // delegate to fallback for multi-extension pattern
-            return normalizeExtension(ext);
-        };
-
-        if (auto normExt = normalizeSingleExtension(req.extension))
+        if (auto normExt = normalizeSingleListExtension(req.extension))
             queryOpts.extension = *normExt;
 
         if (!req.mime.empty())
@@ -1774,112 +1931,15 @@ public:
         std::transform(requestedType.begin(), requestedType.end(), requestedType.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-        auto classifiedFileType = [](const metadata::DocumentInfo& doc) {
-            return utils::classifyFileType(doc.mimeType, doc.fileExtension);
-        };
-
-        auto matchesTypeFilters = [&](const metadata::DocumentInfo& doc) {
-            if (req.text && !isTextMime(doc.mimeType)) {
-                return false;
-            }
-            if (req.binary && isTextMime(doc.mimeType)) {
-                return false;
-            }
-            if (requestedType.empty()) {
-                return true;
-            }
-            if (requestedType == "text") {
-                return isTextMime(doc.mimeType);
-            }
-            if (requestedType == "binary") {
-                return !isTextMime(doc.mimeType);
-            }
-            return classifiedFileType(doc) == requestedType;
-        };
-
-        // Canonicalize pattern to resolve symlinks (e.g., /var -> /private/var on macOS)
-        std::string canonicalPattern = req.pattern;
-        if (!req.pattern.empty()) {
-            auto wildcardPos = req.pattern.find_first_of("*?");
-            if (wildcardPos != std::string::npos) {
-                // Extract prefix before first wildcard and try to canonicalize it
-                std::string prefix = req.pattern.substr(0, wildcardPos);
-                std::string suffix = req.pattern.substr(wildcardPos);
-                // Remove trailing slashes from prefix for proper path resolution
-                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
-                    prefix.pop_back();
-                    suffix = "/" + suffix;
-                }
-                try {
-                    if (!prefix.empty() && std::filesystem::exists(prefix)) {
-                        auto canonical = std::filesystem::canonical(prefix).string();
-                        canonicalPattern = canonical + suffix;
-                    }
-                } catch (...) {
-                    // Ignore errors, use original pattern
-                }
-            } else {
-                try {
-                    if (std::filesystem::exists(req.pattern)) {
-                        canonicalPattern = std::filesystem::canonical(req.pattern).string();
-                    }
-                } catch (...) {
-                    // Ignore errors
-                }
-            }
-        }
-        if (!canonicalPattern.empty()) {
-            const auto& pattern = canonicalPattern;
-            auto wildcardPos = pattern.find_first_of("*?");
-            bool hasWildcard = wildcardPos != std::string::npos;
-
-            if (!hasWildcard) {
-                std::error_code ec;
-                std::filesystem::path candidate{pattern};
-                if (std::filesystem::exists(candidate, ec) &&
-                    std::filesystem::is_directory(candidate, ec)) {
-                    queryOpts.pathPrefix = pattern;
-                    queryOpts.prefixIsDirectory = true;
-                    queryOpts.includeSubdirectories = true;
-                } else {
-                    queryOpts.exactPath = pattern;
-                }
-            } else if (pattern.back() == '*') {
-                // Handle patterns ending with wildcards: /path/* or /path/**
-                // Strip trailing wildcards to get the prefix
-                std::string prefix = pattern;
-                while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
-                    prefix.pop_back();
-
-                // Also strip trailing slashes
-                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
-                    prefix.pop_back();
-
-                // Use tree-based query for path prefixes (PBI-043)
-                // Tree query now supports all filters via queryDocuments
-                if (!prefix.empty()) {
-                    useTree = true;
-                    treePrefix = prefix;
-                }
-
-                // Also set queryOpts for the tree path to use
-                queryOpts.pathPrefix = prefix;
-                queryOpts.prefixIsDirectory = true; // Patterns with * imply directory recursion
-            } else if (pattern.front() == '*' &&
-                       pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
-                queryOpts.containsFragment = pattern.substr(1);
-                queryOpts.containsUsesFts = true;
-            } else {
-                useFallback = true;
-            }
-        }
+        const std::string canonicalPattern = canonicalizeListPattern(req.pattern);
+        configureListPatternQuery(canonicalPattern, queryOpts, useFallback, useTree, treePrefix);
 
         // Try tree-based query for path prefix patterns with full filter support
         if (useTree && !treePrefix.empty()) {
             // Pass full queryOpts to support tags, mime, extension, etc.
             auto treeDocsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (treeDocsRes) {
-                appendProjectedToDocs(std::move(treeDocsRes.value()));
+                docs = documentsFromProjections(std::move(treeDocsRes.value()));
                 usedQuery = true;
                 totalFoundApprox = docs.size();
             } else {
@@ -1896,7 +1956,7 @@ public:
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
-            appendProjectedToDocs(std::move(docsRes.value()));
+            docs = documentsFromProjections(std::move(docsRes.value()));
             usedQuery = true;
             totalFoundApprox = static_cast<std::size_t>(queryOpts.offset) + docs.size();
         }
@@ -1996,7 +2056,8 @@ public:
         if (req.text || req.binary || !requestedType.empty()) {
             docs.erase(std::remove_if(docs.begin(), docs.end(),
                                       [&](const metadata::DocumentInfo& doc) {
-                                          return !matchesTypeFilters(doc);
+                                          return !listDocumentMatchesTypeFilters(doc, req,
+                                                                                 requestedType);
                                       }),
                        docs.end());
         }
@@ -2034,19 +2095,7 @@ public:
             out.documents.reserve(page.size());
             std::unordered_set<std::string> seenPaths;
             for (const auto& d : page) {
-                DocumentEntry e;
-                e.name = d.fileName;
-                e.fileName = d.fileName;
-                e.hash = d.sha256Hash;
-                e.path = d.filePath;
-                e.extension = d.fileExtension;
-                e.size = static_cast<uint64_t>(d.fileSize);
-                e.mimeType = d.mimeType;
-                e.fileType = classifiedFileType(d);
-                e.created = toEpochSeconds(d.createdTime);
-                e.modified = toEpochSeconds(d.modifiedTime);
-                e.indexed = toEpochSeconds(d.indexedTime);
-                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+                DocumentEntry e = makeBaseListEntry(d);
                 if (req.pathsOnly) {
                     path_projection::appendUniquePath(
                         out.paths, seenPaths, path_projection::displayPath(e.path, e.fileName),
@@ -2059,15 +2108,6 @@ public:
             }
             return out;
         }
-
-        auto collectDocIds =
-            [](const std::vector<metadata::DocumentInfo>& docs) -> std::vector<int64_t> {
-            std::vector<int64_t> ids;
-            ids.reserve(docs.size());
-            for (const auto& doc : docs)
-                ids.push_back(doc.id);
-            return ids;
-        };
 
         auto hydrateMetadata = [&](const std::vector<int64_t>& ids)
             -> std::unordered_map<int64_t,
@@ -2101,7 +2141,7 @@ public:
             return {std::unordered_map<int64_t, std::string>{}, true};
         };
 
-        const std::vector<int64_t> docIds = collectDocIds(page);
+        const std::vector<int64_t> docIds = collectDocumentIds(page);
         std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
             metadataCache;
         if (wantsMetadata) {
@@ -2117,19 +2157,7 @@ public:
         }
 
         auto buildEntryForDoc = [&](const metadata::DocumentInfo& d) -> DocumentEntry {
-            DocumentEntry e;
-            e.name = d.fileName;
-            e.fileName = d.fileName;
-            e.hash = d.sha256Hash;
-            e.path = d.filePath;
-            e.extension = d.fileExtension;
-            e.size = static_cast<uint64_t>(d.fileSize);
-            e.mimeType = d.mimeType;
-            e.fileType = classifiedFileType(d);
-            e.created = toEpochSeconds(d.createdTime);
-            e.modified = toEpochSeconds(d.modifiedTime);
-            e.indexed = toEpochSeconds(d.indexedTime);
-            e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+            DocumentEntry e = makeBaseListEntry(d);
             const auto* cachedMetadata =
                 [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
                 auto it = metadataCache.find(d.id);
@@ -2162,21 +2190,14 @@ public:
             return e;
         };
 
-        // Build entries in parallel when large pages, else sequential
-        const bool useParallel = page.size() >= 200 || std::getenv("YAMS_LIST_CONCURRENCY");
+        // Build entries in parallel when large pages, else sequential.
+        const auto concurrencyOverride = listConcurrencyOverride();
+        const bool useParallel = page.size() >= 200 || concurrencyOverride.has_value();
         if (useParallel) {
             std::vector<DocumentEntry> tmp(page.size());
             std::atomic<size_t> nextIdx{0};
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            size_t workers = hw;
-            if (const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); env && *env) {
-                try {
-                    auto v = static_cast<size_t>(std::stoul(env));
-                    if (v > 0)
-                        workers = v;
-                } catch (...) {
-                }
-            }
+            size_t workers = concurrencyOverride.value_or(
+                std::max<size_t>(1, std::thread::hardware_concurrency()));
             workers = std::min(workers, page.size() > 0 ? page.size() : size_t{1});
             auto buildOne = [&](size_t i) { tmp[i] = buildEntryForDoc(page[i]); };
             std::vector<std::thread> ths;
