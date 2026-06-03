@@ -14,8 +14,8 @@
 #include <mutex>
 #include <vector>
 
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -205,18 +205,66 @@ TEST_CASE("YAMS_PRECONDITION fires on encode with wrong vector dimension", "[ass
 }
 
 // ==========================================================================
-// TurboQuant — YAMS_POSTCONDITION on reconstructed dimension mismatch
-// (exercises the postcondition class)
+// YAMS_POSTCONDITION — always-on postcondition check
 // ==========================================================================
 
-TEST_CASE("YAMS_POSTCONDITION fires on reconstruct dimension mismatch", "[assert][turboquant]") {
+namespace {
+void trigger_postcondition_failure() {
+    YAMS_POSTCONDITION(false, "test: postcondition must pass");
+}
+} // namespace
+
+TEST_CASE("YAMS_POSTCONDITION fires on violation", "[assert][postcondition]") {
 #ifdef _WIN32
     SKIP("fork() not available on Windows");
 #else
-    // This is tested indirectly via the existing turboquant unit tests.
-    // The postcondition guards TurboQuant::reconstruct() against
-    // original/reconstructed dimension mismatch.
-    (void)assertionFires;
-    SUCCEED("validated by turboquant unit tests");
+    CHECK(assertionFires([]() { trigger_postcondition_failure(); }));
+#endif
+}
+
+// ==========================================================================
+// YAMS_DCHECK — debug-only sanity check (active in non-NDEBUG builds)
+// ==========================================================================
+
+namespace {
+void trigger_dcheck_failure() {
+    YAMS_DCHECK(false, "test: dcheck must pass in debug builds");
+}
+} // namespace
+
+TEST_CASE("YAMS_DCHECK fires in debug build", "[assert][dcheck]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    // DCHECK is active when NDEBUG is NOT defined.  In shipping builds
+    // (NDEBUG) this test would pass without firing — the DCHECK is a no-op.
+    // Our builddir-local is debug (NDEBUG not defined), so DCHECK fires.
+    bool fired = assertionFires([]() { trigger_dcheck_failure(); });
+
+    // In debug: fires.  In release (NDEBUG): does not fire.
+    // We can't test both in one binary, so we assert the debug behavior.
+#ifndef NDEBUG
+    CHECK(fired);
+#else
+    CHECK_FALSE(fired);
+#endif
+#endif
+}
+
+// ==========================================================================
+// YAMS_UNREACHABLE — impossible control-flow marker
+// ==========================================================================
+
+namespace {
+[[noreturn]] void trigger_unreachable() {
+    YAMS_UNREACHABLE("test: unreachable code reached");
+}
+} // namespace
+
+TEST_CASE("YAMS_UNREACHABLE fires when reached", "[assert][unreachable]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    CHECK(assertionFires([]() { trigger_unreachable(); }));
 #endif
 }
