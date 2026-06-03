@@ -14,8 +14,10 @@
 #include <mutex>
 #include <vector>
 
-#include <unistd.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -89,13 +91,14 @@ TEST_CASE("YAMS_ASSERT fires when PressureLimitedPoller has null inFlightCounter
 #else
     bool fired = assertionFires([]() {
         boost::asio::io_context ioc;
-        std::atomic<bool> sf{false}, stf{false}, pf{false};
+        std::atomic<bool> sf{false}, stf{false}, pf{false}, waf{false};
 
         PressureLimitedPollerConfig<int> cfg;
         cfg.stageName = "null-inflight-assert";
         cfg.stopFlag = &stf;
         cfg.startedFlag = &sf;
         cfg.pauseFlag = &pf;
+        cfg.wasActiveFlag = &waf;
         cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
         cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
             return false;
@@ -160,6 +163,15 @@ void trigger_turboquant_assert_empty_centroids() {
     tq.scoreFromPacked(query, emptyCodes);
 }
 
+void trigger_turboquant_precondition_centroid_idx_out_of_bounds() {
+    yams::vector::TurboQuantConfig config;
+    config.dimension = 128;
+    config.bits_per_channel = 4; // 16 centroids; index 255 is invalid.
+    yams::vector::TurboQuantMSE tq(config);
+    std::vector<uint8_t> badIndices(128, 255);
+    tq.decode(badIndices);
+}
+
 } // namespace
 
 TEST_CASE("YAMS_PRECONDITION fires on zero dimension", "[assert][turboquant]") {
@@ -182,9 +194,7 @@ TEST_CASE("YAMS_PRECONDITION fires on centroid index out of bounds", "[assert][t
 #ifdef _WIN32
     SKIP("fork() not available on Windows");
 #else
-    // This precondition is inside encode_inner and can't be cleanly triggered
-    // from outside.  Verify the fork harness handles explicit abort correctly.
-    CHECK(assertionFires([]() { std::abort(); }));
+    CHECK(assertionFires([]() { trigger_turboquant_precondition_centroid_idx_out_of_bounds(); }));
 #endif
 }
 

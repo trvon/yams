@@ -163,10 +163,33 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                                                  PressureLimitedPollerConfig<Task> cfg) {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-    cfg.startedFlag->store(true);
+    YAMS_ASSERT(channel, "PressureLimitedPoller configured without a task channel");
+    YAMS_ASSERT(cfg.startedFlag,
+                "PressureLimitedPoller configured without startedFlag lifecycle state");
+    YAMS_ASSERT(cfg.stopFlag, "PressureLimitedPoller configured without stopFlag lifecycle state");
+    YAMS_ASSERT(cfg.pauseFlag,
+                "PressureLimitedPoller configured without pauseFlag lifecycle state");
+    YAMS_ASSERT(cfg.wasActiveFlag,
+                "PressureLimitedPoller configured without wasActiveFlag activity state");
     YAMS_ASSERT(cfg.inFlightCounter,
                 "PressureLimitedPoller configured without inFlightCounter — required "
                 "for concurrency tracking in both batch and single-item paths");
+    YAMS_ASSERT(cfg.maxConcurrentFn,
+                "PressureLimitedPoller configured without maxConcurrentFn concurrency policy");
+    YAMS_ASSERT(cfg.tryAcquireFn,
+                "PressureLimitedPoller configured without tryAcquireFn admission policy");
+    YAMS_ASSERT(cfg.completeJobFn,
+                "PressureLimitedPoller configured without completeJobFn completion hook");
+    YAMS_ASSERT(cfg.getHashFn, "PressureLimitedPoller configured without getHashFn task identity");
+    if (cfg.batchMode) {
+        YAMS_ASSERT(cfg.batchProcessFn,
+                    "PressureLimitedPoller batch mode configured without batchProcessFn");
+    } else {
+        YAMS_ASSERT(cfg.processFn,
+                    "PressureLimitedPoller single-item mode configured without processFn");
+    }
+
+    cfg.startedFlag->store(true);
     if (cfg.notifyLifecycleFn) {
         cfg.notifyLifecycleFn();
     }

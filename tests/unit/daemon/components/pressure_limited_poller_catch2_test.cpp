@@ -50,7 +50,9 @@ PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& s
     cfg.completeJobFn = [](const std::string&, bool) {};
     cfg.processFn = [](Task&) {};
     // Required even for capability-sleep path — the template checks at entry.
+    thread_local std::atomic<bool> tlsWasActive{false};
     thread_local std::atomic<std::size_t> tlsInFlight{0};
+    cfg.wasActiveFlag = &tlsWasActive;
     cfg.inFlightCounter = &tlsInFlight;
     return cfg;
 }
@@ -80,7 +82,9 @@ makeWakeTimerConfig(std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag,
     cfg.wakeTimer = std::move(wakeTimer);
     cfg.wakeTimerMutex = &wakeMutex;
     // Required even for wake-timer path — the template checks at entry.
+    thread_local std::atomic<bool> tlsWasActive{false};
     thread_local std::atomic<std::size_t> tlsInFlight{0};
+    cfg.wasActiveFlag = &tlsWasActive;
     cfg.inFlightCounter = &tlsInFlight;
     return cfg;
 }

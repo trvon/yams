@@ -2377,15 +2377,14 @@ public:
                         spdlog::debug("Cleaning orphaned metadata for {}", target.name);
                     }
                     if (!cleanupMetadata(*target.doc, r)) {
+                        // Postcondition: deleting content before metadata is only safe when
+                        // metadata cleanup succeeds. If metadata cleanup fails after content
+                        // removal, the metadata index may retain an orphaned document entry.
+                        YAMS_DCHECK(!r.contentRemoved,
+                                    "content removed before metadata cleanup failed");
                         resp.errors.push_back(r);
                         continue;
                     }
-
-                    // Postcondition: if content was removed but metadata deletion
-                    // failed, an orphaned content blob would survive.  Assert this
-                    // never happens in debug builds.
-                    YAMS_DCHECK(!r.contentRemoved || !r.error.has_value(),
-                                "content removed implies metadata must be deletable");
                 }
 
                 r.deleted = true;
