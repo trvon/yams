@@ -1782,6 +1782,35 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     }
 }
 
+TEST_CASE("batchInsertContentAndIndex: skips stale missing document ids",
+          "[unit][metadata-repo][batch-content][counters][stale]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    const auto docsBefore = fix.repository_->getCachedDocumentCount();
+    const auto extractedBefore = fix.repository_->getCachedExtractedCount();
+    const auto indexedBefore = fix.repository_->getCachedIndexedCount();
+
+    BatchContentEntry stale;
+    stale.documentId = 999999;
+    stale.title = "stale title";
+    stale.contentText = "stale content";
+    stale.mimeType = "text/plain";
+    stale.extractionMethod = "test";
+    stale.language = "en";
+
+    auto batchResult = fix.repository_->batchInsertContentAndIndex({stale});
+    REQUIRE(batchResult.has_value());
+
+    CHECK(fix.repository_->getCachedDocumentCount() == docsBefore);
+    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore);
+    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore);
+
+    auto exactIndexed = fix.repository_->getIndexedDocumentCount();
+    REQUIRE(exactIndexed.has_value());
+    CHECK(static_cast<uint64_t>(exactIndexed.value()) == indexedBefore);
+}
+
 TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
           "[unit][metadata-repo][batch-content][fts-cache]") {
     MetadataRepositoryFixture fix;
