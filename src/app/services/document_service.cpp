@@ -1,6 +1,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/common/time_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/uuid.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteBatchCoalescer.h>
@@ -2379,6 +2380,12 @@ public:
                         resp.errors.push_back(r);
                         continue;
                     }
+
+                    // Postcondition: if content was removed but metadata deletion
+                    // failed, an orphaned content blob would survive.  Assert this
+                    // never happens in debug builds.
+                    YAMS_DCHECK(!r.contentRemoved || !r.error.has_value(),
+                                "content removed implies metadata must be deletable");
                 }
 
                 r.deleted = true;
