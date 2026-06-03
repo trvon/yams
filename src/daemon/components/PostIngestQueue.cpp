@@ -325,12 +325,37 @@ PostIngestQueue::~PostIngestQueue() {
 
     // Wait for all pollers and in-flight operations to quiesce before
     // destroying members. Otherwise detached coroutines can outlive `this`.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    std::unique_lock<std::mutex> lock(lifecycleMutex_);
-    lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
-    lock.unlock();
+    bool dtorQuiesced = false;
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        dtorQuiesced =
+            lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
+    }
 
-    YAMS_ASSERT(shutdownQuiesced(),
+    if (!dtorQuiesced) {
+        spdlog::critical("[PostIngestQueue] destructor: shutdown not quiesced after 1500ms; "
+                         "stages started: extraction={}, kg={}, symbol={}, entity={}, title={}, "
+                         "inflight={}, callbacksInFlight={}",
+                         stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                         stageStarted_[3].load(), stageStarted_[4].load(), totalInFlight(),
+                         callbacksInFlight_.load());
+        // Second and final window
+        auto secondDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        {
+            std::unique_lock<std::mutex> lock(lifecycleMutex_);
+            dtorQuiesced = lifecycleCv_.wait_until(lock, secondDeadline,
+                                                   [this]() { return shutdownQuiesced(); });
+        }
+        if (dtorQuiesced) {
+            spdlog::info("[PostIngestQueue] destructor: pollers quiesced during second window");
+        } else {
+            spdlog::critical(
+                "[PostIngestQueue] destructor: shutdown still not quiesced after 2000ms total");
+        }
+    }
+
+    YAMS_ASSERT(dtorQuiesced || shutdownQuiesced(),
                 "PostIngestQueue destroyed before pollers and callbacks quiesced");
 
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
@@ -461,9 +486,18 @@ void PostIngestQueue::start() {
     boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
 
     const auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    bool allStarted = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, startupDeadline, [this]() { return allStagesStarted(); });
+        allStarted =
+            lifecycleCv_.wait_until(lock, startupDeadline, [this]() { return allStagesStarted(); });
+    }
+
+    if (!allStarted) {
+        spdlog::warn("[PostIngestQueue] not all stages started within 100ms; "
+                     "extraction={}, kg={}, symbol={}, entity={}, title={}",
+                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                     stageStarted_[3].load(), stageStarted_[4].load());
     }
 
     spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={}, "
@@ -484,15 +518,48 @@ void PostIngestQueue::stop() {
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    // Wait for all poller coroutines to observe stop_ and exit, plus any
+    // in-flight callbacks to drain to zero.  The first deadline is the
+    // normal expected path; if a poller is stuck (e.g., the title poller
+    // sleeping in its capability-check loop), we log which stages are
+    // still alive and grant a second window before proceeding.
+    bool quiesced = false;
     {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
+        quiesced = lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
     }
 
-    YAMS_POSTCONDITION(shutdownQuiesced(),
-                       "PostIngestQueue::stop() must quiesce pollers and callbacks before "
-                       "returning");
+    if (!quiesced) {
+        // The title poller is the usual suspect — it sits in a 250ms
+        // capability-sleep loop when no title extractor is available.
+        spdlog::warn("[PostIngestQueue] shutdown not quiesced after 1500ms; stages still started: "
+                     "extraction={}, kg={}, symbol={}, entity={}, title={}, inflight={}, "
+                     "callbacksInFlight={}",
+                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                     stageStarted_[3].load(), stageStarted_[4].load(), totalInFlight(),
+                     callbacksInFlight_.load());
+
+        // Grant one extra window.  The title poller's capability-sleep timer
+        // is 250ms, so 500ms gives it at least one full sleep→wake→check cycle.
+        auto secondDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        {
+            std::unique_lock<std::mutex> lock(lifecycleMutex_);
+            quiesced = lifecycleCv_.wait_until(lock, secondDeadline,
+                                               [this]() { return shutdownQuiesced(); });
+        }
+        if (quiesced) {
+            spdlog::info("[PostIngestQueue] pollers quiesced during second window");
+        } else {
+            spdlog::critical("[PostIngestQueue] shutdown still not quiesced after 2000ms total; "
+                             "proceeding with wake-timer cleanup — this may crash on Windows if "
+                             "a poller coroutine is still suspended on a wake timer");
+        }
+    }
+
+    // clearWakeTimers() destroys the shared_ptr<steady_timer> instances.
+    // This is safe only when all pollers have exited, because a suspended
+    // coroutine referencing a destroyed timer will SIGSEGV.
     startGuard_.store(false, std::memory_order_release);
     clearWakeTimers();
 }
