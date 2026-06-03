@@ -2168,6 +2168,37 @@ private:
     }
 
     boost::asio::awaitable<Result<void>> executeGraphExplore() {
+        const auto renderLocal = [&]() -> Result<void> {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx == nullptr) {
+                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
+            }
+            app::services::GraphExploreRequest localReq;
+            localReq.query = exploreQuery_;
+            localReq.budget.maxFiles = exploreMaxFiles_;
+            localReq.format = wantsJsonOutput() ? app::services::GraphContextFormat::Json
+                                                : app::services::GraphContextFormat::Markdown;
+            auto localResult = service->explore(localReq);
+            if (!localResult) {
+                return localResult.error();
+            }
+            if (wantsJsonOutput()) {
+                std::cout << makeGraphExploreJson(localResult.value()).dump(2) << "\n";
+            } else {
+                renderGraphExploreMarkdown(localResult.value());
+            }
+            return Result<void>();
+        };
+
+        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            co_return renderLocal();
+        }
+
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -2191,30 +2222,7 @@ private:
             }
             spdlog::debug("graph explore daemon request failed; falling back to local service: {}",
                           err.message);
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (!appCtx) {
-                co_return err;
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                co_return err;
-            }
-            app::services::GraphExploreRequest localReq;
-            localReq.query = exploreQuery_;
-            localReq.budget.maxFiles = exploreMaxFiles_;
-            localReq.format = wantsJsonOutput() ? app::services::GraphContextFormat::Json
-                                                : app::services::GraphContextFormat::Markdown;
-            auto localResult = service->explore(localReq);
-            if (!localResult) {
-                co_return localResult.error();
-            }
-            if (wantsJsonOutput()) {
-                std::cout << makeGraphExploreJson(localResult.value()).dump(2) << "\n";
-            } else {
-                renderGraphExploreMarkdown(localResult.value());
-            }
-            co_return Result<void>();
+            co_return renderLocal();
         }
 
         auto appResponse = toAppGraphExploreResponse(result.value());

@@ -246,6 +246,28 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     CHECK(omitted.value().files.front().content.empty());
 }
 
+TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto sourcePath =
+        fixture.writeSource("src/zero_lines.cpp", {"int zeroBased() {", "    return 42;", "}"});
+    auto zeroLineSym = fixture.symbol(sourcePath, "zeroBased", "demo::zeroBased", 0, 0);
+    fixture.upsertSymbols({zeroLineSym});
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = "zeroBased";
+
+    auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().startLine == 1);
+    CHECK(result.value().files.front().endLine == 3);
+    CHECK(result.value().files.front().content.find("1\tint zeroBased() {") != std::string::npos);
+}
+
 TEST_CASE("GraphContextService explore returns canonical relationship context",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;

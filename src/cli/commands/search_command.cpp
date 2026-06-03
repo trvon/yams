@@ -761,6 +761,9 @@ private:
         }
 
         // Fallback to simple truncation
+        if (maxLength <= 3) {
+            return result.substr(0, maxLength);
+        }
         return result.substr(0, maxLength - 3) + "...";
     }
 
@@ -799,8 +802,9 @@ private:
             }
         }
         const double total = static_cast<double>(snippet.size());
-        assessment.printableRatio = printable / total;
-        assessment.whitespaceRatio = whitespace / total;
+        const double denominator = std::max(total, 1.0);
+        assessment.printableRatio = printable / denominator;
+        assessment.whitespaceRatio = whitespace / denominator;
         assessment.sanitized = std::move(cleaned);
         return assessment;
     }

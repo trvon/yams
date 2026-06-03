@@ -130,14 +130,27 @@ std::vector<std::string> readLines(const std::string& path) {
 std::string lineNumberedContent(const std::vector<std::string>& lines, std::size_t startLine,
                                 std::size_t endLine, bool includeLineNumbers, std::size_t maxChars,
                                 bool& truncated) {
+    if (lines.empty()) {
+        return {};
+    }
+    startLine = std::max<std::size_t>(startLine, 1);
+    endLine = std::max(endLine, startLine);
+
+    std::size_t beginIndex = 0;
+    if (startLine > 1) {
+        beginIndex = startLine - 1;
+    }
+    const std::size_t endIndexExclusive = std::min(endLine, lines.size());
+
     std::ostringstream out;
     std::size_t emitted = 0;
-    for (std::size_t lineNo = startLine; lineNo <= endLine && lineNo <= lines.size(); ++lineNo) {
+    for (std::size_t index = beginIndex; index < endIndexExclusive; ++index) {
+        const std::size_t lineNo = index + 1;
         std::string rendered;
         if (includeLineNumbers) {
-            rendered = std::to_string(lineNo) + "\t" + lines[lineNo - 1] + "\n";
+            rendered = std::to_string(lineNo) + "\t" + lines[index] + "\n";
         } else {
-            rendered = lines[lineNo - 1] + "\n";
+            rendered = lines[index] + "\n";
         }
         if (emitted + rendered.size() > maxChars) {
             truncated = true;
@@ -372,13 +385,19 @@ private:
                     endLine = std::max(endLine, static_cast<std::size_t>(*symbol.endLine));
                 }
             }
-            if (startLine == std::numeric_limits<std::size_t>::max()) {
+            if (startLine == std::numeric_limits<std::size_t>::max() || startLine == 0) {
                 startLine = 1;
             }
-            if (endLine == 0 || endLine < startLine) {
-                endLine = std::min(startLine + req.budget.maxSnippetLines - 1, lines.size());
+            const auto snippetLineBudget = std::max<std::size_t>(req.budget.maxSnippetLines, 1);
+            std::size_t snippetLineSpan = snippetLineBudget;
+            if (snippetLineSpan > 0) {
+                --snippetLineSpan;
             }
-            endLine = std::min(endLine, startLine + req.budget.maxSnippetLines - 1);
+            const auto maxEndLine = std::min(lines.size(), startLine + snippetLineSpan);
+            if (endLine == 0 || endLine < startLine) {
+                endLine = maxEndLine;
+            }
+            endLine = std::min(endLine, maxEndLine);
             endLine = std::min(endLine, lines.size());
 
             const auto remaining = req.budget.maxTotalChars - totalChars;
