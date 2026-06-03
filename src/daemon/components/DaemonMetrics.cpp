@@ -1665,21 +1665,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     }
 }
 
-void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
-    const std::string preservedVersion = std::move(out.version);
-    out = buildMinimalSnapshot();
-    if (!preservedVersion.empty()) {
-        out.version = preservedVersion;
-    }
-
-    populateReadinessSnapshot(out);
-
-    populateLifecycleSnapshot(out);
-
-    populateWorkerPipelineSnapshot(out);
-
-    populateRuntimeCounterSnapshot(out);
-
+void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool detailed) const {
     // OS resource hints (fast probes)
     try {
         bool needMemoryFallback = false;
@@ -1784,6 +1770,24 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
     } catch (...) {
         // Metrics collection is best-effort; leave snapshot defaults.
     }
+}
+
+void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
+    const std::string preservedVersion = std::move(out.version);
+    out = buildMinimalSnapshot();
+    if (!preservedVersion.empty()) {
+        out.version = preservedVersion;
+    }
+
+    populateReadinessSnapshot(out);
+
+    populateLifecycleSnapshot(out);
+
+    populateWorkerPipelineSnapshot(out);
+
+    populateRuntimeCounterSnapshot(out);
+
+    populateResourceVectorSnapshot(out, detailed);
 
     // Centralized service states
     try {

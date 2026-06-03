@@ -469,6 +469,7 @@ private:
     void populateLifecycleSnapshot(MetricsSnapshot& snapshot) const;
     void populateWorkerPipelineSnapshot(MetricsSnapshot& snapshot) const;
     void populateRuntimeCounterSnapshot(MetricsSnapshot& snapshot) const;
+    void populateResourceVectorSnapshot(MetricsSnapshot& snapshot, bool detailed) const;
     void enrichDetailedSnapshot(MetricsSnapshot& snapshot) const;
     CachedSnapshotState loadCachedSnapshotState() const;
     SnapshotFreshness evaluateSnapshotFreshness(const CachedSnapshotState& state,
