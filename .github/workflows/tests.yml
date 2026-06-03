@@ -188,7 +188,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false  # Manual submodule init below (some use SSH URLs)
+          submodules: false # Manual submodule init below (some use SSH URLs)
 
       - name: Skip non-linux-x86_64 matrix entries under act
         if: github.actor == 'nektos/act' && matrix.suffix != 'linux-x86_64'
@@ -202,13 +202,13 @@ jobs:
         if: runner.os == 'Linux'
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false      # Keep tools we might need
-          android: true          # ~14GB savings
-          dotnet: true           # ~2.7GB savings
-          haskell: true          # Haskell runtime
-          large-packages: false  # Keep - might need some of these
-          docker-images: true    # Cached docker images
-          swap-storage: false    # Keep swap for large links
+          tool-cache: false # Keep tools we might need
+          android: true # ~14GB savings
+          dotnet: true # ~2.7GB savings
+          haskell: true # Haskell runtime
+          large-packages: false # Keep - might need some of these
+          docker-images: true # Cached docker images
+          swap-storage: false # Keep swap for large links
 
       - name: Initialize required submodules
         shell: bash
@@ -610,8 +610,6 @@ jobs:
       #       exit 1
       #     fi
       #     scripts/ci/check_mobile_abi.sh "$LIB_PATH"
-
-
 
       - name: Run Tests with Meson (Unix)
         id: meson_tests_unix
