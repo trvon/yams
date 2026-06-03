@@ -11,7 +11,6 @@
 #include <chrono>
 #include <climits>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -22,6 +21,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
 #include <yams/daemon/components/InternalEventBus.h>
