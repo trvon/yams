@@ -81,8 +81,74 @@ TEST_CASE("assertion test harness detects clean exit", "[assert][harness]") {
 } // namespace
 
 // ==========================================================================
-// PressureLimitedPoller — YAMS_ASSERT on null inFlightCounter
+// PressureLimitedPoller — YAMS_ASSERT on invalid required config
 // ==========================================================================
+
+namespace {
+
+void runPollerConfigUntilAssertion(std::shared_ptr<SpscQueue<int>> channel,
+                                   PressureLimitedPollerConfig<int> cfg) {
+    boost::asio::io_context ioc;
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, cfg), boost::asio::detached);
+    auto deadline = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < deadline) {
+        ioc.poll_one();
+    }
+}
+
+PressureLimitedPollerConfig<int> makeMinimalValidPollerConfig(std::atomic<bool>& startedFlag,
+                                                              std::atomic<bool>& stopFlag,
+                                                              std::atomic<bool>& pauseFlag,
+                                                              std::atomic<bool>& wasActiveFlag,
+                                                              std::atomic<std::size_t>& inFlight) {
+    PressureLimitedPollerConfig<int> cfg;
+    cfg.stageName = "assert-test";
+    cfg.stopFlag = &stopFlag;
+    cfg.startedFlag = &startedFlag;
+    cfg.pauseFlag = &pauseFlag;
+    cfg.wasActiveFlag = &wasActiveFlag;
+    cfg.inFlightCounter = &inFlight;
+    cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
+    cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+        return false;
+    };
+    cfg.getHashFn = [](const int&) -> std::string { return ""; };
+    cfg.completeJobFn = [](const std::string&, bool) {};
+    cfg.processFn = [](int&) {};
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("YAMS_ASSERT fires when PressureLimitedPoller has null channel", "[assert][poller]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    bool fired = assertionFires([]() {
+        std::atomic<bool> sf{false}, stf{false}, pf{false}, waf{false};
+        std::atomic<std::size_t> inFlight{0};
+        auto cfg = makeMinimalValidPollerConfig(sf, stf, pf, waf, inFlight);
+        runPollerConfigUntilAssertion(nullptr, cfg);
+    });
+    CHECK(fired);
+#endif
+}
+
+TEST_CASE("YAMS_ASSERT fires when PressureLimitedPoller has null startedFlag", "[assert][poller]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    bool fired = assertionFires([]() {
+        std::atomic<bool> sf{false}, stf{false}, pf{false}, waf{false};
+        std::atomic<std::size_t> inFlight{0};
+        auto cfg = makeMinimalValidPollerConfig(sf, stf, pf, waf, inFlight);
+        cfg.startedFlag = nullptr;
+        auto ch = std::make_shared<SpscQueue<int>>(16);
+        runPollerConfigUntilAssertion(ch, cfg);
+    });
+    CHECK(fired);
+#endif
+}
 
 TEST_CASE("YAMS_ASSERT fires when PressureLimitedPoller has null inFlightCounter",
           "[assert][poller]") {
@@ -90,32 +156,30 @@ TEST_CASE("YAMS_ASSERT fires when PressureLimitedPoller has null inFlightCounter
     SKIP("fork() not available on Windows");
 #else
     bool fired = assertionFires([]() {
-        boost::asio::io_context ioc;
         std::atomic<bool> sf{false}, stf{false}, pf{false}, waf{false};
-
-        PressureLimitedPollerConfig<int> cfg;
-        cfg.stageName = "null-inflight-assert";
-        cfg.stopFlag = &stf;
-        cfg.startedFlag = &sf;
-        cfg.pauseFlag = &pf;
-        cfg.wasActiveFlag = &waf;
-        cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
-        cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
-            return false;
-        };
-        cfg.getHashFn = [](const int&) -> std::string { return ""; };
-        cfg.completeJobFn = [](const std::string&, bool) {};
-        cfg.processFn = [](int&) {};
-        // Deliberately leave inFlightCounter = nullptr
-
+        std::atomic<std::size_t> inFlight{0};
+        auto cfg = makeMinimalValidPollerConfig(sf, stf, pf, waf, inFlight);
+        cfg.inFlightCounter = nullptr;
         auto ch = std::make_shared<SpscQueue<int>>(16);
-        boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(ch, std::move(cfg)),
-                              boost::asio::detached);
-        // Run until the assertion fires
-        auto dl = std::chrono::steady_clock::now() + 500ms;
-        while (std::chrono::steady_clock::now() < dl) {
-            ioc.poll_one();
-        }
+        runPollerConfigUntilAssertion(ch, cfg);
+    });
+    CHECK(fired);
+#endif
+}
+
+TEST_CASE("YAMS_ASSERT fires when batch PressureLimitedPoller has null batchProcessFn",
+          "[assert][poller]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    bool fired = assertionFires([]() {
+        std::atomic<bool> sf{false}, stf{false}, pf{false}, waf{false};
+        std::atomic<std::size_t> inFlight{0};
+        auto cfg = makeMinimalValidPollerConfig(sf, stf, pf, waf, inFlight);
+        cfg.batchMode = true;
+        cfg.batchProcessFn = {};
+        auto ch = std::make_shared<SpscQueue<int>>(16);
+        runPollerConfigUntilAssertion(ch, cfg);
     });
     CHECK(fired);
 #endif

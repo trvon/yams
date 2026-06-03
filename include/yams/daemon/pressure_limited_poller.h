@@ -171,6 +171,49 @@ inline void validatePressureLimitedPollerConfig(const std::shared_ptr<SpscQueue<
     }
 }
 
+template <typename Task>
+boost::asio::awaitable<void> awaitPressureLimitedPollerIdle(
+    boost::asio::steady_timer& timer, const PressureLimitedPollerConfig<Task>& cfg,
+    std::chrono::milliseconds& idleDelay, std::chrono::milliseconds minIdleDelay) {
+    // Event-driven idle sleep: the enqueuer cancels wakeTimer to resume this coroutine
+    // immediately. The 10ms expiry is a safety net that handles the race where cancel()
+    // fires before async_wait is armed — worst case poller resumes in 10ms.
+    if (cfg.wakeTimer) {
+        if (cfg.wakeTimerMutex) {
+            std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
+            cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
+        } else {
+            cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
+        }
+        try {
+            if (cfg.wakeTimerMutex) {
+                auto waitOp = [&]() {
+                    std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
+                    return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+                }();
+                co_await std::move(waitOp);
+            } else {
+                co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+            }
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != boost::asio::error::operation_aborted) {
+                spdlog::warn("[PostIngestQueue] {} wake timer error: {}", cfg.stageName, e.what());
+            }
+        }
+        idleDelay = minIdleDelay;
+        co_return;
+    }
+
+    // Adaptive backoff when idle (legacy path, no wake timer).
+    const auto maxIdleDelay = pollerMaxIdleDelay();
+    timer.expires_after(idleDelay);
+    co_await timer.async_wait(boost::asio::use_awaitable);
+    if (idleDelay < maxIdleDelay) {
+        idleDelay = std::min(idleDelay * 2, maxIdleDelay);
+    }
+    co_return;
+}
+
 } // namespace detail
 
 template <typename Task> class PressureLimitedPollerCallbackGuard {
@@ -411,44 +454,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 continue;
             }
 
-            // Event-driven idle sleep: the enqueuer cancels wakeTimer to
-            // resume this coroutine immediately.  The 10ms expiry is a
-            // safety net that handles the race where cancel() fires before
-            // async_wait is armed — worst case poller resumes in 10ms.
-            if (cfg.wakeTimer) {
-                if (cfg.wakeTimerMutex) {
-                    std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-                    cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
-                } else {
-                    cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
-                }
-                try {
-                    if (cfg.wakeTimerMutex) {
-                        auto waitOp = [&]() {
-                            std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-                            return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-                        }();
-                        co_await std::move(waitOp);
-                    } else {
-                        co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-                    }
-                } catch (const boost::system::system_error& e) {
-                    if (e.code() != boost::asio::error::operation_aborted) {
-                        spdlog::warn("[PostIngestQueue] {} wake timer error: {}", cfg.stageName,
-                                     e.what());
-                    }
-                }
-                idleDelay = kMinIdleDelay;
-                continue;
-            }
-
-            // Adaptive backoff when idle (legacy path, no wake timer)
-            const auto maxIdleDelay = detail::pollerMaxIdleDelay();
-            timer.expires_after(idleDelay);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < maxIdleDelay) {
-                idleDelay = std::min(idleDelay * 2, maxIdleDelay);
-            }
+            co_await detail::awaitPressureLimitedPollerIdle(timer, cfg, idleDelay, kMinIdleDelay);
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] {} poller exception: {}", cfg.stageName, e.what());
             idleDelay = std::chrono::milliseconds(100);
