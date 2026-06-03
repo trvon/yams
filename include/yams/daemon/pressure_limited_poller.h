@@ -139,30 +139,11 @@ template <typename Task> struct PressureLimitedPollerConfig {
     std::mutex* wakeTimerMutex = nullptr;
 };
 
-template <typename Task> class PressureLimitedPollerCallbackGuard {
-public:
-    explicit PressureLimitedPollerCallbackGuard(PressureLimitedPollerConfig<Task>& cfg)
-        : cfg_(cfg) {}
-    ~PressureLimitedPollerCallbackGuard() {
-        if (cfg_.callbackInFlightCounter) {
-            cfg_.callbackInFlightCounter->fetch_sub(1, std::memory_order_acq_rel);
-        }
-        if (cfg_.notifyLifecycleFn) {
-            cfg_.notifyLifecycleFn();
-        }
-    }
+namespace detail {
 
-private:
-    PressureLimitedPollerConfig<Task>& cfg_;
-};
-
-/// Generic pressure-limited poller coroutine.
-/// Replaces channelPoller, kgPoller, symbolPoller, entityPoller, titlePoller.
 template <typename Task>
-boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>> channel,
-                                                 PressureLimitedPollerConfig<Task> cfg) {
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
+inline void validatePressureLimitedPollerConfig(const std::shared_ptr<SpscQueue<Task>>& channel,
+                                                const PressureLimitedPollerConfig<Task>& cfg) {
     YAMS_ASSERT(channel, "PressureLimitedPoller configured without a task channel");
     YAMS_ASSERT(cfg.startedFlag,
                 "PressureLimitedPoller configured without startedFlag lifecycle state");
@@ -188,6 +169,35 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
         YAMS_ASSERT(cfg.processFn,
                     "PressureLimitedPoller single-item mode configured without processFn");
     }
+}
+
+} // namespace detail
+
+template <typename Task> class PressureLimitedPollerCallbackGuard {
+public:
+    explicit PressureLimitedPollerCallbackGuard(PressureLimitedPollerConfig<Task>& cfg)
+        : cfg_(cfg) {}
+    ~PressureLimitedPollerCallbackGuard() {
+        if (cfg_.callbackInFlightCounter) {
+            cfg_.callbackInFlightCounter->fetch_sub(1, std::memory_order_acq_rel);
+        }
+        if (cfg_.notifyLifecycleFn) {
+            cfg_.notifyLifecycleFn();
+        }
+    }
+
+private:
+    PressureLimitedPollerConfig<Task>& cfg_;
+};
+
+/// Generic pressure-limited poller coroutine.
+/// Replaces channelPoller, kgPoller, symbolPoller, entityPoller, titlePoller.
+template <typename Task>
+boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>> channel,
+                                                 PressureLimitedPollerConfig<Task> cfg) {
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    detail::validatePressureLimitedPollerConfig(channel, cfg);
 
     cfg.startedFlag->store(true);
     if (cfg.notifyLifecycleFn) {
