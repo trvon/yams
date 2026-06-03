@@ -94,6 +94,7 @@ yams grep "pattern"            # Code pattern search (fast, exact)
 yams search "query"            # Semantic/hybrid search
 
 # Graph
+yams graph --explore <query>   # Agent context: symbols, relationships, snippets
 yams graph --name <file>       # Show file relationships
 yams graph --list-type symbol  # List symbols
 yams graph --relations         # List relation types with counts

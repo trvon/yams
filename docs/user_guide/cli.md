@@ -341,26 +341,34 @@ yams get abcd1234... --verbose
 
 ## graph {#cmd-graph}
 
-Show related documents via the knowledge graph for a given document (read-only).
+Show related documents, symbols, and source context from the knowledge graph (read-only).
 
 Synopsis:
 - yams graph <hash> [--depth N]
 - yams graph --name <path|name> [--depth N]
+- yams graph --explore <symbol|file|query> [--max-files N]
 
 Options:
+- --explore <symbol|file|query>
+  - Build agent-oriented graph context: ranked symbols, relationships, and line-numbered snippets.
+- --max-files <N>
+  - Maximum files to include in `--explore` output.
 - --name <path|name>
-  - Resolve the target by path/name instead of hash
+  - Resolve the target by path/name instead of hash.
 - --depth <N>
-  - Depth of graph traversal, 1-5 (default: 1)
+  - Depth of graph traversal, 1-5 (default: 1).
 - -v, --verbose
-  - Verbose header details
+  - Verbose header details.
 
 Description:
-- Mirrors the graph view available in `get --graph` without fetching content.
-- Uses the same daemon request path; shows related documents and their relationship/distance.
+- `--explore` is the preferred follow-up from search/grep hints when an agent needs source context.
+- Traditional hash/name/node traversal mirrors the graph view available in `get --graph` without fetching content.
+- Uses knowledge-graph symbol metadata where available and falls back to warnings when source snippets cannot be read.
 
 Examples:
 ```
+yams graph --explore "processTask" --max-files 3
+yams graph --explore "src/app/services/search_service.cpp"
 yams graph 0123abcd... --depth 2
 yams graph --name "docs/readme.md" --depth 3
 ```

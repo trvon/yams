@@ -700,9 +700,9 @@ private:
             if (!concreteGraphNextHint.empty()) {
                 std::cout << ui::colorize(concreteGraphNextHint, ui::Ansi::DIM) << std::endl;
             }
-            std::cout << ui::colorize(
-                             "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
-                             ui::Ansi::DIM)
+            std::cout << ui::colorize("Tip: Use `yams graph --explore \"<symbol-or-file>\"` for "
+                                      "line-numbered graph context.",
+                                      ui::Ansi::DIM)
                       << std::endl;
             if (!alternativeGraphSearchHint.empty()) {
                 std::cout << ui::colorize("Alt: " + alternativeGraphSearchHint, ui::Ansi::DIM)
@@ -1700,14 +1700,6 @@ public:
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
         const bool cliOneShot = yams::cli::cli_one_shot_enabled();
-
-        try {
-            // Resolve base query (reuse sync logic for assembling fields)
-            // Defer to execute() for argument normalization, then re-run daemon path with co_await
-            // If execute() succeeded synchronously (local), return its result; otherwise, we
-            // proceed async.
-        } catch (...) {
-        }
 
         // Build normalized arguments (copy of execute() preamble)
         if (query_.empty()) {

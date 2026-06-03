@@ -945,6 +945,76 @@ message GraphQueryResponse {
   repeated RelationTypeCount relation_type_counts = 12;  // yams-kt5t: Relation type counts
 }
 
+message GraphExploreRequest {
+  string query = 1;
+  uint64 max_files = 2;
+  uint64 max_symbols = 3;
+  uint64 max_total_chars = 4;
+  uint64 max_chars_per_file = 5;
+  uint64 max_snippet_lines = 6;
+  bool include_line_numbers = 7;
+  bool include_relationships = 8;
+  bool include_warnings = 9;
+  string format = 10;
+  bool include_code = 11;
+  bool include_tests = 12;
+  bool prefer_exact_symbols = 13;
+}
+
+message GraphExploreSymbol {
+  string node_key = 1;
+  string label = 2;
+  string qualified_name = 3;
+  string kind = 4;
+  string file_path = 5;
+  bool has_start_line = 6;
+  int32 start_line = 7;
+  bool has_end_line = 8;
+  int32 end_line = 9;
+  double score = 10;
+  bool exact_match = 11;
+  bool generated_or_cache = 12;
+  bool test_file = 13;
+}
+
+message GraphExploreSnippet {
+  string file_path = 1;
+  string language = 2;
+  string mode = 3;
+  bool has_start_line = 4;
+  int32 start_line = 5;
+  bool has_end_line = 6;
+  int32 end_line = 7;
+  string heading = 8;
+  string content = 9;
+  repeated GraphExploreSymbol symbols = 10;
+  bool truncated = 11;
+}
+
+message GraphExploreRelation {
+  string relation = 1;
+  string source_node_key = 2;
+  string source_label = 3;
+  string target_node_key = 4;
+  string target_label = 5;
+  float weight = 6;
+  double confidence = 7;
+  string provenance = 8;
+}
+
+message GraphExploreResponse {
+  string query = 1;
+  repeated GraphExploreSymbol entry_symbols = 2;
+  repeated GraphExploreSnippet files = 3;
+  repeated GraphExploreRelation relationships = 4;
+  repeated string warnings = 5;
+  uint64 total_symbols_considered = 6;
+  uint64 total_files_considered = 7;
+  uint64 emitted_chars = 8;
+  bool kg_available = 9;
+  bool truncated = 10;
+}
+
 message GraphPathHistoryRequest {
   string path = 1;
   uint32 limit = 2;
@@ -1088,6 +1158,7 @@ message Envelope {
     KgIngestRequest kg_ingest_request = 54;
     // Graph query requests
     GraphQueryRequest graph_query_request = 55;
+    GraphExploreRequest graph_explore_request = 62;
     GraphPathHistoryRequest graph_path_history_request = 56;
     MetadataValueCountsRequest metadata_value_counts_request = 57;
     // Document repair request (RepairService)
@@ -1144,6 +1215,7 @@ message Envelope {
     KgIngestResponse kg_ingest_response = 139;
     // Graph query responses
     GraphQueryResponse graph_query_response = 140;
+    GraphExploreResponse graph_explore_response = 148;
     GraphPathHistoryResponse graph_path_history_response = 141;
     MetadataValueCountsResponse metadata_value_counts_response = 142;
     // Batch request/response (Track B)

@@ -39,7 +39,7 @@ struct ClientConfig {
     bool autoStart = true;
     bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;
-    size_t maxChunkSize = 512 * 1024;
+    size_t maxChunkSize = static_cast<size_t>(512) * static_cast<size_t>(1024);
     size_t maxInflight = 128;
     bool progressiveOutput = true;
     bool singleUseConnections = false;
@@ -462,7 +462,7 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             // Graph maintenance operations (PBI-009)
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
-            std::is_same<Req, GraphQueryRequest>,
+            std::is_same<Req, GraphQueryRequest>, std::is_same<Req, GraphExploreRequest>,
             // KG ingest operations
             std::is_same<Req, KgIngestRequest>,
             // Cat operations

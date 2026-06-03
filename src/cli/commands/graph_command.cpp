@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <yams/app/services/graph_context_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/graph_helpers.h>
@@ -22,6 +23,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
@@ -59,6 +61,11 @@ public:
         cmd->add_option("--depth", depth_, "Graph traversal depth (1-5)")
             ->default_val(1)
             ->check(CLI::Range(1, 5));
+        cmd->add_option(
+            "--explore", exploreQuery_,
+            "Build agent-oriented graph context for a symbol, file, or natural-language query");
+        cmd->add_option("--max-files", exploreMaxFiles_, "Maximum files to include for --explore")
+            ->default_val(8);
 
         // Relation filtering for traversal
         cmd->add_option("--relation,-r", relationFilter_,
@@ -106,6 +113,10 @@ public:
         try {
             using namespace yams::daemon;
             invocationCwd_ = std::filesystem::current_path();
+
+            if (!exploreQuery_.empty()) {
+                co_return co_await executeGraphExplore();
+            }
 
             // yams-66h: Handle --list-types mode (show available node types)
             if (listTypes_) {
@@ -185,48 +196,16 @@ private:
         }
     }
 
-    static std::string canonicalizeRelationName(std::string value) {
-        auto trimLeft = std::find_if_not(value.begin(), value.end(),
-                                         [](unsigned char c) { return std::isspace(c) != 0; });
-        auto trimRight = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
-                             return std::isspace(c) != 0;
-                         }).base();
-        if (trimLeft >= trimRight) {
-            return {};
-        }
-
-        std::string normalized(trimLeft, trimRight);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        std::replace(normalized.begin(), normalized.end(), '-', '_');
-        std::replace(normalized.begin(), normalized.end(), ' ', '_');
-
-        if (normalized == "call")
-            return "calls";
-        if (normalized == "include")
-            return "includes";
-        if (normalized == "inherit")
-            return "inherits";
-        if (normalized == "implement")
-            return "implements";
-        if (normalized == "reference")
-            return "references";
-        if (normalized == "rename_to")
-            return "renamed_to";
-        if (normalized == "rename_from")
-            return "renamed_from";
-
-        return normalized;
-    }
-
     static std::string buildPathFileNodeKey(const std::string& path) {
         try {
             auto derived = yams::metadata::computePathDerivedValues(path);
             if (!derived.normalizedPath.empty()) {
                 return "path:file:" + derived.normalizedPath;
             }
+        } catch (const std::exception& e) {
+            spdlog::trace("graph: path-derived node key fallback for '{}': {}", path, e.what());
         } catch (...) {
-            // Fall through to raw path fallback.
+            spdlog::trace("graph: path-derived node key fallback for '{}'", path);
         }
         return "path:file:" + path;
     }
@@ -245,7 +224,8 @@ private:
     static json parsePropertiesField(const std::string& properties) {
         try {
             return json::parse(properties);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::trace("graph: treating node properties as raw JSON string: {}", e.what());
             return json(properties);
         }
     }
@@ -309,8 +289,10 @@ private:
             if (!derived.normalizedPath.empty()) {
                 return derived.normalizedPath;
             }
+        } catch (const std::exception& e) {
+            spdlog::trace("graph: canonical path fallback for '{}': {}", path, e.what());
         } catch (...) {
-            // Best effort only; fall back to the raw label/path.
+            spdlog::trace("graph: canonical path fallback for '{}'", path);
         }
         return std::filesystem::path(path).lexically_normal().generic_string();
     }
@@ -1569,7 +1551,7 @@ private:
             gReq.includeEdgeProperties = verbose_;
 
             if (!relationFilter_.empty()) {
-                auto canonicalRelation = canonicalizeRelationName(relationFilter_);
+                auto canonicalRelation = metadata::normalizeRelationName(relationFilter_);
                 if (!canonicalRelation.empty()) {
                     gReq.relationFilters.push_back(std::move(canonicalRelation));
                 }
@@ -1602,7 +1584,7 @@ private:
                 gReq.includeEdgeProperties = verbose_;
 
                 if (!relationFilter_.empty()) {
-                    auto canonicalRelation = canonicalizeRelationName(relationFilter_);
+                    auto canonicalRelation = metadata::normalizeRelationName(relationFilter_);
                     if (!canonicalRelation.empty()) {
                         gReq.relationFilters.push_back(std::move(canonicalRelation));
                     }
@@ -1960,6 +1942,290 @@ private:
         return Result<void>();
     }
 
+    static std::string snippetModeLabel(app::services::GraphContextSnippetMode mode) {
+        using app::services::GraphContextSnippetMode;
+        switch (mode) {
+            case GraphContextSnippetMode::Full:
+                return "full";
+            case GraphContextSnippetMode::Signature:
+                return "signature";
+            case GraphContextSnippetMode::Omitted:
+                return "omitted";
+        }
+        return "omitted";
+    }
+
+    static app::services::GraphContextSnippetMode snippetModeFromLabel(const std::string& mode) {
+        if (mode == "signature") {
+            return app::services::GraphContextSnippetMode::Signature;
+        }
+        if (mode == "omitted") {
+            return app::services::GraphContextSnippetMode::Omitted;
+        }
+        return app::services::GraphContextSnippetMode::Full;
+    }
+
+    static app::services::GraphContextSymbol
+    toAppGraphContextSymbol(const daemon::GraphExploreSymbol& symbol) {
+        app::services::GraphContextSymbol out;
+        out.nodeKey = symbol.nodeKey;
+        out.label = symbol.label;
+        out.qualifiedName = symbol.qualifiedName;
+        out.kind = symbol.kind;
+        out.filePath = symbol.filePath;
+        out.startLine = symbol.startLine;
+        out.endLine = symbol.endLine;
+        out.score = symbol.score;
+        out.exactMatch = symbol.exactMatch;
+        out.generatedOrCache = symbol.generatedOrCache;
+        out.testFile = symbol.testFile;
+        return out;
+    }
+
+    static app::services::GraphExploreResponse
+    toAppGraphExploreResponse(const daemon::GraphExploreResponse& response) {
+        app::services::GraphExploreResponse out;
+        out.query = response.query;
+        out.totalSymbolsConsidered = static_cast<std::size_t>(response.totalSymbolsConsidered);
+        out.totalFilesConsidered = static_cast<std::size_t>(response.totalFilesConsidered);
+        out.emittedChars = static_cast<std::size_t>(response.emittedChars);
+        out.kgAvailable = response.kgAvailable;
+        out.truncated = response.truncated;
+        out.warnings = response.warnings;
+
+        out.entrySymbols.reserve(response.entrySymbols.size());
+        for (const auto& symbol : response.entrySymbols) {
+            out.entrySymbols.push_back(toAppGraphContextSymbol(symbol));
+        }
+
+        out.files.reserve(response.files.size());
+        for (const auto& file : response.files) {
+            app::services::GraphContextSnippet snippet;
+            snippet.filePath = file.filePath;
+            snippet.language = file.language;
+            snippet.mode = snippetModeFromLabel(file.mode);
+            snippet.startLine = file.startLine;
+            snippet.endLine = file.endLine;
+            snippet.heading = file.heading;
+            snippet.content = file.content;
+            snippet.truncated = file.truncated;
+            snippet.symbols.reserve(file.symbols.size());
+            for (const auto& symbol : file.symbols) {
+                snippet.symbols.push_back(toAppGraphContextSymbol(symbol));
+            }
+            out.files.push_back(std::move(snippet));
+        }
+
+        out.relationships.reserve(response.relationships.size());
+        for (const auto& relation : response.relationships) {
+            app::services::GraphContextRelation outRelation;
+            outRelation.relation = relation.relation;
+            outRelation.sourceNodeKey = relation.sourceNodeKey;
+            outRelation.sourceLabel = relation.sourceLabel;
+            outRelation.targetNodeKey = relation.targetNodeKey;
+            outRelation.targetLabel = relation.targetLabel;
+            outRelation.weight = relation.weight;
+            outRelation.confidence = relation.confidence;
+            if (!relation.provenance.empty()) {
+                outRelation.provenance = relation.provenance;
+            }
+            out.relationships.push_back(std::move(outRelation));
+        }
+        return out;
+    }
+
+    static json makeGraphExploreJson(const app::services::GraphExploreResponse& resp) {
+        json out;
+        out["query"] = resp.query;
+        out["kgAvailable"] = resp.kgAvailable;
+        out["truncated"] = resp.truncated;
+        out["totalSymbolsConsidered"] = resp.totalSymbolsConsidered;
+        out["totalFilesConsidered"] = resp.totalFilesConsidered;
+        out["emittedChars"] = resp.emittedChars;
+        out["warnings"] = resp.warnings;
+
+        out["entrySymbols"] = json::array();
+        for (const auto& symbol : resp.entrySymbols) {
+            json entry;
+            entry["nodeKey"] = symbol.nodeKey;
+            entry["label"] = symbol.label;
+            entry["qualifiedName"] = symbol.qualifiedName;
+            entry["kind"] = symbol.kind;
+            entry["filePath"] = symbol.filePath;
+            entry["startLine"] = symbol.startLine ? json(*symbol.startLine) : json(nullptr);
+            entry["endLine"] = symbol.endLine ? json(*symbol.endLine) : json(nullptr);
+            entry["score"] = symbol.score;
+            entry["exactMatch"] = symbol.exactMatch;
+            out["entrySymbols"].push_back(std::move(entry));
+        }
+
+        out["files"] = json::array();
+        for (const auto& file : resp.files) {
+            json item;
+            item["filePath"] = file.filePath;
+            item["language"] = file.language;
+            item["mode"] = snippetModeLabel(file.mode);
+            item["startLine"] = file.startLine ? json(*file.startLine) : json(nullptr);
+            item["endLine"] = file.endLine ? json(*file.endLine) : json(nullptr);
+            item["heading"] = file.heading;
+            item["content"] = file.content;
+            item["truncated"] = file.truncated;
+            item["symbols"] = json::array();
+            for (const auto& symbol : file.symbols) {
+                json fileSymbol;
+                fileSymbol["label"] = symbol.label;
+                fileSymbol["qualifiedName"] = symbol.qualifiedName;
+                fileSymbol["kind"] = symbol.kind;
+                fileSymbol["startLine"] =
+                    symbol.startLine ? json(*symbol.startLine) : json(nullptr);
+                fileSymbol["endLine"] = symbol.endLine ? json(*symbol.endLine) : json(nullptr);
+                item["symbols"].push_back(std::move(fileSymbol));
+            }
+            out["files"].push_back(std::move(item));
+        }
+
+        out["relationships"] = json::array();
+        for (const auto& relation : resp.relationships) {
+            out["relationships"].push_back({{"relation", relation.relation},
+                                            {"sourceNodeKey", relation.sourceNodeKey},
+                                            {"sourceLabel", relation.sourceLabel},
+                                            {"targetNodeKey", relation.targetNodeKey},
+                                            {"targetLabel", relation.targetLabel},
+                                            {"weight", relation.weight},
+                                            {"confidence", relation.confidence}});
+        }
+        return out;
+    }
+
+    void renderGraphExploreMarkdown(const app::services::GraphExploreResponse& resp) const {
+        std::cout << yams::cli::ui::section_header("Graph Explore") << "\n\n";
+        std::cout << yams::cli::ui::key_value("Query", resp.query) << "\n";
+        std::cout << yams::cli::ui::key_value("Files", std::to_string(resp.files.size())) << "\n";
+        std::cout << yams::cli::ui::key_value("Symbols", std::to_string(resp.entrySymbols.size()))
+                  << "\n";
+        if (resp.truncated) {
+            std::cout << yams::cli::ui::status_warning("Output truncated to graph explore budget")
+                      << "\n";
+        }
+        for (const auto& warning : resp.warnings) {
+            std::cout << yams::cli::ui::status_warning(warning) << "\n";
+        }
+        std::cout << "\n";
+
+        if (!resp.relationships.empty()) {
+            std::cout << yams::cli::ui::subsection_header("Relationships") << "\n";
+            std::size_t shown = 0;
+            for (const auto& relation : resp.relationships) {
+                if (shown++ >= 12) {
+                    std::cout << yams::cli::ui::bullet("... more relationships omitted", 2) << "\n";
+                    break;
+                }
+                const auto lhs =
+                    relation.sourceLabel.empty() ? relation.sourceNodeKey : relation.sourceLabel;
+                const auto rhs =
+                    relation.targetLabel.empty() ? relation.targetNodeKey : relation.targetLabel;
+                std::cout << yams::cli::ui::bullet(lhs + " --" + relation.relation + "--> " + rhs,
+                                                   2)
+                          << "\n";
+            }
+            std::cout << "\n";
+        }
+
+        for (const auto& file : resp.files) {
+            const auto displayPath = projectPathForCli(file.filePath, invocationCwd_);
+            std::cout << yams::cli::ui::subsection_header(displayPath) << "\n";
+            if (!file.symbols.empty()) {
+                std::string symbolList;
+                for (const auto& symbol : file.symbols) {
+                    if (!symbolList.empty()) {
+                        symbolList += ", ";
+                    }
+                    symbolList += symbol.label.empty() ? symbol.qualifiedName : symbol.label;
+                }
+                std::cout << yams::cli::ui::key_value("Symbols", symbolList) << "\n";
+            }
+            if (file.content.empty()) {
+                std::cout << yams::cli::ui::status_info("Source omitted or unavailable") << "\n\n";
+                continue;
+            }
+            std::cout << "```" << file.language << "\n" << file.content << "```\n";
+            if (file.truncated) {
+                std::cout
+                    << yams::cli::ui::status_warning(
+                           "File snippet truncated; run graph --explore with a narrower query")
+                    << "\n";
+            }
+            std::cout << "\n";
+        }
+
+        if (!resp.files.empty()) {
+            std::cout << yams::cli::ui::colorize(
+                             "Shown snippets are line-numbered and read-equivalent; prefer another "
+                             "`yams graph --explore` for follow-up context.",
+                             yams::cli::ui::Ansi::DIM)
+                      << "\n";
+        }
+    }
+
+    boost::asio::awaitable<Result<void>> executeGraphExplore() {
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        daemon::GraphExploreRequest req;
+        req.query = exploreQuery_;
+        req.maxFiles = static_cast<uint64_t>(exploreMaxFiles_);
+        req.format = wantsJsonOutput() ? "json" : "markdown";
+
+        auto result = co_await client.call(req);
+        if (!result) {
+            const auto& err = result.error();
+            const bool daemonCompatibilityFailure =
+                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
+            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
+                co_return err;
+            }
+            spdlog::debug("graph explore daemon request failed; falling back to local service: {}",
+                          err.message);
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (!appCtx) {
+                co_return err;
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                co_return err;
+            }
+            app::services::GraphExploreRequest localReq;
+            localReq.query = exploreQuery_;
+            localReq.budget.maxFiles = exploreMaxFiles_;
+            localReq.format = wantsJsonOutput() ? app::services::GraphContextFormat::Json
+                                                : app::services::GraphContextFormat::Markdown;
+            auto localResult = service->explore(localReq);
+            if (!localResult) {
+                co_return localResult.error();
+            }
+            if (wantsJsonOutput()) {
+                std::cout << makeGraphExploreJson(localResult.value()).dump(2) << "\n";
+            } else {
+                renderGraphExploreMarkdown(localResult.value());
+            }
+            co_return Result<void>();
+        }
+
+        auto appResponse = toAppGraphExploreResponse(result.value());
+        if (wantsJsonOutput()) {
+            std::cout << makeGraphExploreJson(appResponse).dump(2) << "\n";
+        } else {
+            renderGraphExploreMarkdown(appResponse);
+        }
+        co_return Result<void>();
+    }
+
     YamsCLI* cli_{nullptr};
     std::filesystem::path invocationCwd_ = std::filesystem::current_path();
     std::string hash_;
@@ -1968,6 +2234,8 @@ private:
     int64_t nodeId_{-1};
     std::string listNodeType_;
     std::string relationFilter_;
+    std::string exploreQuery_;
+    std::size_t exploreMaxFiles_{8};
     int depth_{1};
     size_t limit_{100};
     size_t offset_{0};

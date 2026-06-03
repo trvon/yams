@@ -128,6 +128,7 @@ DEFINE_REQUEST_HANDLER(PluginTrustRemoveRequest, handlePluginTrustRemoveRequest)
 DEFINE_REQUEST_HANDLER(CancelRequest, handleCancelRequest);
 DEFINE_REQUEST_HANDLER(EmbedDocumentsRequest, handleEmbedDocumentsRequest);
 DEFINE_REQUEST_HANDLER(GraphQueryRequest, handleGraphQueryRequest);
+DEFINE_REQUEST_HANDLER(GraphExploreRequest, handleGraphExploreRequest);
 DEFINE_REQUEST_HANDLER(GraphPathHistoryRequest, handleGraphPathHistoryRequest);
 DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
 DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
@@ -368,8 +369,10 @@ boost::asio::any_io_executor RequestDispatcher::getCliExecutor() const {
         if (serviceManager_) {
             return serviceManager_->getCliExecutor();
         }
+    } catch (const std::exception& e) {
+        spdlog::trace("RequestDispatcher: CLI executor unavailable: {}", e.what());
     } catch (...) {
-        // Service manager may be tearing down; fall back to worker executor.
+        spdlog::trace("RequestDispatcher: CLI executor unavailable");
     }
     return getWorkerExecutor();
 }
@@ -388,8 +391,12 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
 
     if (lifecycle_) {
         bool graceful = req.graceful;
-        bool inTestMode = std::getenv("YAMS_TESTING") != nullptr ||
-                          std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test-mode compatibility check.
+        const bool testingEnvSet = std::getenv("YAMS_TESTING") != nullptr;
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test-mode compatibility check.
+        const bool safeSingleInstanceEnvSet =
+            std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
+        bool inTestMode = testingEnvSet || safeSingleInstanceEnvSet;
         lifecycle_->requestShutdown(graceful, inTestMode);
     }
 

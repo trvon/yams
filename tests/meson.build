@@ -422,6 +422,7 @@ if catch2_dep.found()
     files(
       'unit/daemon/graph_component_catch2_test.cpp',
       'unit/app/services/graph_query_service_catch2_test.cpp',
+      'unit/app/services/graph_context_service_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

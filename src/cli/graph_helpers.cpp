@@ -1,12 +1,13 @@
 #include <yams/cli/graph_helpers.h>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string_view>
 #include <unordered_set>
 
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/path_utils.h>
 
 namespace yams::cli {
@@ -79,14 +80,6 @@ std::string extractTopRelation(const std::string& relationSummary) {
 
 namespace {
 
-bool shouldIncludeRelationInHint(std::string_view relation) {
-    static const std::unordered_set<std::string> kHighSignalRelations = {
-        "calls",      "called_by",  "includes",      "imports",   "inherits",
-        "implements", "references", "referenced_by", "overrides", "instantiates",
-    };
-    return kHighSignalRelations.contains(std::string(relation));
-}
-
 std::string stripVersionSuffix(std::string type) {
     static constexpr std::string_view kSuffix = "_version";
     if (type.size() > kSuffix.size() &&
@@ -124,7 +117,10 @@ std::optional<std::string> extractGraphNodePath(const yams::daemon::GraphNode& n
                 }
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::trace("Graph helper could not parse node properties: {}", e.what());
     } catch (...) {
+        spdlog::trace("Graph helper could not parse node properties");
     }
     return std::nullopt;
 }
@@ -254,16 +250,13 @@ std::string projectPathForCli(const std::string& rawPath, const std::filesystem:
 
 std::string buildGraphExploreHint(const std::string& filePath, const std::string& topRelation,
                                   int depth, const std::filesystem::path& cwd) {
+    (void)topRelation;
+    (void)depth;
     if (filePath.empty()) {
         return {};
     }
     const auto displayPath = projectPathForCli(filePath, cwd);
-    std::string cmd = "yams graph --name \"" + displayPath + "\"";
-    if (!topRelation.empty() && shouldIncludeRelationInHint(topRelation)) {
-        cmd += " -r " + topRelation;
-    }
-    cmd += " --depth " + std::to_string(depth);
-    return cmd;
+    return "yams graph --explore \"" + displayPath + "\"";
 }
 
 std::string buildGraphSearchHint(const std::string& value, const std::filesystem::path& cwd) {
@@ -286,7 +279,10 @@ std::string buildGraphSearchHint(const std::string& value, const std::filesystem
                 token = filename;
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::trace("Graph search hint path parsing failed for '{}': {}", value, e.what());
     } catch (...) {
+        spdlog::trace("Graph search hint path parsing failed for '{}'", value);
     }
 
     if (token.empty()) {

@@ -2776,6 +2776,89 @@ struct GraphQueryRequest {
     }
 };
 
+struct GraphExploreRequest {
+    std::string query;
+    uint64_t maxFiles{8};
+    uint64_t maxSymbols{32};
+    uint64_t maxTotalChars{24000};
+    uint64_t maxCharsPerFile{7000};
+    uint64_t maxSnippetLines{160};
+    bool includeLineNumbers{true};
+    bool includeRelationships{true};
+    bool includeWarnings{true};
+    std::string format{"markdown"};
+    bool includeCode{true};
+    bool includeTests{false};
+    bool preferExactSymbols{true};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << query << maxFiles << maxSymbols << maxTotalChars << maxCharsPerFile
+            << maxSnippetLines << includeLineNumbers << includeRelationships << includeWarnings
+            << format << includeCode << includeTests << preferExactSymbols;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphExploreRequest> deserialize(Deserializer& deser) {
+        GraphExploreRequest req;
+        if (auto r = deser.readString(); r)
+            req.query = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxFiles = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSymbols = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxTotalChars = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxCharsPerFile = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSnippetLines = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeLineNumbers = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeRelationships = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeWarnings = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            req.format = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeCode = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeTests = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.preferExactSymbols = r.value();
+        else
+            return r.error();
+        return req;
+    }
+};
+
 struct GraphPathHistoryRequest {
     std::string path;
     uint32_t limit{100};
@@ -3416,8 +3499,8 @@ using Request = std::variant<
     CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
-    GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest,
-    MetadataValueCountsRequest, BatchRequest, RepairRequest>;
+    GraphExploreRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
+    KgIngestRequest, MetadataValueCountsRequest, BatchRequest, RepairRequest>;
 
 // ============================================================================
 // Response Types
@@ -6459,6 +6542,334 @@ struct GraphQueryResponse {
     }
 };
 
+struct GraphExploreSymbol {
+    std::string nodeKey;
+    std::string label;
+    std::string qualifiedName;
+    std::string kind;
+    std::string filePath;
+    std::optional<int32_t> startLine;
+    std::optional<int32_t> endLine;
+    double score{0.0};
+    bool exactMatch{false};
+    bool generatedOrCache{false};
+    bool testFile{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodeKey << label << qualifiedName << kind << filePath << startLine.has_value();
+        if (startLine)
+            ser << *startLine;
+        ser << endLine.has_value();
+        if (endLine)
+            ser << *endLine;
+        ser << score << exactMatch << generatedOrCache << testFile;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphExploreSymbol> deserialize(Deserializer& deser) {
+        GraphExploreSymbol symbol;
+        if (auto r = deser.readString(); r)
+            symbol.nodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            symbol.label = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            symbol.qualifiedName = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            symbol.kind = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            symbol.filePath = std::move(r.value());
+        else
+            return r.error();
+        if (auto has = deser.template read<bool>(); has) {
+            if (has.value()) {
+                if (auto r = deser.template read<int32_t>(); r)
+                    symbol.startLine = r.value();
+                else
+                    return r.error();
+            }
+        } else
+            return has.error();
+        if (auto has = deser.template read<bool>(); has) {
+            if (has.value()) {
+                if (auto r = deser.template read<int32_t>(); r)
+                    symbol.endLine = r.value();
+                else
+                    return r.error();
+            }
+        } else
+            return has.error();
+        if (auto r = deser.template read<double>(); r)
+            symbol.score = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            symbol.exactMatch = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            symbol.generatedOrCache = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            symbol.testFile = r.value();
+        else
+            return r.error();
+        return symbol;
+    }
+};
+
+struct GraphExploreRelation {
+    std::string relation;
+    std::string sourceNodeKey;
+    std::string sourceLabel;
+    std::string targetNodeKey;
+    std::string targetLabel;
+    float weight{1.0F};
+    double confidence{1.0};
+    std::string provenance;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << relation << sourceNodeKey << sourceLabel << targetNodeKey << targetLabel << weight
+            << confidence << provenance;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphExploreRelation> deserialize(Deserializer& deser) {
+        GraphExploreRelation relation;
+        if (auto r = deser.readString(); r)
+            relation.relation = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            relation.sourceNodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            relation.sourceLabel = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            relation.targetNodeKey = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            relation.targetLabel = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<float>(); r)
+            relation.weight = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<double>(); r)
+            relation.confidence = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            relation.provenance = std::move(r.value());
+        else
+            return r.error();
+        return relation;
+    }
+};
+
+struct GraphExploreSnippet {
+    std::string filePath;
+    std::string language;
+    std::string mode{"full"};
+    std::optional<int32_t> startLine;
+    std::optional<int32_t> endLine;
+    std::string heading;
+    std::string content;
+    std::vector<GraphExploreSymbol> symbols;
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << filePath << language << mode << startLine.has_value();
+        if (startLine)
+            ser << *startLine;
+        ser << endLine.has_value();
+        if (endLine)
+            ser << *endLine;
+        ser << heading << content << static_cast<uint32_t>(symbols.size());
+        for (const auto& symbol : symbols) {
+            symbol.serialize(ser);
+        }
+        ser << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphExploreSnippet> deserialize(Deserializer& deser) {
+        GraphExploreSnippet snippet;
+        if (auto r = deser.readString(); r)
+            snippet.filePath = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            snippet.language = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            snippet.mode = std::move(r.value());
+        else
+            return r.error();
+        if (auto has = deser.template read<bool>(); has) {
+            if (has.value()) {
+                if (auto r = deser.template read<int32_t>(); r)
+                    snippet.startLine = r.value();
+                else
+                    return r.error();
+            }
+        } else
+            return has.error();
+        if (auto has = deser.template read<bool>(); has) {
+            if (has.value()) {
+                if (auto r = deser.template read<int32_t>(); r)
+                    snippet.endLine = r.value();
+                else
+                    return r.error();
+            }
+        } else
+            return has.error();
+        if (auto r = deser.readString(); r)
+            snippet.heading = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            snippet.content = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            snippet.symbols.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto symbol = GraphExploreSymbol::deserialize(deser);
+                if (!symbol)
+                    return symbol.error();
+                snippet.symbols.push_back(std::move(symbol.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.template read<bool>(); r)
+            snippet.truncated = r.value();
+        else
+            return r.error();
+        return snippet;
+    }
+};
+
+struct GraphExploreResponse {
+    std::string query;
+    std::vector<GraphExploreSymbol> entrySymbols;
+    std::vector<GraphExploreSnippet> files;
+    std::vector<GraphExploreRelation> relationships;
+    std::vector<std::string> warnings;
+    uint64_t totalSymbolsConsidered{0};
+    uint64_t totalFilesConsidered{0};
+    uint64_t emittedChars{0};
+    bool kgAvailable{true};
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << query << static_cast<uint32_t>(entrySymbols.size());
+        for (const auto& symbol : entrySymbols) {
+            symbol.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(files.size());
+        for (const auto& file : files) {
+            file.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(relationships.size());
+        for (const auto& relation : relationships) {
+            relation.serialize(ser);
+        }
+        ser << warnings << totalSymbolsConsidered << totalFilesConsidered << emittedChars
+            << kgAvailable << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphExploreResponse> deserialize(Deserializer& deser) {
+        GraphExploreResponse response;
+        if (auto r = deser.readString(); r)
+            response.query = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.entrySymbols.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto symbol = GraphExploreSymbol::deserialize(deser);
+                if (!symbol)
+                    return symbol.error();
+                response.entrySymbols.push_back(std::move(symbol.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.files.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto file = GraphExploreSnippet::deserialize(deser);
+                if (!file)
+                    return file.error();
+                response.files.push_back(std::move(file.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.relationships.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto relation = GraphExploreRelation::deserialize(deser);
+                if (!relation)
+                    return relation.error();
+                response.relationships.push_back(std::move(relation.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.readStringVector(); r)
+            response.warnings = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.totalSymbolsConsidered = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.totalFilesConsidered = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.emittedChars = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.kgAvailable = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.truncated = r.value();
+        else
+            return r.error();
+        return response;
+    }
+};
+
 struct PathHistoryEntry {
     std::string path;
     std::string snapshotId;
@@ -7411,8 +7822,8 @@ using Response =
                  PluginTrustListResponse, CatResponse, ListSessionsResponse, ListTreeDiffResponse,
                  FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
                  RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse,
-                 GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse,
-                 KgIngestResponse, MetadataValueCountsResponse,
+                 GraphExploreResponse, GraphPathHistoryResponse, GraphRepairResponse,
+                 GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse,
                  // Batch response (Track B)
                  BatchResponse,
                  // Streaming events (progress/heartbeats)
@@ -7817,6 +8228,7 @@ enum class MessageType : uint8_t {
     PluginTrustRemoveRequest = 42,
     // Graph query requests (PBI-009)
     GraphQueryRequest = 43,
+    GraphExploreRequest = 77,
     GraphPathHistoryRequest = 44,
     // Graph maintenance requests (PBI-009 Phase 4.3)
     GraphRepairRequest = 45,
@@ -7863,6 +8275,7 @@ enum class MessageType : uint8_t {
     PluginTrustListResponse = 163,
     // Graph query responses (PBI-009)
     GraphQueryResponse = 164,
+    GraphExploreResponse = 174,
     GraphPathHistoryResponse = 165,
     // Graph maintenance responses (PBI-009 Phase 4.3)
     GraphRepairResponse = 166,

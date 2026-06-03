@@ -139,6 +139,9 @@ template <> struct ResponseOf<GraphValidateRequest> {
 template <> struct ResponseOf<GraphQueryRequest> {
     using type = GraphQueryResponse;
 };
+template <> struct ResponseOf<GraphExploreRequest> {
+    using type = GraphExploreResponse;
+};
 
 // KG ingest operations (PBI-093)
 template <> struct ResponseOf<KgIngestRequest> {

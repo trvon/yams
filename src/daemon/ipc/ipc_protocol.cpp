@@ -183,6 +183,10 @@ template <> struct MessageTypeTraits<GraphQueryRequest> {
     static constexpr MessageType value = MessageType::GraphQueryRequest;
     static constexpr const char* name = "GraphQuery";
 };
+template <> struct MessageTypeTraits<GraphExploreRequest> {
+    static constexpr MessageType value = MessageType::GraphExploreRequest;
+    static constexpr const char* name = "GraphExplore";
+};
 template <> struct MessageTypeTraits<GraphPathHistoryRequest> {
     static constexpr MessageType value = MessageType::GraphPathHistoryRequest;
     static constexpr const char* name = "GraphPathHistory";
@@ -325,6 +329,9 @@ template <> struct MessageTypeTraits<PluginTrustListResponse> {
 template <> struct MessageTypeTraits<GraphQueryResponse> {
     static constexpr MessageType value = MessageType::GraphQueryResponse;
 };
+template <> struct MessageTypeTraits<GraphExploreResponse> {
+    static constexpr MessageType value = MessageType::GraphExploreResponse;
+};
 template <> struct MessageTypeTraits<GraphPathHistoryResponse> {
     static constexpr MessageType value = MessageType::GraphPathHistoryResponse;
 };
@@ -395,13 +402,14 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::RestoreCollectionRequest,   // 41
     MessageType::RestoreSnapshotRequest,     // 42
     MessageType::GraphQueryRequest,          // 43
-    MessageType::GraphPathHistoryRequest,    // 44
-    MessageType::GraphRepairRequest,         // 45
-    MessageType::GraphValidateRequest,       // 46
-    MessageType::KgIngestRequest,            // 47
-    MessageType::MetadataValueCountsRequest, // 48
-    MessageType::BatchRequest,               // 49
-    MessageType::RepairRequest_MsgType       // 50 (RepairRequest)
+    MessageType::GraphExploreRequest,        // 44
+    MessageType::GraphPathHistoryRequest,    // 45
+    MessageType::GraphRepairRequest,         // 46
+    MessageType::GraphValidateRequest,       // 47
+    MessageType::KgIngestRequest,            // 48
+    MessageType::MetadataValueCountsRequest, // 49
+    MessageType::BatchRequest,               // 50
+    MessageType::RepairRequest_MsgType       // 51 (RepairRequest)
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -450,13 +458,14 @@ static constexpr const char* kRequestNameMap[] = {
     "RestoreCollection",   // 41
     "RestoreSnapshot",     // 42
     "GraphQuery",          // 43
-    "GraphPathHistory",    // 44
-    "GraphRepair",         // 45
-    "GraphValidate",       // 46
-    "KgIngest",            // 47
-    "MetadataValueCounts", // 48
-    "Batch",               // 49
-    "Repair"               // 50
+    "GraphExplore",        // 44
+    "GraphPathHistory",    // 45
+    "GraphRepair",         // 46
+    "GraphValidate",       // 47
+    "KgIngest",            // 48
+    "MetadataValueCounts", // 49
+    "Batch",               // 50
+    "Repair"               // 51
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h
@@ -496,16 +505,17 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::RestoreCollectionResponse,   // 32
     MessageType::RestoreSnapshotResponse,     // 33
     MessageType::GraphQueryResponse,          // 34
-    MessageType::GraphPathHistoryResponse,    // 35
-    MessageType::GraphRepairResponse,         // 36
-    MessageType::GraphValidateResponse,       // 37
-    MessageType::KgIngestResponse,            // 38
-    MessageType::MetadataValueCountsResponse, // 39
-    MessageType::BatchResponse,               // 40
-    MessageType::EmbeddingEvent,              // 41
-    MessageType::ModelLoadEvent,              // 42
-    MessageType::RepairResponse_MsgType,      // 43
-    MessageType::RepairEvent_MsgType          // 44
+    MessageType::GraphExploreResponse,        // 35
+    MessageType::GraphPathHistoryResponse,    // 36
+    MessageType::GraphRepairResponse,         // 37
+    MessageType::GraphValidateResponse,       // 38
+    MessageType::KgIngestResponse,            // 39
+    MessageType::MetadataValueCountsResponse, // 40
+    MessageType::BatchResponse,               // 41
+    MessageType::EmbeddingEvent,              // 42
+    MessageType::ModelLoadEvent,              // 43
+    MessageType::RepairResponse_MsgType,      // 44
+    MessageType::RepairEvent_MsgType          // 45
 };
 
 MessageType getMessageType(const Request& req) {

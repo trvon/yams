@@ -1,5 +1,7 @@
 #include <yams/app/services/graph_query_service.hpp>
 
+#include <yams/metadata/kg_relation_summary.h>
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -19,49 +21,7 @@ struct NormalizedRelationFilter {
     std::unordered_set<std::string> allowed;
 };
 
-std::string normalizeRelationName(std::string relation) {
-    auto trimLeft = std::find_if_not(relation.begin(), relation.end(),
-                                     [](unsigned char c) { return std::isspace(c) != 0; });
-    auto trimRight = std::find_if_not(relation.rbegin(), relation.rend(), [](unsigned char c) {
-                         return std::isspace(c) != 0;
-                     }).base();
-
-    if (trimLeft >= trimRight) {
-        return {};
-    }
-
-    std::string normalized(trimLeft, trimRight);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    std::replace(normalized.begin(), normalized.end(), '-', '_');
-    std::replace(normalized.begin(), normalized.end(), ' ', '_');
-
-    // Canonical aliases accepted from CLI/API callers.
-    if (normalized == "call")
-        return "calls";
-    if (normalized == "include")
-        return "includes";
-    if (normalized == "inherit")
-        return "inherits";
-    if (normalized == "implement")
-        return "implements";
-    if (normalized == "reference")
-        return "references";
-    if (normalized == "rename_to")
-        return "renamed_to";
-    if (normalized == "rename_from")
-        return "renamed_from";
-    if (normalized == "move_to")
-        return "moved_to";
-    if (normalized == "move_from")
-        return "moved_from";
-    if (normalized == "version")
-        return "has_version";
-    if (normalized == "blob_version")
-        return "has_version";
-
-    return normalized;
-}
+using yams::metadata::normalizeRelationName;
 
 // Helper: Convert GraphRelationType enum to KG relation strings
 std::vector<std::string> relationTypeToStrings(GraphRelationType type) {
@@ -179,7 +139,10 @@ double extractEdgeConfidence(const metadata::KGEdge& edge) {
                     return std::clamp(provenance["confidence"].get<double>(), 0.0, 1.0);
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::trace("GraphQueryService: failed to parse edge confidence: {}", e.what());
         } catch (...) {
+            spdlog::trace("GraphQueryService: failed to parse edge confidence");
         }
     }
 
@@ -302,9 +265,7 @@ public:
             entry.snapshotId = record.snapshotId;
             entry.blobHash = record.blobHash;
             entry.changeType = record.changeType;
-            if (record.diffId.has_value()) {
-                entry.diffId = record.diffId.value();
-            }
+            entry.diffId = record.diffId;
             // Timestamp would need to be extracted from snapshot metadata
             response.history.push_back(std::move(entry));
         }
@@ -420,7 +381,7 @@ private:
 
             auto docIdResult = kgStore_->getDocumentIdByHash(hash);
             if (docIdResult && docIdResult.value().has_value()) {
-                metadata.documentId = docIdResult.value().value();
+                metadata.documentId = docIdResult.value();
 
                 // Get document metadata from repository
                 if (metadataRepo_) {

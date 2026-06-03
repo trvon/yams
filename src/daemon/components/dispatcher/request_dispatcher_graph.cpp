@@ -5,59 +5,110 @@
 #include <algorithm>
 #include <cctype>
 #include <unordered_set>
+#include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 namespace yams::daemon {
 
 namespace {
 
-std::string canonicalizeRelationName(std::string value) {
-    auto trimLeft = std::find_if_not(value.begin(), value.end(),
-                                     [](unsigned char c) { return std::isspace(c) != 0; });
-    auto trimRight = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
-                         return std::isspace(c) != 0;
-                     }).base();
-    if (trimLeft >= trimRight) {
-        return {};
-    }
-
-    std::string normalized(trimLeft, trimRight);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    std::replace(normalized.begin(), normalized.end(), '-', '_');
-    std::replace(normalized.begin(), normalized.end(), ' ', '_');
-
-    if (normalized == "call")
-        return "calls";
-    if (normalized == "include")
-        return "includes";
-    if (normalized == "inherit")
-        return "inherits";
-    if (normalized == "implement")
-        return "implements";
-    if (normalized == "reference")
-        return "references";
-    if (normalized == "rename_to")
-        return "renamed_to";
-    if (normalized == "rename_from")
-        return "renamed_from";
-
-    return normalized;
-}
-
 std::vector<std::string> canonicalizeRelationFilters(const std::vector<std::string>& input) {
     std::vector<std::string> out;
     out.reserve(input.size());
     for (const auto& relation : input) {
-        auto canonical = canonicalizeRelationName(relation);
+        auto canonical = metadata::normalizeRelationName(relation);
         if (!canonical.empty()) {
             out.push_back(std::move(canonical));
         }
     }
+    return out;
+}
+
+app::services::GraphContextFormat graphContextFormatFromString(const std::string& value) {
+    return value == "json" ? app::services::GraphContextFormat::Json
+                           : app::services::GraphContextFormat::Markdown;
+}
+
+std::string snippetModeToString(app::services::GraphContextSnippetMode mode) {
+    switch (mode) {
+        case app::services::GraphContextSnippetMode::Full:
+            return "full";
+        case app::services::GraphContextSnippetMode::Signature:
+            return "signature";
+        case app::services::GraphContextSnippetMode::Omitted:
+            return "omitted";
+    }
+    return "full";
+}
+
+GraphExploreSymbol mapGraphExploreSymbol(const app::services::GraphContextSymbol& in) {
+    GraphExploreSymbol out;
+    out.nodeKey = in.nodeKey;
+    out.label = in.label;
+    out.qualifiedName = in.qualifiedName;
+    out.kind = in.kind;
+    out.filePath = in.filePath;
+    out.startLine = in.startLine;
+    out.endLine = in.endLine;
+    out.score = in.score;
+    out.exactMatch = in.exactMatch;
+    out.generatedOrCache = in.generatedOrCache;
+    out.testFile = in.testFile;
+    return out;
+}
+
+GraphExploreResponse mapGraphExploreResponse(const app::services::GraphExploreResponse& in) {
+    GraphExploreResponse out;
+    out.query = in.query;
+    out.totalSymbolsConsidered = in.totalSymbolsConsidered;
+    out.totalFilesConsidered = in.totalFilesConsidered;
+    out.emittedChars = in.emittedChars;
+    out.kgAvailable = in.kgAvailable;
+    out.truncated = in.truncated;
+    out.warnings = in.warnings;
+
+    out.entrySymbols.reserve(in.entrySymbols.size());
+    for (const auto& symbol : in.entrySymbols) {
+        out.entrySymbols.push_back(mapGraphExploreSymbol(symbol));
+    }
+
+    out.files.reserve(in.files.size());
+    for (const auto& file : in.files) {
+        GraphExploreSnippet snippet;
+        snippet.filePath = file.filePath;
+        snippet.language = file.language;
+        snippet.mode = snippetModeToString(file.mode);
+        snippet.startLine = file.startLine;
+        snippet.endLine = file.endLine;
+        snippet.heading = file.heading;
+        snippet.content = file.content;
+        snippet.truncated = file.truncated;
+        snippet.symbols.reserve(file.symbols.size());
+        for (const auto& symbol : file.symbols) {
+            snippet.symbols.push_back(mapGraphExploreSymbol(symbol));
+        }
+        out.files.push_back(std::move(snippet));
+    }
+
+    out.relationships.reserve(in.relationships.size());
+    for (const auto& relation : in.relationships) {
+        GraphExploreRelation outRelation;
+        outRelation.relation = relation.relation;
+        outRelation.sourceNodeKey = relation.sourceNodeKey;
+        outRelation.sourceLabel = relation.sourceLabel;
+        outRelation.targetNodeKey = relation.targetNodeKey;
+        outRelation.targetLabel = relation.targetLabel;
+        outRelation.weight = relation.weight;
+        outRelation.confidence = relation.confidence;
+        outRelation.provenance = relation.provenance.value_or("");
+        out.relationships.push_back(std::move(outRelation));
+    }
+
     return out;
 }
 
@@ -170,6 +221,58 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     co_return resp;
 }
 
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphExploreRequest(const GraphExploreRequest& req) {
+    spdlog::debug("GraphExplore request: query='{}', maxFiles={}, includeCode={}, includeTests={}",
+                  req.query, req.maxFiles, req.includeCode, req.includeTests);
+
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
+    }
+
+    auto kgStore = metaRepo->getKnowledgeGraphStore();
+    if (!kgStore) {
+        GraphExploreResponse resp;
+        resp.query = req.query;
+        resp.kgAvailable = false;
+        resp.warnings.push_back("Knowledge graph not available");
+        co_return resp;
+    }
+
+    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph context service");
+    }
+
+    app::services::GraphExploreRequest serviceReq;
+    serviceReq.query = req.query;
+    serviceReq.budget.maxFiles = static_cast<std::size_t>(req.maxFiles);
+    serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
+    serviceReq.budget.maxTotalChars = static_cast<std::size_t>(req.maxTotalChars);
+    serviceReq.budget.maxCharsPerFile = static_cast<std::size_t>(req.maxCharsPerFile);
+    serviceReq.budget.maxSnippetLines = static_cast<std::size_t>(req.maxSnippetLines);
+    serviceReq.budget.includeLineNumbers = req.includeLineNumbers;
+    serviceReq.budget.includeRelationships = req.includeRelationships;
+    serviceReq.budget.includeWarnings = req.includeWarnings;
+    serviceReq.format = graphContextFormatFromString(req.format);
+    serviceReq.includeCode = req.includeCode;
+    serviceReq.includeTests = req.includeTests;
+    serviceReq.preferExactSymbols = req.preferExactSymbols;
+
+    auto result = graphService->explore(serviceReq);
+    if (!result) {
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
+    }
+
+    auto response = mapGraphExploreResponse(result.value());
+    spdlog::debug("GraphExplore: returning {} files, {} symbols, truncated={}",
+                  response.files.size(), response.entrySymbols.size(), response.truncated);
+    co_return response;
+}
+
 // PBI-093: Helper for listByType mode - list KG nodes by type without traversal
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
@@ -214,8 +317,9 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
                                                 KnowledgeGraphStore* kgStore) {
     std::string nodeType = req.nodeType.empty() ? "function" : req.nodeType;
-    std::string relation =
-        req.isolatedRelation.empty() ? "calls" : canonicalizeRelationName(req.isolatedRelation);
+    std::string relation = req.isolatedRelation.empty()
+                               ? "calls"
+                               : metadata::normalizeRelationName(req.isolatedRelation);
 
     spdlog::debug("GraphQuery isolatedMode: type='{}', relation='{}', limit={}", nodeType, relation,
                   req.limit);

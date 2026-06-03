@@ -2764,6 +2764,176 @@ template <> struct ProtoBinding<GraphQueryResponse> {
     }
 };
 
+template <> struct ProtoBinding<GraphExploreRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphExploreRequest;
+    static void set(Envelope& env, const GraphExploreRequest& r) {
+        auto* o = env.mutable_graph_explore_request();
+        o->set_query(r.query);
+        o->set_max_files(r.maxFiles);
+        o->set_max_symbols(r.maxSymbols);
+        o->set_max_total_chars(r.maxTotalChars);
+        o->set_max_chars_per_file(r.maxCharsPerFile);
+        o->set_max_snippet_lines(r.maxSnippetLines);
+        o->set_include_line_numbers(r.includeLineNumbers);
+        o->set_include_relationships(r.includeRelationships);
+        o->set_include_warnings(r.includeWarnings);
+        o->set_format(r.format);
+        o->set_include_code(r.includeCode);
+        o->set_include_tests(r.includeTests);
+        o->set_prefer_exact_symbols(r.preferExactSymbols);
+    }
+    static GraphExploreRequest get(const Envelope& env) {
+        const auto& i = env.graph_explore_request();
+        GraphExploreRequest r{};
+        r.query = i.query();
+        r.maxFiles = i.max_files();
+        r.maxSymbols = i.max_symbols();
+        r.maxTotalChars = i.max_total_chars();
+        r.maxCharsPerFile = i.max_chars_per_file();
+        r.maxSnippetLines = i.max_snippet_lines();
+        r.includeLineNumbers = i.include_line_numbers();
+        r.includeRelationships = i.include_relationships();
+        r.includeWarnings = i.include_warnings();
+        r.format = i.format();
+        r.includeCode = i.include_code();
+        r.includeTests = i.include_tests();
+        r.preferExactSymbols = i.prefer_exact_symbols();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphExploreResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphExploreResponse;
+
+    static void setSymbol(pb::GraphExploreSymbol* o, const GraphExploreSymbol& r) {
+        o->set_node_key(r.nodeKey);
+        o->set_label(r.label);
+        o->set_qualified_name(r.qualifiedName);
+        o->set_kind(r.kind);
+        o->set_file_path(r.filePath);
+        o->set_has_start_line(r.startLine.has_value());
+        if (r.startLine)
+            o->set_start_line(*r.startLine);
+        o->set_has_end_line(r.endLine.has_value());
+        if (r.endLine)
+            o->set_end_line(*r.endLine);
+        o->set_score(r.score);
+        o->set_exact_match(r.exactMatch);
+        o->set_generated_or_cache(r.generatedOrCache);
+        o->set_test_file(r.testFile);
+    }
+
+    static GraphExploreSymbol getSymbol(const pb::GraphExploreSymbol& i) {
+        GraphExploreSymbol r{};
+        r.nodeKey = i.node_key();
+        r.label = i.label();
+        r.qualifiedName = i.qualified_name();
+        r.kind = i.kind();
+        r.filePath = i.file_path();
+        if (i.has_start_line())
+            r.startLine = i.start_line();
+        if (i.has_end_line())
+            r.endLine = i.end_line();
+        r.score = i.score();
+        r.exactMatch = i.exact_match();
+        r.generatedOrCache = i.generated_or_cache();
+        r.testFile = i.test_file();
+        return r;
+    }
+
+    static void set(Envelope& env, const GraphExploreResponse& r) {
+        auto* o = env.mutable_graph_explore_response();
+        o->set_query(r.query);
+        for (const auto& symbol : r.entrySymbols) {
+            setSymbol(o->add_entry_symbols(), symbol);
+        }
+        for (const auto& file : r.files) {
+            auto* f = o->add_files();
+            f->set_file_path(file.filePath);
+            f->set_language(file.language);
+            f->set_mode(file.mode);
+            f->set_has_start_line(file.startLine.has_value());
+            if (file.startLine)
+                f->set_start_line(*file.startLine);
+            f->set_has_end_line(file.endLine.has_value());
+            if (file.endLine)
+                f->set_end_line(*file.endLine);
+            f->set_heading(file.heading);
+            f->set_content(file.content);
+            for (const auto& symbol : file.symbols) {
+                setSymbol(f->add_symbols(), symbol);
+            }
+            f->set_truncated(file.truncated);
+        }
+        for (const auto& relation : r.relationships) {
+            auto* rel = o->add_relationships();
+            rel->set_relation(relation.relation);
+            rel->set_source_node_key(relation.sourceNodeKey);
+            rel->set_source_label(relation.sourceLabel);
+            rel->set_target_node_key(relation.targetNodeKey);
+            rel->set_target_label(relation.targetLabel);
+            rel->set_weight(relation.weight);
+            rel->set_confidence(relation.confidence);
+            rel->set_provenance(relation.provenance);
+        }
+        set_string_list(r.warnings, o->mutable_warnings());
+        o->set_total_symbols_considered(r.totalSymbolsConsidered);
+        o->set_total_files_considered(r.totalFilesConsidered);
+        o->set_emitted_chars(r.emittedChars);
+        o->set_kg_available(r.kgAvailable);
+        o->set_truncated(r.truncated);
+    }
+
+    static GraphExploreResponse get(const Envelope& env) {
+        const auto& i = env.graph_explore_response();
+        GraphExploreResponse r{};
+        r.query = i.query();
+        reserve_from_proto_size(r.entrySymbols, i.entry_symbols_size());
+        for (const auto& symbol : i.entry_symbols()) {
+            r.entrySymbols.push_back(getSymbol(symbol));
+        }
+        reserve_from_proto_size(r.files, i.files_size());
+        for (const auto& file : i.files()) {
+            GraphExploreSnippet f{};
+            f.filePath = file.file_path();
+            f.language = file.language();
+            f.mode = file.mode();
+            if (file.has_start_line())
+                f.startLine = file.start_line();
+            if (file.has_end_line())
+                f.endLine = file.end_line();
+            f.heading = file.heading();
+            f.content = file.content();
+            reserve_from_proto_size(f.symbols, file.symbols_size());
+            for (const auto& symbol : file.symbols()) {
+                f.symbols.push_back(getSymbol(symbol));
+            }
+            f.truncated = file.truncated();
+            r.files.push_back(std::move(f));
+        }
+        reserve_from_proto_size(r.relationships, i.relationships_size());
+        for (const auto& relation : i.relationships()) {
+            GraphExploreRelation rel{};
+            rel.relation = relation.relation();
+            rel.sourceNodeKey = relation.source_node_key();
+            rel.sourceLabel = relation.source_label();
+            rel.targetNodeKey = relation.target_node_key();
+            rel.targetLabel = relation.target_label();
+            rel.weight = relation.weight();
+            rel.confidence = relation.confidence();
+            rel.provenance = relation.provenance();
+            r.relationships.push_back(std::move(rel));
+        }
+        r.warnings = get_string_list(i.warnings());
+        r.totalSymbolsConsidered = i.total_symbols_considered();
+        r.totalFilesConsidered = i.total_files_considered();
+        r.emittedChars = i.emitted_chars();
+        r.kgAvailable = i.kg_available();
+        r.truncated = i.truncated();
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<GraphPathHistoryRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryRequest;
     static void set(Envelope& env, const GraphPathHistoryRequest& r) {
@@ -3734,6 +3904,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kGraphExploreRequest: {
+            auto v = ProtoBinding<GraphExploreRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kGraphPathHistoryRequest: {
             auto v = ProtoBinding<GraphPathHistoryRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -3929,6 +4104,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kGraphQueryResponse: {
             auto v = ProtoBinding<GraphQueryResponse>::get(env);
             m.payload = Response{std::in_place_type<GraphQueryResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphExploreResponse: {
+            auto v = ProtoBinding<GraphExploreResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphExploreResponse>, std::move(v)};
             break;
         }
         case Envelope::kGraphPathHistoryResponse: {
