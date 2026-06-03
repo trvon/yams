@@ -168,6 +168,13 @@ public:
             return Result<void>();
         }
 
+        const auto lifecycleBeforeShutdown = lifecycleFsm_.snapshot().state;
+        if (lifecycleBeforeShutdown != LifecycleState::Stopping &&
+            lifecycleBeforeShutdown != LifecycleState::Stopped &&
+            lifecycleBeforeShutdown != LifecycleState::Failed) {
+            lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
+        }
+
         if (dispatcher_) {
             dispatcher_.reset();
         }

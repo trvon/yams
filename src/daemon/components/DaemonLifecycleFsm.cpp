@@ -156,7 +156,8 @@ bool canDispatch(LifecycleState state, const ShutdownRequestedEvent&) {
 }
 
 bool canDispatch(LifecycleState state, const StoppedEvent&) {
-    return state == LifecycleState::Failed || state == LifecycleState::Stopping;
+    return state == LifecycleState::Failed || state == LifecycleState::Stopping ||
+           state == LifecycleState::Stopped;
 }
 
 template <typename Event>
@@ -217,7 +218,7 @@ void DaemonLifecycleFsm::dispatch(const ShutdownRequestedEvent& ev) {
 
 void DaemonLifecycleFsm::dispatch(const StoppedEvent& ev) {
     validateDispatch(snapshot().state, ev,
-                     "DaemonLifecycleFsm StoppedEvent requires Failed or Stopping state");
+                     "DaemonLifecycleFsm StoppedEvent requires Failed, Stopping, or Stopped state");
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::dispatch(ev);
 }

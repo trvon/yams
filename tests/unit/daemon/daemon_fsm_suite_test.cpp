@@ -235,6 +235,17 @@ TEST_CASE("DaemonLifecycleFSM: State transitions", "[daemon][fsm][lifecycle]") {
         fsm.dispatch(StoppedEvent{});
         REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
     }
+
+    SECTION("StoppedEvent is idempotent once stopped") {
+        fsm.dispatch(BootstrappedEvent{});
+        fsm.dispatch(HealthyEvent{});
+        fsm.dispatch(ShutdownRequestedEvent{});
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+    }
 }
 
 TEST_CASE("DaemonLifecycleFSM: clearing degradation is not a warning", "[daemon][fsm][lifecycle]") {
