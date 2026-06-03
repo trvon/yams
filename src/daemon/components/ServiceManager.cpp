@@ -1805,28 +1805,38 @@ void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath
                     "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
                 state_.readiness.databaseSalvaged = true;
             }
-            // Clean up corrupt files so the next startup doesn't re-trigger
-            // the same salvage on already-recovered DBs.
-            auto cleanup = removeCorruptDbFiles(salvageDir);
-            spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s) after salvage",
-                         cleanup.removed.size());
-            // Also clean up .recovered-* sentinel files left by quarantineAndRecreate;
-            // they are stale once corrupt files have been salvaged and removed.
-            {
-                std::error_code ec;
-                const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
-                for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
-                    if (ec) {
-                        ec.clear();
-                        continue;
-                    }
-                    if (entry.path().filename().string().rfind(sentinelPrefix, 0) == 0) {
-                        fs::remove(entry.path(), ec);
-                    }
-                }
-            }
         } else {
             spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
+        }
+
+        // Clean up corrupt files and .recovered-* sentinels regardless of salvage count.
+        // Corrupt DBs and their sentinels are stale once salvage has examined them;
+        // leaving them causes unbounded disk accumulation on repeated crash/recovery cycles.
+        {
+            auto cleanup = removeCorruptDbFiles(salvageDir);
+            if (!cleanup.removed.empty()) {
+                spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)",
+                             cleanup.removed.size());
+            }
+        }
+        {
+            std::error_code ec;
+            const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
+            int removedSentinelCount = 0;
+            for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                if (entry.path().filename().string().rfind(sentinelPrefix, 0) == 0) {
+                    fs::remove(entry.path(), ec);
+                    ++removedSentinelCount;
+                }
+            }
+            if (removedSentinelCount > 0) {
+                spdlog::info("[ServiceManager] Cleaned up {} recovery sentinel(s)",
+                             removedSentinelCount);
+            }
         }
         {
             std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
