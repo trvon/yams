@@ -2887,6 +2887,37 @@ private:
 
         vec0_dirty_dims_.erase(dim);
         vec0_ready_dims_.insert(dim);
+
+        // Try to restore a previously-persisted ANN index so we skip the
+        // O(n log n) rebuild on daemon restart. The shadow tables are named
+        // vectors_<dim>_hnsw_meta / vectors_<dim>_hnsw_nodes and are written
+        // by persistVec0AnnIndexUnlocked() when buildIndex() completes.
+        try {
+            char* err = nullptr;
+            auto restored =
+                sqlite_vec_cpp::index::load_hnsw_index<float,
+                                                       sqlite_vec_cpp::distances::L2Metric<float>>(
+                    db_, "main", ("vectors_" + std::to_string(dim)).c_str(), &err);
+            if (err == nullptr) {
+                auto ann =
+                    std::make_shared<sqlite_vec_cpp::sqlite::Vec0AnnIndex>(std::move(restored));
+                sqlite_vec_cpp::sqlite::vec0_with_table(
+                    db_, "main", vec0TableName(dim), [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
+                        if (!table) {
+                            return;
+                        }
+                        std::lock_guard<std::mutex> ann_lock(table->ann_mutex);
+                        table->ann_index = ann;
+                        table->ann_ready = true;
+                    });
+                spdlog::info("[vec0] restored persisted ANN index for dim {}", dim);
+            } else {
+                sqlite3_free(err);
+            }
+        } catch (...) {
+            spdlog::debug("[vec0] no persisted ANN index for dim {} — will rebuild", dim);
+        }
+
         return Result<void>{};
     }
 
@@ -3547,9 +3578,6 @@ ORDER BY rowid
 
     // Persist the vec0 ANN index so restarts skip the O(n log n) rebuild.
     void persistVec0AnnIndexUnlocked();
-
-    // Try to restore a previously-persisted vec0 ANN index on startup.
-    void restoreVec0AnnIndexIfPresentUnlocked();
 };
 
 // ============================================================================
@@ -3586,16 +3614,6 @@ void SqliteVecBackend::Impl::persistVec0AnnIndexUnlocked() {
             spdlog::info("[vec0] persisted ANN index for dim {} to shadow tables", dim);
         }
     }
-}
-
-void SqliteVecBackend::Impl::restoreVec0AnnIndexIfPresentUnlocked() {
-    // Check each dimension for a persisted ANN index and restore it.
-    // This is called during initialize() after vec0 functions are registered.
-    std::vector<size_t> dims;
-    // Probe by scanning known dimensions from config or schema.
-    // For now, restore on first searchSimilar access via lazy path.
-    // Full restore requires knowing which dims have persisted shadow tables.
-    (void)this; // placeholder — full implementation in follow-up
 }
 
 // ============================================================================
