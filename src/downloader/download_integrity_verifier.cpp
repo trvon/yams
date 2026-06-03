@@ -15,6 +15,7 @@
  */
 
 #include <yams/downloader/downloader.hpp>
+#include <yams/core/assert.hpp>
 
 #include <openssl/evp.h>
 #include <openssl/sha.h>
@@ -67,6 +68,8 @@ inline const EVP_MD* resolve_algo(HashAlgo algo) {
 }
 
 inline std::string to_hex_lower(const unsigned char* bytes, std::size_t len) {
+    YAMS_PRECONDITION(bytes != nullptr || len == 0,
+                      "bytes must be non-null when len > 0");
     static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
     out.resize(len * 2);

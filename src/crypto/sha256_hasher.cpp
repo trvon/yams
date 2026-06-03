@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <openssl/evp.h>
+#include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -16,6 +17,8 @@ namespace yams::crypto {
 namespace {
 
 std::string bytesToHex(const unsigned char* data, unsigned int size) {
+    YAMS_PRECONDITION(data != nullptr || size == 0,
+                      "data must be non-null when size > 0");
     static constexpr char kHexDigits[] = "0123456789abcdef";
     std::string out(static_cast<std::string::size_type>(size) * 2U, '\0');
     for (unsigned int i = 0; i < size; ++i) {

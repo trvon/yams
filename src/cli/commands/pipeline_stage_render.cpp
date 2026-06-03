@@ -1,4 +1,5 @@
 #include <yams/cli/pipeline_stage_render.h>
+#include <yams/core/assert.hpp>
 
 #include <sstream>
 #include <string>
@@ -6,6 +7,8 @@
 namespace yams::cli::detail {
 
 std::vector<ui::Row> renderPipelineStages(const StageInfo* stages, size_t count) {
+    YAMS_PRECONDITION(stages != nullptr || count == 0,
+                      "stages must be non-null when count > 0");
     using namespace yams::cli::ui;
 
     std::vector<Row> rows;
