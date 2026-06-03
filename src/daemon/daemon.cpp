@@ -1250,7 +1250,18 @@ void YamsDaemon::onDocumentRemoved(const std::string& hash) {
 namespace {
 std::filesystem::path getXDGStateHome() {
     auto stateDir = yams::config::get_state_dir();
-    return stateDir.empty() ? std::filesystem::path() : stateDir.parent_path();
+    if (stateDir.empty()) {
+        return std::filesystem::path();
+    }
+#ifdef _WIN32
+    // get_state_dir() returns %LOCALAPPDATA%\yams\state on Windows.
+    // parent_path() gives %LOCALAPPDATA%\yams — but callers append /yams
+    // themselves, producing a doubled yams\yams path. Go up two levels to
+    // return %LOCALAPPDATA% so the xdg / "yams" pattern stays correct.
+    return stateDir.parent_path().parent_path();
+#else
+    return stateDir.parent_path();
+#endif
 }
 } // namespace
 

@@ -16,7 +16,15 @@ namespace yams::config {
 std::filesystem::path expand_tilde(const std::string& path) {
     if (!path.empty() && path[0] == '~') {
         if (const char* home = std::getenv("HOME")) {
-            return std::filesystem::path(home) / path.substr(2);
+            // path may be "~" (bare home) or "~/..." (relative to home).
+            // path.substr(2) would throw std::out_of_range for a bare "~".
+            if (path.size() >= 2 && path[1] == '/') {
+                return std::filesystem::path(home) / path.substr(2);
+            }
+            if (path.size() == 1) {
+                return std::filesystem::path(home);
+            }
+            // "~user" (non-home-directory tilde expansion) — not expanded.
         }
     }
     return path;
