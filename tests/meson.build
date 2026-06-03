@@ -490,6 +490,16 @@ if catch2_dep.found()
     install: false,
   )
 
+#Assertion validation tests (fork-based death tests for YAMS_ASSERT / YAMS_PRECONDITION)
+  catch2_assert_val_exe = executable('catch2_assert_val',
+    files('unit/core/assert_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Metrics consistency tests(migrated from GTest)
   catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
     files('unit/daemon/metrics_consistency_catch2_test.cpp'),
@@ -2644,6 +2654,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'poller'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
+  )
+
+  test('assert_val', catch2_assert_val_exe,
+    suite: ['catch2', 'unit', 'core', 'assert'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 15
   )
 
   test('metrics_consistency', catch2_metrics_consistency_exe,
