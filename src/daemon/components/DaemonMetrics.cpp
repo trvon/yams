@@ -1449,19 +1449,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
     }
 }
 
-void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
-    const std::string preservedVersion = std::move(out.version);
-    out = buildMinimalSnapshot();
-    if (!preservedVersion.empty()) {
-        out.version = preservedVersion;
-    }
-
-    populateReadinessSnapshot(out);
-
-    populateLifecycleSnapshot(out);
-
-    populateWorkerPipelineSnapshot(out);
-
+void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     // Session watch status (best-effort)
     try {
         if (services_) {
@@ -1675,6 +1663,22 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
     } catch (...) {
         // Metrics collection is best-effort; leave snapshot defaults.
     }
+}
+
+void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) const {
+    const std::string preservedVersion = std::move(out.version);
+    out = buildMinimalSnapshot();
+    if (!preservedVersion.empty()) {
+        out.version = preservedVersion;
+    }
+
+    populateReadinessSnapshot(out);
+
+    populateLifecycleSnapshot(out);
+
+    populateWorkerPipelineSnapshot(out);
+
+    populateRuntimeCounterSnapshot(out);
 
     // OS resource hints (fast probes)
     try {
