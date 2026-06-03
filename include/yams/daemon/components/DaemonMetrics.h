@@ -465,6 +465,9 @@ private:
     MetricsSnapshot buildMinimalSnapshot() const;
     MetricsSnapshot collectSnapshot(bool detailed) const;
     void populateCommonSnapshot(MetricsSnapshot& snapshot, bool detailed) const;
+    void populateReadinessSnapshot(MetricsSnapshot& snapshot) const;
+    void populateLifecycleSnapshot(MetricsSnapshot& snapshot) const;
+    void populateWorkerPipelineSnapshot(MetricsSnapshot& snapshot) const;
     void enrichDetailedSnapshot(MetricsSnapshot& snapshot) const;
     CachedSnapshotState loadCachedSnapshotState() const;
     SnapshotFreshness evaluateSnapshotFreshness(const CachedSnapshotState& state,
