@@ -2776,11 +2776,8 @@ template <> struct ProtoBinding<GraphExploreRequest> {
         o->set_max_snippet_lines(r.maxSnippetLines);
         o->set_include_line_numbers(r.includeLineNumbers);
         o->set_include_relationships(r.includeRelationships);
-        o->set_include_warnings(r.includeWarnings);
-        o->set_format(r.format);
         o->set_include_code(r.includeCode);
         o->set_include_tests(r.includeTests);
-        o->set_prefer_exact_symbols(r.preferExactSymbols);
     }
     static GraphExploreRequest get(const Envelope& env) {
         const auto& i = env.graph_explore_request();
@@ -2793,11 +2790,8 @@ template <> struct ProtoBinding<GraphExploreRequest> {
         r.maxSnippetLines = i.max_snippet_lines();
         r.includeLineNumbers = i.include_line_numbers();
         r.includeRelationships = i.include_relationships();
-        r.includeWarnings = i.include_warnings();
-        r.format = i.format();
         r.includeCode = i.include_code();
         r.includeTests = i.include_tests();
-        r.preferExactSymbols = i.prefer_exact_symbols();
         return r;
     }
 };

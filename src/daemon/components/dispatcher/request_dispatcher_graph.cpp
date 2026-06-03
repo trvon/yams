@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -29,21 +30,14 @@ std::vector<std::string> canonicalizeRelationFilters(const std::vector<std::stri
     return out;
 }
 
-app::services::GraphContextFormat graphContextFormatFromString(const std::string& value) {
-    return value == "json" ? app::services::GraphContextFormat::Json
-                           : app::services::GraphContextFormat::Markdown;
-}
-
 std::string snippetModeToString(app::services::GraphContextSnippetMode mode) {
     switch (mode) {
         case app::services::GraphContextSnippetMode::Full:
             return "full";
-        case app::services::GraphContextSnippetMode::Signature:
-            return "signature";
         case app::services::GraphContextSnippetMode::Omitted:
             return "omitted";
     }
-    return "full";
+    YAMS_UNREACHABLE("unknown graph context snippet mode in dispatcher");
 }
 
 GraphExploreSymbol mapGraphExploreSymbol(const app::services::GraphContextSymbol& in) {
@@ -256,11 +250,8 @@ RequestDispatcher::handleGraphExploreRequest(const GraphExploreRequest& req) {
     serviceReq.budget.maxSnippetLines = static_cast<std::size_t>(req.maxSnippetLines);
     serviceReq.budget.includeLineNumbers = req.includeLineNumbers;
     serviceReq.budget.includeRelationships = req.includeRelationships;
-    serviceReq.budget.includeWarnings = req.includeWarnings;
-    serviceReq.format = graphContextFormatFromString(req.format);
     serviceReq.includeCode = req.includeCode;
     serviceReq.includeTests = req.includeTests;
-    serviceReq.preferExactSymbols = req.preferExactSymbols;
 
     auto result = graphService->explore(serviceReq);
     if (!result) {

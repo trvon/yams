@@ -1,14 +1,15 @@
 #include <yams/app/services/graph_context_service.hpp>
 
+#include <yams/core/assert.hpp>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <sstream>
 #include <unordered_map>
@@ -127,6 +128,125 @@ std::vector<std::string> readLines(const std::string& path) {
     return lines;
 }
 
+std::size_t cappedProduct(std::size_t value, std::size_t factor, std::size_t cap) {
+    if (value == 0 || factor == 0 || cap == 0) {
+        return 0;
+    }
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < factor; ++i) {
+        const auto next = total + value;
+        if (next < total || next > cap) {
+            return cap;
+        }
+        total = next;
+    }
+    return total;
+}
+
+std::optional<std::string> tryExtractStringProperty(const metadata::KGNode& node,
+                                                    std::string_view key) {
+    if (!node.properties.has_value() || node.properties->empty()) {
+        return std::nullopt;
+    }
+    try {
+        const auto props = nlohmann::json::parse(*node.properties);
+        if (!props.contains(std::string(key)) || !props[std::string(key)].is_string()) {
+            return std::nullopt;
+        }
+        return props[std::string(key)].get<std::string>();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::int32_t> tryExtractIntProperty(const metadata::KGNode& node,
+                                                  std::string_view key) {
+    if (!node.properties.has_value() || node.properties->empty()) {
+        return std::nullopt;
+    }
+    try {
+        const auto props = nlohmann::json::parse(*node.properties);
+        if (!props.contains(std::string(key)) || !props[std::string(key)].is_number_integer()) {
+            return std::nullopt;
+        }
+        return static_cast<std::int32_t>(props[std::string(key)].get<std::int64_t>());
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> filePathFromNodeKey(std::string_view nodeKey) {
+    auto at = nodeKey.rfind('@');
+    if (at == std::string_view::npos || at + 1 >= nodeKey.size()) {
+        return std::nullopt;
+    }
+    auto suffix = std::string(nodeKey.substr(at + 1));
+    if (suffix.rfind("snap:", 0) == 0) {
+        return std::nullopt;
+    }
+    return suffix;
+}
+
+std::optional<std::string> qualifiedNameFromNodeKey(std::string_view nodeKey) {
+    const auto colon = nodeKey.find(':');
+    const auto at = nodeKey.rfind('@');
+    if (colon == std::string_view::npos || at == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto start = colon + 1;
+    if (at <= start) {
+        return std::nullopt;
+    }
+    return std::string(nodeKey.begin() + static_cast<std::ptrdiff_t>(start),
+                       nodeKey.begin() + static_cast<std::ptrdiff_t>(at));
+}
+
+GraphContextSymbol makeContextSymbol(const metadata::KGNode& node, const std::string& query,
+                                     double baseScore) {
+    GraphContextSymbol out;
+    out.nodeKey = node.nodeKey;
+    out.label = node.label.value_or(std::string{});
+    out.kind = node.type.value_or("symbol");
+    static constexpr std::string_view kVersionSuffix = "_version";
+    if (out.kind.size() >= kVersionSuffix.size() && out.kind.ends_with(kVersionSuffix)) {
+        const auto suffixPos = out.kind.rfind(kVersionSuffix);
+        if (suffixPos != std::string::npos) {
+            out.kind = out.kind.substr(0, suffixPos);
+        }
+    }
+    auto qualifiedName = tryExtractStringProperty(node, "qualified_name");
+    if (!qualifiedName.has_value()) {
+        qualifiedName = qualifiedNameFromNodeKey(node.nodeKey);
+    }
+    out.qualifiedName = qualifiedName.value_or(out.label);
+
+    auto filePath = tryExtractStringProperty(node, "file_path");
+    if (!filePath.has_value()) {
+        filePath = filePathFromNodeKey(node.nodeKey);
+    }
+    out.filePath = filePath.value_or(std::string{});
+    out.startLine = tryExtractIntProperty(node, "start_line");
+    out.endLine = tryExtractIntProperty(node, "end_line");
+    out.exactMatch = lowerAscii(out.label) == lowerAscii(query) ||
+                     lowerAscii(out.qualifiedName) == lowerAscii(query);
+    out.generatedOrCache = isGeneratedOrCachePath(out.filePath);
+    out.testFile = isTestPath(out.filePath);
+    out.score = baseScore;
+    if (out.exactMatch) {
+        out.score += 20.0;
+    }
+    if (containsToken(out.qualifiedName, query)) {
+        out.score += 10.0;
+    }
+    if (out.generatedOrCache) {
+        out.score -= 30.0;
+    }
+    if (out.testFile && !queryMentionsTests(query)) {
+        out.score -= 20.0;
+    }
+    return out;
+}
+
 std::string lineNumberedContent(const std::vector<std::string>& lines, std::size_t startLine,
                                 std::size_t endLine, bool includeLineNumbers, std::size_t maxChars,
                                 bool& truncated) {
@@ -189,6 +309,93 @@ GraphContextSymbol makeContextSymbol(const metadata::SymbolMetadata& sym,
     return out;
 }
 
+Result<std::vector<GraphContextSymbol>>
+lookupFallbackNodeSymbols(metadata::KnowledgeGraphStore& kgStore,
+                          const std::vector<std::string>& terms, const std::string& query,
+                          bool includeTests, std::size_t limit) {
+    std::vector<GraphContextSymbol> symbols;
+    std::unordered_set<std::string> seenKeys;
+    symbols.reserve(limit);
+
+    const auto maybeAddNode = [&](const metadata::KGNode& node, double baseScore) {
+        if (seenKeys.size() >= limit) {
+            return;
+        }
+        auto symbol = makeContextSymbol(node, query, baseScore);
+        if ((!includeTests && symbol.testFile && !queryMentionsTests(query)) ||
+            symbol.filePath.empty()) {
+            return;
+        }
+        if (seenKeys.insert(symbol.nodeKey).second) {
+            symbols.push_back(std::move(symbol));
+        }
+    };
+
+    const auto hydrateAliases = [&](const Result<std::vector<metadata::AliasResolution>>& aliases,
+                                    double baseScore) -> Result<void> {
+        if (!aliases) {
+            return aliases.error();
+        }
+        for (const auto& alias : aliases.value()) {
+            auto node = kgStore.getNodeById(alias.nodeId);
+            if (!node) {
+                return node.error();
+            }
+            if (!node.value().has_value()) {
+                continue;
+            }
+            maybeAddNode(*node.value(), baseScore * alias.score);
+            if (symbols.size() >= limit) {
+                return Result<void>();
+            }
+        }
+        return Result<void>();
+    };
+
+    for (const auto& term : terms) {
+        auto exactAliases = hydrateAliases(kgStore.resolveAliasExact(term, limit), 95.0);
+        if (!exactAliases) {
+            return exactAliases.error();
+        }
+        if (symbols.size() >= limit) {
+            break;
+        }
+
+        auto labelMatches = kgStore.searchNodesByLabel(term, limit, 0);
+        if (!labelMatches) {
+            return labelMatches.error();
+        }
+        for (const auto& node : labelMatches.value()) {
+            maybeAddNode(node, term.find(' ') != std::string::npos ? 90.0 : 80.0);
+            if (symbols.size() >= limit) {
+                break;
+            }
+        }
+        if (symbols.size() >= limit) {
+            break;
+        }
+
+        auto fuzzyAliases = hydrateAliases(kgStore.resolveAliasFuzzy(term, limit), 70.0);
+        if (!fuzzyAliases) {
+            return fuzzyAliases.error();
+        }
+        if (symbols.size() >= limit) {
+            break;
+        }
+    }
+
+    std::stable_sort(symbols.begin(), symbols.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+        if (lhs.filePath != rhs.filePath) {
+            return lhs.filePath < rhs.filePath;
+        }
+        return lhs.qualifiedName < rhs.qualifiedName;
+    });
+    return symbols;
+}
+
 } // namespace
 
 class GraphContextService : public IGraphContextService {
@@ -243,17 +450,36 @@ public:
 
         response.totalSymbolsConsidered = symbols.size();
         if (symbols.empty()) {
-            response.warnings.push_back("No matching symbols found in symbol metadata");
-            return response;
+            auto fallbackSymbols = lookupFallbackNodeSymbols(
+                *kgStore_, terms, req.query, req.includeTests, req.budget.maxSymbols);
+            if (!fallbackSymbols) {
+                return fallbackSymbols.error();
+            }
+            if (fallbackSymbols.value().empty()) {
+                response.warnings.push_back(
+                    "No matching symbols found in symbol metadata or graph node labels");
+                response.warnings.push_back(
+                    "Graph explore depends on extracted symbol metadata; re-index the file or "
+                    "rerun extraction if results look incomplete");
+                return response;
+            }
+            response.warnings.push_back(
+                "Symbol metadata missing or stale; falling back to graph node labels and aliases");
+            symbols = std::move(fallbackSymbols.value());
+            response.totalSymbolsConsidered = symbols.size();
         }
         if (symbols.size() > req.budget.maxSymbols) {
             symbols.resize(req.budget.maxSymbols);
             response.truncated = true;
         }
         response.entrySymbols = symbols;
+        YAMS_DCHECK(response.entrySymbols.size() <= req.budget.maxSymbols,
+                    "graph explore entry symbols must respect maxSymbols budget");
 
         addRelationships(symbols, response, req.budget);
         addSnippets(symbols, response, req);
+        YAMS_DCHECK(response.emittedChars <= req.budget.maxTotalChars,
+                    "graph explore emitted chars must respect maxTotalChars budget");
         return response;
     }
 
@@ -276,17 +502,71 @@ public:
 private:
     void addRelationships(const std::vector<GraphContextSymbol>& symbols,
                           GraphExploreResponse& response, const GraphContextBudget& budget) {
-        if (!budget.includeRelationships) {
+        YAMS_PRECONDITION(kgStore_ != nullptr,
+                          "GraphContextService::addRelationships requires a knowledge graph store");
+        if (!budget.includeRelationships || symbols.empty()) {
             return;
         }
-        std::unordered_set<std::int64_t> seenEdgeIds;
+
+        std::vector<std::string> nodeKeys;
+        nodeKeys.reserve(symbols.size());
         for (const auto& symbol : symbols) {
-            auto nodeResult = kgStore_->getNodeByKey(symbol.nodeKey);
-            if (!nodeResult || !nodeResult.value().has_value()) {
+            if (!symbol.nodeKey.empty()) {
+                nodeKeys.push_back(symbol.nodeKey);
+            }
+        }
+        if (nodeKeys.empty()) {
+            return;
+        }
+
+        auto nodesResult = kgStore_->getNodesByKeys(nodeKeys);
+        if (!nodesResult) {
+            return;
+        }
+
+        std::unordered_map<std::string, std::int64_t> nodeIdsByKey;
+        nodeIdsByKey.reserve(nodesResult.value().size());
+        for (const auto& node : nodesResult.value()) {
+            nodeIdsByKey.emplace(node.nodeKey, node.id);
+        }
+        if (nodeIdsByKey.empty()) {
+            return;
+        }
+
+        const auto symbolCount = symbols.size();
+        YAMS_PRECONDITION(symbolCount > 0,
+                          "GraphContextService::addRelationships requires at least one symbol");
+        if (symbolCount == 0) {
+            return;
+        }
+        static constexpr std::size_t kRelationshipBudgetCap = 128;
+        const auto relationshipBudget = std::clamp<std::size_t>(
+            std::max<std::size_t>(cappedProduct(symbolCount, 4, kRelationshipBudgetCap),
+                                  cappedProduct(budget.maxFiles, 6, kRelationshipBudgetCap)),
+            8, kRelationshipBudgetCap);
+        const auto fetchShare = relationshipBudget / symbolCount;
+        const auto fetchRemainder = relationshipBudget % symbolCount;
+        const auto fetchLimitPerSymbol =
+            std::clamp<std::size_t>(fetchShare + (fetchRemainder == 0 ? 2 : 3), 4, 24);
+        YAMS_DCHECK(
+            relationshipBudget >= symbolCount || relationshipBudget == kRelationshipBudgetCap,
+            "graph explore relationship budget must cover the entry symbol set unless capped");
+        YAMS_DCHECK(fetchLimitPerSymbol > 0,
+                    "graph explore relationship fetch budget must stay positive");
+
+        std::unordered_set<std::int64_t> seenEdgeIds;
+        std::vector<metadata::KGEdge> hydratedEdges;
+        hydratedEdges.reserve(relationshipBudget);
+        bool relationshipLimitHit = false;
+
+        for (const auto& symbol : symbols) {
+            const auto nodeIt = nodeIdsByKey.find(symbol.nodeKey);
+            if (nodeIt == nodeIdsByKey.end()) {
                 continue;
             }
+
             auto edgesResult =
-                kgStore_->getEdgesBidirectional(nodeResult.value()->id, std::nullopt, 16);
+                kgStore_->getEdgesBidirectional(nodeIt->second, std::nullopt, fetchLimitPerSymbol);
             if (!edgesResult) {
                 continue;
             }
@@ -294,26 +574,69 @@ private:
                 if (!seenEdgeIds.insert(edge.id).second) {
                     continue;
                 }
-                GraphContextRelation relation;
-                relation.relation = metadata::normalizeRelationName(edge.relation);
-                relation.sourceNodeKey = std::to_string(edge.srcNodeId);
-                relation.targetNodeKey = std::to_string(edge.dstNodeId);
-                relation.weight = edge.weight;
-                relation.confidence = std::clamp(static_cast<double>(edge.weight), 0.0, 1.0);
-                if (auto src = kgStore_->getNodeById(edge.srcNodeId); src && src.value()) {
-                    relation.sourceNodeKey = src.value()->nodeKey;
-                    relation.sourceLabel = src.value()->label.value_or(src.value()->nodeKey);
+                if (hydratedEdges.size() >= relationshipBudget) {
+                    relationshipLimitHit = true;
+                    break;
                 }
-                if (auto dst = kgStore_->getNodeById(edge.dstNodeId); dst && dst.value()) {
-                    relation.targetNodeKey = dst.value()->nodeKey;
-                    relation.targetLabel = dst.value()->label.value_or(dst.value()->nodeKey);
-                }
-                response.relationships.push_back(std::move(relation));
-                if (response.relationships.size() >= budget.maxSymbols) {
-                    response.truncated = true;
-                    return;
+                hydratedEdges.push_back(edge);
+            }
+            if (relationshipLimitHit) {
+                break;
+            }
+        }
+
+        YAMS_DCHECK(hydratedEdges.size() <= relationshipBudget,
+                    "graph explore hydrated edge count must respect relationship budget");
+        if (hydratedEdges.empty()) {
+            return;
+        }
+
+        std::vector<std::int64_t> endpointIds;
+        endpointIds.reserve(hydratedEdges.size());
+        std::unordered_set<std::int64_t> seenEndpointIds;
+        for (const auto& edge : hydratedEdges) {
+            if (seenEndpointIds.insert(edge.srcNodeId).second) {
+                endpointIds.push_back(edge.srcNodeId);
+            }
+            if (seenEndpointIds.insert(edge.dstNodeId).second) {
+                endpointIds.push_back(edge.dstNodeId);
+            }
+        }
+
+        std::unordered_map<std::int64_t, metadata::KGNode> nodesById;
+        if (!endpointIds.empty()) {
+            auto endpointNodesResult = kgStore_->getNodesByIds(endpointIds);
+            if (endpointNodesResult) {
+                nodesById.reserve(endpointNodesResult.value().size());
+                for (auto& node : endpointNodesResult.value()) {
+                    nodesById.emplace(node.id, std::move(node));
                 }
             }
+        }
+
+        response.relationships.reserve(response.relationships.size() + hydratedEdges.size());
+        for (const auto& edge : hydratedEdges) {
+            GraphContextRelation relation;
+            relation.relation = metadata::normalizeRelationName(edge.relation);
+            relation.sourceNodeKey = std::to_string(edge.srcNodeId);
+            relation.targetNodeKey = std::to_string(edge.dstNodeId);
+            relation.weight = edge.weight;
+            relation.confidence = std::clamp(static_cast<double>(edge.weight), 0.0, 1.0);
+
+            if (const auto srcIt = nodesById.find(edge.srcNodeId); srcIt != nodesById.end()) {
+                relation.sourceNodeKey = srcIt->second.nodeKey;
+                relation.sourceLabel = srcIt->second.label.value_or(srcIt->second.nodeKey);
+            }
+            if (const auto dstIt = nodesById.find(edge.dstNodeId); dstIt != nodesById.end()) {
+                relation.targetNodeKey = dstIt->second.nodeKey;
+                relation.targetLabel = dstIt->second.label.value_or(dstIt->second.nodeKey);
+            }
+
+            response.relationships.push_back(std::move(relation));
+        }
+
+        if (relationshipLimitHit) {
+            response.truncated = true;
         }
     }
 
@@ -388,6 +711,9 @@ private:
             if (startLine == std::numeric_limits<std::size_t>::max() || startLine == 0) {
                 startLine = 1;
             }
+            YAMS_DCHECK(
+                startLine >= 1,
+                "graph explore snippet start line must be normalized to one-based indexing");
             const auto snippetLineBudget = std::max<std::size_t>(req.budget.maxSnippetLines, 1);
             std::size_t snippetLineSpan = snippetLineBudget;
             if (snippetLineSpan > 0) {
@@ -399,6 +725,8 @@ private:
             }
             endLine = std::min(endLine, maxEndLine);
             endLine = std::min(endLine, lines.size());
+            YAMS_DCHECK(endLine >= startLine,
+                        "graph explore snippet end line must not precede start line");
 
             const auto remaining = req.budget.maxTotalChars - totalChars;
             const auto fileBudget = std::min(req.budget.maxCharsPerFile, remaining);
@@ -408,6 +736,8 @@ private:
             snippet.startLine = static_cast<std::int32_t>(startLine);
             snippet.endLine = static_cast<std::int32_t>(endLine);
             totalChars += snippet.content.size();
+            YAMS_DCHECK(totalChars <= req.budget.maxTotalChars,
+                        "graph explore snippet aggregation must respect maxTotalChars budget");
             response.emittedChars = totalChars;
             if (snippet.truncated) {
                 response.truncated = true;

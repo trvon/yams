@@ -24,15 +24,9 @@ namespace yams::app::services {
  * into read-equivalent context blocks for CLI/MCP/agent surfaces.
  */
 
-enum class GraphContextFormat {
-    Markdown,
-    Json,
-};
-
 enum class GraphContextSnippetMode {
-    Full,      // Include the selected source span in full, subject to budgets.
-    Signature, // Include a signature/outline only.
-    Omitted,   // Mention the symbol/file but omit source due to budget or policy.
+    Full,    // Include the selected source span in full, subject to budgets.
+    Omitted, // Mention the symbol/file but omit source due to budget or policy.
 };
 
 struct GraphContextBudget {
@@ -43,7 +37,6 @@ struct GraphContextBudget {
     std::size_t maxSnippetLines{160};
     bool includeLineNumbers{true};
     bool includeRelationships{true};
-    bool includeWarnings{true};
 };
 
 struct GraphContextRelation {
@@ -86,10 +79,8 @@ struct GraphContextSnippet {
 struct GraphExploreRequest {
     std::string query;
     GraphContextBudget budget{};
-    GraphContextFormat format{GraphContextFormat::Markdown};
     bool includeCode{true};
     bool includeTests{false};
-    bool preferExactSymbols{true};
 };
 
 struct GraphExploreResponse {

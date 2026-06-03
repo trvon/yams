@@ -2785,18 +2785,15 @@ struct GraphExploreRequest {
     uint64_t maxSnippetLines{160};
     bool includeLineNumbers{true};
     bool includeRelationships{true};
-    bool includeWarnings{true};
-    std::string format{"markdown"};
     bool includeCode{true};
     bool includeTests{false};
-    bool preferExactSymbols{true};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << query << maxFiles << maxSymbols << maxTotalChars << maxCharsPerFile
-            << maxSnippetLines << includeLineNumbers << includeRelationships << includeWarnings
-            << format << includeCode << includeTests << preferExactSymbols;
+            << maxSnippetLines << includeLineNumbers << includeRelationships << includeCode
+            << includeTests;
     }
 
     template <typename Deserializer>
@@ -2836,23 +2833,11 @@ struct GraphExploreRequest {
         else
             return r.error();
         if (auto r = deser.template read<bool>(); r)
-            req.includeWarnings = r.value();
-        else
-            return r.error();
-        if (auto r = deser.readString(); r)
-            req.format = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.template read<bool>(); r)
             req.includeCode = r.value();
         else
             return r.error();
         if (auto r = deser.template read<bool>(); r)
             req.includeTests = r.value();
-        else
-            return r.error();
-        if (auto r = deser.template read<bool>(); r)
-            req.preferExactSymbols = r.value();
         else
             return r.error();
         return req;

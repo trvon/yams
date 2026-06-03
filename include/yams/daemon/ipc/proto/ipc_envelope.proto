@@ -946,6 +946,8 @@ message GraphQueryResponse {
 }
 
 message GraphExploreRequest {
+  reserved 9, 10, 13;
+
   string query = 1;
   uint64 max_files = 2;
   uint64 max_symbols = 3;
@@ -954,11 +956,8 @@ message GraphExploreRequest {
   uint64 max_snippet_lines = 6;
   bool include_line_numbers = 7;
   bool include_relationships = 8;
-  bool include_warnings = 9;
-  string format = 10;
   bool include_code = 11;
   bool include_tests = 12;
-  bool prefer_exact_symbols = 13;
 }
 
 message GraphExploreSymbol {

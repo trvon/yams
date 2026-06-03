@@ -1,13 +1,11 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,14 +14,18 @@
 #include <yams/app/services/graph_context_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/graph_explore_presenter.h>
 #include <yams/cli/graph_helpers.h>
+#include <yams/cli/graph_query_execution.h>
+#include <yams/cli/graph_query_presenter.h>
+#include <yams/cli/graph_scope_support.h>
+#include <yams/cli/graph_topology_presenter.h>
+#include <yams/cli/graph_topology_support.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
-#include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/connection_pool.h>
-#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
@@ -196,20 +198,6 @@ private:
         }
     }
 
-    static std::string buildPathFileNodeKey(const std::string& path) {
-        try {
-            auto derived = yams::metadata::computePathDerivedValues(path);
-            if (!derived.normalizedPath.empty()) {
-                return "path:file:" + derived.normalizedPath;
-            }
-        } catch (const std::exception& e) {
-            spdlog::trace("graph: path-derived node key fallback for '{}': {}", path, e.what());
-        } catch (...) {
-            spdlog::trace("graph: path-derived node key fallback for '{}'", path);
-        }
-        return "path:file:" + path;
-    }
-
     static std::string displayNodePath(const yams::daemon::GraphNode& node) {
         if (!node.documentPath.empty()) {
             return node.documentPath;
@@ -337,7 +325,7 @@ private:
         out["key"] = group.key;
         out["label"] = group.label.find('/') == std::string::npos
                            ? group.label
-                           : projectPathForDisplay(group.label, cwd);
+                           : projectPathForCli(group.label, cwd);
         if (!group.path.empty()) {
             out["path"] = group.path;
         }
@@ -375,287 +363,30 @@ private:
         }
     }
 
-    static std::string topologyInputKindLabel(yams::topology::TopologyInputKind kind) {
-        using yams::topology::TopologyInputKind;
-        switch (kind) {
-            case TopologyInputKind::SemanticNeighborGraph:
-                return "semantic_neighbor_graph";
-            case TopologyInputKind::EmbeddingNeighborhood:
-                return "embedding_neighborhood";
-            case TopologyInputKind::Hybrid:
-                return "hybrid";
-        }
-        return "hybrid";
-    }
-
-    static std::string topologyRoleLabel(yams::topology::DocumentTopologyRole role) {
-        using yams::topology::DocumentTopologyRole;
-        switch (role) {
-            case DocumentTopologyRole::Core:
-                return "core";
-            case DocumentTopologyRole::Bridge:
-                return "bridge";
-            case DocumentTopologyRole::Medoid:
-                return "medoid";
-            case DocumentTopologyRole::Outlier:
-                return "outlier";
-        }
-        return "core";
-    }
-
-    struct TopologyClusterStats {
-        std::size_t scopedMemberCount{0};
-        std::unordered_map<std::string, std::size_t> roleCounts;
-    };
-
-    struct TopologyReadContext {
-        std::shared_ptr<metadata::ConnectionPool> connectionPool;
-        std::shared_ptr<metadata::IMetadataRepository> metadataRepo;
-        std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
-    };
-
-    Result<std::optional<TopologyReadContext>> buildTopologyReadContext() const {
-        if (cli_ == nullptr) {
-            return std::optional<TopologyReadContext>{std::nullopt};
-        }
-
-        if (auto repo = cli_->getMetadataRepository()) {
-            TopologyReadContext ctx;
-            ctx.metadataRepo = repo;
-            ctx.kgStore = cli_->getKnowledgeGraphStore();
-            return std::optional<TopologyReadContext>{std::move(ctx)};
-        }
-
-        const auto dbPath = cli_->getDataPath() / "yams.db";
-        if (!std::filesystem::exists(dbPath)) {
-            return std::optional<TopologyReadContext>{std::nullopt};
-        }
-
-        metadata::ConnectionPoolConfig poolConfig;
-        poolConfig.maxConnections = 4;
-        poolConfig.minConnections = 1;
-        poolConfig.connectTimeout = std::chrono::seconds(10);
-
-        auto pool = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolConfig);
-        auto poolInit = pool->initialize();
-        if (!poolInit) {
-            return poolInit.error();
-        }
-
-        TopologyReadContext ctx;
-        ctx.connectionPool = pool;
-        ctx.metadataRepo = std::make_shared<metadata::MetadataRepository>(*pool);
-
-        metadata::KnowledgeGraphStoreConfig kgCfg;
-        kgCfg.enable_alias_fts = true;
-        kgCfg.enable_wal = true;
-        auto kgStoreRes = metadata::makeSqliteKnowledgeGraphStore(dbPath.string(), kgCfg);
-        if (kgStoreRes) {
-            ctx.kgStore =
-                std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgStoreRes.value()));
-        }
-        return std::optional<TopologyReadContext>{std::move(ctx)};
-    }
-
-    Result<std::optional<yams::topology::TopologyArtifactBatch>> loadTopologySnapshot() const {
-        auto ctxRes = buildTopologyReadContext();
-        if (!ctxRes) {
-            return ctxRes.error();
-        }
-        const auto& ctxOpt = ctxRes.value();
-        if (!ctxOpt.has_value() || !ctxOpt->metadataRepo) {
-            return std::optional<yams::topology::TopologyArtifactBatch>{std::nullopt};
-        }
-
-        yams::topology::MetadataKgTopologyArtifactStore store(ctxOpt->metadataRepo,
-                                                              ctxOpt->kgStore);
-        return store.loadLatest(topologySnapshotId_);
-    }
-
-    std::string resolveDocumentPathByHash(const std::string& hash) const {
-        if (hash.empty() || cli_ == nullptr) {
-            return {};
-        }
-        auto ctxRes = buildTopologyReadContext();
-        if (!ctxRes || !ctxRes.value().has_value() || !ctxRes.value()->metadataRepo) {
-            return {};
-        }
-        auto docRes = ctxRes.value()->metadataRepo->getDocumentByHash(hash);
-        if (!docRes || !docRes.value().has_value()) {
-            return {};
-        }
-        return docRes.value()->filePath;
-    }
-
-    static std::vector<std::string> splitPathSegments(const std::filesystem::path& path) {
-        std::vector<std::string> segments;
-        for (const auto& part : path) {
-            auto s = part.generic_string();
-            if (!s.empty() && s != "/") {
-                segments.push_back(std::move(s));
-            }
-        }
-        return segments;
-    }
-
-    static std::string projectPathForDisplay(const std::string& rawPath,
-                                             const std::filesystem::path& cwd) {
-        if (rawPath.empty()) {
-            return {};
-        }
-
-        const auto normalized = yams::metadata::computePathDerivedValues(rawPath).normalizedPath;
-        std::filesystem::path normalizedPath(normalized);
-        std::error_code ec;
-        auto rel = normalizedPath.lexically_relative(cwd);
-        if (!rel.empty() && rel.generic_string().find("..") != 0) {
-            return rel.generic_string();
-        }
-
-        const auto cwdSegs = splitPathSegments(cwd.lexically_normal());
-        const auto pathSegs = splitPathSegments(normalizedPath.lexically_normal());
-        if (cwdSegs.empty() || pathSegs.empty()) {
-            return normalized;
-        }
-
-        std::size_t bestLen = 0;
-        std::size_t bestPathStart = 0;
-        for (std::size_t len = std::min(cwdSegs.size(), pathSegs.size()); len >= 2; --len) {
-            const std::size_t cwdStart = cwdSegs.size() - len;
-            for (std::size_t pathStart = 0; pathStart + len <= pathSegs.size(); ++pathStart) {
-                bool match = true;
-                for (std::size_t i = 0; i < len; ++i) {
-                    if (cwdSegs[cwdStart + i] != pathSegs[pathStart + i]) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
-                    bestLen = len;
-                    bestPathStart = pathStart;
-                    break;
-                }
-            }
-            if (bestLen > 0) {
-                break;
-            }
-            if (len == 2) {
-                break;
-            }
-        }
-
-        if (bestLen > 0) {
-            std::filesystem::path projected;
-            for (std::size_t i = bestPathStart + bestLen; i < pathSegs.size(); ++i) {
-                projected /= pathSegs[i];
-            }
-            if (!projected.empty()) {
-                return projected.generic_string();
-            }
-        }
-
-        return normalized;
-    }
-
-    TopologyClusterStats
-    collectTopologyClusterStats(const yams::topology::TopologyArtifactBatch& snapshot,
-                                const yams::topology::ClusterArtifact& cluster,
-                                const std::unordered_set<std::string>* scopedPaths = nullptr,
-                                const std::filesystem::path* cwd = nullptr) const {
-        TopologyClusterStats stats;
-        for (const auto& membership : snapshot.memberships) {
-            if (membership.clusterId != cluster.clusterId) {
-                continue;
-            }
-            stats.roleCounts[topologyRoleLabel(membership.role)]++;
-
-            bool include = true;
-            if (scopedPaths != nullptr && cwd != nullptr) {
-                std::string path = resolveDocumentPathByHash(membership.documentHash);
-                if (path.empty()) {
-                    include = false;
-                } else {
-                    auto normalized = normalizePath(std::filesystem::path(path), *cwd);
-                    include = scopedPaths->count(normalized) > 0;
-                }
-            }
-            if (include) {
-                ++stats.scopedMemberCount;
-            }
-        }
-        return stats;
-    }
-
-    static std::string
-    formatRoleCounts(const std::unordered_map<std::string, std::size_t>& roleCounts) {
-        return formatRelationCounts(roleCounts, 4);
+    GraphTopologySupport topologySupport() const {
+        return GraphTopologySupport(cli_, topologySnapshotId_);
     }
 
     Result<void> executeTopologySnapshots() {
-        auto snapshotRes = loadTopologySnapshot();
+        auto support = topologySupport();
+        auto snapshotRes = support.loadTopologySnapshot();
         if (!snapshotRes) {
             return snapshotRes.error();
         }
 
-        const auto& snapshotOpt = snapshotRes.value();
-        if (!snapshotOpt.has_value()) {
-            if (wantsJsonOutput()) {
-                json out;
-                out["snapshot"] = nullptr;
-                out["requested_snapshot_id"] =
-                    topologySnapshotId_.empty() ? json(nullptr) : json(topologySnapshotId_);
-                std::cout << out.dump(2) << "\n";
-            } else {
-                std::cout << yams::cli::ui::section_header("Topology Snapshots") << "\n\n";
-                std::cout << yams::cli::ui::status_info("No topology snapshot available") << "\n";
-            }
-            return Result<void>();
-        }
-
-        const auto& snapshot = *snapshotOpt;
-        if (wantsJsonOutput()) {
-            json out;
-            out["snapshot"] = {{"snapshot_id", snapshot.snapshotId},
-                               {"algorithm", snapshot.algorithm},
-                               {"input_kind", topologyInputKindLabel(snapshot.inputKind)},
-                               {"generated_at_unix_seconds", snapshot.generatedAtUnixSeconds},
-                               {"topology_epoch", snapshot.topologyEpoch},
-                               {"cluster_count", snapshot.clusters.size()},
-                               {"membership_count", snapshot.memberships.size()}};
-            std::cout << out.dump(2) << "\n";
-            return Result<void>();
-        }
-
-        std::cout << yams::cli::ui::section_header("Topology Snapshots") << "\n\n";
-        yams::cli::ui::Table table;
-        table.headers = {"SNAPSHOT", "ALGORITHM", "INPUT", "CLUSTERS", "MEMBERSHIPS", "EPOCH"};
-        table.has_header = true;
-        table.add_row({snapshot.snapshotId, snapshot.algorithm.empty() ? "-" : snapshot.algorithm,
-                       topologyInputKindLabel(snapshot.inputKind),
-                       yams::cli::ui::format_number(snapshot.clusters.size()),
-                       yams::cli::ui::format_number(snapshot.memberships.size()),
-                       yams::cli::ui::format_number(snapshot.topologyEpoch)});
-        yams::cli::ui::render_table(std::cout, table);
-
-        if (verbose_) {
-            std::cout << "\n"
-                      << yams::cli::ui::key_value("Generated At (unix seconds)",
-                                                  std::to_string(snapshot.generatedAtUnixSeconds))
-                      << "\n";
-            if (!topologySnapshotId_.empty()) {
-                std::cout << yams::cli::ui::key_value("Requested Snapshot", topologySnapshotId_)
-                          << "\n";
-            }
-        }
-        return Result<void>();
+        TopologyCommandRenderOptions options;
+        options.jsonOutput = wantsJsonOutput();
+        options.verbose = verbose_;
+        options.requestedSnapshotId = topologySnapshotId_;
+        return renderTopologySnapshots(std::cout, snapshotRes.value(), options);
     }
 
     Result<void> executeTopologyClusters() {
-        auto snapshotRes = loadTopologySnapshot();
+        auto support = topologySupport();
+        auto snapshotRes = support.loadTopologySnapshot();
         if (!snapshotRes) {
             return snapshotRes.error();
         }
-
         const auto& snapshotOpt = snapshotRes.value();
         if (!snapshotOpt.has_value()) {
             if (wantsJsonOutput()) {
@@ -671,120 +402,17 @@ private:
             return Result<void>();
         }
 
-        const auto& snapshot = *snapshotOpt;
-        std::unordered_set<std::string> scopedPaths;
-        const auto cwd = std::filesystem::current_path();
-        if (scopeToCwd_) {
-            auto scopeRes = buildCurrentScopePathSet(cwd);
-            if (!scopeRes) {
-                return scopeRes.error();
-            }
-            scopedPaths = std::move(scopeRes.value());
-        }
-        std::vector<const yams::topology::ClusterArtifact*> clusters;
-        clusters.reserve(snapshot.clusters.size());
-        for (const auto& cluster : snapshot.clusters) {
-            clusters.push_back(&cluster);
-        }
-        std::sort(clusters.begin(), clusters.end(), [](const auto* lhs, const auto* rhs) {
-            if (lhs->bridgeMass != rhs->bridgeMass) {
-                return lhs->bridgeMass > rhs->bridgeMass;
-            }
-            if (lhs->persistenceScore != rhs->persistenceScore) {
-                return lhs->persistenceScore > rhs->persistenceScore;
-            }
-            if (lhs->memberCount != rhs->memberCount) {
-                return lhs->memberCount > rhs->memberCount;
-            }
-            return lhs->clusterId < rhs->clusterId;
-        });
-
-        if (wantsJsonOutput()) {
-            json out;
-            out["snapshot_id"] = snapshot.snapshotId;
-            out["cluster_count"] = snapshot.clusters.size();
-            json clustersJson = json::array();
-            for (const auto* cluster : clusters) {
-                auto stats = collectTopologyClusterStats(snapshot, *cluster,
-                                                         scopeToCwd_ ? &scopedPaths : nullptr,
-                                                         scopeToCwd_ ? &cwd : nullptr);
-                std::string medoidPath;
-                if (cluster->medoid.has_value()) {
-                    medoidPath = !cluster->medoid->filePath.empty()
-                                     ? cluster->medoid->filePath
-                                     : resolveDocumentPathByHash(cluster->medoid->documentHash);
-                    medoidPath = projectPathForDisplay(medoidPath, cwd);
-                }
-                json row;
-                row["cluster_id"] = cluster->clusterId;
-                row["level"] = cluster->level;
-                row["member_count"] = cluster->memberCount;
-                row["scoped_member_count"] = stats.scopedMemberCount;
-                row["persistence_score"] = cluster->persistenceScore;
-                row["cohesion_score"] = cluster->cohesionScore;
-                row["bridge_mass"] = cluster->bridgeMass;
-                row["role_summary"] = formatRoleCounts(stats.roleCounts);
-                row["parent_cluster_id"] = cluster->parentClusterId.has_value()
-                                               ? json(*cluster->parentClusterId)
-                                               : json(nullptr);
-                row["overlap_cluster_ids"] = cluster->overlapClusterIds;
-                if (cluster->medoid.has_value()) {
-                    row["medoid"] = {
-                        {"document_hash", cluster->medoid->documentHash},
-                        {"file_path", medoidPath},
-                        {"representative_score", cluster->medoid->representativeScore}};
-                }
-                clustersJson.push_back(std::move(row));
-            }
-            out["clusters"] = std::move(clustersJson);
-            std::cout << out.dump(2) << "\n";
-            return Result<void>();
-        }
-
-        std::cout << yams::cli::ui::section_header("Topology Clusters") << "\n\n";
-        std::cout << yams::cli::ui::status_info("Snapshot: " + snapshot.snapshotId) << "\n\n";
-
-        yams::cli::ui::Table table;
-        table.headers = {"CLUSTER", "LEVEL",    "MEMBERS", "SCOPED", "ROLES",
-                         "PERSIST", "COHESION", "BRIDGE",  "MEDOID"};
-        table.has_header = true;
-        for (const auto* cluster : clusters) {
-            auto stats = collectTopologyClusterStats(snapshot, *cluster,
-                                                     scopeToCwd_ ? &scopedPaths : nullptr,
-                                                     scopeToCwd_ ? &cwd : nullptr);
-            std::string medoid = "-";
-            if (cluster->medoid.has_value()) {
-                medoid = !cluster->medoid->filePath.empty()
-                             ? cluster->medoid->filePath
-                             : resolveDocumentPathByHash(cluster->medoid->documentHash);
-                medoid = projectPathForDisplay(medoid, cwd);
-                if (medoid.empty()) {
-                    medoid = cluster->medoid->documentHash;
-                }
-            }
-            table.add_row(
-                {yams::cli::ui::truncate_to_width(cluster->clusterId, 28),
-                 std::to_string(cluster->level), yams::cli::ui::format_number(cluster->memberCount),
-                 yams::cli::ui::format_number(stats.scopedMemberCount),
-                 yams::cli::ui::truncate_to_width(formatRoleCounts(stats.roleCounts), 26),
-                 yams::cli::ui::truncate_to_width(std::to_string(cluster->persistenceScore), 6),
-                 yams::cli::ui::truncate_to_width(std::to_string(cluster->cohesionScore), 6),
-                 yams::cli::ui::truncate_to_width(std::to_string(cluster->bridgeMass), 6),
-                 yams::cli::ui::truncate_to_width(medoid, 38)});
-        }
-        yams::cli::ui::render_table(std::cout, table);
-
-        if (verbose_) {
-            std::cout << "\n"
-                      << yams::cli::ui::status_info(
-                             "Sorted by bridge mass, then persistence, then member count")
-                      << "\n";
-        }
-        return Result<void>();
+        TopologyCommandRenderOptions options;
+        options.jsonOutput = wantsJsonOutput();
+        options.verbose = verbose_;
+        options.scopeToCwd = scopeToCwd_;
+        options.cwd = std::filesystem::current_path();
+        return renderTopologyClusters(std::cout, *snapshotOpt, support, options);
     }
 
     Result<void> executeTopologyClusterDetail() {
-        auto snapshotRes = loadTopologySnapshot();
+        auto support = topologySupport();
+        auto snapshotRes = support.loadTopologySnapshot();
         if (!snapshotRes) {
             return snapshotRes.error();
         }
@@ -794,224 +422,12 @@ private:
             return Error{ErrorCode::NotFound, "No topology snapshot available"};
         }
 
-        const auto& snapshot = *snapshotOpt;
-        auto clusterIt = std::find_if(
-            snapshot.clusters.begin(), snapshot.clusters.end(),
-            [&](const auto& cluster) { return cluster.clusterId == topologyClusterId_; });
-        if (clusterIt == snapshot.clusters.end()) {
-            return Error{ErrorCode::NotFound, "Topology cluster not found: " + topologyClusterId_};
-        }
-
-        const auto& cluster = *clusterIt;
-        std::unordered_set<std::string> scopedPaths;
-        const auto cwd = std::filesystem::current_path();
-        if (scopeToCwd_) {
-            auto scopeRes = buildCurrentScopePathSet(cwd);
-            if (!scopeRes) {
-                return scopeRes.error();
-            }
-            scopedPaths = std::move(scopeRes.value());
-        }
-        auto clusterStats = collectTopologyClusterStats(
-            snapshot, cluster, scopeToCwd_ ? &scopedPaths : nullptr, scopeToCwd_ ? &cwd : nullptr);
-
-        json membersJson = json::array();
-        yams::cli::ui::Table membersTable;
-        membersTable.headers = {"ROLE", "PATH", "HASH", "BRIDGE"};
-        membersTable.has_header = true;
-        std::size_t scopedMemberCount = 0;
-
-        for (const auto& membership : snapshot.memberships) {
-            if (membership.clusterId != cluster.clusterId) {
-                continue;
-            }
-
-            std::string path = resolveDocumentPathByHash(membership.documentHash);
-            path = projectPathForDisplay(path, cwd);
-            bool include = true;
-            if (scopeToCwd_) {
-                if (path.empty()) {
-                    include = false;
-                } else {
-                    auto normalized = normalizePath(
-                        std::filesystem::path(resolveDocumentPathByHash(membership.documentHash)),
-                        cwd);
-                    include = scopedPaths.count(normalized) > 0;
-                }
-            }
-            if (!include) {
-                continue;
-            }
-
-            ++scopedMemberCount;
-            json member{{"document_hash", membership.documentHash},
-                        {"path", path.empty() ? json(nullptr) : json(path)},
-                        {"role", topologyRoleLabel(membership.role)},
-                        {"bridge_score", membership.bridgeScore},
-                        {"cluster_level", membership.clusterLevel},
-                        {"persistence_score", membership.persistenceScore},
-                        {"cohesion_score", membership.cohesionScore},
-                        {"overlap_cluster_ids", membership.overlapClusterIds}};
-            membersJson.push_back(std::move(member));
-
-            membersTable.add_row(
-                {topologyRoleLabel(membership.role),
-                 yams::cli::ui::truncate_to_width(path.empty() ? "-" : path, 48),
-                 yams::cli::ui::truncate_to_width(membership.documentHash, 18),
-                 yams::cli::ui::truncate_to_width(std::to_string(membership.bridgeScore), 6)});
-        }
-
-        if (wantsJsonOutput()) {
-            json out;
-            out["snapshot_id"] = snapshot.snapshotId;
-            out["cluster"] = {{"cluster_id", cluster.clusterId},
-                              {"parent_cluster_id", cluster.parentClusterId.has_value()
-                                                        ? json(*cluster.parentClusterId)
-                                                        : json(nullptr)},
-                              {"level", cluster.level},
-                              {"member_count", cluster.memberCount},
-                              {"scoped_member_count", scopedMemberCount},
-                              {"role_summary", formatRoleCounts(clusterStats.roleCounts)},
-                              {"role_counts", clusterStats.roleCounts},
-                              {"persistence_score", cluster.persistenceScore},
-                              {"cohesion_score", cluster.cohesionScore},
-                              {"bridge_mass", cluster.bridgeMass},
-                              {"overlap_cluster_ids", cluster.overlapClusterIds}};
-            if (cluster.medoid.has_value()) {
-                std::string medoidPath =
-                    !cluster.medoid->filePath.empty()
-                        ? cluster.medoid->filePath
-                        : resolveDocumentPathByHash(cluster.medoid->documentHash);
-                medoidPath = projectPathForDisplay(medoidPath, cwd);
-                out["cluster"]["medoid"] = {
-                    {"document_hash", cluster.medoid->documentHash},
-                    {"file_path", medoidPath},
-                    {"representative_score", cluster.medoid->representativeScore}};
-            }
-            out["scope_cwd"] = scopeToCwd_;
-            out["members"] = std::move(membersJson);
-            std::cout << out.dump(2) << "\n";
-            return Result<void>();
-        }
-
-        std::cout << yams::cli::ui::section_header("Topology Cluster") << "\n\n";
-        std::cout << yams::cli::ui::key_value("Snapshot", snapshot.snapshotId) << "\n";
-        std::cout << yams::cli::ui::key_value("Cluster", cluster.clusterId) << "\n";
-        if (cluster.parentClusterId.has_value()) {
-            std::cout << yams::cli::ui::key_value("Parent", *cluster.parentClusterId) << "\n";
-        }
-        std::cout << yams::cli::ui::key_value("Level", std::to_string(cluster.level)) << "\n";
-        std::cout << yams::cli::ui::key_value("Members", std::to_string(cluster.memberCount))
-                  << "\n";
-        if (scopeToCwd_) {
-            std::cout << yams::cli::ui::key_value("Scoped Members",
-                                                  std::to_string(scopedMemberCount))
-                      << "\n";
-        }
-        std::cout << yams::cli::ui::key_value("Roles", formatRoleCounts(clusterStats.roleCounts))
-                  << "\n";
-        std::cout << yams::cli::ui::key_value("Persistence",
-                                              std::to_string(cluster.persistenceScore))
-                  << "\n";
-        std::cout << yams::cli::ui::key_value("Cohesion", std::to_string(cluster.cohesionScore))
-                  << "\n";
-        std::cout << yams::cli::ui::key_value("Bridge", std::to_string(cluster.bridgeMass)) << "\n";
-        if (!cluster.overlapClusterIds.empty()) {
-            std::ostringstream os;
-            for (std::size_t i = 0; i < cluster.overlapClusterIds.size(); ++i) {
-                if (i)
-                    os << ", ";
-                os << cluster.overlapClusterIds[i];
-            }
-            std::cout << yams::cli::ui::key_value("Overlaps", os.str()) << "\n";
-        }
-        if (cluster.medoid.has_value()) {
-            std::string medoidPath = !cluster.medoid->filePath.empty()
-                                         ? cluster.medoid->filePath
-                                         : resolveDocumentPathByHash(cluster.medoid->documentHash);
-            medoidPath = projectPathForDisplay(medoidPath, cwd);
-            std::cout << yams::cli::ui::key_value("Medoid Hash", cluster.medoid->documentHash)
-                      << "\n";
-            if (!medoidPath.empty()) {
-                std::cout << yams::cli::ui::key_value("Medoid Path", medoidPath) << "\n";
-            }
-        }
-
-        std::cout << "\n" << yams::cli::ui::subsection_header("Members") << "\n";
-        if (scopedMemberCount == 0) {
-            std::cout << yams::cli::ui::status_info(scopeToCwd_ ? "No members in current scope"
-                                                                : "No members found")
-                      << "\n";
-        } else {
-            yams::cli::ui::render_table(std::cout, membersTable);
-        }
-        if (scopeToCwd_) {
-            std::cout << "\n"
-                      << yams::cli::ui::status_info(std::string{kScopeToCwdDescription}) << "\n";
-        }
-        return Result<void>();
-    }
-
-    static std::unordered_map<int64_t, std::string>
-    buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
-        std::unordered_map<int64_t, std::string> hints;
-        if (resp.connectedNodes.empty() || resp.edges.empty()) {
-            return hints;
-        }
-
-        std::unordered_set<int64_t> connectedIds;
-        connectedIds.reserve(resp.connectedNodes.size());
-
-        std::unordered_map<int64_t, int32_t> distanceByNode;
-        distanceByNode.reserve(resp.connectedNodes.size() + 1);
-        for (const auto& node : resp.connectedNodes) {
-            connectedIds.insert(node.nodeId);
-            distanceByNode[node.nodeId] = node.distance;
-        }
-        distanceByNode[resp.originNode.nodeId] = 0;
-
-        std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> preferred;
-        std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> fallback;
-
-        auto accumulate = [&](int64_t nodeId, int64_t otherNodeId,
-                              const std::string& relationLabel) {
-            if (connectedIds.find(nodeId) == connectedIds.end()) {
-                return;
-            }
-
-            fallback[nodeId][relationLabel] += 1;
-
-            auto distIt = distanceByNode.find(nodeId);
-            auto otherDistIt = distanceByNode.find(otherNodeId);
-            if (distIt == distanceByNode.end() || otherDistIt == distanceByNode.end()) {
-                return;
-            }
-            if (distIt->second > 0 && otherDistIt->second == distIt->second - 1) {
-                preferred[nodeId][relationLabel] += 1;
-            }
-        };
-
-        for (const auto& edge : resp.edges) {
-            const std::string relationLabel = edge.relation.empty() ? "edge" : edge.relation;
-            accumulate(edge.srcNodeId, edge.dstNodeId, relationLabel);
-            accumulate(edge.dstNodeId, edge.srcNodeId, relationLabel);
-        }
-
-        hints.reserve(resp.connectedNodes.size());
-        for (const auto& node : resp.connectedNodes) {
-            if (auto it = preferred.find(node.nodeId);
-                it != preferred.end() && !it->second.empty()) {
-                hints[node.nodeId] = formatRelationCounts(it->second);
-                continue;
-            }
-            if (auto it = fallback.find(node.nodeId); it != fallback.end() && !it->second.empty()) {
-                hints[node.nodeId] = formatRelationCounts(it->second);
-                continue;
-            }
-            hints[node.nodeId] = "-";
-        }
-
-        return hints;
+        TopologyCommandRenderOptions options;
+        options.jsonOutput = wantsJsonOutput();
+        options.scopeToCwd = scopeToCwd_;
+        options.cwd = std::filesystem::current_path();
+        options.clusterId = topologyClusterId_;
+        return renderTopologyClusterDetail(std::cout, *snapshotOpt, support, options);
     }
 
     // yams-66h: List available node types with counts
@@ -1026,11 +442,7 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
-        // Build GraphQueryRequest with listTypes mode
-        GraphQueryRequest req;
-        req.listTypes = true;
-
-        auto r = co_await client.call(req);
+        auto r = co_await executeGraphListTypesQuery(client);
         if (!r) {
             std::cerr << "Graph query error: " << r.error().message << "\n";
             co_return r.error();
@@ -1098,11 +510,7 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
-        // Build GraphQueryRequest with listRelations mode
-        GraphQueryRequest req;
-        req.listRelations = true;
-
-        auto r = co_await client.call(req);
+        auto r = co_await executeGraphListRelationsQuery(client);
         if (!r) {
             std::cerr << "Graph query error: " << r.error().message << "\n";
             co_return r.error();
@@ -1171,15 +579,11 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
-        // Build GraphQueryRequest with search mode
-        GraphQueryRequest req;
-        req.searchMode = true;
-        req.searchPattern = searchPattern_;
-        req.limit = static_cast<uint32_t>(limit_);
-        req.offset = static_cast<uint32_t>(offset_);
-        req.includeNodeProperties = verbose_;
-
-        auto r = co_await client.call(req);
+        auto r = co_await executeGraphSearchQuery(client,
+                                                  GraphSearchQueryOptions{.pattern = searchPattern_,
+                                                                          .limit = limit_,
+                                                                          .offset = offset_,
+                                                                          .verbose = verbose_});
         if (!r) {
             std::cerr << "Graph search error: " << r.error().message << "\n";
             co_return r.error();
@@ -1268,7 +672,7 @@ private:
                                    yams::cli::ui::truncate_to_width(
                                        group->label.find('/') == std::string::npos
                                            ? group->label
-                                           : projectPathForDisplay(group->label, cwd),
+                                           : projectPathForCli(group->label, cwd),
                                        55),
                                    yams::cli::ui::truncate_to_width(group->key, 48)});
                 }
@@ -1299,15 +703,11 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
-        // Build GraphQueryRequest with listByType mode
-        GraphQueryRequest req;
-        req.listByType = true;
-        req.nodeType = listNodeType_;
-        req.limit = static_cast<uint32_t>(limit_);
-        req.offset = static_cast<uint32_t>(offset_);
-        req.includeNodeProperties = verbose_;
-
-        auto r = co_await client.call(req);
+        auto r = co_await executeGraphListByTypeQuery(
+            client, GraphListByTypeQueryOptions{.nodeType = listNodeType_,
+                                                .limit = limit_,
+                                                .offset = offset_,
+                                                .verbose = verbose_});
         if (!r) {
             std::cerr << "Graph query error: " << r.error().message << "\n";
             co_return r.error();
@@ -1317,7 +717,7 @@ private:
         std::vector<yams::daemon::GraphNode> nodes = resp.connectedNodes;
         const auto cwd = std::filesystem::current_path();
         if (scopeToCwd_) {
-            auto res = buildCurrentScopePathSet(cwd);
+            auto res = buildGraphCurrentScopePathSet(cli_, cwd);
             if (!res) {
                 co_return res.error();
             }
@@ -1352,7 +752,7 @@ private:
                                   " node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
             if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(std::string{kScopeToCwdDescription})
+                std::cout << yams::cli::ui::status_info(std::string{kGraphScopeToCwdDescription})
                           << "\n";
             }
             std::cout << "Showing: " << nodes.size() << " (offset " << offset_ << ", limit "
@@ -1397,69 +797,6 @@ private:
         co_return Result<void>();
     }
 
-    static std::string normalizePath(const std::filesystem::path& path,
-                                     const std::filesystem::path& cwd) {
-        std::filesystem::path normalized = path;
-        if (normalized.is_relative()) {
-            normalized = cwd / normalized;
-        }
-        normalized = normalized.lexically_normal();
-        return normalized.generic_string();
-    }
-
-    static Result<std::unordered_set<std::string>>
-    buildScopedPathSet(const std::filesystem::path& cwd,
-                       const std::shared_ptr<metadata::IMetadataRepository>& repo) {
-        if (!repo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
-        }
-        std::unordered_set<std::string> paths;
-        auto addPrefix = [&](std::string_view prefix) -> Result<void> {
-            auto res = repo->findDocumentsByPathTreePrefix(prefix, true, 0);
-            if (!res) {
-                return res.error();
-            }
-            for (const auto& doc : res.value()) {
-                paths.insert(normalizePath(std::filesystem::path(doc.filePath), cwd));
-            }
-            return Result<void>();
-        };
-
-        for (const auto& prefix : {"src", "include"}) {
-            auto r = addPrefix(prefix);
-            if (!r) {
-                return r.error();
-            }
-        }
-        for (auto it = paths.begin(); it != paths.end();) {
-            const auto& pathStr = *it;
-            std::string_view ext;
-            if (auto dot = pathStr.find_last_of('.'); dot != std::string::npos) {
-                ext = std::string_view(pathStr).substr(dot + 1);
-            }
-            auto cat = yams::magic::getPruneCategory(pathStr, ext);
-            if (cat == yams::magic::PruneCategory::GitArtifacts ||
-                yams::magic::matchesPruneGroup(cat, "build") ||
-                yams::magic::matchesPruneGroup(cat, "packages") ||
-                yams::magic::matchesPruneGroup(cat, "ide-all")) {
-                it = paths.erase(it);
-                continue;
-            }
-            ++it;
-        }
-        return paths;
-    }
-
-    Result<std::unordered_set<std::string>>
-    buildCurrentScopePathSet(const std::filesystem::path& cwd) const {
-        auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-        if (!appCtx || !appCtx->metadataRepo) {
-            return Error{ErrorCode::NotInitialized,
-                         "Path tree scoping unavailable (metadata repo not ready)"};
-        }
-        return buildScopedPathSet(cwd, appCtx->metadataRepo);
-    }
-
     static std::vector<yams::daemon::GraphNode>
     filterNodesToScopedPaths(std::vector<yams::daemon::GraphNode> nodes,
                              const std::unordered_set<std::string>& scopedPaths,
@@ -1471,17 +808,13 @@ private:
             if (!nodePathOpt.has_value()) {
                 continue;
             }
-            auto normalized = normalizePath(nodePathOpt.value(), cwd);
+            auto normalized = normalizeGraphScopePath(nodePathOpt.value(), cwd);
             if (scopedPaths.count(normalized) > 0) {
                 filtered.push_back(node);
             }
         }
         return filtered;
     }
-
-    static constexpr std::string_view kScopeToCwdDescription =
-        "Scoped to src/** and include/** via path tree (excluding tests/, benchmarks/, "
-        "third_party/, node_modules/, build*)";
 
     static std::optional<std::filesystem::path>
     extractNodePath(const yams::daemon::GraphNode& node) {
@@ -1537,27 +870,16 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
-        // If using node-key or node-id, use GraphQueryRequest directly
+        const GraphTraversalQueryOptions traversalOptions{.depth = depth_,
+                                                          .limit = limit_,
+                                                          .offset = offset_,
+                                                          .verbose = verbose_,
+                                                          .relationFilter = relationFilter_};
+
         if (!nodeKey_.empty() || nodeId_ >= 0) {
-            GraphQueryRequest gReq;
-            gReq.nodeId = nodeId_;
-            gReq.nodeKey = nodeKey_; // Daemon will resolve nodeKey to nodeId if needed
-            gReq.maxDepth = depth_;
-            gReq.maxResults = static_cast<uint32_t>(limit_);
-            gReq.maxResultsPerDepth = 100;
-            gReq.offset = static_cast<uint32_t>(offset_);
-            gReq.limit = static_cast<uint32_t>(limit_);
-            gReq.includeNodeProperties = verbose_;
-            gReq.includeEdgeProperties = verbose_;
-
-            if (!relationFilter_.empty()) {
-                auto canonicalRelation = metadata::normalizeRelationName(relationFilter_);
-                if (!canonicalRelation.empty()) {
-                    gReq.relationFilters.push_back(std::move(canonicalRelation));
-                }
-            }
-
-            auto r = co_await client.call(gReq);
+            auto r = co_await executeGraphTraversalByNode(
+                client, traversalOptions, nodeKey_,
+                nodeId_ >= 0 ? std::optional<int64_t>{nodeId_} : std::nullopt);
             if (!r) {
                 std::cerr << "Graph query error: " << r.error().message << "\n";
                 co_return r.error();
@@ -1567,49 +889,21 @@ private:
             co_return printGraphQueryResponse(r.value());
         }
 
-        // If --name is provided, try to resolve it to a file node in the KG first
         if (!name_.empty()) {
-            auto candidates = build_graph_file_node_candidates(name_, invocationCwd_);
-            for (const auto& candidate : candidates) {
-                std::string fileNodeKey = buildPathFileNodeKey(candidate);
-
-                GraphQueryRequest gReq;
-                gReq.nodeKey = fileNodeKey;
-                gReq.maxDepth = depth_;
-                gReq.maxResults = static_cast<uint32_t>(limit_);
-                gReq.maxResultsPerDepth = 100;
-                gReq.offset = static_cast<uint32_t>(offset_);
-                gReq.limit = static_cast<uint32_t>(limit_);
-                gReq.includeNodeProperties = verbose_;
-                gReq.includeEdgeProperties = verbose_;
-
-                if (!relationFilter_.empty()) {
-                    auto canonicalRelation = metadata::normalizeRelationName(relationFilter_);
-                    if (!canonicalRelation.empty()) {
-                        gReq.relationFilters.push_back(std::move(canonicalRelation));
-                    }
-                }
-
-                auto r = co_await client.call(gReq);
-                if (r && r.value().kgAvailable && r.value().originNode.nodeId > 0) {
-                    // Found the file node, show the KG graph response
-                    co_return printGraphQueryResponse(r.value());
-                }
+            auto graphResp = co_await executeGraphTraversalByNameCandidates(
+                client, traversalOptions, name_, invocationCwd_);
+            if (!graphResp) {
+                std::cerr << "Graph query error: " << graphResp.error().message << "\n";
+                co_return graphResp.error();
             }
-            // Fall through to document-based lookup if file node not found
+            if (graphResp.value().has_value()) {
+                co_return printGraphQueryResponse(*graphResp.value());
+            }
         }
 
-        // Fall back to document-based lookup via GetRequest
-        GetRequest req;
-        req.hash = hash_;
-        req.name = name_;
-        req.byName = !name_.empty();
-        req.metadataOnly = true;
-        req.showGraph = true;
-        req.graphDepth = depth_;
-        req.verbose = verbose_;
-
-        auto r = co_await client.get(req);
+        auto r = co_await executeDocumentGraphLookup(
+            client, DocumentGraphLookupOptions{
+                        .hash = hash_, .name = name_, .depth = depth_, .verbose = verbose_});
         if (!r) {
             std::cerr << "Graph error: " << r.error().message << "\n";
             if (!name_.empty() &&
@@ -1640,531 +934,19 @@ private:
     }
 
     Result<void> printGraphQueryResponse(const yams::daemon::GraphQueryResponse& resp) {
-        if (!resp.kgAvailable) {
-            std::cout << yams::cli::ui::status_error(
-                             "Knowledge graph not available" +
-                             (resp.warning.empty() ? "" : ": " + resp.warning))
-                      << "\n";
-            return Result<void>();
-        }
-
-        const auto traversalHints = buildTraversalRelationHints(resp);
-
-        if (wantsJsonOutput()) {
-            json out;
-            out["origin"] = {{"nodeId", resp.originNode.nodeId},
-                             {"nodeKey", resp.originNode.nodeKey},
-                             {"label", resp.originNode.label},
-                             {"type", resp.originNode.type}};
-            out["totalNodesFound"] = resp.totalNodesFound;
-            out["totalEdgesTraversed"] = resp.totalEdgesTraversed;
-            out["maxDepthReached"] = resp.maxDepthReached;
-            out["truncated"] = resp.truncated;
-
-            json nodes = json::array();
-            for (const auto& node : resp.connectedNodes) {
-                nodes.push_back(makeGraphNodeJson(node, true, &traversalHints));
-            }
-            out["connectedNodes"] = nodes;
-            if (!resp.edges.empty()) {
-                json edges = json::array();
-                for (const auto& edge : resp.edges) {
-                    json e;
-                    e["edgeId"] = edge.edgeId;
-                    e["srcNodeId"] = edge.srcNodeId;
-                    e["dstNodeId"] = edge.dstNodeId;
-                    e["relation"] = edge.relation;
-                    e["weight"] = edge.weight;
-                    if (!edge.properties.empty()) {
-                        try {
-                            e["properties"] = json::parse(edge.properties);
-                        } catch (...) {
-                            e["properties"] = edge.properties;
-                        }
-                    }
-                    edges.push_back(e);
-                }
-                out["edges"] = edges;
-            }
-            std::cout << out.dump(2) << "\n";
-        } else if (outputFormat_ == "dot") {
-            // DOT format for graphviz visualization
-            std::cout << "digraph G {\n";
-            std::cout << "  rankdir=LR;\n";
-            std::cout << "  node [shape=box];\n";
-
-            std::unordered_map<int64_t, std::string> nodeKeyById;
-            if (!resp.originNode.nodeKey.empty()) {
-                nodeKeyById[resp.originNode.nodeId] = resp.originNode.nodeKey;
-            }
-
-            // Origin node
-            std::cout << "  \"" << resp.originNode.nodeKey << "\" [label=\""
-                      << resp.originNode.label << "\\n(" << resp.originNode.type
-                      << ")\", style=filled, fillcolor=lightblue];\n";
-
-            // Connected nodes and edges
-            for (const auto& node : resp.connectedNodes) {
-                std::cout << "  \"" << node.nodeKey << "\" [label=\"" << node.label << "\\n("
-                          << node.type << ")\"];\n";
-                if (!node.nodeKey.empty()) {
-                    nodeKeyById[node.nodeId] = node.nodeKey;
-                }
-            }
-            if (!resp.edges.empty()) {
-                for (const auto& edge : resp.edges) {
-                    auto srcIt = nodeKeyById.find(edge.srcNodeId);
-                    auto dstIt = nodeKeyById.find(edge.dstNodeId);
-                    std::string src =
-                        srcIt != nodeKeyById.end() ? srcIt->second : std::to_string(edge.srcNodeId);
-                    std::string dst =
-                        dstIt != nodeKeyById.end() ? dstIt->second : std::to_string(edge.dstNodeId);
-                    std::string label =
-                        edge.relation.empty() ? "" : " [label=\"" + edge.relation + "\"]";
-                    std::cout << "  \"" << src << "\" -> \"" << dst << "\"" << label << ";\n";
-                }
-            } else {
-                for (const auto& node : resp.connectedNodes) {
-                    std::cout << "  \"" << resp.originNode.nodeKey << "\" -> \"" << node.nodeKey
-                              << "\";\n";
-                }
-            }
-            std::cout << "}\n";
-        } else {
-            // Table format using ui_helpers
-            std::cout << yams::cli::ui::section_header("Knowledge Graph Query") << "\n\n";
-
-            const auto& cwd = invocationCwd_;
-            struct VisibleNodeRow {
-                const yams::daemon::GraphNode* node{nullptr};
-                yams::cli::GraphNodeCliPresentation presentation;
-            };
-
-            std::vector<VisibleNodeRow> visibleNodes;
-            visibleNodes.reserve(resp.connectedNodes.size());
-            const bool hasHighSignalNodes = std::any_of(
-                resp.connectedNodes.begin(), resp.connectedNodes.end(), [&](const auto& node) {
-                    return !describeGraphNodeForCli(node, cwd).hideByDefault;
-                });
-            for (const auto& node : resp.connectedNodes) {
-                auto presentation = describeGraphNodeForCli(node, cwd);
-                if (!verbose_ && hasHighSignalNodes && presentation.hideByDefault) {
-                    continue;
-                }
-                visibleNodes.push_back(
-                    VisibleNodeRow{.node = &node, .presentation = std::move(presentation)});
-            }
-            std::stable_sort(visibleNodes.begin(), visibleNodes.end(),
-                             [](const auto& a, const auto& b) {
-                                 if (a.presentation.sortRank != b.presentation.sortRank) {
-                                     return a.presentation.sortRank < b.presentation.sortRank;
-                                 }
-                                 if (a.node->distance != b.node->distance) {
-                                     return a.node->distance < b.node->distance;
-                                 }
-                                 return a.presentation.displayLabel < b.presentation.displayLabel;
-                             });
-
-            // Origin node info
-            std::cout << yams::cli::ui::colorize("Origin: ", yams::cli::ui::Ansi::BOLD)
-                      << projectPathForCli(resp.originNode.label, cwd) << " ("
-                      << resp.originNode.type << ")\n";
-            std::cout << yams::cli::ui::key_value("  Node Key", resp.originNode.nodeKey) << "\n";
-            std::cout << yams::cli::ui::key_value("  Node ID",
-                                                  std::to_string(resp.originNode.nodeId))
-                      << "\n\n";
-
-            // Summary
-            std::string summary =
-                "Connected: " + yams::cli::ui::format_number(visibleNodes.size()) + " of " +
-                yams::cli::ui::format_number(resp.totalNodesFound) + " nodes, " +
-                yams::cli::ui::format_number(resp.totalEdgesTraversed) + " edges";
-            std::cout << yams::cli::ui::status_info(summary) << "\n";
-            if (!verbose_ && hasHighSignalNodes &&
-                visibleNodes.size() != resp.connectedNodes.size()) {
-                std::cout
-                    << yams::cli::ui::status_info(
-                           "Showing high-signal relationships; rerun with --verbose for storage "
-                           "and structural nodes")
-                    << "\n";
-            }
-            std::cout << "\n";
-
-            // Build table
-            yams::cli::ui::Table table;
-            table.headers = {"LABEL", "TYPE", "DIST", "VIA"};
-            if (verbose_) {
-                table.headers.push_back("PATH");
-                table.headers.push_back("KEY");
-                table.headers.push_back("HASH");
-            }
-            table.has_header = true;
-
-            for (const auto& visible : visibleNodes) {
-                const auto* node = visible.node;
-                std::vector<std::string> row;
-                row.push_back(
-                    yams::cli::ui::truncate_to_width(visible.presentation.displayLabel, 35));
-                row.push_back(visible.presentation.displayType.empty()
-                                  ? "-"
-                                  : visible.presentation.displayType);
-                row.push_back(std::to_string(node->distance));
-                std::string viaDisplay = "-";
-                if (auto it = traversalHints.find(node->nodeId); it != traversalHints.end()) {
-                    viaDisplay = it->second;
-                }
-                row.push_back(yams::cli::ui::truncate_to_width(viaDisplay, 34));
-                if (verbose_) {
-                    auto nodePath = displayNodePath(*node);
-                    row.push_back(nodePath.empty() ? "-"
-                                                   : yams::cli::ui::truncate_to_width(
-                                                         projectPathForCli(nodePath, cwd), 42));
-                    row.push_back(yams::cli::ui::truncate_to_width(node->nodeKey, 25));
-                    std::string hashDisplay =
-                        node->documentHash.empty() ? "-" : node->documentHash.substr(0, 12) + "...";
-                    row.push_back(hashDisplay);
-                }
-                table.add_row(row);
-            }
-
-            if (visibleNodes.empty()) {
-                std::cout << yams::cli::ui::status_info(
-                                 "No high-signal relationships found. Rerun with --verbose to "
-                                 "inspect storage and structural nodes")
-                          << "\n";
-            } else {
-                yams::cli::ui::render_table(std::cout, table);
-            }
-
-            // Properties in verbose mode
-            if (verbose_) {
-                renderNodePropertiesSection(resp.connectedNodes);
-            }
-
-            if (resp.truncated) {
-                std::cout << "\n"
-                          << yams::cli::ui::status_warning(
-                                 "Results truncated. Use --limit to see more.")
-                          << "\n";
-            }
-        }
-
-        return Result<void>();
+        return yams::cli::renderGraphQueryResponse(
+            std::cout, resp,
+            GraphQueryRenderOptions{.jsonOutput = wantsJsonOutput(),
+                                    .verbose = verbose_,
+                                    .outputFormat = outputFormat_,
+                                    .cwd = invocationCwd_});
     }
 
     Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) {
-        if (wantsJsonOutput()) {
-            json out;
-            out["document"] = resp.fileName;
-            out["hash"] = resp.hash;
-            out["graphEnabled"] = resp.graphEnabled;
-
-            json related = json::array();
-            for (const auto& rel : resp.related) {
-                related.push_back({{"name", rel.name},
-                                   {"hash", rel.hash},
-                                   {"relationship", rel.relationship},
-                                   {"distance", rel.distance}});
-            }
-            out["related"] = related;
-            std::cout << out.dump(2) << "\n";
-            return Result<void>();
-        }
-
-        // Table format using ui_helpers
-        std::cout << yams::cli::ui::section_header("Knowledge Graph") << "\n\n";
-
-        // Document info
-        if (!resp.fileName.empty())
-            std::cout << yams::cli::ui::key_value("Document", resp.fileName) << "\n";
-        if (!resp.hash.empty()) {
-            std::string hashDisplay =
-                resp.hash.size() > 12 ? resp.hash.substr(0, 12) + "..." : resp.hash;
-            std::cout << yams::cli::ui::key_value("Hash", hashDisplay) << "\n";
-        }
-        if (!resp.path.empty())
-            std::cout << yams::cli::ui::key_value("Path",
-                                                  projectPathForCli(resp.path, invocationCwd_))
-                      << "\n";
-
-        if (!resp.graphEnabled) {
-            std::cout << "\n"
-                      << yams::cli::ui::status_warning(
-                             "Graph data unavailable (graph disabled or not indexed yet). "
-                             "Retry after indexing completes.")
-                      << "\n";
-            const auto displayPath = projectPathForCli(resp.path, invocationCwd_);
-            if (!displayPath.empty()) {
-                std::cout << yams::cli::ui::status_info("If this file is new, run: yams add \"" +
-                                                        displayPath + "\" --sync")
-                          << "\n";
-                std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
-                                                        displayPath + "\" --depth " +
-                                                        std::to_string(depth_))
-                          << "\n";
-            }
-            if (auto searchHint = buildGraphSearchHint(
-                    resp.path.empty() ? resp.fileName : resp.path, invocationCwd_);
-                !searchHint.empty()) {
-                std::cout << yams::cli::ui::status_info("Or explore graph labels with: " +
-                                                        searchHint)
-                          << "\n";
-            }
-            return Result<void>();
-        }
-
-        if (resp.related.empty()) {
-            std::cout << "\n"
-                      << yams::cli::ui::status_info("No related documents found at depth " +
-                                                    std::to_string(depth_))
-                      << "\n";
-            return Result<void>();
-        }
-
-        std::cout << "\n";
-        std::string relSummary = "Related Documents (depth " + std::to_string(depth_) + ")";
-        std::cout << yams::cli::ui::colorize(relSummary, yams::cli::ui::Ansi::BOLD) << "\n\n";
-
-        // Build table for related docs
-        yams::cli::ui::Table table;
-        table.headers = {"NAME", "RELATIONSHIP", "DIST", "HASH"};
-        table.has_header = true;
-
-        for (const auto& rel : resp.related) {
-            std::string hashDisplay =
-                rel.hash.size() > 8 ? rel.hash.substr(0, 8) + "..." : rel.hash;
-            table.add_row({yams::cli::ui::truncate_to_width(rel.name, 40), rel.relationship,
-                           std::to_string(rel.distance), hashDisplay});
-        }
-
-        yams::cli::ui::render_table(std::cout, table);
-
-        return Result<void>();
-    }
-
-    static std::string snippetModeLabel(app::services::GraphContextSnippetMode mode) {
-        using app::services::GraphContextSnippetMode;
-        switch (mode) {
-            case GraphContextSnippetMode::Full:
-                return "full";
-            case GraphContextSnippetMode::Signature:
-                return "signature";
-            case GraphContextSnippetMode::Omitted:
-                return "omitted";
-        }
-        return "omitted";
-    }
-
-    static app::services::GraphContextSnippetMode snippetModeFromLabel(const std::string& mode) {
-        if (mode == "signature") {
-            return app::services::GraphContextSnippetMode::Signature;
-        }
-        if (mode == "omitted") {
-            return app::services::GraphContextSnippetMode::Omitted;
-        }
-        return app::services::GraphContextSnippetMode::Full;
-    }
-
-    static app::services::GraphContextSymbol
-    toAppGraphContextSymbol(const daemon::GraphExploreSymbol& symbol) {
-        app::services::GraphContextSymbol out;
-        out.nodeKey = symbol.nodeKey;
-        out.label = symbol.label;
-        out.qualifiedName = symbol.qualifiedName;
-        out.kind = symbol.kind;
-        out.filePath = symbol.filePath;
-        out.startLine = symbol.startLine;
-        out.endLine = symbol.endLine;
-        out.score = symbol.score;
-        out.exactMatch = symbol.exactMatch;
-        out.generatedOrCache = symbol.generatedOrCache;
-        out.testFile = symbol.testFile;
-        return out;
-    }
-
-    static app::services::GraphExploreResponse
-    toAppGraphExploreResponse(const daemon::GraphExploreResponse& response) {
-        app::services::GraphExploreResponse out;
-        out.query = response.query;
-        out.totalSymbolsConsidered = static_cast<std::size_t>(response.totalSymbolsConsidered);
-        out.totalFilesConsidered = static_cast<std::size_t>(response.totalFilesConsidered);
-        out.emittedChars = static_cast<std::size_t>(response.emittedChars);
-        out.kgAvailable = response.kgAvailable;
-        out.truncated = response.truncated;
-        out.warnings = response.warnings;
-
-        out.entrySymbols.reserve(response.entrySymbols.size());
-        for (const auto& symbol : response.entrySymbols) {
-            out.entrySymbols.push_back(toAppGraphContextSymbol(symbol));
-        }
-
-        out.files.reserve(response.files.size());
-        for (const auto& file : response.files) {
-            app::services::GraphContextSnippet snippet;
-            snippet.filePath = file.filePath;
-            snippet.language = file.language;
-            snippet.mode = snippetModeFromLabel(file.mode);
-            snippet.startLine = file.startLine;
-            snippet.endLine = file.endLine;
-            snippet.heading = file.heading;
-            snippet.content = file.content;
-            snippet.truncated = file.truncated;
-            snippet.symbols.reserve(file.symbols.size());
-            for (const auto& symbol : file.symbols) {
-                snippet.symbols.push_back(toAppGraphContextSymbol(symbol));
-            }
-            out.files.push_back(std::move(snippet));
-        }
-
-        out.relationships.reserve(response.relationships.size());
-        for (const auto& relation : response.relationships) {
-            app::services::GraphContextRelation outRelation;
-            outRelation.relation = relation.relation;
-            outRelation.sourceNodeKey = relation.sourceNodeKey;
-            outRelation.sourceLabel = relation.sourceLabel;
-            outRelation.targetNodeKey = relation.targetNodeKey;
-            outRelation.targetLabel = relation.targetLabel;
-            outRelation.weight = relation.weight;
-            outRelation.confidence = relation.confidence;
-            if (!relation.provenance.empty()) {
-                outRelation.provenance = relation.provenance;
-            }
-            out.relationships.push_back(std::move(outRelation));
-        }
-        return out;
-    }
-
-    static json makeGraphExploreJson(const app::services::GraphExploreResponse& resp) {
-        json out;
-        out["query"] = resp.query;
-        out["kgAvailable"] = resp.kgAvailable;
-        out["truncated"] = resp.truncated;
-        out["totalSymbolsConsidered"] = resp.totalSymbolsConsidered;
-        out["totalFilesConsidered"] = resp.totalFilesConsidered;
-        out["emittedChars"] = resp.emittedChars;
-        out["warnings"] = resp.warnings;
-
-        out["entrySymbols"] = json::array();
-        for (const auto& symbol : resp.entrySymbols) {
-            json entry;
-            entry["nodeKey"] = symbol.nodeKey;
-            entry["label"] = symbol.label;
-            entry["qualifiedName"] = symbol.qualifiedName;
-            entry["kind"] = symbol.kind;
-            entry["filePath"] = symbol.filePath;
-            entry["startLine"] = symbol.startLine ? json(*symbol.startLine) : json(nullptr);
-            entry["endLine"] = symbol.endLine ? json(*symbol.endLine) : json(nullptr);
-            entry["score"] = symbol.score;
-            entry["exactMatch"] = symbol.exactMatch;
-            out["entrySymbols"].push_back(std::move(entry));
-        }
-
-        out["files"] = json::array();
-        for (const auto& file : resp.files) {
-            json item;
-            item["filePath"] = file.filePath;
-            item["language"] = file.language;
-            item["mode"] = snippetModeLabel(file.mode);
-            item["startLine"] = file.startLine ? json(*file.startLine) : json(nullptr);
-            item["endLine"] = file.endLine ? json(*file.endLine) : json(nullptr);
-            item["heading"] = file.heading;
-            item["content"] = file.content;
-            item["truncated"] = file.truncated;
-            item["symbols"] = json::array();
-            for (const auto& symbol : file.symbols) {
-                json fileSymbol;
-                fileSymbol["label"] = symbol.label;
-                fileSymbol["qualifiedName"] = symbol.qualifiedName;
-                fileSymbol["kind"] = symbol.kind;
-                fileSymbol["startLine"] =
-                    symbol.startLine ? json(*symbol.startLine) : json(nullptr);
-                fileSymbol["endLine"] = symbol.endLine ? json(*symbol.endLine) : json(nullptr);
-                item["symbols"].push_back(std::move(fileSymbol));
-            }
-            out["files"].push_back(std::move(item));
-        }
-
-        out["relationships"] = json::array();
-        for (const auto& relation : resp.relationships) {
-            out["relationships"].push_back({{"relation", relation.relation},
-                                            {"sourceNodeKey", relation.sourceNodeKey},
-                                            {"sourceLabel", relation.sourceLabel},
-                                            {"targetNodeKey", relation.targetNodeKey},
-                                            {"targetLabel", relation.targetLabel},
-                                            {"weight", relation.weight},
-                                            {"confidence", relation.confidence}});
-        }
-        return out;
-    }
-
-    void renderGraphExploreMarkdown(const app::services::GraphExploreResponse& resp) const {
-        std::cout << yams::cli::ui::section_header("Graph Explore") << "\n\n";
-        std::cout << yams::cli::ui::key_value("Query", resp.query) << "\n";
-        std::cout << yams::cli::ui::key_value("Files", std::to_string(resp.files.size())) << "\n";
-        std::cout << yams::cli::ui::key_value("Symbols", std::to_string(resp.entrySymbols.size()))
-                  << "\n";
-        if (resp.truncated) {
-            std::cout << yams::cli::ui::status_warning("Output truncated to graph explore budget")
-                      << "\n";
-        }
-        for (const auto& warning : resp.warnings) {
-            std::cout << yams::cli::ui::status_warning(warning) << "\n";
-        }
-        std::cout << "\n";
-
-        if (!resp.relationships.empty()) {
-            std::cout << yams::cli::ui::subsection_header("Relationships") << "\n";
-            std::size_t shown = 0;
-            for (const auto& relation : resp.relationships) {
-                if (shown++ >= 12) {
-                    std::cout << yams::cli::ui::bullet("... more relationships omitted", 2) << "\n";
-                    break;
-                }
-                const auto lhs =
-                    relation.sourceLabel.empty() ? relation.sourceNodeKey : relation.sourceLabel;
-                const auto rhs =
-                    relation.targetLabel.empty() ? relation.targetNodeKey : relation.targetLabel;
-                std::cout << yams::cli::ui::bullet(lhs + " --" + relation.relation + "--> " + rhs,
-                                                   2)
-                          << "\n";
-            }
-            std::cout << "\n";
-        }
-
-        for (const auto& file : resp.files) {
-            const auto displayPath = projectPathForCli(file.filePath, invocationCwd_);
-            std::cout << yams::cli::ui::subsection_header(displayPath) << "\n";
-            if (!file.symbols.empty()) {
-                std::string symbolList;
-                for (const auto& symbol : file.symbols) {
-                    if (!symbolList.empty()) {
-                        symbolList += ", ";
-                    }
-                    symbolList += symbol.label.empty() ? symbol.qualifiedName : symbol.label;
-                }
-                std::cout << yams::cli::ui::key_value("Symbols", symbolList) << "\n";
-            }
-            if (file.content.empty()) {
-                std::cout << yams::cli::ui::status_info("Source omitted or unavailable") << "\n\n";
-                continue;
-            }
-            std::cout << "```" << file.language << "\n" << file.content << "```\n";
-            if (file.truncated) {
-                std::cout
-                    << yams::cli::ui::status_warning(
-                           "File snippet truncated; run graph --explore with a narrower query")
-                    << "\n";
-            }
-            std::cout << "\n";
-        }
-
-        if (!resp.files.empty()) {
-            std::cout << yams::cli::ui::colorize(
-                             "Shown snippets are line-numbered and read-equivalent; prefer another "
-                             "`yams graph --explore` for follow-up context.",
-                             yams::cli::ui::Ansi::DIM)
-                      << "\n";
-        }
+        return yams::cli::renderDocumentGraphResponse(
+            std::cout, resp,
+            DocumentGraphRenderOptions{
+                .jsonOutput = wantsJsonOutput(), .depth = depth_, .cwd = invocationCwd_});
     }
 
     boost::asio::awaitable<Result<void>> executeGraphExplore() {
@@ -2181,16 +963,15 @@ private:
             app::services::GraphExploreRequest localReq;
             localReq.query = exploreQuery_;
             localReq.budget.maxFiles = exploreMaxFiles_;
-            localReq.format = wantsJsonOutput() ? app::services::GraphContextFormat::Json
-                                                : app::services::GraphContextFormat::Markdown;
             auto localResult = service->explore(localReq);
             if (!localResult) {
                 return localResult.error();
             }
             if (wantsJsonOutput()) {
-                std::cout << makeGraphExploreJson(localResult.value()).dump(2) << "\n";
+                std::cout << yams::cli::makeGraphExploreJson(localResult.value()).dump(2) << "\n";
             } else {
-                renderGraphExploreMarkdown(localResult.value());
+                yams::cli::renderGraphExploreMarkdown(std::cout, localResult.value(),
+                                                      invocationCwd_);
             }
             return Result<void>();
         };
@@ -2210,7 +991,6 @@ private:
         daemon::GraphExploreRequest req;
         req.query = exploreQuery_;
         req.maxFiles = static_cast<uint64_t>(exploreMaxFiles_);
-        req.format = wantsJsonOutput() ? "json" : "markdown";
 
         auto result = co_await client.call(req);
         if (!result) {
@@ -2225,11 +1005,11 @@ private:
             co_return renderLocal();
         }
 
-        auto appResponse = toAppGraphExploreResponse(result.value());
+        auto appResponse = yams::cli::mapGraphExploreResponseFromDaemon(result.value());
         if (wantsJsonOutput()) {
-            std::cout << makeGraphExploreJson(appResponse).dump(2) << "\n";
+            std::cout << yams::cli::makeGraphExploreJson(appResponse).dump(2) << "\n";
         } else {
-            renderGraphExploreMarkdown(appResponse);
+            yams::cli::renderGraphExploreMarkdown(std::cout, appResponse, invocationCwd_);
         }
         co_return Result<void>();
     }

@@ -1104,11 +1104,8 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         req.maxSnippetLines = 42;
         req.includeLineNumbers = true;
         req.includeRelationships = false;
-        req.includeWarnings = true;
         req.includeCode = false;
         req.includeTests = true;
-        req.preferExactSymbols = false;
-        req.format = "json";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 24));
         REQUIRE(enc);
@@ -1127,11 +1124,8 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK(got->maxSnippetLines == 42);
         CHECK(got->includeLineNumbers);
         CHECK_FALSE(got->includeRelationships);
-        CHECK(got->includeWarnings);
         CHECK_FALSE(got->includeCode);
         CHECK(got->includeTests);
-        CHECK_FALSE(got->preferExactSymbols);
-        CHECK(got->format == "json");
     }
 }
 

@@ -268,6 +268,57 @@ TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
     CHECK(result.value().files.front().content.find("1\tint zeroBased() {") != std::string::npos);
 }
 
+TEST_CASE("GraphContextService explore falls back to graph nodes without symbol metadata",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto sourcePath =
+        fixture.writeSource("src/fallback.cpp", {"int fallbackEntry() {", "    return 7;", "}"});
+
+    DocumentInfo doc;
+    doc.filePath = sourcePath.string();
+    const auto derived = computePathDerivedValues(doc.filePath);
+    doc.fileName = sourcePath.filename().string();
+    doc.fileExtension = sourcePath.extension().string();
+    doc.fileSize = static_cast<std::int64_t>(std::filesystem::file_size(sourcePath));
+    doc.sha256Hash = "hash-fallback";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    KGNode node;
+    node.nodeKey = "function:demo::fallbackEntry@" + sourcePath.string();
+    node.label = "fallbackEntry";
+    node.type = "function";
+    REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = "fallbackEntry";
+
+    auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().entrySymbols.size() == 1);
+    CHECK(result.value().entrySymbols.front().label == "fallbackEntry");
+    CHECK(result.value().entrySymbols.front().filePath == sourcePath.string());
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().filePath == sourcePath.string());
+    CHECK(result.value().files.front().content.find("1\tint fallbackEntry() {") !=
+          std::string::npos);
+    CHECK_FALSE(result.value().warnings.empty());
+    CHECK(result.value().warnings.front().find("falling back to graph node labels") !=
+          std::string::npos);
+}
+
 TEST_CASE("GraphContextService explore returns canonical relationship context",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;
@@ -300,4 +351,56 @@ TEST_CASE("GraphContextService explore returns canonical relationship context",
     CHECK(response.relationships.front().relation == "calls");
     CHECK(response.relationships.front().sourceLabel == "caller");
     CHECK(response.relationships.front().targetLabel == "callee");
+}
+
+TEST_CASE("GraphContextService explore relationship budget is not capped by symbol budget",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto rootPath =
+        fixture.writeSource("src/root.cpp", {"int root() {", "    return left() + right();", "}"});
+    auto leftPath = fixture.writeSource("src/left.cpp", {"int left() {", "    return 1;", "}"});
+    auto rightPath = fixture.writeSource("src/right.cpp", {"int right() {", "    return 2;", "}"});
+
+    auto rootSym = fixture.symbol(rootPath, "root", "demo::root", 1, 3);
+    auto leftSym = fixture.symbol(leftPath, "left", "demo::left", 1, 3);
+    auto rightSym = fixture.symbol(rightPath, "right", "demo::right", 1, 3);
+    fixture.upsertSymbols({rootSym, leftSym, rightSym});
+
+    const auto rootId = fixture.upsertNodeFor(rootSym);
+    const auto leftId = fixture.upsertNodeFor(leftSym);
+    const auto rightId = fixture.upsertNodeFor(rightSym);
+
+    KGEdge leftEdge;
+    leftEdge.srcNodeId = rootId;
+    leftEdge.dstNodeId = leftId;
+    leftEdge.relation = "call";
+    leftEdge.weight = 0.8F;
+    REQUIRE(fixture.kgStore->addEdge(leftEdge).has_value());
+
+    KGEdge rightEdge;
+    rightEdge.srcNodeId = rootId;
+    rightEdge.dstNodeId = rightId;
+    rightEdge.relation = "call";
+    rightEdge.weight = 0.7F;
+    REQUIRE(fixture.kgStore->addEdge(rightEdge).has_value());
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = "root";
+    req.budget.maxFiles = 1;
+    req.budget.maxSymbols = 1;
+
+    auto result = service->explore(req);
+    REQUIRE(result.has_value());
+
+    const auto& response = result.value();
+    REQUIRE(response.entrySymbols.size() == 1);
+    REQUIRE(response.relationships.size() == 2);
+    CHECK(response.relationships[0].sourceLabel == "root");
+    CHECK(response.relationships[0].targetLabel == "left");
+    CHECK(response.relationships[1].sourceLabel == "root");
+    CHECK(response.relationships[1].targetLabel == "right");
+    CHECK_FALSE(response.truncated);
 }
