@@ -19,6 +19,7 @@
 #include <vector>
 #include <yams/common/time_utils.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/document_metadata.h>
@@ -1233,6 +1234,16 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             if (wasEmbedded) {
                 core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
             }
+
+            YAMS_DCHECK(
+                cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: indexed count must not exceed total document count after delete");
+            YAMS_DCHECK(
+                cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: extracted count must not exceed total document count after delete");
+            YAMS_DCHECK(
+                cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: embedded count must not exceed total document count after delete");
         }
 
         return Result<void>();
@@ -1349,6 +1360,16 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 if (wasEmbedded) {
                     core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
                 }
+
+                YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: indexed count must not exceed total document count after "
+                            "batch delete");
+                YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: extracted count must not exceed total document count after "
+                            "batch delete");
+                YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: embedded count must not exceed total document count after "
+                            "batch delete");
             }
         }
 
@@ -1752,6 +1773,13 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
                   static_cast<int64_t>(newlyExtracted));
         YAMS_PLOT("metadata_repo::batch_content_newly_indexed", static_cast<int64_t>(newlyIndexed));
+
+        YAMS_DCHECK(
+            cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+            "metadata: indexed count must not exceed total document count after batch insert");
+        YAMS_DCHECK(
+            cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+            "metadata: extracted count must not exceed total document count after batch insert");
     }
     return result;
 }
@@ -3497,6 +3525,14 @@ void MetadataRepository::initializeCounters() {
                      cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
                      cachedTagCount_.load(), cachedExtensionCounts_.size(),
                      cachedPathDepthSum_.load(), cachedPathDepthMax_.load());
+
+        // Cross-check: derived counters must be consistent with the primary count.
+        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: indexed count must not exceed total after initialization");
+        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: extracted count must not exceed total after initialization");
+        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: embedded count must not exceed total after initialization");
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
