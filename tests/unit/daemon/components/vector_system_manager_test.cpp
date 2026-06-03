@@ -20,6 +20,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -147,8 +148,15 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     SECTION("retryable dimension deferral clears initAttempted latch") {
         yams::test::ScopedEnvVar embedDimEnv("YAMS_EMBED_DIM", std::nullopt);
         yams::test::ScopedEnvVar preferredModelEnv("YAMS_PREFERRED_MODEL", std::nullopt);
+        yams::test::ScopedEnvVar configPathEnv("YAMS_CONFIG_PATH", std::nullopt);
         yams::test::ScopedEnvVar configEnv("YAMS_CONFIG",
                                            (tempDir / "missing-config.toml").string());
+        auto isolatedHome = tempDir / "isolated_home";
+        auto isolatedXdg = tempDir / "isolated_xdg";
+        std::filesystem::create_directories(isolatedHome);
+        std::filesystem::create_directories(isolatedXdg);
+        yams::test::ScopedEnvVar homeEnv("HOME", isolatedHome.string());
+        yams::test::ScopedEnvVar xdgEnv("XDG_CONFIG_HOME", isolatedXdg.string());
 
         auto unresolvedDeps = makeDeps();
         unresolvedDeps.resolvePreferredModel = {};
@@ -165,22 +173,64 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 #ifndef _WIN32
     SECTION("lock busy path clears initAttempted latch") {
         auto lockPath = tempDir / "vectors.lock";
-        int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
-        REQUIRE(lockFd >= 0);
+        int readyPipe[2] = {-1, -1};
+        int releasePipe[2] = {-1, -1};
+        REQUIRE(::pipe(readyPipe) == 0);
+        REQUIRE(::pipe(releasePipe) == 0);
 
-        struct flock fl{};
-        fl.l_type = F_WRLCK;
-        fl.l_whence = SEEK_SET;
-        REQUIRE(::fcntl(lockFd, F_SETLK, &fl) == 0);
+        pid_t child = ::fork();
+        REQUIRE(child >= 0);
+
+        if (child == 0) {
+            ::close(readyPipe[0]);
+            ::close(releasePipe[1]);
+
+            int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+            if (lockFd < 0) {
+                _exit(2);
+            }
+
+            struct flock fl{};
+            fl.l_type = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            if (::fcntl(lockFd, F_SETLK, &fl) != 0) {
+                _exit(3);
+            }
+
+            char ready = '1';
+            (void)::write(readyPipe[1], &ready, 1);
+            char release = 0;
+            (void)::read(releasePipe[0], &release, 1);
+
+            fl.l_type = F_UNLCK;
+            (void)::fcntl(lockFd, F_SETLK, &fl);
+            ::close(lockFd);
+            _exit(0);
+        }
+
+        ::close(readyPipe[1]);
+        ::close(releasePipe[0]);
+
+        char ready = 0;
+        REQUIRE(::read(readyPipe[0], &ready, 1) == 1);
+        REQUIRE(ready == '1');
 
         auto result = mgr.initializeOnce(tempDir);
-        REQUIRE(result.has_value());
-        CHECK_FALSE(result.value());
+        CHECK(result.has_value());
+        if (result.has_value()) {
+            CHECK_FALSE(result.value());
+        }
         CHECK_FALSE(mgr.wasInitAttempted());
 
-        fl.l_type = F_UNLCK;
-        REQUIRE(::fcntl(lockFd, F_SETLK, &fl) == 0);
-        ::close(lockFd);
+        char release = '1';
+        REQUIRE(::write(releasePipe[1], &release, 1) == 1);
+        ::close(readyPipe[0]);
+        ::close(releasePipe[1]);
+
+        int status = 0;
+        REQUIRE(::waitpid(child, &status, 0) == child);
+        REQUIRE(WIFEXITED(status));
+        REQUIRE(WEXITSTATUS(status) == 0);
     }
 #endif
 
