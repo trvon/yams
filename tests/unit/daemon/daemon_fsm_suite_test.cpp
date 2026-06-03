@@ -369,6 +369,14 @@ TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachabl
         REQUIRE(fsm.isTerminalState());
     }
 
+    SECTION("tryStartOpeningDatabase treats shutdown as cancellation") {
+        fsm.dispatch(ShutdownEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
+
+        REQUIRE_FALSE(fsm.tryStartOpeningDatabase());
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
+    }
+
     SECTION("waitForTerminalState unblocks after failure event") {
         // waitForTerminalState blocks until a terminal state is reached.
         // After dispatching InitializationFailedEvent, it should unblock.

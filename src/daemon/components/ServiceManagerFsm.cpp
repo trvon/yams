@@ -210,6 +210,29 @@ void ServiceManagerFsm::dispatch(const OpeningDatabaseEvent& ev) noexcept {
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
+bool ServiceManagerFsm::tryStartOpeningDatabase() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(sharedMutex());
+        const auto state = detail::ServiceManagerMachine::snap.state;
+        if (state == ServiceManagerState::Uninitialized) {
+            detail::ServiceManagerMachine::dispatch(OpeningDatabaseEvent{});
+            return true;
+        }
+        if (state == ServiceManagerState::ShuttingDown || state == ServiceManagerState::Stopped) {
+            return false;
+        }
+        YAMS_DCHECK(false,
+                    "ServiceManagerFsm OpeningDatabaseEvent requires Uninitialized state unless "
+                    "shutdown already started");
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManagerFSM] tryStartOpeningDatabase swallowed exception: {}",
+                      e.what());
+    } catch (...) {
+        spdlog::debug("[ServiceManagerFSM] tryStartOpeningDatabase swallowed unknown exception");
+    }
+    return false;
+}
+
 void ServiceManagerFsm::dispatch(const DatabaseOpenedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm DatabaseOpenedEvent requires OpeningDatabase state");

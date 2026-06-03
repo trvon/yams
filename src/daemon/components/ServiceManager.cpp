@@ -1716,13 +1716,8 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         co_return false;
     }
 
-    try {
-        serviceFsm_.dispatch(OpeningDatabaseEvent{});
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown: {}", e.what());
-        co_return false;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] FSM dispatch during shutdown (unknown exception)");
+    if (!serviceFsm_.tryStartOpeningDatabase()) {
+        spdlog::debug("[ServiceManager] Skipping database open; shutdown already started");
         co_return false;
     }
 
