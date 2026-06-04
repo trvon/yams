@@ -181,6 +181,8 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
         // Store manifests in manifests/ab/cdef...manifest
         auto baseHash = hash.substr(0, hash.length() - 9); // Remove ".manifest"
         if (baseHash.length() < pImpl->config.shardDepth) {
+            // PRECONDITION aborts in dev/CI; the throw preserves backward-compatible
+            // catchable std::invalid_argument for callers that may handle it.
             YAMS_PRECONDITION(false, "Manifest hash too short for sharding");
             throw std::invalid_argument("Hash too short for sharding");
         }
@@ -191,6 +193,8 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
     }
 
     if (hash.length() < pImpl->config.shardDepth) {
+        // PRECONDITION aborts in dev/CI; throw preserves backward-compatible
+        // catchable std::invalid_argument for callers that may handle it.
         YAMS_PRECONDITION(false, "Hash too short for sharding");
         throw std::invalid_argument("Hash too short for sharding");
     }
@@ -304,7 +308,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         return Result<void>(ErrorCode::Unknown);
     }
 
-    YAMS_ASSERT(std::filesystem::exists(path),
+    YAMS_DCHECK(std::filesystem::exists(path),
                 "Target file must exist after successful atomic rename");
     return {};
 }
