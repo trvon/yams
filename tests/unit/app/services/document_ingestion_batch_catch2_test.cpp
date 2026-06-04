@@ -77,3 +77,22 @@ TEST_CASE("DocumentIngestionService batch concurrency never returns zero",
     CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 0) >=
            1));
 }
+
+TEST_CASE("DocumentIngestionService batch concurrency respects explicit maxConcurrent",
+          "[unit][app][services][ingestion][batch]") {
+    TuneAdvisorBatchReset reset;
+
+    // maxConcurrent > 0 bypasses all tuning — uses std::min(maxConcurrent, batchSize).
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 1) ==
+           1));
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 4) ==
+           4));
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 8) ==
+           8));
+
+    // maxConcurrent clamps to batchSize.
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(3, 8) ==
+           3));
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(1, 16) ==
+           1));
+}
