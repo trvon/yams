@@ -44,10 +44,12 @@ if enable_profiling
   endif
 endif
 
-# Google Benchmark dependency
+# Google Benchmark dependency (library + main entry point)
 benchmark_dep = dependency('benchmark', required: false)
+benchmark_main_dep = dependency('benchmark', modules: ['benchmark::benchmark_main'], required: false)
 if not benchmark_dep.found()
   benchmark_dep = dependency('google-benchmark', required: false)
+  benchmark_main_dep = dependency('google-benchmark', modules: ['benchmark::benchmark_main'], required: false)
 endif
 
 api_bench = executable('yams_api_benchmarks', files('api_benchmarks.cpp'),
@@ -106,27 +108,28 @@ alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
 # Large-scale ingestion benchmark (requires google-benchmark)
 if benchmark_dep.found()
-  large_scale_ingestion_bench_deps = [
-    test_deps,
-    dependency('yams_benchmarks'),
-    benchmark_dep,
-  ] + tracy_deps
+large_scale_ingestion_bench_deps = [
+test_deps,
+dependency('yams_benchmarks'),
+benchmark_dep,
+benchmark_main_dep,
+] + tracy_deps
 
-  large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
-    files('large_scale_ingestion_bench.cpp'),
-    include_directories: incs,
-    dependencies: large_scale_ingestion_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
+large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
+files('large_scale_ingestion_bench.cpp'),
+include_directories: incs,
+dependencies: large_scale_ingestion_bench_deps,
+cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+install: false,
+)
 
-  alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
+alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
 else
-  message('Google Benchmark not found; skipping large_scale_ingestion_bench')
+message('Google Benchmark not found; skipping large_scale_ingestion_bench')
 endif
 
 if benchmark_dep.found()
-  storage_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
     files('storage_throughput_bench.cpp'),
@@ -136,7 +139,7 @@ if benchmark_dep.found()
     install: false,
   )
 
-  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
     files('retrieval_service_benchmarks.cpp'),
@@ -146,7 +149,7 @@ if benchmark_dep.found()
     install: false,
   )
 
-  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
+  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
     include_directories: incs,
@@ -175,7 +178,7 @@ if benchmark_dep.found()
   ] + tracy_deps + [benchmark_dep]
 
   # RAG retrieval quality benchmark
-  retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json')]
+  retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json'), benchmark_main_dep]
   retrieval_quality_bench_rpath = []
   if host_machine.system() == 'darwin'
     retrieval_quality_bench_rpath += ['/opt/homebrew/lib']
@@ -210,7 +213,7 @@ if benchmark_dep.found()
   alias_target('bench_fusion_experiment', fusion_experiment)
 
   # PBI-004: End-to-end ingestion pipeline benchmark
-  ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
+  ingestion_e2e_bench_deps = search_bench_deps + [test_deps, benchmark_main_dep]
 
   ingestion_e2e_bench = executable('ingestion_e2e_bench',
     files('../../src/search/benchmarks/ingestion_e2e_bench.cpp'),

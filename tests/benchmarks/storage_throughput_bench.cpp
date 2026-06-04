@@ -27,7 +27,10 @@ public:
         auto gen = yams::test::TestDataGenerator();
         const auto dataSize = static_cast<size_t>(state.range(0));
         data_ = gen.generateRandomBytes(dataSize);
-        hash_ = "benchmark-test-hash-00000000000000000000000000000000";
+        // 64-char hex hash for valid storage key
+        hash_ = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+                std::to_string(state.range(0) / 1024);
+        hash_ = hash_.substr(0, 64);
     }
 
     void TearDown(const benchmark::State&) override {
@@ -45,8 +48,10 @@ protected:
 BENCHMARK_DEFINE_F(StorageFixture, Store)(benchmark::State& state) {
     int iter = 0;
     for (auto _ : state) {
-        // Use unique hash per iteration to avoid dedup-path measurement.
-        auto hash = "bench-" + std::to_string(iter++);
+        // Use unique 64-char hex hash per iteration to avoid dedup-path measurement.
+        auto hexIter = "0000000000000000000000000000000000000000000000000000000000000000" +
+                       std::to_string(iter++);
+        auto hash = hexIter.substr(hexIter.size() - 64);
         auto result = engine_->store(hash, data_);
         benchmark::DoNotOptimize(result);
     }

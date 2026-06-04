@@ -393,8 +393,9 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
     file.seekg(0, std::ios::beg);
 
-    std::vector<std::byte> data(static_cast<size_t>(fileSize));
-    file.read(reinterpret_cast<char*>(data.data()), fileSize);
+    // Avoid zero-initialization: allocate uninitialized, read directly, then move into vector.
+    auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
+    file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
     if (!file) {
         pImpl->stats.failedOperations.fetch_add(1);
@@ -407,7 +408,7 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     pImpl->stats.readOperations.fetch_add(1);
 
     IStorageEngine::RawObject obj;
-    obj.data = std::move(data);
+    obj.data.assign(buf.get(), buf.get() + fileSize);
     obj.header = std::nullopt;
     return obj;
 }
