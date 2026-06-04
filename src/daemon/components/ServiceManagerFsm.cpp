@@ -155,8 +155,10 @@ bool canDispatch(ServiceManagerState state, const SearchEngineBuiltEvent&) {
 }
 
 bool canDispatch(ServiceManagerState state, const InitializationFailedEvent&) {
-    return state != ServiceManagerState::Ready && state != ServiceManagerState::ShuttingDown &&
-           state != ServiceManagerState::Stopped && state != ServiceManagerState::Failed;
+    // Accept from any state except the two terminal states that have no handler.
+    // Ready and ShuttingDown silently ignore init failures; init-path states
+    // (Uninitialized, OpeningDatabase, etc.) transit to Failed.
+    return state != ServiceManagerState::Stopped && state != ServiceManagerState::Failed;
 }
 
 bool canDispatch(ServiceManagerState state, const ServiceManagerStoppedEvent&) {
@@ -274,8 +276,7 @@ void ServiceManagerFsm::dispatch(const SearchEngineBuiltEvent& ev) noexcept {
 
 void ServiceManagerFsm::dispatch(const InitializationFailedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
-                     "ServiceManagerFsm InitializationFailedEvent must not arrive after Ready or "
-                     "shutdown terminal states");
+                     "ServiceManagerFsm InitializationFailedEvent invalid in terminal states");
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 

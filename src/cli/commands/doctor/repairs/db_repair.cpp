@@ -1,16 +1,16 @@
-#include <yams/cli/doctor/repairs/db_repair.h>
+#include <spdlog/spdlog.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/doctor/repairs/db_repair.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/cli/doctor/doctor_context.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/model_provider.h>
-#include <yams/repair/embedding_repair_util.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/query_helpers.h>
-#include <spdlog/spdlog.h>
+#include <yams/repair/embedding_repair_util.h>
 
 namespace yams::cli::doctor {
 

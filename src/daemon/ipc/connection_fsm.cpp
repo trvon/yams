@@ -237,6 +237,7 @@ struct ConfigValues {
 namespace {
 // Fixed-size ring buffer to bound snapshot memory
 template <std::size_t N> struct SnapshotRing {
+    static_assert(N > 0, "SnapshotRing requires N > 0");
     std::array<SnapshotEntry, N> buf{};
     std::uint32_t head{0};
     std::uint32_t size{0};
