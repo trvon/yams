@@ -2,6 +2,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
@@ -134,6 +135,7 @@ struct StorageEngine::Impl {
         std::vector<std::unique_ptr<std::mutex>> mutexes;
 
         explicit MutexPool(size_t size) {
+            YAMS_ASSERT(size > 0, "mutexPoolSize must be positive");
             mutexes.reserve(size);
             for (size_t i = 0; i < size; ++i) {
                 mutexes.emplace_back(std::make_unique<std::mutex>());
@@ -179,6 +181,7 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
         // Store manifests in manifests/ab/cdef...manifest
         auto baseHash = hash.substr(0, hash.length() - 9); // Remove ".manifest"
         if (baseHash.length() < pImpl->config.shardDepth) {
+            YAMS_PRECONDITION(false, "Manifest hash too short for sharding");
             throw std::invalid_argument("Hash too short for sharding");
         }
         auto prefix = baseHash.substr(0, pImpl->config.shardDepth);
@@ -188,6 +191,7 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
     }
 
     if (hash.length() < pImpl->config.shardDepth) {
+        YAMS_PRECONDITION(false, "Hash too short for sharding");
         throw std::invalid_argument("Hash too short for sharding");
     }
 
