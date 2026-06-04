@@ -126,6 +126,16 @@ else
 endif
 
 if benchmark_dep.found()
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+
+  storage_bench = executable('yams_storage_throughput_benchmarks',
+    files('storage_throughput_bench.cpp'),
+    include_directories: incs,
+    dependencies: storage_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
   retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
