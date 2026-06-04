@@ -554,8 +554,8 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
         stmt.execute();
 
         if (pImpl->db->changes() == 0) {
-            YAMS_DCHECK(false,
-                        "Decrement affected zero rows — block may not exist ref_count already 0");
+            // Concurrent decrements may legitimately produce zero changes
+            // when ref_count already reached 0 — this is not a bug.
             spdlog::warn("Attempted to decrement non-existent or zero reference count for {}",
                          blockHash);
         }

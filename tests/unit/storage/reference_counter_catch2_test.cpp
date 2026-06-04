@@ -387,8 +387,8 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-s
     CHECK_FALSE(secondCommit.has_value());
     CHECK(secondCommit.error().code == yams::ErrorCode::TransactionFailed);
 
-    REQUIRE_THROWS_AS(txn->increment(hash, 1024), std::runtime_error);
-    REQUIRE_THROWS_AS(txn->decrement(hash), std::runtime_error);
+    // YAMS_PRECONDITION active_ guard replaces old throw — process aborts on
+    // post-commit increment/decrement. Verified via fork()-based assertion test.
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture,
