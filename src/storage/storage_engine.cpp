@@ -287,8 +287,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     }
 
     // Temp file must exist and contain data before rename.
-    YAMS_DCHECK(std::filesystem::exists(tempPath),
-                "Temp file must exist after successful write");
+    YAMS_DCHECK(std::filesystem::exists(tempPath), "Temp file must exist after successful write");
 
     // Atomic rename
     std::error_code ec;
@@ -404,7 +403,8 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     // Avoid zero-initialization: allocate uninitialized, read directly, then move into vector.
     auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
     if (fileSize > 0) {
-        YAMS_DCHECK(buf != nullptr, "make_unique_for_overwrite must return non-null for positive size");
+        YAMS_DCHECK(buf != nullptr,
+                    "make_unique_for_overwrite must return non-null for positive size");
     }
     file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
