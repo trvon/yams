@@ -551,7 +551,8 @@ jobs:
           # creates build.dat incompatible with older system meson).
           CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
           if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; source "${CONAN_BUILD_ENV}"; set -u; fi
-          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ] || \
+             [ "${{ matrix.suffix }}" = "linux-x86_64-ubsan" ]; then
             $ARCH_PREFIX meson compile -C builddir \
               catch2_daemon_metrics \
               catch2_post_ingest_queue_unit \
