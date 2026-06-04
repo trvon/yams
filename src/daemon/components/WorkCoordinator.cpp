@@ -16,8 +16,8 @@
 
 #include "yams/daemon/components/WorkCoordinator.h"
 
-#include <yams/core/assert.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/core/assert.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -69,9 +69,6 @@ WorkCoordinator::~WorkCoordinator() {
 
 void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     YAMS_PRECONDITION(!started_, "WorkCoordinator must not be started twice");
-    if (started_) {
-        throw std::runtime_error("WorkCoordinator already started");
-    }
 
     spdlog::debug("[WorkCoordinator] Starting worker thread pool...");
 
