@@ -207,22 +207,20 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
 }
 
 std::filesystem::path StorageEngine::getTempPath() const {
-    // Ensure temp directory exists (can be removed by external cleanup).
-    {
-        std::error_code ec;
-        yams::common::ensureDirectories(pImpl->config.basePath / "temp");
-    }
+    // Temp directory is created at construction time (see Impl ctor);
+    // skip redundant ensureDirectories on every store call.
 
-    // Generate random temp filename
+    // Generate random temp filename using pre-computed hex table
     static thread_local std::random_device rd;
     static thread_local std::mt19937 gen(rd());
-    static thread_local std::uniform_int_distribution<> dis(0, 15);
+    static thread_local std::uniform_int_distribution<unsigned> dis(0, 15);
+    static constexpr char kHexChars[] = "0123456789abcdef";
 
     std::string tempName;
     tempName.reserve(TEMP_NAME_LENGTH);
 
     for (size_t i = 0; i < TEMP_NAME_LENGTH; ++i) {
-        tempName += yamsfmt::format("{:x}", dis(gen));
+        tempName.push_back(kHexChars[dis(gen)]);
     }
 
     return pImpl->config.basePath / "temp" / tempName;
