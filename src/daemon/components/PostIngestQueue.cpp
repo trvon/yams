@@ -434,6 +434,20 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
     }
 }
 
+#ifdef _WIN32
+// On Windows, destroying a steady_timer while a coroutine is suspended on
+// async_wait will SIGSEGV. Detach by moving into a leaked allocation so
+// the timer outlives any pending coroutine, matching the destructor path.
+static void leakWakeTimer(std::shared_ptr<boost::asio::steady_timer>& t) noexcept {
+    if (t) {
+        try {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(t));
+        } catch (...) {
+        }
+    }
+}
+#endif
+
 void PostIngestQueue::signalAllWakeTimers() {
     signalWakeTimer(Stage::Extraction);
     signalWakeTimer(Stage::KnowledgeGraph);
@@ -445,22 +459,11 @@ void PostIngestQueue::signalAllWakeTimers() {
 void PostIngestQueue::clearWakeTimers() {
     std::lock_guard<std::mutex> lock(wakeTimerMutex_);
 #ifdef _WIN32
-    // On Windows, destroying a steady_timer while a coroutine is suspended on
-    // async_wait will SIGSEGV. Detach by moving into a leaked allocation so
-    // the timer outlives any pending coroutine, matching the destructor path.
-    void leakTimer(std::shared_ptr<boost::asio::steady_timer>& t) noexcept {
-        if (t) {
-            try {
-                (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(t));
-            } catch (...) {
-            }
-        }
-    }
-    leakTimer(extractionWakeTimer_);
-    leakTimer(kgWakeTimer_);
-    leakTimer(symbolWakeTimer_);
-    leakTimer(entityWakeTimer_);
-    leakTimer(titleWakeTimer_);
+    leakWakeTimer(extractionWakeTimer_);
+    leakWakeTimer(kgWakeTimer_);
+    leakWakeTimer(symbolWakeTimer_);
+    leakWakeTimer(entityWakeTimer_);
+    leakWakeTimer(titleWakeTimer_);
 #else
     extractionWakeTimer_.reset();
     kgWakeTimer_.reset();

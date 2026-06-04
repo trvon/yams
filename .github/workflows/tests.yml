@@ -649,7 +649,8 @@ jobs:
           fi
           # Run unit and integration tests (TSAN disabled in CI). ASAN is a sanitizer smoke lane;
           # build/test selected targets only so hosted runners do not get recycled.
-          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ]; then
+          if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ] || \
+             [ "${{ matrix.suffix }}" = "linux-x86_64-ubsan" ]; then
             meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
               daemon_metrics_status \
               post_ingest_queue_unit \
