@@ -304,6 +304,8 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         return Result<void>(ErrorCode::Unknown);
     }
 
+    YAMS_ASSERT(std::filesystem::exists(path),
+                "Target file must exist after successful atomic rename");
     return {};
 }
 
@@ -346,7 +348,8 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
         pImpl->stats.totalObjects.fetch_add(1);
         pImpl->stats.totalBytes.fetch_add(data.size());
         pImpl->stats.writeOperations.fetch_add(1);
-
+        YAMS_POSTCONDITION(std::filesystem::exists(objectPath),
+                           "Stored object must exist on disk after successful write");
         spdlog::debug("Stored object {} ({} bytes)", hash, data.size());
     } else {
         pImpl->stats.failedOperations.fetch_add(1);
