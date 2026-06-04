@@ -46,3 +46,34 @@ TEST_CASE("DocumentIngestionService batch concurrency disables auto fan-out when
     CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(160, 0) ==
            1));
 }
+
+TEST_CASE("DocumentIngestionService batch concurrency never returns zero",
+          "[unit][app][services][ingestion][batch][assert]") {
+    // YAMS_POSTCONDITION(result >= 1) must hold for all valid inputs.
+    // Exercise edge cases that pass through different early-return branches.
+    TuneAdvisorBatchReset reset;
+
+    // Zero batch size returns 1 via early-return.
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(0, 0) ==
+           1));
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(0, 8) ==
+           1));
+
+    // Single-item batch always returns 1.
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(1, 8) ==
+           1));
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(1, 0) ==
+           1));
+
+    // With parallel ingest disabled and no explicit concurrency, returns 1.
+    yams::daemon::TuneAdvisor::setEnableParallelIngest(false);
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 0) ==
+           1));
+
+    // Storage cap of 0 defaults to 1.
+    yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
+    yams::daemon::TuneAdvisor::setMaxIngestWorkers(0);
+    yams::daemon::TuneAdvisor::setStoragePoolSize(0);
+    CHECK((yams::app::services::DocumentIngestionService::testing_resolveBatchConcurrency(100, 0) >=
+           1));
+}
