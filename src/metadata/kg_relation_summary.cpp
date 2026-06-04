@@ -97,6 +97,29 @@ std::string normalizeRelationName(std::string relation) {
         }
         return static_cast<char>(std::tolower(c));
     });
+
+    // Canonical aliases accepted by CLI, daemon IPC, and app-service graph callers.
+    if (relation == "call")
+        return "calls";
+    if (relation == "include")
+        return "includes";
+    if (relation == "inherit")
+        return "inherits";
+    if (relation == "implement")
+        return "implements";
+    if (relation == "reference")
+        return "references";
+    if (relation == "rename_to")
+        return "renamed_to";
+    if (relation == "rename_from")
+        return "renamed_from";
+    if (relation == "move_to")
+        return "moved_to";
+    if (relation == "move_from")
+        return "moved_from";
+    if (relation == "version" || relation == "blob_version")
+        return "has_version";
+
     return relation;
 }
 

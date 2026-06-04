@@ -53,6 +53,17 @@ struct KGRelationSummaryFixture {
 TEST_CASE("KGRelationSummary normalizes relation names", "[unit][metadata][kg][relations]") {
     CHECK(normalizeRelationName("  HAS-VERSION  ") == "has_version");
     CHECK(normalizeRelationName("calls") == "calls");
+    CHECK(normalizeRelationName("call") == "calls");
+    CHECK(normalizeRelationName("include") == "includes");
+    CHECK(normalizeRelationName("inherit") == "inherits");
+    CHECK(normalizeRelationName("implement") == "implements");
+    CHECK(normalizeRelationName("reference") == "references");
+    CHECK(normalizeRelationName("rename_to") == "renamed_to");
+    CHECK(normalizeRelationName("rename-from") == "renamed_from");
+    CHECK(normalizeRelationName("move_to") == "moved_to");
+    CHECK(normalizeRelationName("move-from") == "moved_from");
+    CHECK(normalizeRelationName("version") == "has_version");
+    CHECK(normalizeRelationName("blob_version") == "has_version");
     CHECK(normalizeRelationName("  ") == "");
 }
 

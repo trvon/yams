@@ -852,6 +852,7 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         try {
             policy.medoidBoost = std::stof(env);
         } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
         }
     }
 
@@ -1055,6 +1056,65 @@ ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy()
 
     if (auto v = readEnvString("YAMS_VECTOR_BACKEND"))
         policy.backend = std::move(v);
+
+    return policy;
+}
+
+ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePolicy() {
+    EmbeddingRuntimePolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.runtime.backend");
+                it != kv.end() && !it->second.empty())
+                policy.backend = it->second;
+            if (auto it = kv.find("embeddings.runtime.preferred_model");
+                it != kv.end() && !it->second.empty())
+                policy.preferredModel = it->second;
+            if (auto it = kv.find("embeddings.runtime.batch_size"); it != kv.end())
+                if (auto v = parseTomlU32(it->second))
+                    policy.batchSize = static_cast<std::size_t>(*v);
+            if (auto it = kv.find("embeddings.runtime.batch_target"); it != kv.end())
+                if (auto v = parseTomlU32(it->second))
+                    policy.batchTarget = static_cast<std::size_t>(*v);
+            if (auto it = kv.find("embeddings.runtime.repair_lock_timeout_ms"); it != kv.end())
+                if (auto val = parseTomlU32(it->second)) {
+                    policy.repairLockTimeoutMs = static_cast<std::uint64_t>(*val);
+                }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for embedding runtime: {}", e.what());
+    }
+
+    // Env overrides (preserve existing test/CI overlays)
+    if (auto v = readEnvString("YAMS_EMBED_BACKEND"))
+        policy.backend = std::move(v);
+    if (auto v = readEnvString("YAMS_PREFERRED_MODEL"))
+        policy.preferredModel = std::move(v);
+    if (auto v = readEnvString("YAMS_EMBED_BATCH")) {
+        try {
+            policy.batchSize = static_cast<std::size_t>(std::stoull(*v));
+        } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH size_t");
+        }
+    }
+    if (auto v = readEnvString("YAMS_EMBED_BATCH_TARGET")) {
+        try {
+            policy.batchTarget = static_cast<std::size_t>(std::stoull(*v));
+        } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH_TARGET size_t");
+        }
+    }
+    if (auto v = readEnvString("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
+        try {
+            policy.repairLockTimeoutMs = static_cast<std::uint64_t>(std::stoull(*v));
+        } catch (...) {
+            spdlog::debug("config: failed to parse YAMS_REPAIR_LOCK_TIMEOUT_MS uint64");
+        }
+    }
 
     return policy;
 }

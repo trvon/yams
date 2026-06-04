@@ -45,6 +45,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
@@ -679,6 +680,25 @@ private:
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix);
+
+metadata::DocumentInfo makeGraphDispatcherDocument(const std::filesystem::path& path,
+                                                   const std::string& hash) {
+    metadata::DocumentInfo info;
+    info.filePath = path.string();
+    info.fileName = path.filename().string();
+    info.fileExtension = path.extension().string();
+    info.fileSize = static_cast<std::int64_t>(std::filesystem::file_size(path));
+    info.sha256Hash = hash;
+    info.mimeType = "text/plain";
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    info.createdTime = now;
+    info.modifiedTime = now;
+    info.indexedTime = now;
+    info.contentExtracted = true;
+    info.extractionStatus = metadata::ExtractionStatus::Success;
+    metadata::populatePathDerivedFields(info);
+    return info;
+}
 
 struct GraphDispatcherFixture {
     GraphDispatcherFixture() {
@@ -1496,6 +1516,8 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
         CHECK(repo->deleteCallCount() == 2);
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
+        const auto removed = store->removedHashes();
+        CHECK(std::find(removed.begin(), removed.end(), std::string(64, 'd')) == removed.end());
     }
 
     SECTION("apply mode removes content through the document deletion service") {
@@ -4749,6 +4771,30 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(err.message == "Metadata repository unavailable");
     }
 
+    SECTION("graph explore reports unavailable metadata repository") {
+        auto resp =
+            dispatchRequest(*fixture.dispatcher, Request{GraphExploreRequest{.query = "entry"}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Metadata repository unavailable");
+    }
+
+    SECTION("graph explore reports unavailable knowledge graph store") {
+        fixture.initMetadata(false);
+
+        auto resp =
+            dispatchRequest(*fixture.dispatcher, Request{GraphExploreRequest{.query = "entry"}});
+
+        REQUIRE(std::holds_alternative<GraphExploreResponse>(resp));
+        const auto& graphResp = std::get<GraphExploreResponse>(resp);
+        CHECK(graphResp.query == "entry");
+        CHECK_FALSE(graphResp.kgAvailable);
+        REQUIRE(graphResp.warnings.size() == 1);
+        CHECK(graphResp.warnings.front() == "Knowledge graph not available");
+    }
+
     SECTION("graph query traversal requires an origin") {
         fixture.initMetadata();
 
@@ -4758,6 +4804,51 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InvalidArgument);
         CHECK(err.message.find("No valid origin specified") != std::string::npos);
+    }
+
+    SECTION("graph explore returns full and omitted snippet modes through dispatcher") {
+        fixture.initMetadata();
+
+        const auto sourcePath = fixture.testDir / "src" / "fallback.cpp";
+        std::filesystem::create_directories(sourcePath.parent_path());
+        {
+            std::ofstream out(sourcePath);
+            REQUIRE(out.good());
+            out << "int fallbackEntry() {\n    return 7;\n}\n";
+        }
+
+        REQUIRE(
+            fixture.repo->insertDocument(makeGraphDispatcherDocument(sourcePath, "hash-fallback"))
+                .has_value());
+
+        metadata::KGNode node;
+        node.nodeKey = "function:demo::fallbackEntry@" + sourcePath.string();
+        node.label = "fallbackEntry";
+        node.type = "function";
+        REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+
+        GraphExploreRequest fullReq;
+        fullReq.query = "fallbackEntry";
+
+        auto fullRespRaw = dispatchRequest(*fixture.dispatcher, Request{fullReq});
+        REQUIRE(std::holds_alternative<GraphExploreResponse>(fullRespRaw));
+        const auto& fullResp = std::get<GraphExploreResponse>(fullRespRaw);
+        REQUIRE(fullResp.files.size() == 1);
+        CHECK(fullResp.files.front().mode == "full");
+        CHECK(fullResp.files.front().content.find("fallbackEntry") != std::string::npos);
+        CHECK(fullResp.entrySymbols.size() == 1);
+        CHECK(fullResp.entrySymbols.front().label == "fallbackEntry");
+
+        GraphExploreRequest omittedReq;
+        omittedReq.query = "fallbackEntry";
+        omittedReq.includeCode = false;
+
+        auto omittedRespRaw = dispatchRequest(*fixture.dispatcher, Request{omittedReq});
+        REQUIRE(std::holds_alternative<GraphExploreResponse>(omittedRespRaw));
+        const auto& omittedResp = std::get<GraphExploreResponse>(omittedRespRaw);
+        REQUIRE(omittedResp.files.size() == 1);
+        CHECK(omittedResp.files.front().mode == "omitted");
+        CHECK(omittedResp.files.front().content.empty());
     }
 
     SECTION("graph query lists node types") {

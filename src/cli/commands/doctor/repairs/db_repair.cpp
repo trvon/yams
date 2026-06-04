@@ -1,16 +1,16 @@
-#include <yams/cli/doctor/repairs/db_repair.h>
+#include <spdlog/spdlog.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/doctor/repairs/db_repair.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
-#include <yams/cli/doctor/doctor_context.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/resource/model_provider.h>
-#include <yams/repair/embedding_repair_util.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/query_helpers.h>
-#include <spdlog/spdlog.h>
+#include <yams/repair/embedding_repair_util.h>
 
 namespace yams::cli::doctor {
 
@@ -105,6 +105,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                         try {
                             rpc_ms = std::max(1000, std::stoi(env));
                         } catch (...) {
+                            spdlog::debug("db_repair: failed to parse YAMS_DOCTOR_RPC_TIMEOUT_MS");
                         }
                     }
                     cfg.requestTimeout = std::chrono::milliseconds(rpc_ms);
@@ -271,6 +272,8 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                                             try {
                                                 out = static_cast<size_t>(std::stoul(num));
                                             } catch (...) {
+                                                spdlog::debug(
+                                                    "db_repair: failed to parse vector dim");
                                             }
                                         }
                                     }
@@ -304,6 +307,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                         return;
                     }
                 } catch (...) {
+                    spdlog::debug("db_repair: db dimension check failed");
                 }
                 if (!stdout_is_tty()) {
                     os << "  " << ui::status_pending("Scanning for documents missing embeddings")
@@ -394,6 +398,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                                 try {
                                     rpc_ms = std::max(1000, std::stoi(env));
                                 } catch (...) {
+                                    spdlog::debug("db_repair: failed to parse RPC timeout");
                                 }
                             }
                             cfg.requestTimeout = std::chrono::milliseconds(rpc_ms);

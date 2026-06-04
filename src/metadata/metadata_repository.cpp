@@ -19,6 +19,7 @@
 #include <vector>
 #include <yams/common/time_utils.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/document_metadata.h>
@@ -1233,6 +1234,16 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             if (wasEmbedded) {
                 core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
             }
+
+            YAMS_DCHECK(
+                cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: indexed count must not exceed total document count after delete");
+            YAMS_DCHECK(
+                cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: extracted count must not exceed total document count after delete");
+            YAMS_DCHECK(
+                cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: embedded count must not exceed total document count after delete");
         }
 
         return Result<void>();
@@ -1349,6 +1360,16 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 if (wasEmbedded) {
                     core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
                 }
+
+                YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: indexed count must not exceed total document count after "
+                            "batch delete");
+                YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: extracted count must not exceed total document count after "
+                            "batch delete");
+                YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                            "metadata: embedded count must not exceed total document count after "
+                            "batch delete");
             }
         }
 
@@ -1485,14 +1506,18 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         return Result<void>();
     }
 
-    // Track counter deltas for component-owned cached metrics.
-    // These counters are intentionally maintained without live DB queries on hot paths.
-    uint64_t newlyExtracted = 0;
-    uint64_t newlyIndexed = 0;
-    std::vector<int64_t> indexedDocIds;
-    indexedDocIds.reserve(entries.size());
+    struct BatchContentDelta {
+        uint64_t newlyExtracted{0};
+        uint64_t newlyIndexed{0};
+        std::vector<int64_t> indexedDocIds;
+    };
 
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
+        // Track counter deltas per attempt. executeQueryOnPool may retry the lambda
+        // after lock/constraint races; deltas from failed attempts must not leak into
+        // the final cache update.
+        BatchContentDelta delta;
+        delta.indexedDocIds.reserve(entries.size());
         // Begin transaction for batch operation
         auto beginResult = beginTransactionWithRetry(db);
         if (!beginResult) {
@@ -1612,6 +1637,14 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 if (checkStep.value()) {
                     wasExtracted = checkStmt.getInt(0) == 1;
                     wasIndexed = checkStmt.getInt(1) == 1;
+                } else {
+                    // Post-ingest work can race with document deletion or duplicate-content
+                    // resolution. Do not create orphan content/FTS rows or advance counters
+                    // for a document row that no longer exists.
+                    spdlog::debug("MetadataRepository: skipping stale batch content entry for "
+                                  "missing document id {}",
+                                  entry.documentId);
+                    continue;
                 }
             }
 
@@ -1697,7 +1730,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     db.execute("ROLLBACK");
                     return ftsExec.error();
                 }
-                indexedDocIds.push_back(entry.documentId);
+                delta.indexedDocIds.push_back(entry.documentId);
             }
 
             if (auto r = combinedStmt.reset(); !r) {
@@ -1718,10 +1751,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 return combExec.error();
             }
             if (!wasExtracted) {
-                newlyExtracted++;
+                delta.newlyExtracted++;
             }
             if (!wasIndexed) {
-                newlyIndexed++;
+                delta.newlyIndexed++;
             }
         }
 
@@ -1732,7 +1765,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             return commitResult.error();
         }
 
-        return Result<void>();
+        return delta;
     });
 
     if (result) {
@@ -1740,20 +1773,40 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         // Signal corpus stats stale - batch content affects extractionCoverage stats
         signalCorpusStatsStale();
 
-        if (newlyExtracted > 0) {
-            cachedExtractedCount_.fetch_add(newlyExtracted, std::memory_order_relaxed);
+        const auto& delta = result.value();
+        if (delta.newlyExtracted > 0) {
+            cachedExtractedCount_.fetch_add(delta.newlyExtracted, std::memory_order_relaxed);
         }
-        if (newlyIndexed > 0) {
-            cachedIndexedCount_.fetch_add(newlyIndexed, std::memory_order_relaxed);
+        if (delta.newlyIndexed > 0) {
+            cachedIndexedCount_.fetch_add(delta.newlyIndexed, std::memory_order_relaxed);
         }
-        for (const auto docId : indexedDocIds) {
+        for (const auto docId : delta.indexedDocIds) {
             noteFtsIndexedId(docId);
         }
         YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
-                  static_cast<int64_t>(newlyExtracted));
-        YAMS_PLOT("metadata_repo::batch_content_newly_indexed", static_cast<int64_t>(newlyIndexed));
+                  static_cast<int64_t>(delta.newlyExtracted));
+        YAMS_PLOT("metadata_repo::batch_content_newly_indexed",
+                  static_cast<int64_t>(delta.newlyIndexed));
+
+        const auto cachedIndexed = cachedIndexedCount_.load(std::memory_order_relaxed);
+        const auto cachedDocuments = cachedDocumentCount_.load(std::memory_order_relaxed);
+        if (cachedIndexed > cachedDocuments) {
+            spdlog::warn("MetadataRepository: batch counter drift docs={} indexed={} "
+                         "delta_extracted={} delta_indexed={} entries={}",
+                         cachedDocuments, cachedIndexed, delta.newlyExtracted, delta.newlyIndexed,
+                         entries.size());
+        }
+        YAMS_DCHECK(
+            cachedIndexed <= cachedDocuments,
+            "metadata: indexed count must not exceed total document count after batch insert");
+        YAMS_DCHECK(
+            cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+            "metadata: extracted count must not exceed total document count after batch insert");
     }
-    return result;
+    if (!result) {
+        return result.error();
+    }
+    return Result<void>();
 }
 
 // Metadata operations
@@ -2725,6 +2778,11 @@ Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
 
 // Full-text search operations
 namespace {
+struct FtsIndexDelta {
+    bool indexed{false};
+    bool newlyIndexed{false};
+};
+
 Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const std::string& title,
                                       const std::string& content,
                                       [[maybe_unused]] const std::string& contentType,
@@ -2789,52 +2847,103 @@ Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const st
     }
     return execResult;
 }
+
+Result<FtsIndexDelta> indexDocumentContentWithDelta(Database& db, int64_t documentId,
+                                                    const std::string& title,
+                                                    const std::string& content,
+                                                    const std::string& contentType,
+                                                    bool verifyDocumentExists) {
+    YAMS_TRY(beginTransactionWithRetry(db));
+
+    auto fts5Result = db.hasFTS5();
+    if (!fts5Result) {
+        db.execute("ROLLBACK");
+        return fts5Result.error();
+    }
+    if (!fts5Result.value()) {
+        db.execute("ROLLBACK");
+        return FtsIndexDelta{};
+    }
+
+    bool hadFtsEntry = false;
+    auto checkStmt = db.prepare("SELECT 1 FROM documents_fts WHERE rowid = ?");
+    if (!checkStmt) {
+        db.execute("ROLLBACK");
+        return checkStmt.error();
+    }
+    auto& stmt = checkStmt.value();
+    if (auto bind = stmt.bind(1, documentId); !bind) {
+        db.execute("ROLLBACK");
+        return bind.error();
+    }
+    auto step = stmt.step();
+    if (!step) {
+        db.execute("ROLLBACK");
+        return step.error();
+    }
+    hadFtsEntry = step.value();
+
+    auto indexResult =
+        indexDocumentContentImpl(db, documentId, title, content, contentType, verifyDocumentExists);
+    if (!indexResult) {
+        db.execute("ROLLBACK");
+        return indexResult.error();
+    }
+
+    auto commit = db.execute("COMMIT");
+    if (!commit) {
+        db.execute("ROLLBACK");
+        return commit.error();
+    }
+
+    return FtsIndexDelta{.indexed = true, .newlyIndexed = !hadFtsEntry};
+}
 } // namespace
 
 Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const std::string& title,
                                                       const std::string& content,
                                                       const std::string& contentType) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::indexDocumentContent");
-    bool hadFtsEntry = false;
-    if (auto hasFtsBefore = hasFtsEntry(documentId); hasFtsBefore) {
-        hadFtsEntry = hasFtsBefore.value();
-    }
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        return indexDocumentContentImpl(db, documentId, title, content, contentType,
-                                        /*verifyDocumentExists=*/true);
+    auto result = executeQuery<FtsIndexDelta>([&](Database& db) -> Result<FtsIndexDelta> {
+        return indexDocumentContentWithDelta(db, documentId, title, content, contentType,
+                                             /*verifyDocumentExists=*/true);
     });
 
     if (result) {
-        if (!hadFtsEntry) {
+        const auto& delta = result.value();
+        if (delta.newlyIndexed) {
             cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
         }
-        noteFtsIndexedId(documentId);
+        if (delta.indexed) {
+            noteFtsIndexedId(documentId);
+        }
         invalidateQueryCache();
+        return Result<void>();
     }
-    return result;
+    return result.error();
 }
 
 Result<void> MetadataRepository::indexDocumentContentTrusted(int64_t documentId,
                                                              const std::string& title,
                                                              const std::string& content,
                                                              const std::string& contentType) {
-    bool hadFtsEntry = false;
-    if (auto hasFtsBefore = hasFtsEntry(documentId); hasFtsBefore) {
-        hadFtsEntry = hasFtsBefore.value();
-    }
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        return indexDocumentContentImpl(db, documentId, title, content, contentType,
-                                        /*verifyDocumentExists=*/false);
+    auto result = executeQuery<FtsIndexDelta>([&](Database& db) -> Result<FtsIndexDelta> {
+        return indexDocumentContentWithDelta(db, documentId, title, content, contentType,
+                                             /*verifyDocumentExists=*/false);
     });
 
     if (result) {
-        if (!hadFtsEntry) {
+        const auto& delta = result.value();
+        if (delta.newlyIndexed) {
             cachedIndexedCount_.fetch_add(1, std::memory_order_relaxed);
         }
-        noteFtsIndexedId(documentId);
+        if (delta.indexed) {
+            noteFtsIndexedId(documentId);
+        }
         invalidateQueryCache();
+        return Result<void>();
     }
-    return result;
+    return result.error();
 }
 
 Result<bool> MetadataRepository::hasFtsEntry(int64_t documentId) {
@@ -3497,6 +3606,14 @@ void MetadataRepository::initializeCounters() {
                      cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
                      cachedTagCount_.load(), cachedExtensionCounts_.size(),
                      cachedPathDepthSum_.load(), cachedPathDepthMax_.load());
+
+        // Cross-check: derived counters must be consistent with the primary count.
+        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: indexed count must not exceed total after initialization");
+        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: extracted count must not exceed total after initialization");
+        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: embedded count must not exceed total after initialization");
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }

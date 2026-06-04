@@ -13,6 +13,7 @@
  */
 
 #include <memory>
+#include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -32,6 +33,7 @@ struct ServiceBundle {
     std::shared_ptr<IIndexingService> indexing;
     std::shared_ptr<IStatsService> stats;
     std::shared_ptr<IGraphQueryService> graph;
+    std::shared_ptr<IGraphContextService> graphContext;
 
     // True if all services are non-null.
     [[nodiscard]] bool valid() const noexcept {
@@ -66,6 +68,7 @@ struct ServiceBundle {
 [[nodiscard]] std::shared_ptr<IIndexingService> makeIndexingService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IStatsService> makeStatsService(const AppContext& ctx);
 [[nodiscard]] std::shared_ptr<IGraphQueryService> makeGraphQueryService(const AppContext& ctx);
+[[nodiscard]] std::shared_ptr<IGraphContextService> makeGraphContextService(const AppContext& ctx);
 
 // Session service factory (shared across CLI/MCP)
 // Declared in session_service.hpp; included above for consumers.

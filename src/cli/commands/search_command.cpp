@@ -700,9 +700,9 @@ private:
             if (!concreteGraphNextHint.empty()) {
                 std::cout << ui::colorize(concreteGraphNextHint, ui::Ansi::DIM) << std::endl;
             }
-            std::cout << ui::colorize(
-                             "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
-                             ui::Ansi::DIM)
+            std::cout << ui::colorize("Tip: Use `yams graph --explore \"<symbol-or-file>\"` for "
+                                      "line-numbered graph context.",
+                                      ui::Ansi::DIM)
                       << std::endl;
             if (!alternativeGraphSearchHint.empty()) {
                 std::cout << ui::colorize("Alt: " + alternativeGraphSearchHint, ui::Ansi::DIM)
@@ -761,6 +761,9 @@ private:
         }
 
         // Fallback to simple truncation
+        if (maxLength <= 3) {
+            return result.substr(0, maxLength);
+        }
         return result.substr(0, maxLength - 3) + "...";
     }
 
@@ -799,8 +802,9 @@ private:
             }
         }
         const double total = static_cast<double>(snippet.size());
-        assessment.printableRatio = printable / total;
-        assessment.whitespaceRatio = whitespace / total;
+        const double denominator = std::max(total, 1.0);
+        assessment.printableRatio = printable / denominator;
+        assessment.whitespaceRatio = whitespace / denominator;
         assessment.sanitized = std::move(cleaned);
         return assessment;
     }
@@ -1700,14 +1704,6 @@ public:
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
         const bool cliOneShot = yams::cli::cli_one_shot_enabled();
-
-        try {
-            // Resolve base query (reuse sync logic for assembling fields)
-            // Defer to execute() for argument normalization, then re-run daemon path with co_await
-            // If execute() succeeded synchronously (local), return its result; otherwise, we
-            // proceed async.
-        } catch (...) {
-        }
 
         // Build normalized arguments (copy of execute() preamble)
         if (query_.empty()) {

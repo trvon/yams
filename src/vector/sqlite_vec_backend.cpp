@@ -1,3 +1,4 @@
+#include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_database.h>
@@ -24,10 +25,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <shared_mutex>
 #include <span>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -38,7 +39,9 @@
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
+#include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 #include <sqlite-vec-cpp/sqlite/registration.hpp>
+#include <sqlite-vec-cpp/sqlite/vec0_module.hpp>
 
 namespace yams::vector {
 
@@ -53,6 +56,15 @@ struct SimeonPqIndexState {
 
 namespace {
 
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -60,8 +72,8 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    auto env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env.has_value() && !env->empty() && *env != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -98,8 +110,8 @@ inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
     return text ? text : "";
 }
 
-// Check if an embedding is zero-norm (all zeros or negligible magnitude)
-// Zero-norm vectors cannot participate in cosine similarity and become dead-ends in HNSW
+// Zero-norm vectors cannot participate in cosine similarity and become dead-ends
+// in approximate search indices.
 inline bool isZeroNormEmbedding(const std::vector<float>& embedding) {
     constexpr double kZeroNormThreshold = 1e-10;
     double norm_sq = 0.0;
@@ -550,6 +562,7 @@ std::map<std::string, std::string> deserializeMetadata(const std::string& json_s
     try {
         return nlohmann::json::parse(json_str).get<std::map<std::string, std::string>>();
     } catch (...) {
+        spdlog::debug("sqlite_vec_backend: deserializeMetadata JSON parse failed");
         return {};
     }
 }
@@ -568,6 +581,7 @@ std::vector<std::string> deserializeStringVector(const std::string& json_str) {
     try {
         return nlohmann::json::parse(json_str).get<std::vector<std::string>>();
     } catch (...) {
+        spdlog::debug("sqlite_vec_backend: deserializeStringVector JSON parse failed");
         return {};
     }
 }
@@ -596,6 +610,9 @@ public:
     }
 
     std::uint32_t normalizedSimeonPqSubquantizers(size_t dim) const {
+        YAMS_PRECONDITION(config_.simeon_pq_subquantizers <=
+                              static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
+                          "simeon_pq_subquantizers must fit in uint32_t");
         const std::uint32_t requested =
             static_cast<std::uint32_t>(std::max<size_t>(1, config_.simeon_pq_subquantizers));
         if (dim == 0) {
@@ -683,14 +700,13 @@ public:
         // Register all sqlite-vec functions: vec0 module (for V1 migration), distance functions
         // (l2, l1, cosine, hamming), utility functions (vec_length, vec_type, vec_f32, etc.),
         // and enhanced functions (vec_dot, vec_magnitude, vec_scale, vec_mean)
-        auto func_result = sqlite_vec_cpp::sqlite::register_all_functions(db_);
+        auto func_result = sqlite_vec_cpp::sqlite::register_yams_minimal_functions(db_);
         if (!func_result) {
             spdlog::warn("[VectorInit] Failed to register sqlite-vec functions: {}",
                          func_result.error().message);
             // Continue anyway - migration will handle this gracefully
         } else {
-            spdlog::info(
-                "[VectorInit] sqlite-vec functions registered (vec0, distances, enhanced)");
+            spdlog::info("[VectorInit] sqlite-vec functions registered (vec0, l2, cosine)");
         }
 
         // Check for V1 schema and migrate if needed
@@ -1054,7 +1070,7 @@ public:
 
         int64_t old_rowid = *rowid_opt;
 
-        // Get old dimension before deleting (need to know which HNSW index to remove from)
+        // Get old dimension before deleting (need to know which search index to update).
         // Use embedding_dim when embedding blob is absent (quantized-primary mode).
         std::optional<size_t> old_dim;
         auto old_record = getVectorByChunkIdUnlocked(chunk_id);
@@ -1634,6 +1650,8 @@ FROM vectors WHERE level = ?
                                    std::chrono::steady_clock::now() - start)
                                    .count();
             spdlog::info("[vec0] buildIndex completed in {} ms", durMs);
+            // Persist ANN index so restarts avoid O(n log n) rebuild
+            persistVec0AnnIndexUnlocked();
             return Result<void>{};
         }
         if (usesSimeonPqSearchEngine()) {
@@ -2002,7 +2020,7 @@ public:
         // Finalize all prepared statements
         finalizeStatements();
 
-        // Drop any legacy HNSW shadow tables (orphaned by HNSW removal),
+        // Drop legacy HNSW shadow tables (orphaned by HNSW removal).
         // plus SimeonPQ metadata tables and any per-dim vec0 virtual tables.
         std::vector<std::string> tables_to_drop;
         const char* find_tables =
@@ -2193,18 +2211,18 @@ public:
         return Result<void>{};
     }
 
-    std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) {
+    Result<std::vector<EntityVectorRecord>> getEntityVectorsByNode(const std::string& node_key) {
         std::shared_lock lock(mutex_);
         std::vector<EntityVectorRecord> results;
 
         if (!db_) {
-            return results;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, kSelectEntityByNodeKey, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            return results;
+            return Error{ErrorCode::DatabaseError, sqlite3_errmsg(db_)};
         }
 
         sqlite3_bind_text(stmt, 1, node_key.c_str(), -1, SQLITE_TRANSIENT);
@@ -2217,18 +2235,19 @@ public:
         return results;
     }
 
-    std::vector<EntityVectorRecord> getEntityVectorsByDocument(const std::string& document_hash) {
+    Result<std::vector<EntityVectorRecord>>
+    getEntityVectorsByDocument(const std::string& document_hash) {
         std::shared_lock lock(mutex_);
         std::vector<EntityVectorRecord> results;
 
         if (!db_) {
-            return results;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, kSelectEntityByDocument, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            return results;
+            return Error{ErrorCode::DatabaseError, sqlite3_errmsg(db_)};
         }
 
         sqlite3_bind_text(stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
@@ -2242,12 +2261,15 @@ public:
         return results;
     }
 
-    std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
-                                                   const EntitySearchParams& params) {
+    Result<std::vector<EntityVectorRecord>>
+    searchEntities(const std::vector<float>& query_embedding, const EntitySearchParams& params) {
         std::shared_lock lock(mutex_);
         std::vector<EntityVectorRecord> results;
 
-        if (!db_ || query_embedding.empty()) {
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (query_embedding.empty()) {
             return results;
         }
 
@@ -2272,7 +2294,7 @@ public:
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            return results;
+            return Error{ErrorCode::DatabaseError, sqlite3_errmsg(db_)};
         }
 
         // Bind filter parameters
@@ -2327,17 +2349,17 @@ public:
         return results;
     }
 
-    bool hasEntityEmbedding(const std::string& node_key) {
+    Result<bool> hasEntityEmbedding(const std::string& node_key) {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
-            return false;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, kHasEntityEmbedding, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            return false;
+            return Error{ErrorCode::DatabaseError, sqlite3_errmsg(db_)};
         }
 
         sqlite3_bind_text(stmt, 1, node_key.c_str(), -1, SQLITE_TRANSIENT);
@@ -2347,17 +2369,17 @@ public:
         return exists;
     }
 
-    size_t getEntityVectorCount() {
+    Result<size_t> getEntityVectorCount() {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
-            return 0;
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, kCountEntityVectors, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            return 0;
+            return Error{ErrorCode::DatabaseError, sqlite3_errmsg(db_)};
         }
 
         size_t count = 0;
@@ -2450,7 +2472,7 @@ private:
                               record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
         }
 
-        // Embedding dimension: always populate it so HNSW/search maintenance can use it
+        // Embedding dimension: always populate it so search-index maintenance can use it
         // even when the float blob is absent in quantized-primary mode.
         size_t effective_dim =
             record.embedding_dim > 0 ? record.embedding_dim : record.embedding.size();
@@ -2865,6 +2887,37 @@ private:
 
         vec0_dirty_dims_.erase(dim);
         vec0_ready_dims_.insert(dim);
+
+        // Try to restore a previously-persisted ANN index so we skip the
+        // O(n log n) rebuild on daemon restart. The shadow tables are named
+        // vectors_<dim>_hnsw_meta / vectors_<dim>_hnsw_nodes and are written
+        // by persistVec0AnnIndexUnlocked() when buildIndex() completes.
+        try {
+            char* err = nullptr;
+            auto restored =
+                sqlite_vec_cpp::index::load_hnsw_index<float,
+                                                       sqlite_vec_cpp::distances::L2Metric<float>>(
+                    db_, "main", ("vectors_" + std::to_string(dim)).c_str(), &err);
+            if (err == nullptr) {
+                auto ann =
+                    std::make_shared<sqlite_vec_cpp::sqlite::Vec0AnnIndex>(std::move(restored));
+                sqlite_vec_cpp::sqlite::vec0_with_table(
+                    db_, "main", vec0TableName(dim), [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
+                        if (!table) {
+                            return;
+                        }
+                        std::lock_guard<std::mutex> ann_lock(table->ann_mutex);
+                        table->ann_index = ann;
+                        table->ann_ready = true;
+                    });
+                spdlog::info("[vec0] restored persisted ANN index for dim {}", dim);
+            } else {
+                sqlite3_free(err);
+            }
+        } catch (...) {
+            spdlog::debug("[vec0] no persisted ANN index for dim {} — will rebuild", dim);
+        }
+
         return Result<void>{};
     }
 
@@ -2959,7 +3012,12 @@ private:
             return Result<void>{};
         }
 
+        YAMS_PRECONDITION(dim > 0, "Simeon PQ rebuild requires a positive dimension");
+        YAMS_PRECONDITION(dim <= static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
+                          "Simeon PQ rebuild dimension must fit in uint32_t");
         const std::uint32_t m = normalizedSimeonPqSubquantizers(dim);
+        YAMS_ASSERT(m > 0 && dim % m == 0,
+                    "Normalized Simeon PQ subquantizers must evenly divide the dimension");
         const std::uint32_t k = static_cast<std::uint32_t>(
             std::clamp<std::size_t>(config_.simeon_pq_centroids, 2, 256));
         simeon::PQConfig pqConfig{
@@ -3205,7 +3263,8 @@ private:
     }
 
     // beginBulkLoad/finalizeBulkLoad are kept in the public API for ABI compatibility
-    // and to gate future bulk-mode optimizations. With HNSW removed there is no index
+    // and to gate future bulk-mode optimizations. The active search engine
+    // (vec0 or Simeon PQ) owns its own index lifecycle.
     // state to pause/rebuild here; Vec0 and SimeonPQ indices are maintained lazily.
     Result<void> beginBulkLoadUnlocked() {
         std::unique_lock lock(mutex_);
@@ -3516,7 +3575,46 @@ ORDER BY rowid
     // Thread safety
     mutable std::shared_mutex mutex_;
     mutable std::mutex stmt_mutex_;
+
+    // Persist the vec0 ANN index so restarts skip the O(n log n) rebuild.
+    void persistVec0AnnIndexUnlocked();
 };
+
+// ============================================================================
+// SqliteVecBackend public interface
+// ============================================================================
+
+void SqliteVecBackend::Impl::persistVec0AnnIndexUnlocked() {
+    // Find the vec0 table via registry and persist its ANN index to shadow tables.
+    for (size_t dim : vec0_ready_dims_) {
+        std::shared_ptr<sqlite_vec_cpp::sqlite::Vec0AnnIndex> ann_index;
+        sqlite_vec_cpp::sqlite::vec0_with_table(db_, "main", std::to_string(dim) + "_vec0",
+                                                [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
+                                                    if (!table) {
+                                                        return;
+                                                    }
+                                                    std::lock_guard<std::mutex> ann_lock(
+                                                        table->ann_mutex);
+                                                    ann_index = table->ann_index;
+                                                });
+        if (!ann_index) {
+            continue;
+        }
+
+        char* err = nullptr;
+        int rc = sqlite_vec_cpp::index::save_hnsw_index<float,
+                                                        sqlite_vec_cpp::distances::L2Metric<float>>(
+            db_, "main", ("vectors_" + std::to_string(dim)).c_str(), *ann_index, &err);
+        if (rc != SQLITE_OK) {
+            spdlog::warn("[vec0] failed to persist ANN index for dim {}: {}", dim,
+                         err ? err : "unknown");
+            if (err)
+                sqlite3_free(err);
+        } else {
+            spdlog::info("[vec0] persisted ANN index for dim {} to shadow tables", dim);
+        }
+    }
+}
 
 // ============================================================================
 // SqliteVecBackend public interface
@@ -3762,27 +3860,27 @@ Result<void> SqliteVecBackend::deleteEntityVectorsByDocument(const std::string& 
     return impl_->deleteEntityVectorsByDocument(document_hash);
 }
 
-std::vector<EntityVectorRecord>
+Result<std::vector<EntityVectorRecord>>
 SqliteVecBackend::searchEntities(const std::vector<float>& query_embedding,
                                  const EntitySearchParams& params) {
     return impl_->searchEntities(query_embedding, params);
 }
 
-std::vector<EntityVectorRecord>
+Result<std::vector<EntityVectorRecord>>
 SqliteVecBackend::getEntityVectorsByNode(const std::string& node_key) {
     return impl_->getEntityVectorsByNode(node_key);
 }
 
-std::vector<EntityVectorRecord>
+Result<std::vector<EntityVectorRecord>>
 SqliteVecBackend::getEntityVectorsByDocument(const std::string& document_hash) {
     return impl_->getEntityVectorsByDocument(document_hash);
 }
 
-bool SqliteVecBackend::hasEntityEmbedding(const std::string& node_key) {
+Result<bool> SqliteVecBackend::hasEntityEmbedding(const std::string& node_key) {
     return impl_->hasEntityEmbedding(node_key);
 }
 
-size_t SqliteVecBackend::getEntityVectorCount() {
+Result<size_t> SqliteVecBackend::getEntityVectorCount() {
     return impl_->getEntityVectorCount();
 }
 

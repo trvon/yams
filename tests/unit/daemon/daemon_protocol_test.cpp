@@ -1093,6 +1093,40 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         checkSanitizedField("UpdateDocumentRequest.removeTags[0]", got->removeTags.at(0),
                             req.removeTags.at(0));
     }
+
+    SECTION("GraphExploreRequest roundtrips budgets and flags") {
+        GraphExploreRequest req;
+        req.query = "processTask";
+        req.maxFiles = 3;
+        req.maxSymbols = 9;
+        req.maxTotalChars = 12345;
+        req.maxCharsPerFile = 4096;
+        req.maxSnippetLines = 42;
+        req.includeLineNumbers = true;
+        req.includeRelationships = false;
+        req.includeCode = false;
+        req.includeTests = true;
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 24));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<GraphExploreRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->query == req.query);
+        CHECK(got->maxFiles == 3);
+        CHECK(got->maxSymbols == 9);
+        CHECK(got->maxTotalChars == 12345);
+        CHECK(got->maxCharsPerFile == 4096);
+        CHECK(got->maxSnippetLines == 42);
+        CHECK(got->includeLineNumbers);
+        CHECK_FALSE(got->includeRelationships);
+        CHECK_FALSE(got->includeCode);
+        CHECK(got->includeTests);
+    }
 }
 
 TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serialization]") {
@@ -1168,6 +1202,72 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         CHECK(gotGraph->edges[0].edgeId == 42);
         CHECK(gotGraph->edges[0].relation == "defines");
         CHECK(gotGraph->edges[0].properties == "{\"source\":\"test\"}");
+    }
+
+    SECTION("GraphExploreResponse roundtrips snippets and relationships") {
+        GraphExploreResponse response;
+        response.query = "processTask";
+        response.totalSymbolsConsidered = 2;
+        response.totalFilesConsidered = 1;
+        response.emittedChars = 64;
+        response.kgAvailable = true;
+        response.truncated = true;
+        response.warnings = {"budget reached"};
+
+        GraphExploreSymbol symbol;
+        symbol.nodeKey = "function:demo::processTask@/repo/src/process.cpp";
+        symbol.label = "processTask";
+        symbol.qualifiedName = "demo::processTask";
+        symbol.kind = "function";
+        symbol.filePath = "/repo/src/process.cpp";
+        symbol.startLine = 10;
+        symbol.endLine = 12;
+        symbol.score = 98.5;
+        symbol.exactMatch = true;
+        response.entrySymbols.push_back(symbol);
+
+        GraphExploreSnippet snippet;
+        snippet.filePath = symbol.filePath;
+        snippet.language = "cpp";
+        snippet.mode = "full";
+        snippet.startLine = 10;
+        snippet.endLine = 12;
+        snippet.heading = "process.cpp";
+        snippet.content = "10\tint processTask() {}\n";
+        snippet.symbols.push_back(symbol);
+        snippet.truncated = false;
+        response.files.push_back(snippet);
+
+        GraphExploreRelation relation;
+        relation.relation = "calls";
+        relation.sourceNodeKey = symbol.nodeKey;
+        relation.sourceLabel = "processTask";
+        relation.targetNodeKey = "function:demo::helper@/repo/src/process.cpp";
+        relation.targetLabel = "helper";
+        relation.weight = 0.75F;
+        relation.confidence = 0.75;
+        response.relationships.push_back(relation);
+
+        auto encGraph = ProtoSerializer::encode_payload(
+            makeMessageWith(Response{std::in_place_type<GraphExploreResponse>, response}, 5));
+        REQUIRE(encGraph);
+
+        auto decGraph = ProtoSerializer::decode_payload(encGraph.value());
+        REQUIRE(decGraph);
+        REQUIRE(std::holds_alternative<Response>(decGraph.value().payload));
+
+        auto* gotGraph =
+            std::get_if<GraphExploreResponse>(&std::get<Response>(decGraph.value().payload));
+        REQUIRE(gotGraph != nullptr);
+        CHECK(gotGraph->query == "processTask");
+        REQUIRE(gotGraph->entrySymbols.size() == 1);
+        CHECK(gotGraph->entrySymbols[0].startLine == 10);
+        REQUIRE(gotGraph->files.size() == 1);
+        CHECK(gotGraph->files[0].content.find("processTask") != std::string::npos);
+        REQUIRE(gotGraph->relationships.size() == 1);
+        CHECK(gotGraph->relationships[0].relation == "calls");
+        CHECK(gotGraph->warnings.at(0) == "budget reached");
+        CHECK(gotGraph->truncated);
     }
 
     SECTION("ErrorResponse sanitizes invalid UTF-8 message") {
@@ -1403,6 +1503,8 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
         REQUIRE(
             MessageType::RemovePathSelectorRequest ==
             getMessageType(Request{RemovePathSelectorRequest{.session_name = "s", .path = "/p"}}));
+        REQUIRE(MessageType::GraphExploreRequest ==
+                getMessageType(Request{GraphExploreRequest{.query = "processTask"}}));
     }
 
     SECTION("Response type mappings") {
@@ -1411,6 +1513,8 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
         REQUIRE(MessageType::StatusResponse == getMessageType(Response{StatusResponse{}}));
         REQUIRE(MessageType::ListDownloadJobsResponse ==
                 getMessageType(Response{ListDownloadJobsResponse{}}));
+        REQUIRE(MessageType::GraphExploreResponse ==
+                getMessageType(Response{GraphExploreResponse{.query = "processTask"}}));
     }
 
     SECTION("Request name extraction") {
@@ -1418,6 +1522,8 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
         REQUIRE(std::string("ListSessions") == getRequestName(Request{ListSessionsRequest{}}));
         REQUIRE(std::string("DownloadStatus") ==
                 getRequestName(Request{DownloadStatusRequest{.jobId = "download-1"}}));
+        REQUIRE(std::string("GraphExplore") ==
+                getRequestName(Request{GraphExploreRequest{.query = "processTask"}}));
         REQUIRE(std::string("CancelDownloadJob") ==
                 getRequestName(Request{CancelDownloadJobRequest{.jobId = "download-2"}}));
         REQUIRE(std::string("ListDownloadJobs") ==

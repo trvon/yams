@@ -124,7 +124,10 @@ void DaemonCheck::execute(std::ostream& os, YamsCLI* cli,
                     os << "  yams plugin trust reset\n";
                     os << "  yams plugin trust status\n";
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("doctor plugin-trust check failed: {}", e.what());
             } catch (...) {
+                spdlog::debug("doctor plugin-trust check failed");
             }
         };
 
@@ -238,7 +241,10 @@ void DaemonCheck::execute(std::ostream& os, YamsCLI* cli,
                     sqlite3_close(db);
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("doctor db-migration check failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("doctor db-migration check failed");
         }
 
         DoctorRender::printHeader(os, "Daemon Health");
@@ -290,7 +296,10 @@ void DaemonCheck::execute(std::ostream& os, YamsCLI* cli,
                              ")";
             }
             resourceRows.push_back({"Vector Scoring", vecStatus, ""});
+        } catch (const std::exception& e) {
+            spdlog::debug("doctor vector-scoring check failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("doctor vector-scoring check failed");
         }
 
         try {
@@ -333,7 +342,10 @@ void DaemonCheck::execute(std::ostream& os, YamsCLI* cli,
                 resourceRows.push_back(
                     {"Mux Queued", std::to_string(st.muxQueuedBytes) + " bytes", ""});
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("doctor resource-mux check failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("doctor resource-mux check failed");
         }
 
         if (!resourceRows.empty()) {

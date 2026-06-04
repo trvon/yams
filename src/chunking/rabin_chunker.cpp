@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/chunking/chunker.h>
+#include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -22,6 +23,7 @@ struct RabinTables {
     std::array<std::array<uint64_t, 256>, 64> modTable{};
 
     explicit RabinTables(uint64_t polynomial) {
+        YAMS_PRECONDITION(polynomial != 0, "Rabin fingerprint polynomial must be non-zero");
         // Initialize output table
         for (int i = 0; i < 256; ++i) {
             uint64_t hash = 0;

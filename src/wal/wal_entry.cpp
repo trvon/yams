@@ -80,7 +80,7 @@ template <typename T> std::optional<T> readObject(std::span<const std::byte> in)
     }
     T result{};
     std::memcpy(&result, in.data(),
-                sizeof(T)); // nosemgrep: yams.cpp.memcpy-non-pod-object -- centralized POD WAL
+                sizeof(T)); // nosemgrep: yams.cpp.memcpy-non-pod-object
                             // payload decoder with static_assert.
     return result;
 }

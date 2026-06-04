@@ -11,7 +11,6 @@
 #include <chrono>
 #include <climits>
 #include <cstdlib>
-#include "../../common/test_helpers_catch2.h"
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -22,6 +21,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -722,7 +722,11 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     }
 
     constexpr int64_t kDocBaseId = 5000;
-    constexpr int kDocCount = 128;
+    // InternalEventBus channels are process-wide and may have been created by
+    // earlier sections with a smaller capacity than this queue's constructor
+    // request. Keep the regression batch below the smallest test channel cap so
+    // identity coverage is independent of singleton creation order.
+    constexpr int kDocCount = 24;
     std::vector<metadata::DocumentInfo> docs;
     docs.reserve(kDocCount);
     for (int i = 0; i < kDocCount; ++i) {

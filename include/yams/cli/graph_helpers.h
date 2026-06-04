@@ -6,7 +6,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include <yams/daemon/ipc/ipc_protocol.h>
+namespace yams::daemon {
+struct GraphNode;
+} // namespace yams::daemon
 
 namespace yams::cli {
 
@@ -65,8 +67,9 @@ inline std::string formatRelationCounts(const std::unordered_map<std::string, st
 std::string projectPathForCli(const std::string& rawPath,
                               const std::filesystem::path& cwd = std::filesystem::current_path());
 
-// Build a graph explore hint string for a file path.
-// Low-signal structural/storage relations are omitted from the suggested command.
+// Build an agent-oriented graph explore hint string for a file path.
+// Relation/depth inputs are accepted for call-site compatibility but the new explore flow
+// infers relevant relationships from the query.
 // Returns empty string if path is empty.
 std::string
 buildGraphExploreHint(const std::string& filePath, const std::string& topRelation = {},

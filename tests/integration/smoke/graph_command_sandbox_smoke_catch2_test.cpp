@@ -1,9 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <nlohmann/json.hpp>
 #include <exception>
 #include <filesystem>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -11,6 +11,8 @@
 
 #include "common/test_helpers_catch2.h"
 
+#include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/global_io_context.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -18,8 +20,6 @@
 #include <yams/metadata/path_utils.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_metadata_store.h>
-#include <yams/cli/yams_cli.h>
-#include <yams/daemon/client/global_io_context.h>
 
 namespace fs = std::filesystem;
 
@@ -122,6 +122,24 @@ struct StoredTopologyFixture {
     std::string firstClusterId;
 };
 
+std::string symbolNodeKey(const yams::metadata::SymbolMetadata& sym) {
+    return sym.kind + ":" + sym.qualifiedName + "@" + sym.filePath;
+}
+
+yams::metadata::SymbolMetadata makeSymbol(const fs::path& path, const std::string& hash,
+                                          const std::string& name, const std::string& qualifiedName,
+                                          std::int32_t startLine, std::int32_t endLine) {
+    yams::metadata::SymbolMetadata sym;
+    sym.documentHash = hash;
+    sym.filePath = path.string();
+    sym.symbolName = name;
+    sym.qualifiedName = qualifiedName;
+    sym.kind = "function";
+    sym.startLine = startLine;
+    sym.endLine = endLine;
+    return sym;
+}
+
 StoredTopologyFixture createStoredTopologyFixture(const fs::path& root) {
     using namespace yams::metadata;
     using namespace yams::topology;
@@ -179,6 +197,69 @@ StoredTopologyFixture createStoredTopologyFixture(const fs::path& root) {
     pool->shutdown();
     pool.reset();
     return fixture;
+}
+
+void createGraphExploreFixture(const fs::path& root) {
+    using namespace yams::metadata;
+
+    const fs::path dataDir = root / "data";
+    const fs::path sourceDir = root / "src";
+    fs::create_directories(dataDir);
+    fs::create_directories(sourceDir);
+    const fs::path sourcePath = sourceDir / "explore.cpp";
+    yams::test::write_file(sourcePath, "int exploreTarget() {\n"
+                                       "    return 7;\n"
+                                       "}\n"
+                                       "int exploreEntry() {\n"
+                                       "    return exploreTarget();\n"
+                                       "}\n");
+
+    const fs::path dbPath = dataDir / "yams.db";
+    ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    auto pool = std::make_unique<ConnectionPool>(dbPath.string(), poolConfig);
+    REQUIRE(pool->initialize().has_value());
+
+    auto repository = std::make_shared<MetadataRepository>(*pool);
+    auto kgResult = makeSqliteKnowledgeGraphStore(*pool, KnowledgeGraphStoreConfig{});
+    REQUIRE(kgResult.has_value());
+    auto kgStore = std::shared_ptr<KnowledgeGraphStore>(kgResult.value().release());
+    repository->setKnowledgeGraphStore(kgStore);
+
+    REQUIRE(repository->insertDocument(makeDocumentWithPath(sourcePath.string(), "explore-hash"))
+                .has_value());
+
+    auto entry = makeSymbol(sourcePath, "explore-hash", "exploreEntry", "demo::exploreEntry", 4, 6);
+    auto target =
+        makeSymbol(sourcePath, "explore-hash", "exploreTarget", "demo::exploreTarget", 1, 3);
+    REQUIRE(kgStore->upsertSymbolMetadata({entry, target}).has_value());
+
+    KGNode entryNode;
+    entryNode.nodeKey = symbolNodeKey(entry);
+    entryNode.label = entry.symbolName;
+    entryNode.type = entry.kind;
+    const auto entryId = kgStore->upsertNode(entryNode);
+    REQUIRE(entryId.has_value());
+
+    KGNode targetNode;
+    targetNode.nodeKey = symbolNodeKey(target);
+    targetNode.label = target.symbolName;
+    targetNode.type = target.kind;
+    const auto targetId = kgStore->upsertNode(targetNode);
+    REQUIRE(targetId.has_value());
+
+    KGEdge edge;
+    edge.srcNodeId = entryId.value();
+    edge.dstNodeId = targetId.value();
+    edge.relation = "call";
+    edge.weight = 1.0F;
+    REQUIRE(kgStore->addEdge(edge).has_value());
+
+    kgStore.reset();
+    repository.reset();
+    pool->shutdown();
+    pool.reset();
 }
 
 } // namespace
@@ -244,6 +325,43 @@ TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][inte
 
     INFO(out);
     CHECK(rc != 0);
+}
+
+TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrationsmoke]") {
+    const fs::path root = yams::test::make_temp_dir("yams_graph_explore_");
+    createGraphExploreFixture(root);
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", (root / "data").string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", (root / "data").string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    std::string jsonOut;
+    const int jsonRc = run_cli(
+        {"yams", "graph", "--explore", "exploreEntry", "--max-files", "1", "--json"}, &jsonOut);
+    INFO(jsonOut);
+    REQUIRE(jsonRc == 0);
+    auto parsed = nlohmann::json::parse(jsonOut);
+    CHECK(parsed["query"] == "exploreEntry");
+    REQUIRE_FALSE(parsed["entrySymbols"].empty());
+    CHECK(parsed["entrySymbols"][0]["label"] == "exploreEntry");
+    REQUIRE_FALSE(parsed["files"].empty());
+    CHECK(parsed["files"][0]["content"].get<std::string>().find("4\tint exploreEntry()") !=
+          std::string::npos);
+    REQUIRE_FALSE(parsed["relationships"].empty());
+    CHECK(parsed["relationships"][0]["relation"] == "calls");
+
+    std::string humanOut;
+    const int humanRc =
+        run_cli({"yams", "graph", "--explore", "exploreEntry", "--max-files", "1"}, &humanOut);
+    INFO(humanOut);
+    REQUIRE(humanRc == 0);
+    CHECK(humanOut.find("Graph Explore") != std::string::npos);
+    CHECK(humanOut.find("exploreEntry --calls--> exploreTarget") != std::string::npos);
+    CHECK(humanOut.find("4\tint exploreEntry()") != std::string::npos);
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {

@@ -219,6 +219,7 @@ private:
 
     // Graph query handlers (PBI-009)
     boost::asio::awaitable<Response> handleGraphQueryRequest(const GraphQueryRequest& req);
+    boost::asio::awaitable<Response> handleGraphExploreRequest(const GraphExploreRequest& req);
     boost::asio::awaitable<Response>
     handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req);
     // PBI-093: Helper for listByType mode

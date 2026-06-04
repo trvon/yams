@@ -22,8 +22,10 @@
 #include <regex>
 #include <shared_mutex>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 // Include daemon client for DaemonBackend
@@ -42,7 +44,31 @@ class HybridBackend;
  * DaemonBackend - Daemon IPC backend
  * Communicates with the daemon service for embedding generation
  */
-// Local awaitable bridge (build-only) to await daemon calls without legacy async_bridge
+// Local awaitable bridge (build-only) to await daemon calls without legacy async_bridge.
+// Callers must ensure the supplied awaitable factory owns any state it touches because the
+// spawned coroutine may outlive the timeout return path.
+static std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex env_mutex;
+    std::lock_guard<std::mutex> lock(env_mutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+static bool isTruthyEnvValue(std::string_view value) {
+    if (value.empty()) {
+        return false;
+    }
+
+    std::string normalized(value);
+    for (auto& c : normalized) {
+        c = static_cast<char>(std::tolower(c));
+    }
+
+    return normalized != "0" && normalized != "false" && normalized != "off" && normalized != "no";
+}
+
 template <typename T, typename MakeAwaitable>
 static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
     auto shared_promise = std::make_shared<std::promise<yams::Result<T>>>();
@@ -80,7 +106,7 @@ static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::mil
                     shared_promise->set_value(
                         yams::Error{yams::ErrorCode::Timeout, "await timeout"});
                 } catch (...) {
-                    // ignore double set_value races
+                    spdlog::debug("await_with_timeout: promise already satisfied during timeout");
                 }
             }
             return yams::Error{yams::ErrorCode::Timeout, "await timeout"};
@@ -106,50 +132,34 @@ public:
         try {
             // If running inside the daemon process, prefer an in-process embedding provider to
             // avoid recursive IPC calls back into the daemon.
-            if (const char* inproc = std::getenv("YAMS_IN_DAEMON")) {
-                std::string v(inproc);
-                for (auto& c : v)
-                    c = static_cast<char>(std::tolower(c));
-                if (!v.empty() && v != "0" && v != "false" && v != "off" && v != "no") {
-                    auto isTruthy = [](const char* value) {
-                        if (!value || !*value) {
-                            return false;
-                        }
-                        std::string normalized(value);
-                        for (auto& c : normalized) {
-                            c = static_cast<char>(std::tolower(c));
-                        }
-                        return normalized != "0" && normalized != "false" && normalized != "off" &&
-                               normalized != "no";
-                    };
-
-                    // In synthetic/unit tests we intentionally force a deterministic mock provider
-                    // while running in-daemon mode.
-                    if (isTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
-                        fallback_provider_ = yams::ml::createEmbeddingProvider("Mock");
-                    } else {
-                        fallback_provider_ = yams::ml::createEmbeddingProvider();
-                    }
-                    if (fallback_provider_ && fallback_provider_->isAvailable()) {
-                        auto initRes = fallback_provider_->initialize();
-                        if (!initRes) {
-                            spdlog::warn("DaemonBackend fallback provider init failed: {}",
-                                         initRes.error().message);
-                            fallback_provider_.reset();
-                        } else {
-                            fallback_initialized_ = true;
-                            cached_dim_ = fallback_provider_->getEmbeddingDimension();
-                            cached_seq_len_ = fallback_provider_->getMaxSequenceLength();
-                            initialized_ = true;
-                            spdlog::info("DaemonBackend using in-process embedding provider '{}'",
-                                         fallback_provider_->getProviderName());
-                            return true;
-                        }
-                    } else {
+            if (auto inproc = getenvCopy("YAMS_IN_DAEMON"); inproc && isTruthyEnvValue(*inproc)) {
+                // In synthetic/unit tests we intentionally force a deterministic mock provider
+                // while running in-daemon mode.
+                if (auto mockProvider = getenvCopy("YAMS_USE_MOCK_PROVIDER");
+                    mockProvider && isTruthyEnvValue(*mockProvider)) {
+                    fallback_provider_ = yams::ml::createEmbeddingProvider("Mock");
+                } else {
+                    fallback_provider_ = yams::ml::createEmbeddingProvider();
+                }
+                if (fallback_provider_ && fallback_provider_->isAvailable()) {
+                    auto initRes = fallback_provider_->initialize();
+                    if (!initRes) {
+                        spdlog::warn("DaemonBackend fallback provider init failed: {}",
+                                     initRes.error().message);
                         fallback_provider_.reset();
-                        spdlog::warn("DaemonBackend could not obtain in-process embedding "
-                                     "provider; falling back to IPC backend");
+                    } else {
+                        fallback_initialized_ = true;
+                        cached_dim_ = fallback_provider_->getEmbeddingDimension();
+                        cached_seq_len_ = fallback_provider_->getMaxSequenceLength();
+                        initialized_ = true;
+                        spdlog::info("DaemonBackend using in-process embedding provider '{}'",
+                                     fallback_provider_->getProviderName());
+                        return true;
                     }
+                } else {
+                    fallback_provider_.reset();
+                    spdlog::warn("DaemonBackend could not obtain in-process embedding "
+                                 "provider; falling back to IPC backend");
                 }
             }
 
@@ -169,8 +179,9 @@ public:
 
             // Verify daemon is responsive via DaemonClient, then request model preload (non-fatal
             // on error)
+            auto daemonClient = daemon_client_;
             auto st = await_with_timeout<yams::daemon::StatusResponse>(
-                [&]() { return daemon_client_->status(); }, std::chrono::seconds(5));
+                [daemonClient]() { return daemonClient->status(); }, std::chrono::seconds(5));
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
@@ -202,18 +213,21 @@ public:
                             }
                         }
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("DaemonBackend: failed to inspect loaded daemon models");
                     }
 
                     // Allow extended preload timeout via env (default 30s)
                     std::chrono::milliseconds preload_timeout = std::chrono::seconds(30);
-                    if (const char* t = std::getenv("YAMS_MODEL_PRELOAD_TIMEOUT_MS")) {
+                    if (auto timeoutOverride = getenvCopy("YAMS_MODEL_PRELOAD_TIMEOUT_MS");
+                        timeoutOverride) {
                         try {
-                            long v = std::stol(std::string(t));
+                            long v = std::stol(*timeoutOverride);
                             if (v > 0)
                                 preload_timeout = std::chrono::milliseconds(v);
                         } catch (...) {
-                            // Intentional best-effort path; keep the primary operation unaffected.
+                            spdlog::debug(
+                                "DaemonBackend: invalid YAMS_MODEL_PRELOAD_TIMEOUT_MS='{}'",
+                                *timeoutOverride);
                         }
                     }
 
@@ -226,7 +240,8 @@ public:
                         req.modelName = config_.model_name;
                         req.preload = true;
                         auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
-                            [&]() { return daemon_client_->loadModel(req); }, preload_timeout);
+                            [daemonClient, req]() { return daemonClient->loadModel(req); },
+                            preload_timeout);
                         if (!lm) {
                             spdlog::debug("Preload model in daemon did not complete: {}",
                                           lm.error().message);
@@ -255,7 +270,7 @@ public:
             try {
                 fallback_provider_->shutdown();
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug("DaemonBackend: fallback provider shutdown raised exception");
             }
             fallback_provider_.reset();
         }
@@ -301,8 +316,10 @@ public:
             req.modelName = config_.model_name;
             req.normalize = config_.normalize_embeddings;
 
+            auto daemonClient = daemon_client_;
             auto result = await_with_timeout<yams::daemon::EmbeddingResponse>(
-                [&]() { return daemon_client_->generateEmbedding(req); }, config_.daemon_timeout);
+                [daemonClient, req]() { return daemonClient->generateEmbedding(req); },
+                config_.daemon_timeout);
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
@@ -386,14 +403,18 @@ public:
                               attempt, texts.size(), useStreaming ? "true" : "false",
                               currentBatchSize);
                 req.batchSize = currentBatchSize;
+                auto daemonClient = daemon_client_;
                 yams::Result<yams::daemon::BatchEmbeddingResponse> result =
-                    useStreaming
-                        ? await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
-                              [&]() { return daemon_client_->streamingBatchEmbeddings(req); },
-                              config_.daemon_timeout)
-                        : await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
-                              [&]() { return daemon_client_->generateBatchEmbeddings(req); },
-                              config_.daemon_timeout);
+                    useStreaming ? await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
+                                       [daemonClient, req]() {
+                                           return daemonClient->streamingBatchEmbeddings(req);
+                                       },
+                                       config_.daemon_timeout)
+                                 : await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
+                                       [daemonClient, req]() {
+                                           return daemonClient->generateBatchEmbeddings(req);
+                                       },
+                                       config_.daemon_timeout);
                 if (result) {
                     maybeResponse = result.value();
                     break;
@@ -627,18 +648,21 @@ class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
         auto effective = config.backend;
-        if (const char* env = std::getenv("YAMS_EMBED_BACKEND"); env && *env) {
-            std::string s(env);
-            for (auto& c : s)
+        // Typed config + env override via ConfigResolver (preserves existing YAMS_EMBED_BACKEND)
+        auto runtimePolicy = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        if (runtimePolicy.backend) {
+            const auto& s = *runtimePolicy.backend;
+            std::string lowered(s);
+            for (auto& c : lowered)
                 c = static_cast<char>(std::tolower(c));
-            if (s == "simeon") {
+            if (lowered == "simeon") {
                 effective = EmbeddingConfig::Backend::Simeon;
                 config_.backend = effective;
-            } else if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
-                       s == "local_onnx") {
+            } else if (lowered == "onnx" || lowered == "onnxruntime" || lowered == "onnx-runtime" ||
+                       lowered == "ort" || lowered == "local_onnx") {
                 effective = EmbeddingConfig::Backend::OnnxRuntime;
                 config_.backend = effective;
-            } else if (s == "daemon" || s == "hybrid" || s == "local") {
+            } else if (lowered == "daemon" || lowered == "hybrid" || lowered == "local") {
                 effective = EmbeddingConfig::Backend::Daemon;
                 config_.backend = effective;
             }
@@ -801,6 +825,7 @@ public:
         try {
             return backend_ ? backend_->getBackendName() : std::string{"unknown"};
         } catch (...) {
+            spdlog::debug("EmbeddingGenerator::Impl::getBackendName failed");
             return "unknown";
         }
     }
@@ -846,7 +871,7 @@ private:
             try {
                 cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug("EmbeddingGenerator: failed to read TuneAdvisor concurrency cap");
             }
             if (cap <= 0) {
                 cap = std::max(1u, std::thread::hardware_concurrency());
@@ -968,7 +993,8 @@ EmbeddingGenerator::generateEmbeddingsAsync(const std::vector<std::string>& text
             try {
                 promise->set_exception(std::current_exception());
             } catch (...) {
-                // Ignore errors setting exception
+                spdlog::debug(
+                    "EmbeddingGenerator::generateEmbeddingsAsync: promise already satisfied");
             }
         }
     }).detach();
@@ -1014,6 +1040,7 @@ std::string EmbeddingGenerator::getBackendName() const {
     try {
         return pImpl ? pImpl->getBackendName() : std::string{"unknown"};
     } catch (...) {
+        spdlog::debug("EmbeddingGenerator::getBackendName failed");
         return "unknown";
     }
 }

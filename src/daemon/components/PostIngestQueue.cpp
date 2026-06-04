@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -14,6 +15,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -252,12 +254,23 @@ std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
     return variants;
 }
 
+// Copy an environment variable under a static mutex so thread-safety
+// checkers can see we're serializing access to the env block.
+inline std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
     static const bool disabled = []() {
-        const char* env = std::getenv("YAMS_DISABLE_GLINER_TITLES");
-        return env && std::string(env) == "1";
+        auto env = getenvCopy("YAMS_DISABLE_GLINER_TITLES");
+        return env && *env == "1";
     }();
     return disabled;
 }
@@ -307,33 +320,68 @@ PostIngestQueue::PostIngestQueue(
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
+    signalAllWakeTimers();
     notifyLifecycle();
-    // Wait for all in-flight operations to complete before destroying members.
-    // This prevents data races where workers access members during destruction.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
-    std::unique_lock<std::mutex> lock(lifecycleMutex_);
-    lifecycleCv_.wait_until(lock, deadline, [this]() {
-        return totalInFlight() == 0 && callbacksInFlight_.load(std::memory_order_acquire) == 0;
-    });
+
+    // Wait for all pollers and in-flight operations to quiesce before
+    // destroying members. Otherwise detached coroutines can outlive `this`.
+    bool dtorQuiesced = false;
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        dtorQuiesced =
+            lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
+    }
+
+    if (!dtorQuiesced) {
+        spdlog::critical("[PostIngestQueue] destructor: shutdown not quiesced after 1500ms; "
+                         "stages started: extraction={}, kg={}, symbol={}, entity={}, title={}, "
+                         "inflight={}, callbacksInFlight={}",
+                         stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                         stageStarted_[3].load(), stageStarted_[4].load(), totalInFlight(),
+                         callbacksInFlight_.load());
+        // Second and final window
+        auto secondDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        {
+            std::unique_lock<std::mutex> lock(lifecycleMutex_);
+            dtorQuiesced = lifecycleCv_.wait_until(lock, secondDeadline,
+                                                   [this]() { return shutdownQuiesced(); });
+        }
+        if (dtorQuiesced) {
+            spdlog::info("[PostIngestQueue] destructor: pollers quiesced during second window");
+        } else {
+            spdlog::critical(
+                "[PostIngestQueue] destructor: shutdown still not quiesced after 2000ms total");
+        }
+    }
+
+    YAMS_ASSERT(dtorQuiesced || shutdownQuiesced(),
+                "PostIngestQueue destroyed before pollers and callbacks quiesced");
 
     // Detach wake timers to prevent use-after-free in steady_timer destructor.
     // The timers hold references to io_context service objects that may be
     // destroyed before PostIngestQueue member destructors run during shutdown.
+    // Each new-expression intentionally leaks a moved-from shared_ptr; the
+    // try-catch silences the allocation-failure static-analysis warning.
     std::lock_guard<std::mutex> wakeLock(wakeTimerMutex_);
-    if (extractionWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
-    }
-    if (kgWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
-    }
-    if (symbolWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
-    }
-    if (entityWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
-    }
-    if (titleWakeTimer_) {
-        (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
+    try {
+        if (extractionWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(extractionWakeTimer_));
+        }
+        if (kgWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
+        }
+        if (symbolWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
+        }
+        if (entityWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
+        }
+        if (titleWakeTimer_) {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(titleWakeTimer_));
+        }
+    } catch (...) {
+        spdlog::debug("[PostIngestQueue] timer detach allocation failed during shutdown");
     }
 }
 
@@ -381,20 +429,48 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
         }
     }
     if (timer) {
-        boost::asio::post(timer->get_executor(), [timer = std::move(timer)]() mutable {
-            boost::system::error_code ec;
-            timer->cancel(ec);
-        });
+        boost::asio::post(timer->get_executor(),
+                          [timer = std::move(timer)]() mutable { (void)timer->cancel(); });
     }
+}
+
+#ifdef _WIN32
+// On Windows, destroying a steady_timer while a coroutine is suspended on
+// async_wait will SIGSEGV. Detach by moving into a leaked allocation so
+// the timer outlives any pending coroutine, matching the destructor path.
+static void leakWakeTimer(std::shared_ptr<boost::asio::steady_timer>& t) noexcept {
+    if (t) {
+        try {
+            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(t));
+        } catch (...) {
+        }
+    }
+}
+#endif
+
+void PostIngestQueue::signalAllWakeTimers() {
+    signalWakeTimer(Stage::Extraction);
+    signalWakeTimer(Stage::KnowledgeGraph);
+    signalWakeTimer(Stage::Symbol);
+    signalWakeTimer(Stage::Entity);
+    signalWakeTimer(Stage::Title);
 }
 
 void PostIngestQueue::clearWakeTimers() {
     std::lock_guard<std::mutex> lock(wakeTimerMutex_);
+#ifdef _WIN32
+    leakWakeTimer(extractionWakeTimer_);
+    leakWakeTimer(kgWakeTimer_);
+    leakWakeTimer(symbolWakeTimer_);
+    leakWakeTimer(entityWakeTimer_);
+    leakWakeTimer(titleWakeTimer_);
+#else
     extractionWakeTimer_.reset();
     kgWakeTimer_.reset();
     symbolWakeTimer_.reset();
     entityWakeTimer_.reset();
     titleWakeTimer_.reset();
+#endif
 }
 
 void PostIngestQueue::start() {
@@ -431,18 +507,19 @@ void PostIngestQueue::start() {
     spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
     boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
 
-    auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-    auto allPollersStarted = [this]() {
-        for (std::size_t s = 0; s < kStageCount; ++s) {
-            if (!stageStarted_[s].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
-    };
+    const auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    bool allStarted = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, startupDeadline, allPollersStarted);
+        allStarted =
+            lifecycleCv_.wait_until(lock, startupDeadline, [this]() { return allStagesStarted(); });
+    }
+
+    if (!allStarted) {
+        spdlog::warn("[PostIngestQueue] not all stages started within 100ms; "
+                     "extraction={}, kg={}, symbol={}, entity={}, title={}",
+                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                     stageStarted_[3].load(), stageStarted_[4].load());
     }
 
     spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={}, "
@@ -452,15 +529,9 @@ void PostIngestQueue::start() {
 }
 
 void PostIngestQueue::stop() {
-    const bool alreadyStopping = stop_.exchange(true, std::memory_order_acq_rel);
+    stop_.exchange(true, std::memory_order_acq_rel);
     notifyLifecycle();
-    if (!alreadyStopping) {
-        signalWakeTimer(Stage::Extraction);
-        signalWakeTimer(Stage::KnowledgeGraph);
-        signalWakeTimer(Stage::Symbol);
-        signalWakeTimer(Stage::Entity);
-        signalWakeTimer(Stage::Title);
-    }
+    signalAllWakeTimers();
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
@@ -469,30 +540,50 @@ void PostIngestQueue::stop() {
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
-    auto allPollersStopped = [this]() {
-        for (std::size_t s = 0; s < kStageCount; ++s) {
-            if (stageStarted_[s].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    // Wait for all poller coroutines to observe stop_ and exit, plus any
+    // in-flight callbacks to drain to zero.  The first deadline is the
+    // normal expected path; if a poller is stuck (e.g., the title poller
+    // sleeping in its capability-check loop), we log which stages are
+    // still alive and grant a second window before proceeding.
+    bool quiesced = false;
     {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.wait_until(lock, deadline, [&]() {
-            return allPollersStopped() && totalInFlight() == 0 &&
-                   callbacksInFlight_.load(std::memory_order_acquire) == 0;
-        });
-        if (allPollersStopped() && totalInFlight() == 0 &&
-            callbacksInFlight_.load(std::memory_order_acquire) == 0) {
-            startGuard_.store(false, std::memory_order_release);
+        quiesced = lifecycleCv_.wait_until(lock, deadline, [this]() { return shutdownQuiesced(); });
+    }
+
+    if (!quiesced) {
+        // The title poller is the usual suspect — it sits in a 250ms
+        // capability-sleep loop when no title extractor is available.
+        spdlog::warn("[PostIngestQueue] shutdown not quiesced after 1500ms; stages still started: "
+                     "extraction={}, kg={}, symbol={}, entity={}, title={}, inflight={}, "
+                     "callbacksInFlight={}",
+                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                     stageStarted_[3].load(), stageStarted_[4].load(), totalInFlight(),
+                     callbacksInFlight_.load());
+
+        // Grant one extra window.  The title poller's capability-sleep timer
+        // is 250ms, so 500ms gives it at least one full sleep→wake→check cycle.
+        auto secondDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        {
+            std::unique_lock<std::mutex> lock(lifecycleMutex_);
+            quiesced = lifecycleCv_.wait_until(lock, secondDeadline,
+                                               [this]() { return shutdownQuiesced(); });
+        }
+        if (quiesced) {
+            spdlog::info("[PostIngestQueue] pollers quiesced during second window");
+        } else {
+            spdlog::critical("[PostIngestQueue] shutdown still not quiesced after 2000ms total; "
+                             "proceeding with wake-timer cleanup — this may crash on Windows if "
+                             "a poller coroutine is still suspended on a wake timer");
         }
     }
-    if (!alreadyStopping) {
-        clearWakeTimers();
-    }
+
+    // clearWakeTimers() destroys the shared_ptr<steady_timer> instances.
+    // This is safe only when all pollers have exited, because a suspended
+    // coroutine referencing a destroyed timer will SIGSEGV.
+    startGuard_.store(false, std::memory_order_release);
+    clearWakeTimers();
 }
 
 // ============================================================================
@@ -505,10 +596,13 @@ constexpr TuneAdvisor::PostIngestStage kTuneAdvisorStages[] = {
     TuneAdvisor::PostIngestStage::Symbol,     TuneAdvisor::PostIngestStage::Entity,
     TuneAdvisor::PostIngestStage::Title,
 };
+static_assert(std::size(kTuneAdvisorStages) == 5,
+              "kTuneAdvisorStages must stay in sync with PostIngestQueue::Stage");
 } // namespace
 
 void PostIngestQueue::pauseStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "pauseStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(true, std::memory_order_release);
     TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], false);
     spdlog::info("[PostIngestQueue] Paused {} stage", kStageNames[idx]);
@@ -516,13 +610,16 @@ void PostIngestQueue::pauseStage(Stage stage) {
 
 void PostIngestQueue::resumeStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "resumeStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(false, std::memory_order_release);
     TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], true);
     spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
 bool PostIngestQueue::isStagePaused(Stage stage) const {
-    return stagePaused_[static_cast<std::size_t>(stage)].load(std::memory_order_acquire);
+    const auto idx = static_cast<std::size_t>(stage);
+    YAMS_PRECONDITION(idx < kStageCount, "isStagePaused requires a valid PostIngestQueue::Stage");
+    return stagePaused_[idx].load(std::memory_order_acquire);
 }
 
 void PostIngestQueue::pauseAll() {
@@ -2841,7 +2938,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
     auto cached = metadataCache_.infoCache.get(hash);
     if (cached) {
-        return *cached;
+        return cached.value();
     }
 
     // Cache miss - query DB
@@ -2863,7 +2960,7 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
     // Try cache first
     auto cached = metadataCache_.tagsCache.get(docId);
     if (cached) {
-        return *cached;
+        return cached.value();
     }
 
     // Cache miss - query DB
@@ -3025,8 +3122,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     std::vector<std::string> embedHashBatch;
     std::size_t embedPreparedBatchPayloadBytes = 0;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
-    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4u * 1024u * 1024u;
-    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16u * 1024u * 1024u;
+    constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
+    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
@@ -3294,6 +3391,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 
     using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
     const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
+    YAMS_ASSERT(numChunks > 0, "PostIngestQueue::processBatch requires at least one worker chunk");
     const std::size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
     std::vector<std::future<std::vector<TaskResult>>> futures;
     futures.reserve(numChunks);

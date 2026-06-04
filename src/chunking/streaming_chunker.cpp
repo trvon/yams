@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/chunking/streaming_chunker.h>
+#include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
 
 #include <algorithm>
@@ -14,6 +15,7 @@ struct StreamingRabinTables {
     std::array<std::array<uint64_t, 256>, 64> modTable{};
 
     explicit StreamingRabinTables(uint64_t polynomial) {
+        YAMS_PRECONDITION(polynomial != 0, "Streaming Rabin polynomial must be non-zero");
         // Initialize output table
         for (int i = 0; i < 256; ++i) {
             uint64_t hash = 0;
@@ -63,6 +65,7 @@ struct StreamingChunker::Impl {
 
 StreamingChunker::StreamingChunker(ChunkingConfig config)
     : pImpl(std::make_unique<Impl>(config.polynomial)), config_(std::move(config)) {
+    YAMS_PRECONDITION(config_.windowSize > 0, "StreamingChunker windowSize must be positive");
     spdlog::debug("Created StreamingChunker with target chunk size: {}", config_.targetChunkSize);
 }
 

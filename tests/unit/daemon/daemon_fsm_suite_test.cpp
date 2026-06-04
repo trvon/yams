@@ -214,6 +214,38 @@ TEST_CASE("DaemonLifecycleFSM: State transitions", "[daemon][fsm][lifecycle]") {
         REQUIRE(snapshot.state == LifecycleState::Failed);
         REQUIRE(snapshot.lastError.find("Critical") != std::string::npos);
     }
+
+    SECTION("ShutdownRequested from Ready reaches Stopped") {
+        fsm.dispatch(BootstrappedEvent{});
+        fsm.dispatch(HealthyEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Ready);
+
+        fsm.dispatch(ShutdownRequestedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopping);
+
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+    }
+
+    SECTION("Failed lifecycle can still reach Stopped") {
+        fsm.dispatch(BootstrappedEvent{});
+        fsm.dispatch(FailureEvent{"Critical error"});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Failed);
+
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+    }
+
+    SECTION("StoppedEvent is idempotent once stopped") {
+        fsm.dispatch(BootstrappedEvent{});
+        fsm.dispatch(HealthyEvent{});
+        fsm.dispatch(ShutdownRequestedEvent{});
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+
+        fsm.dispatch(StoppedEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Stopped);
+    }
 }
 
 TEST_CASE("DaemonLifecycleFSM: clearing degradation is not a warning", "[daemon][fsm][lifecycle]") {
@@ -335,6 +367,14 @@ TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachabl
         fsm.dispatch(ServiceManagerStoppedEvent{});
         REQUIRE(fsm.snapshot().state == ServiceManagerState::Stopped);
         REQUIRE(fsm.isTerminalState());
+    }
+
+    SECTION("tryStartOpeningDatabase treats shutdown as cancellation") {
+        fsm.dispatch(ShutdownEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
+
+        REQUIRE_FALSE(fsm.tryStartOpeningDatabase());
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
     }
 
     SECTION("waitForTerminalState unblocks after failure event") {

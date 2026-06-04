@@ -486,7 +486,11 @@ public:
                             std::string base = p;
                             try {
                                 base = std::filesystem::path(p).filename().string();
+                            } catch (const std::exception& e) {
+                                spdlog::trace("grep path basename extraction failed for '{}': {}",
+                                              p, e.what());
                             } catch (...) {
+                                spdlog::trace("grep path basename extraction failed for '{}'", p);
                             }
                             if (!base.empty() && base != p)
                                 extra.push_back(std::string("*") + base);
@@ -1080,7 +1084,7 @@ private:
     void renderGraphExploreTip() const {
         std::cout << "\n"
                   << ui::colorize(
-                         "Tip: Explore relationships with `yams graph --name <file> --depth 2`",
+                         "Tip: Explore relationships with `yams graph --explore <symbol-or-file>`",
                          ui::Ansi::DIM)
                   << std::endl;
     }
@@ -1888,8 +1892,10 @@ private:
                     if (!filtered.empty())
                         documents.swap(filtered);
                 }
+            } catch (const std::exception& e) {
+                spdlog::trace("grep candidate optimization failed: {}", e.what());
             } catch (...) {
-                // Best-effort optimization; ignore failures
+                spdlog::trace("grep candidate optimization failed");
             }
         }
 

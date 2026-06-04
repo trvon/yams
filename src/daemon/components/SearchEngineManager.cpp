@@ -405,7 +405,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             ev.vectorEnabled = vectorEnabled;
                             ev.durationMs = 0;
                             fsm_.dispatch(ev);
-                        } catch (...) {
+                        } catch (const std::exception& e) {
+                            spdlog::debug("SearchEngine rebuild-completed FSM dispatch failed: {}",
+                                          e.what());
                         }
 
                         result = RetT(newEngine);
@@ -414,7 +416,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                             SearchEngineRebuildFailedEvent ev;
                             ev.error = r.error().message;
                             fsm_.dispatch(ev);
-                        } catch (...) {
+                        } catch (const std::exception& e) {
+                            spdlog::debug("SearchEngine rebuild-failed FSM dispatch failed: {}",
+                                          e.what());
                         }
                         result = RetT(Error{ErrorCode::InternalError, r.error().message});
                     }

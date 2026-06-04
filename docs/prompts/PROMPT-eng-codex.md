@@ -157,7 +157,7 @@ Always ask first for:
 - Do not start discovery with `Read`, `Glob`, `Grep`, `rg`, or ad-hoc bash search when YAMS retrieval can narrow the target first.
 - Use `yams grep` first for symbols, strings, APIs, and code patterns.
 - Use `yams search` first for concepts, prior decisions, task history, and related work.
-- When exploring how code connects (callers, callees, includes, imports, dependencies), prefer `yams graph --name <file>` or `yams graph --node-key <key>` over repeated `yams grep` or `yams search`. Use the `graph_explore_hint` field in JSON output to discover the precise command for a result.
+- When exploring how code connects (callers, callees, includes, imports, dependencies), prefer `yams graph --explore <symbol-or-file>` for agent-readable snippets and relationship context; use `yams graph --name <file>` or `yams graph --node-key <key>` when you need raw traversal. Use the `graph_explore_hint` field in JSON output to discover the precise command for a result.
 - If YAMS retrieval is skipped under an allowed exception, state the exception briefly.
 - Treat `served - used` as weak negative signal (`not_used`), not rejection.
 - Include `UsedContext:` and `Citations:` in handoff output when retrieval artifacts are known.

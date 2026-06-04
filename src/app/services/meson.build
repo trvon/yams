@@ -30,6 +30,7 @@ yams_app_services_lib = static_library('yams_app_services',
     'factory.cpp',
     'session_service.cpp',
     'graph_query_service.cpp',
+    'graph_context_service.cpp',
   ],
   dependencies: [
     dependency('yams_api'),

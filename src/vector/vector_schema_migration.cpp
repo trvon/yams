@@ -12,8 +12,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/storage/sqlite_retry.h>
 
-#include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
-
 namespace yams::vector {
 
 namespace {
@@ -145,9 +143,9 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
         return SchemaVersion::Unknown;
     }
 
-    // Check for V2+ schema (unified vectors table). The legacy `vectors_hnsw_meta`
-    // shadow table no longer exists on fresh databases (HNSW was removed), so
-    // detection now depends only on the vectors table plus its column markers.
+    // Check for V2+ schema (unified vectors table). Legacy HNSW shadow tables
+    // no longer exist on fresh databases, so detection depends on the vectors
+    // table plus its column markers.
     if (tableExists(db, "vectors")) {
         if (columnExists(db, "vectors", "quantized_packed_codes")) {
             return SchemaVersion::V2_2;
@@ -399,15 +397,9 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db,
         return result;
     }
 
-    // Create HNSW shadow tables
-    char* err_msg = nullptr;
-    int rc = sqlite_vec_cpp::index::create_hnsw_shadow_tables(db, "main", "vectors", &err_msg);
-    if (rc != SQLITE_OK) {
-        std::string err = err_msg ? err_msg : "Unknown error";
-        sqlite3_free(err_msg);
-        executeSQL(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError, "Failed to create HNSW tables: " + err};
-    }
+    // Fresh unified-schema databases no longer create HNSW shadow tables here.
+    // Active search-index state is owned by the current backend (vec0 aux tables or
+    // Simeon PQ persistence) and initialized later through normal backend flows.
 
     // Create entity_vectors table for symbol/entity embeddings
     const char* create_entity_vectors = R"sql(

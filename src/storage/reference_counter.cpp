@@ -420,11 +420,9 @@ void configureReferenceDatabase(Database& db, const ReferenceCounter::Config& co
     }
 
     db.execute(yamsfmt::format("PRAGMA cache_size = {}",
-                               config.cacheSize)); // nosemgrep: yams.cpp.dynamic-sql-execute --
-                                                   // numeric PRAGMA from typed storage config.
+                               config.cacheSize)); // nosemgrep: yams.cpp.dynamic-sql-execute
     db.execute(yamsfmt::format("PRAGMA busy_timeout = {}",
-                               config.busyTimeout)); // nosemgrep: yams.cpp.dynamic-sql-execute --
-                                                     // numeric PRAGMA from typed storage config.
+                               config.busyTimeout)); // nosemgrep: yams.cpp.dynamic-sql-execute
     db.execute("PRAGMA synchronous = NORMAL");
     db.execute("PRAGMA temp_store = MEMORY");
 }

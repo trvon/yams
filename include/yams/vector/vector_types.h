@@ -47,7 +47,7 @@ enum class VectorSearchEngine {
 
 [[nodiscard]] inline std::optional<VectorSearchEngine>
 parseVectorSearchEngine(std::string_view raw) {
-    // Legacy aliases for removed HNSW engine map to SimeonPqAdc.
+    // Legacy aliases for engines no longer in the default data plane map to SimeonPqAdc.
     if (raw == "hnsw" || raw == "hnsw_cosine" || raw == "cosine") {
         return VectorSearchEngine::SimeonPqAdc;
     }
@@ -80,10 +80,22 @@ struct VectorDatabaseConfig {
     bool use_in_memory = false;
     VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
     bool vec0_phss_enabled = false;
+    /// PHSS candidate count for vec0: more candidates → higher recall, proportional latency.
+    /// 64 is a safe default for typical 10-50K corpus sizes.
     size_t vec0_phss_candidates = 64;
+    /// PQ subquantizers (m). Jégou et al. 2011: subvector dim = embedding_dim / m.
+    /// For 1024-dim embeddings, m=32 gives subvector dim=32; m=64→16; m=128→8.
+    /// Smaller subvector dims improve recall at proportional memory cost.
+    /// m=32 is a balanced default; consider 64 for recall-sensitive workloads.
     size_t simeon_pq_subquantizers = 32;
+    /// Centroids per PQ subspace (k). Jégou et al. 2011: k=256 is standard
+    /// (exactly 1 byte per subquantizer code).
     size_t simeon_pq_centroids = 256;
+    /// Training corpus size for PQ k-means. Standard practice: >> k centroids.
+    /// 4096 provides good convergence for typical corpus sizes.
     size_t simeon_pq_train_limit = 4096;
+    /// ADC rerank multiplier. Jégou et al. 2011: fetch rerank_factor * k candidates
+    /// from compressed search, then score exactly. 2-4 is typical; 2 favours speed.
     size_t simeon_pq_rerank_factor = 2;
     uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
     bool suppress_search_index_builds = false;

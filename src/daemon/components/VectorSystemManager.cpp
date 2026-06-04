@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -16,7 +17,6 @@
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
-#include <fstream>
 #include <optional>
 #include <string_view>
 #include <thread>
@@ -24,7 +24,6 @@
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
-#define getpid _getpid
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -48,6 +47,14 @@ template <typename T> std::optional<T> parseUnsigned(std::string_view raw) {
     return value;
 }
 
+long long currentProcessId() noexcept {
+#ifdef _WIN32
+    return static_cast<long long>(::_getpid());
+#else
+    return static_cast<long long>(::getpid());
+#endif
+}
+
 std::optional<int> parseInt(std::string_view raw) {
     if (raw.empty()) {
         return std::nullopt;
@@ -62,6 +69,27 @@ std::optional<int> parseInt(std::string_view raw) {
     return value;
 }
 
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+bool isTruthyValue(std::string_view raw) {
+    if (raw.empty()) {
+        return false;
+    }
+
+    std::string normalized(raw);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    });
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
 void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
     if (!state) {
         return;
@@ -69,7 +97,7 @@ void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
     try {
         state->readiness.vectorDbInitAttempted = attempted;
     } catch (...) {
-        // State publication is best-effort during initialization/shutdown races.
+        spdlog::debug("[VectorInit] failed to publish initAttempted readiness state");
     }
 }
 
@@ -103,6 +131,11 @@ void VectorSystemManager::shutdown() {
 }
 
 Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& dataDir) {
+    const auto clearRetryableInitAttempt = [this]() {
+        markVectorInitAttempted(deps_.state, false);
+        initAttempted_.store(false, std::memory_order_release);
+    };
+
     // In-process guard (first-wins)
     if (initAttempted_.exchange(true, std::memory_order_acq_rel)) {
         spdlog::debug("[VectorInit] skipped (already attempted in this process)");
@@ -141,11 +174,11 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         try {
             auto ddlDim = ConfigResolver::readDbEmbeddingDim(cfg.database_path);
             if (ddlDim && *ddlDim > 0) {
-                dim = *ddlDim;
+                dim = ddlDim;
                 spdlog::info("[VectorInit] probe: ddl dim={}", *ddlDim);
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("[VectorInit] failed reading embedding dim from existing DB DDL");
         }
     }
 
@@ -159,7 +192,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 spdlog::info("[VectorInit] probe: generator dim={}", g);
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("[VectorInit] getEmbeddingDimension callback failed");
         }
     }
 
@@ -177,7 +210,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                              modelProvider->getProviderName());
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("[VectorInit] training-free provider dimension probe failed");
         }
     }
     if (!dim && deps_.resolvePreferredModel) {
@@ -191,7 +224,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("[VectorInit] preferred model provider dimension probe failed");
         }
     }
 
@@ -204,19 +237,19 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
                     if (auto parsed = parseUnsigned<size_t>(it->second)) {
-                        dim = *parsed;
+                        dim = parsed;
                         spdlog::info("[VectorInit] probe: config dim={}", *dim);
                     }
                 }
             } catch (...) {
-                // Config dimension is a fallback probe only; keep trying other sources.
+                spdlog::debug("[VectorInit] config embedding dim probe failed");
             }
         }
 
         if (!dim) {
-            if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
-                if (auto parsed = parseUnsigned<size_t>(envd)) {
-                    dim = *parsed;
+            if (auto envd = getenvCopy("YAMS_EMBED_DIM"); envd) {
+                if (auto parsed = parseUnsigned<size_t>(*envd)) {
+                    dim = parsed;
                 }
             }
         }
@@ -232,29 +265,29 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     fs::path(cfg.database_path).parent_path() / "models" / preferred;
                 // Try config file first (most accurate)
                 if (auto cfgDim = vector::dimres::dim_from_model_config(modelsDir)) {
-                    dim = *cfgDim;
+                    dim = cfgDim;
                     spdlog::info("[VectorInit] probe: model config dim={} for '{}'", *dim,
                                  preferred);
                 } else if (auto nameDim = vector::dimres::dim_from_model_name(preferred)) {
                     // Name-based heuristic (jina, nomic, minilm, etc.)
-                    dim = *nameDim;
+                    dim = nameDim;
                     spdlog::info("[VectorInit] probe: model name heuristic dim={} for '{}'", *dim,
                                  preferred);
                 }
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("[VectorInit] preferred model config/name heuristic probe failed");
         }
     }
 
     // 6. Last resort: try YAMS_PREFERRED_MODEL env var directly for model name heuristic
     // This handles cases where resolvePreferredModel callback isn't ready yet
     if (!dim) {
-        if (const char* envModel = std::getenv("YAMS_PREFERRED_MODEL")) {
-            std::string modelName(envModel);
+        if (auto envModel = getenvCopy("YAMS_PREFERRED_MODEL"); envModel) {
+            std::string modelName(*envModel);
             if (!modelName.empty()) {
                 if (auto nameDim = vector::dimres::dim_from_model_name(modelName)) {
-                    dim = *nameDim;
+                    dim = nameDim;
                     spdlog::info("[VectorInit] probe: env model name heuristic dim={} for '{}'",
                                  *dim, modelName);
                 }
@@ -278,7 +311,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     for (const auto& model : knownModels) {
                         if (preload->second.find(model) != std::string::npos) {
                             if (auto nameDim = vector::dimres::dim_from_model_name(model)) {
-                                dim = *nameDim;
+                                dim = nameDim;
                                 spdlog::info(
                                     "[VectorInit] probe: preload list heuristic dim={} for '{}'",
                                     *dim, model);
@@ -288,57 +321,44 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     }
                 }
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug("[VectorInit] preload model list heuristic probe failed");
             }
         }
     }
 
     if (!dim) {
         spdlog::info("[VectorInit] deferring initialization (provider dim unresolved)");
-        markVectorInitAttempted(deps_.state, false);
-        initAttempted_.store(false, std::memory_order_release);
+        clearRetryableInitAttempt();
         return Result<bool>(false);
     }
 
-    cfg.embedding_dim = *dim;
+    cfg.embedding_dim = dim.value();
     cfg.suppress_search_index_builds = deps_.suppressVectorIndexBuild;
     if (cfg.suppress_search_index_builds) {
         spdlog::warn("[VectorInit] search index build/load suppressed by memory instrumentation "
                      "profile");
     }
 
-    const auto envTruthy = [](const char* value) -> bool {
-        if (!value) {
-            return false;
-        }
-        std::string normalized(value);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        return normalized == "1" || normalized == "true" || normalized == "yes" ||
-               normalized == "on";
-    };
-
-    if (const char* env = std::getenv("YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE")) {
-        cfg.enable_turboquant_storage = envTruthy(env);
+    if (auto env = getenvCopy("YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE"); env) {
+        cfg.enable_turboquant_storage = isTruthyValue(*env);
         spdlog::info("[VectorInit] turboquant storage overridden to {} via env",
                      cfg.enable_turboquant_storage);
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_QUANTIZED_PRIMARY_STORAGE")) {
-        cfg.quantized_primary_storage = envTruthy(env);
+    if (auto env = getenvCopy("YAMS_VECTOR_QUANTIZED_PRIMARY_STORAGE"); env) {
+        cfg.quantized_primary_storage = isTruthyValue(*env);
         spdlog::info("[VectorInit] quantized primary storage overridden to {} via env",
                      cfg.quantized_primary_storage);
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_BITS")) {
-        if (auto bits = parseInt(env)) {
+    if (auto env = getenvCopy("YAMS_VECTOR_TURBOQUANT_BITS"); env) {
+        if (auto bits = parseInt(*env)) {
             cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(*bits, 1, 8));
             spdlog::info("[VectorInit] turboquant bits overridden to {} via env",
                          static_cast<int>(cfg.turboquant_bits));
         }
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_TURBOQUANT_SEED")) {
-        if (auto seed = parseUnsigned<uint64_t>(env)) {
-            cfg.turboquant_seed = *seed;
+    if (auto env = getenvCopy("YAMS_VECTOR_TURBOQUANT_SEED"); env) {
+        if (auto seed = parseUnsigned<uint64_t>(*env)) {
+            cfg.turboquant_seed = seed.value();
             spdlog::info("[VectorInit] turboquant seed overridden to {} via env",
                          cfg.turboquant_seed);
         }
@@ -356,7 +376,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                         return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                     });
                 if (auto parsed = vector::parseVectorSearchEngine(normalized)) {
-                    cfg.search_engine = *parsed;
+                    cfg.search_engine = parsed.value();
                     spdlog::info("[VectorInit] search engine configured as {} from {}",
                                  vector::vectorSearchEngineName(cfg.search_engine),
                                  cfgPath.string());
@@ -364,7 +384,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
             }
             if (auto it = kv.find("vector_database.vec0_phss_enabled");
                 it != kv.end() && !it->second.empty()) {
-                cfg.vec0_phss_enabled = envTruthy(it->second.c_str());
+                cfg.vec0_phss_enabled = isTruthyValue(it->second);
                 spdlog::info("[VectorInit] vec0 PHSS configured as {} from {}",
                              cfg.vec0_phss_enabled ? "enabled" : "disabled", cfgPath.string());
             }
@@ -377,31 +397,31 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 }
             }
         } catch (...) {
-            // Optional vector config overrides are best-effort; defaults remain valid.
+            spdlog::debug("[VectorInit] optional vector config overrides parse failed");
         }
     }
 
-    if (const char* env = std::getenv("YAMS_VECTOR_SEARCH_ENGINE")) {
-        std::string normalized(env);
+    if (auto env = getenvCopy("YAMS_VECTOR_SEARCH_ENGINE"); env) {
+        std::string normalized(*env);
         std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
             return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         });
         if (auto parsed = vector::parseVectorSearchEngine(normalized)) {
-            cfg.search_engine = *parsed;
+            cfg.search_engine = parsed.value();
             spdlog::info("[VectorInit] search engine overridden to {} via env",
                          vector::vectorSearchEngineName(cfg.search_engine));
         } else {
             spdlog::warn("[VectorInit] invalid YAMS_VECTOR_SEARCH_ENGINE='{}'; using default {}",
-                         env, vector::vectorSearchEngineName(cfg.search_engine));
+                         *env, vector::vectorSearchEngineName(cfg.search_engine));
         }
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_ENABLED")) {
-        cfg.vec0_phss_enabled = envTruthy(env);
+    if (auto env = getenvCopy("YAMS_VECTOR_VEC0_PHSS_ENABLED"); env) {
+        cfg.vec0_phss_enabled = isTruthyValue(*env);
         spdlog::info("[VectorInit] vec0 PHSS overridden to {} via env",
                      cfg.vec0_phss_enabled ? "enabled" : "disabled");
     }
-    if (const char* env = std::getenv("YAMS_VECTOR_VEC0_PHSS_CANDIDATES")) {
-        if (auto candidates = parseInt(env)) {
+    if (auto env = getenvCopy("YAMS_VECTOR_VEC0_PHSS_CANDIDATES"); env) {
+        if (auto candidates = parseInt(*env)) {
             cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
             spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
                          cfg.vec0_phss_candidates);
@@ -411,9 +431,9 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     // Log start
     auto tid = std::this_thread::get_id();
     spdlog::info("[VectorInit] start pid={} tid={} path={} exists={} create={} dim={} engine={}",
-                 static_cast<long long>(::getpid()), static_cast<const void*>(&tid),
-                 cfg.database_path, exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no",
-                 cfg.embedding_dim, vector::vectorSearchEngineName(cfg.search_engine));
+                 currentProcessId(), static_cast<const void*>(&tid), cfg.database_path,
+                 exists ? "yes" : "no", cfg.create_if_missing ? "yes" : "no", cfg.embedding_dim,
+                 vector::vectorSearchEngineName(cfg.search_engine));
 
     // Cross-process advisory lock
 #ifdef _WIN32
@@ -435,6 +455,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                             &ov)) {
                 spdlog::info("[VectorInit] skipped (lock busy by another process)");
                 CloseHandle(hLock);
+                clearRetryableInitAttempt();
                 return Result<bool>(false);
             }
         }
@@ -447,6 +468,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
             if (fcntl(lock_fd, F_SETLK, &fl) == -1) {
                 spdlog::info("[VectorInit] skipped (lock busy by another process)");
                 ::close(lock_fd);
+                clearRetryableInitAttempt();
                 return Result<bool>(false);
             }
         }
@@ -475,19 +497,30 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 try {
                     vdb->initializeCounter();
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("[VectorInit] initializeCounter best-effort step failed");
                 }
 
                 bool vectorDbReady = false;
                 try {
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
-                    if (!vectorDbReady) {
+                    if (vectorDbReady) {
+                        // Eagerly prepare the search index so first query doesn't
+                        // pay the O(n log n) ANN build cost (profiler: 99% CPU).
+                        spdlog::info("[VectorInit] preparing search index for {} vectors", rows);
+                        if (vdb->prepareSearchIndex()) {
+                            spdlog::info("[VectorInit] search index ready");
+                        } else {
+                            spdlog::warn("[VectorInit] search index prepare failed: {}",
+                                         vdb->getLastError());
+                        }
+                    } else {
                         spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
                                      "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug(
+                        "[VectorInit] failed probing vector count/search index readiness");
                 }
 
                 // Update state (DB readiness only; index readiness is managed by coordinator)
@@ -498,7 +531,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                         deps_.state->readiness.vectorDbDim =
                             static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("[VectorInit] failed publishing vector readiness state");
                     }
                 }
 
@@ -507,7 +540,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     try {
                         deps_.serviceFsm->dispatch(VectorsInitializedEvent{cfg.embedding_dim});
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("[VectorInit] failed dispatching VectorsInitializedEvent");
                     }
                 }
 
@@ -554,9 +587,12 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     if (!success) {
         spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
                       maxAttempts);
+        clearRetryableInitAttempt();
         return Error{ErrorCode::DatabaseError, "vector database init failed after retries"};
     }
 
+    YAMS_POSTCONDITION(getVectorDatabase() != nullptr,
+                       "VectorSystemManager success path must publish a vector database");
     return Result<bool>(true);
 }
 

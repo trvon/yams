@@ -1,6 +1,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/common/time_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/uuid.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteBatchCoalescer.h>
@@ -531,6 +532,557 @@ extractTags(const std::unordered_map<std::string, yams::metadata::MetadataValue>
 } // namespace
 
 class DocumentServiceImpl final : public IDocumentService {
+private:
+    struct DeleteTarget {
+        std::optional<metadata::DocumentInfo> doc;
+        std::string hash;
+        std::string name;
+    };
+
+    using MetadataMap = std::unordered_map<std::string, metadata::MetadataValue>;
+    using MetadataCache = std::unordered_map<int64_t, MetadataMap>;
+    using SnippetPreviewCache = std::unordered_map<int64_t, std::string>;
+
+    static void addUniqueDeleteTargets(std::vector<DeleteTarget>& targets,
+                                       std::unordered_set<std::string>& seenHashes,
+                                       const std::vector<metadata::DocumentInfo>& docs) {
+        for (const auto& doc : docs) {
+            if (seenHashes.insert(doc.sha256Hash).second) {
+                DeleteTarget target;
+                target.doc = doc;
+                target.hash = doc.sha256Hash;
+                target.name = doc.fileName.empty() ? doc.filePath : doc.fileName;
+                targets.push_back(std::move(target));
+            }
+        }
+    }
+
+    static Result<void>
+    addResolvedDeleteTargets(std::vector<DeleteTarget>& targets,
+                             std::unordered_set<std::string>& seenHashes,
+                             const DeleteByNameRequest& req, const std::string& selector,
+                             const Result<std::vector<metadata::DocumentInfo>>& resolved) {
+        if (!resolved) {
+            return Result<void>();
+        }
+        if (!req.force && resolved.value().size() > 1) {
+            return Error{ErrorCode::InvalidOperation, "Multiple documents match '" + selector +
+                                                          "'; use --force to delete all matches "
+                                                          "or specify the exact hash"};
+        }
+        addUniqueDeleteTargets(targets, seenHashes, resolved.value());
+        return Result<void>();
+    }
+
+    Result<std::vector<DeleteTarget>> resolveDeleteTargets(const DeleteByNameRequest& req) {
+        DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
+        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
+        resolveOpts.tryHashPrefix = true;
+
+        std::vector<DeleteTarget> targets;
+        std::unordered_set<std::string> seenHashes;
+        bool rawFullHashWithoutMetadata = false;
+
+        if (!req.hash.empty()) {
+            if (req.hash.size() == 64) {
+                auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
+                if (docRes && docRes.value().has_value()) {
+                    addUniqueDeleteTargets(targets, seenHashes, {docRes.value().value()});
+                } else if (docRes && isHex(req.hash)) {
+                    rawFullHashWithoutMetadata = true;
+                }
+            } else {
+                auto matchResult = ctx_.metadataRepo->findDocumentsByHashPrefix(req.hash, 100);
+                if (matchResult) {
+                    addUniqueDeleteTargets(targets, seenHashes, matchResult.value());
+                }
+            }
+        }
+
+        if (!req.pattern.empty()) {
+            auto pat = globToSqlLike(req.pattern);
+            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pat);
+            if (res && !res.value().empty()) {
+                addUniqueDeleteTargets(targets, seenHashes, res.value());
+            }
+        }
+
+        for (const auto& n : req.names) {
+            auto added = addResolvedDeleteTargets(targets, seenHashes, req, n,
+                                                  resolver.resolveAll(n, resolveOpts));
+            if (!added) {
+                return added.error();
+            }
+        }
+
+        if (!req.name.empty()) {
+            auto added = addResolvedDeleteTargets(targets, seenHashes, req, req.name,
+                                                  resolver.resolveAll(req.name, resolveOpts));
+            if (!added) {
+                return added.error();
+            }
+        }
+
+        if (rawFullHashWithoutMetadata && !seenHashes.contains(req.hash)) {
+            DeleteTarget target;
+            target.hash = req.hash;
+            target.name = "hash:" + req.hash.substr(0, 8) + "...";
+            targets.push_back(std::move(target));
+        }
+
+        return targets;
+    }
+
+    std::optional<MetadataMap> captureMetadataForDelete(const metadata::DocumentInfo& doc) {
+        auto metadata = ctx_.metadataRepo->getAllMetadata(doc.id);
+        if (!metadata) {
+            spdlog::warn("Failed to capture metadata for delete rollback on {}: {}", doc.sha256Hash,
+                         metadata.error().message);
+            return std::nullopt;
+        }
+        return std::move(metadata.value());
+    }
+
+    void restoreMetadataAfterContentDeleteFailure(const metadata::DocumentInfo& doc,
+                                                  const std::optional<MetadataMap>& metadata) {
+        auto restoredId = ctx_.metadataRepo->insertDocument(doc);
+        if (!restoredId) {
+            spdlog::error("Failed to restore metadata for {} after content delete failure: {}",
+                          doc.sha256Hash, restoredId.error().message);
+            return;
+        }
+        if (metadata && !metadata->empty()) {
+            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> entries;
+            entries.reserve(metadata->size());
+            for (const auto& [key, value] : *metadata) {
+                entries.emplace_back(restoredId.value(), key, value);
+            }
+            auto restoredMetadata = ctx_.metadataRepo->setMetadataBatch(entries);
+            if (!restoredMetadata) {
+                spdlog::warn(
+                    "Failed to restore metadata fields for {} after content delete failure: {}",
+                    doc.sha256Hash, restoredMetadata.error().message);
+            }
+        }
+    }
+
+    bool cleanupMetadataForDelete(const metadata::DocumentInfo& doc, DeleteByNameResult& r) {
+        if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
+            if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
+                spdlog::warn("Failed to delete vectors for document {}: {}", doc.sha256Hash,
+                             ctx_.vectorDatabase->getLastError());
+            }
+        }
+
+        auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
+        if (!metaResult) {
+            r.error = "Failed to delete metadata: " + metaResult.error().message;
+            return false;
+        }
+
+        auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
+        if (!lingering) {
+            r.error = "Failed to verify metadata deletion: " + lingering.error().message;
+            return false;
+        }
+        if (lingering.value().has_value()) {
+            auto retryDelete = ctx_.metadataRepo->deleteDocument(lingering.value()->id);
+            if (!retryDelete) {
+                r.error = "Failed to delete lingering metadata: " + retryDelete.error().message;
+                return false;
+            }
+        }
+
+        if (ctx_.kgStore) {
+            auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
+            if (!kgResult) {
+                spdlog::warn("Failed to clean up KG nodes for document {}: {}", doc.sha256Hash,
+                             kgResult.error().message);
+            }
+        }
+        return true;
+    }
+
+    void executeDeleteTarget(const DeleteByNameRequest& req, const DeleteTarget& target,
+                             DeleteByNameResponse& resp) {
+        DeleteByNameResult r;
+        r.name = target.name;
+        r.hash = target.hash;
+
+        if (req.dryRun) {
+            r.deleted = false;
+            resp.deleted.push_back(r);
+            return;
+        }
+
+        if (target.doc.has_value()) {
+            const auto metadataBeforeDelete = captureMetadataForDelete(*target.doc);
+            if (!cleanupMetadataForDelete(*target.doc, r)) {
+                // Content deletion is intentionally ordered after metadata cleanup so a metadata
+                // failure cannot leave the index pointing at missing content.
+                YAMS_DCHECK(!r.contentRemoved, "content removed before metadata cleanup failed");
+                resp.errors.push_back(r);
+                return;
+            }
+
+            auto storeResult = ctx_.store->remove(target.hash);
+            if (!storeResult) {
+                const bool canForceMetadataCleanup =
+                    req.force &&
+                    storeResult.error().message.find("Corrupted data") != std::string::npos;
+                if (!canForceMetadataCleanup) {
+                    restoreMetadataAfterContentDeleteFailure(*target.doc, metadataBeforeDelete);
+                    r.deleted = false;
+                    r.error = storeResult.error().message;
+                    resp.errors.push_back(r);
+                    return;
+                }
+                spdlog::warn("Storage data is corrupted for {}. Metadata deletion was forced.",
+                             target.name);
+            } else if (storeResult.value()) {
+                r.contentRemoved = true;
+            } else {
+                spdlog::debug("Cleaned orphaned metadata for {}; content was absent", target.name);
+            }
+
+            r.deleted = true;
+            resp.deleted.push_back(r);
+            return;
+        }
+
+        auto storeResult = ctx_.store->remove(target.hash);
+        if (!storeResult) {
+            r.deleted = false;
+            r.error = storeResult.error().message;
+            resp.errors.push_back(r);
+            return;
+        }
+        if (!storeResult.value()) {
+            r.error = "Document not found in store";
+            resp.errors.push_back(r);
+            return;
+        }
+
+        r.contentRemoved = true;
+        r.deleted = true;
+        resp.deleted.push_back(r);
+    }
+
+    static metadata::DocumentInfo
+    documentFromProjection(metadata::ListDocumentProjection&& projection) {
+        metadata::DocumentInfo doc;
+        doc.id = projection.id;
+        doc.filePath = std::move(projection.filePath);
+        doc.fileName = std::move(projection.fileName);
+        doc.fileExtension = std::move(projection.fileExtension);
+        doc.fileSize = projection.fileSize;
+        doc.sha256Hash = std::move(projection.sha256Hash);
+        doc.mimeType = std::move(projection.mimeType);
+        doc.createdTime = projection.createdTime;
+        doc.modifiedTime = projection.modifiedTime;
+        doc.indexedTime = projection.indexedTime;
+        doc.extractionStatus = projection.extractionStatus;
+        return doc;
+    }
+
+    static std::vector<metadata::DocumentInfo>
+    documentsFromProjections(std::vector<metadata::ListDocumentProjection>&& projected) {
+        std::vector<metadata::DocumentInfo> docs;
+        docs.reserve(projected.size());
+        for (auto& projection : projected) {
+            docs.push_back(documentFromProjection(std::move(projection)));
+        }
+        return docs;
+    }
+
+    static std::optional<std::string> normalizeSingleListExtension(const std::string& ext) {
+        if (ext.empty() || ext.find(',') != std::string::npos) {
+            return std::nullopt;
+        }
+        return normalizeExtension(ext);
+    }
+
+    static std::string canonicalizeListPattern(const std::string& pattern) {
+        if (pattern.empty()) {
+            return {};
+        }
+
+        std::string canonicalPattern = pattern;
+        auto wildcardPos = pattern.find_first_of("*?");
+        if (wildcardPos != std::string::npos) {
+            std::string prefix = pattern.substr(0, wildcardPos);
+            std::string suffix = pattern.substr(wildcardPos);
+            while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
+                prefix.pop_back();
+                suffix = "/" + suffix;
+            }
+            try {
+                if (!prefix.empty() && std::filesystem::exists(prefix)) {
+                    canonicalPattern = std::filesystem::canonical(prefix).string() + suffix;
+                }
+            } catch (...) {
+                // Ignore errors; use original pattern.
+            }
+            return canonicalPattern;
+        }
+
+        try {
+            if (std::filesystem::exists(pattern)) {
+                canonicalPattern = std::filesystem::canonical(pattern).string();
+            }
+        } catch (...) {
+            // Ignore errors; use original pattern.
+        }
+        return canonicalPattern;
+    }
+
+    static void configureListPatternQuery(const std::string& pattern,
+                                          metadata::DocumentQueryOptions& queryOpts,
+                                          bool& useFallback, bool& useTree,
+                                          std::string& treePrefix) {
+        if (pattern.empty()) {
+            return;
+        }
+
+        auto wildcardPos = pattern.find_first_of("*?");
+        const bool hasWildcard = wildcardPos != std::string::npos;
+        if (!hasWildcard) {
+            std::error_code ec;
+            std::filesystem::path candidate{pattern};
+            if (std::filesystem::exists(candidate, ec) &&
+                std::filesystem::is_directory(candidate, ec)) {
+                queryOpts.pathPrefix = pattern;
+                queryOpts.prefixIsDirectory = true;
+                queryOpts.includeSubdirectories = true;
+            } else {
+                queryOpts.exactPath = pattern;
+            }
+            return;
+        }
+
+        if (pattern.back() == '*') {
+            std::string prefix = pattern;
+            while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?')) {
+                prefix.pop_back();
+            }
+            while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
+                prefix.pop_back();
+            }
+            if (!prefix.empty()) {
+                useTree = true;
+                treePrefix = prefix;
+            }
+            queryOpts.pathPrefix = prefix;
+            queryOpts.prefixIsDirectory = true;
+            return;
+        }
+
+        if (pattern.front() == '*' &&
+            pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
+            queryOpts.containsFragment = pattern.substr(1);
+            queryOpts.containsUsesFts = true;
+            return;
+        }
+
+        useFallback = true;
+    }
+
+    static bool listDocumentMatchesTypeFilters(const metadata::DocumentInfo& doc,
+                                               const ListDocumentsRequest& req,
+                                               const std::string& requestedType) {
+        if (req.text && !isTextMime(doc.mimeType)) {
+            return false;
+        }
+        if (req.binary && isTextMime(doc.mimeType)) {
+            return false;
+        }
+        if (requestedType.empty()) {
+            return true;
+        }
+        if (requestedType == "text") {
+            return isTextMime(doc.mimeType);
+        }
+        if (requestedType == "binary") {
+            return !isTextMime(doc.mimeType);
+        }
+        return utils::classifyFileType(doc.mimeType, doc.fileExtension) == requestedType;
+    }
+
+    static std::optional<size_t> listConcurrencyOverride() {
+        const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); // NOLINT(concurrency-mt-unsafe)
+        if (!env || !*env) {
+            return std::nullopt;
+        }
+        try {
+            auto value = static_cast<size_t>(std::stoul(env));
+            if (value > 0) {
+                return value;
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Ignoring invalid YAMS_LIST_CONCURRENCY='{}': {}", env, e.what());
+        } catch (...) {
+            spdlog::debug("Ignoring invalid YAMS_LIST_CONCURRENCY='{}'", env);
+        }
+        return std::nullopt;
+    }
+
+    static DocumentEntry makeBaseListEntry(const metadata::DocumentInfo& doc) {
+        DocumentEntry entry;
+        entry.name = doc.fileName;
+        entry.fileName = doc.fileName;
+        entry.hash = doc.sha256Hash;
+        entry.path = doc.filePath;
+        entry.extension = doc.fileExtension;
+        entry.size = static_cast<uint64_t>(doc.fileSize);
+        entry.mimeType = doc.mimeType;
+        entry.fileType = utils::classifyFileType(doc.mimeType, doc.fileExtension);
+        entry.created = toEpochSeconds(doc.createdTime);
+        entry.modified = toEpochSeconds(doc.modifiedTime);
+        entry.indexed = toEpochSeconds(doc.indexedTime);
+        entry.extractionStatus = metadata::ExtractionStatusUtils::toString(doc.extractionStatus);
+        return entry;
+    }
+
+    static std::vector<int64_t>
+    collectDocumentIds(const std::vector<metadata::DocumentInfo>& docs) {
+        std::vector<int64_t> ids;
+        ids.reserve(docs.size());
+        for (const auto& doc : docs) {
+            ids.push_back(doc.id);
+        }
+        return ids;
+    }
+
+    void applyFallbackListFilters(std::vector<metadata::DocumentInfo>& docs,
+                                  const ListDocumentsRequest& req) {
+        if (!req.extension.empty()) {
+            const std::string wanted = normalizeExtension(req.extension);
+            docs.erase(std::remove_if(docs.begin(), docs.end(),
+                                      [&](const auto& doc) {
+                                          return normalizeExtension(doc.fileExtension) != wanted;
+                                      }),
+                       docs.end());
+        }
+
+        if (!req.tags.empty()) {
+            std::vector<metadata::DocumentInfo> filtered;
+            for (const auto& doc : docs) {
+                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                if (!md) {
+                    continue;
+                }
+                auto tags = extractTags(md.value());
+                const bool hasTag =
+                    std::any_of(req.tags.begin(), req.tags.end(), [&](const auto& tag) {
+                        return std::find(tags.begin(), tags.end(), tag) != tags.end();
+                    });
+                if (hasTag) {
+                    filtered.push_back(doc);
+                }
+            }
+            docs.swap(filtered);
+        }
+
+        if (!req.metadataFilters.empty()) {
+            std::vector<metadata::DocumentInfo> filtered;
+            for (const auto& doc : docs) {
+                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                if (!md) {
+                    continue;
+                }
+                const auto& mdMap = md.value();
+                bool match = req.matchAllMetadata;
+                for (const auto& [key, expectedValue] : req.metadataFilters) {
+                    auto it = mdMap.find(key);
+                    const bool keyMatches =
+                        (it != mdMap.end() && it->second.asString() == expectedValue);
+                    match = req.matchAllMetadata ? (match && keyMatches) : (match || keyMatches);
+                }
+                if (match) {
+                    filtered.push_back(doc);
+                }
+            }
+            docs.swap(filtered);
+        }
+
+        if (req.recent && *req.recent > 0) {
+            std::sort(docs.begin(), docs.end(),
+                      [](const auto& a, const auto& b) { return a.indexedTime > b.indexedTime; });
+            if (static_cast<int>(docs.size()) > *req.recent) {
+                docs.resize(static_cast<size_t>(*req.recent));
+            }
+        }
+
+        if (req.sortBy == "name") {
+            std::sort(docs.begin(), docs.end(),
+                      [](const auto& a, const auto& b) { return a.fileName < b.fileName; });
+            if (req.sortOrder == "desc") {
+                std::reverse(docs.begin(), docs.end());
+            }
+        }
+    }
+
+    MetadataCache hydrateListMetadata(const std::vector<int64_t>& ids) {
+        if (ids.empty()) {
+            return {};
+        }
+        auto metaRes = ctx_.metadataRepo->getMetadataForDocuments(std::span<const int64_t>(ids));
+        if (!metaRes) {
+            return {};
+        }
+        return std::move(metaRes.value());
+    }
+
+    std::pair<SnippetPreviewCache, bool> hydrateListSnippets(const std::vector<int64_t>& ids,
+                                                             int snippetLength) {
+        if (ids.empty()) {
+            return {SnippetPreviewCache{}, false};
+        }
+        const int previewChars = std::clamp(snippetLength * 8, 256, 8192);
+        auto previewRes = ctx_.metadataRepo->batchGetContentPreview(ids, previewChars, 0);
+        if (previewRes) {
+            return {std::move(previewRes.value()), false};
+        }
+        return {SnippetPreviewCache{}, true};
+    }
+
+    static DocumentEntry buildHydratedListEntry(const ListDocumentsRequest& req,
+                                                const metadata::DocumentInfo& doc,
+                                                const MetadataCache& metadataCache,
+                                                const SnippetPreviewCache& snippetPreviewCache,
+                                                bool snippetFetchFailed) {
+        DocumentEntry entry = makeBaseListEntry(doc);
+        const MetadataMap* cachedMetadata = nullptr;
+        if (auto it = metadataCache.find(doc.id); it != metadataCache.end()) {
+            cachedMetadata = &it->second;
+        }
+
+        if (req.showSnippets && req.snippetLength > 0) {
+            auto sit = snippetPreviewCache.find(doc.id);
+            if (sit != snippetPreviewCache.end()) {
+                auto snippet =
+                    utils::createSnippet(sit->second, static_cast<size_t>(req.snippetLength), true);
+                entry.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
+            } else if (snippetFetchFailed) {
+                entry.snippet = "[Content extraction failed]";
+            } else {
+                entry.snippet = "[Content not available]";
+            }
+        }
+
+        if (cachedMetadata) {
+            if (req.showTags) {
+                entry.tags = extractTags(*cachedMetadata);
+            }
+            if (req.showMetadata) {
+                for (const auto& [key, value] : *cachedMetadata) {
+                    entry.metadata[key] = value.value;
+                }
+            }
+        }
+        return entry;
+    }
+
 public:
     explicit DocumentServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
 
@@ -1530,26 +2082,6 @@ public:
         metadata::MetadataOpScope metadataScope("client_list");
 
         std::vector<metadata::DocumentInfo> docs;
-        auto appendProjectedToDocs =
-            [&](std::vector<metadata::ListDocumentProjection>&& projected) {
-                docs.clear();
-                docs.reserve(projected.size());
-                for (auto& p : projected) {
-                    metadata::DocumentInfo d;
-                    d.id = p.id;
-                    d.filePath = std::move(p.filePath);
-                    d.fileName = std::move(p.fileName);
-                    d.fileExtension = std::move(p.fileExtension);
-                    d.fileSize = p.fileSize;
-                    d.sha256Hash = std::move(p.sha256Hash);
-                    d.mimeType = std::move(p.mimeType);
-                    d.createdTime = p.createdTime;
-                    d.modifiedTime = p.modifiedTime;
-                    d.indexedTime = p.indexedTime;
-                    d.extractionStatus = p.extractionStatus;
-                    docs.push_back(std::move(d));
-                }
-            };
         bool usedQuery = false;
         std::size_t totalFoundApprox = 0;
 
@@ -1558,15 +2090,7 @@ public:
         queryOpts.offset = std::max(0, req.offset);
         queryOpts.pathsOnly = req.pathsOnly;
 
-        auto normalizeSingleExtension = [&](const std::string& ext) -> std::optional<std::string> {
-            if (ext.empty())
-                return std::nullopt;
-            if (ext.find(',') != std::string::npos)
-                return std::nullopt; // delegate to fallback for multi-extension pattern
-            return normalizeExtension(ext);
-        };
-
-        if (auto normExt = normalizeSingleExtension(req.extension))
+        if (auto normExt = normalizeSingleListExtension(req.extension))
             queryOpts.extension = *normExt;
 
         if (!req.mime.empty())
@@ -1599,112 +2123,15 @@ public:
         std::transform(requestedType.begin(), requestedType.end(), requestedType.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-        auto classifiedFileType = [](const metadata::DocumentInfo& doc) {
-            return utils::classifyFileType(doc.mimeType, doc.fileExtension);
-        };
-
-        auto matchesTypeFilters = [&](const metadata::DocumentInfo& doc) {
-            if (req.text && !isTextMime(doc.mimeType)) {
-                return false;
-            }
-            if (req.binary && isTextMime(doc.mimeType)) {
-                return false;
-            }
-            if (requestedType.empty()) {
-                return true;
-            }
-            if (requestedType == "text") {
-                return isTextMime(doc.mimeType);
-            }
-            if (requestedType == "binary") {
-                return !isTextMime(doc.mimeType);
-            }
-            return classifiedFileType(doc) == requestedType;
-        };
-
-        // Canonicalize pattern to resolve symlinks (e.g., /var -> /private/var on macOS)
-        std::string canonicalPattern = req.pattern;
-        if (!req.pattern.empty()) {
-            auto wildcardPos = req.pattern.find_first_of("*?");
-            if (wildcardPos != std::string::npos) {
-                // Extract prefix before first wildcard and try to canonicalize it
-                std::string prefix = req.pattern.substr(0, wildcardPos);
-                std::string suffix = req.pattern.substr(wildcardPos);
-                // Remove trailing slashes from prefix for proper path resolution
-                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
-                    prefix.pop_back();
-                    suffix = "/" + suffix;
-                }
-                try {
-                    if (!prefix.empty() && std::filesystem::exists(prefix)) {
-                        auto canonical = std::filesystem::canonical(prefix).string();
-                        canonicalPattern = canonical + suffix;
-                    }
-                } catch (...) {
-                    // Ignore errors, use original pattern
-                }
-            } else {
-                try {
-                    if (std::filesystem::exists(req.pattern)) {
-                        canonicalPattern = std::filesystem::canonical(req.pattern).string();
-                    }
-                } catch (...) {
-                    // Ignore errors
-                }
-            }
-        }
-        if (!canonicalPattern.empty()) {
-            const auto& pattern = canonicalPattern;
-            auto wildcardPos = pattern.find_first_of("*?");
-            bool hasWildcard = wildcardPos != std::string::npos;
-
-            if (!hasWildcard) {
-                std::error_code ec;
-                std::filesystem::path candidate{pattern};
-                if (std::filesystem::exists(candidate, ec) &&
-                    std::filesystem::is_directory(candidate, ec)) {
-                    queryOpts.pathPrefix = pattern;
-                    queryOpts.prefixIsDirectory = true;
-                    queryOpts.includeSubdirectories = true;
-                } else {
-                    queryOpts.exactPath = pattern;
-                }
-            } else if (pattern.back() == '*') {
-                // Handle patterns ending with wildcards: /path/* or /path/**
-                // Strip trailing wildcards to get the prefix
-                std::string prefix = pattern;
-                while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
-                    prefix.pop_back();
-
-                // Also strip trailing slashes
-                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
-                    prefix.pop_back();
-
-                // Use tree-based query for path prefixes (PBI-043)
-                // Tree query now supports all filters via queryDocuments
-                if (!prefix.empty()) {
-                    useTree = true;
-                    treePrefix = prefix;
-                }
-
-                // Also set queryOpts for the tree path to use
-                queryOpts.pathPrefix = prefix;
-                queryOpts.prefixIsDirectory = true; // Patterns with * imply directory recursion
-            } else if (pattern.front() == '*' &&
-                       pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
-                queryOpts.containsFragment = pattern.substr(1);
-                queryOpts.containsUsesFts = true;
-            } else {
-                useFallback = true;
-            }
-        }
+        const std::string canonicalPattern = canonicalizeListPattern(req.pattern);
+        configureListPatternQuery(canonicalPattern, queryOpts, useFallback, useTree, treePrefix);
 
         // Try tree-based query for path prefix patterns with full filter support
         if (useTree && !treePrefix.empty()) {
             // Pass full queryOpts to support tags, mime, extension, etc.
             auto treeDocsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (treeDocsRes) {
-                appendProjectedToDocs(std::move(treeDocsRes.value()));
+                docs = documentsFromProjections(std::move(treeDocsRes.value()));
                 usedQuery = true;
                 totalFoundApprox = docs.size();
             } else {
@@ -1721,7 +2148,7 @@ public:
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
-            appendProjectedToDocs(std::move(docsRes.value()));
+            docs = documentsFromProjections(std::move(docsRes.value()));
             usedQuery = true;
             totalFoundApprox = static_cast<std::size_t>(queryOpts.offset) + docs.size();
         }
@@ -1736,92 +2163,14 @@ public:
             }
 
             docs = std::move(docsRes.value());
-
-            // Filter by extension (accept ".md" or "md")
-            if (!req.extension.empty()) {
-                std::string wanted = normalizeExtension(req.extension);
-                docs.erase(std::remove_if(docs.begin(), docs.end(),
-                                          [&](const metadata::DocumentInfo& d) {
-                                              std::string ext = d.fileExtension;
-                                              return normalizeExtension(ext) != wanted;
-                                          }),
-                           docs.end());
-            }
-
-            // Filter by tags (presence-based)
-            if (!req.tags.empty()) {
-                std::vector<metadata::DocumentInfo> filtered;
-                for (const auto& d : docs) {
-                    auto md = ctx_.metadataRepo->getAllMetadata(d.id);
-                    if (!md)
-                        continue;
-                    auto tags = extractTags(md.value());
-                    bool has = false;
-                    for (const auto& t : req.tags) {
-                        if (std::find(tags.begin(), tags.end(), t) != tags.end()) {
-                            has = true;
-                            break;
-                        }
-                    }
-                    if (has)
-                        filtered.push_back(d);
-                }
-                docs.swap(filtered);
-            }
-
-            // Filter by metadata key-value pairs (PBI-080)
-            if (!req.metadataFilters.empty()) {
-                std::vector<metadata::DocumentInfo> filtered;
-                for (const auto& d : docs) {
-                    auto md = ctx_.metadataRepo->getAllMetadata(d.id);
-                    if (!md)
-                        continue;
-
-                    const auto& mdMap = md.value();
-                    bool match = req.matchAllMetadata; // true = AND start, false = OR start
-
-                    for (const auto& [key, expectedValue] : req.metadataFilters) {
-                        auto it = mdMap.find(key);
-                        bool keyMatches =
-                            (it != mdMap.end() && it->second.asString() == expectedValue);
-
-                        if (req.matchAllMetadata) {
-                            match = match && keyMatches; // AND: all must match
-                        } else {
-                            match = match || keyMatches; // OR: any must match
-                        }
-                    }
-
-                    if (match)
-                        filtered.push_back(d);
-                }
-                docs.swap(filtered);
-            }
-
-            // Recent: keep N most recently indexed (desc)
-            if (req.recent && *req.recent > 0) {
-                std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
-                    return a.indexedTime > b.indexedTime;
-                });
-                if (static_cast<int>(docs.size()) > *req.recent) {
-                    docs.resize(static_cast<size_t>(*req.recent));
-                }
-            }
-
-            // Sorting (minimal): name, asc|desc; default to req.sortBy if present
-            if (req.sortBy == "name") {
-                std::sort(docs.begin(), docs.end(),
-                          [](const auto& a, const auto& b) { return a.fileName < b.fileName; });
-                if (req.sortOrder == "desc") {
-                    std::reverse(docs.begin(), docs.end());
-                }
-            }
+            applyFallbackListFilters(docs, req);
         }
 
         if (req.text || req.binary || !requestedType.empty()) {
             docs.erase(std::remove_if(docs.begin(), docs.end(),
                                       [&](const metadata::DocumentInfo& doc) {
-                                          return !matchesTypeFilters(doc);
+                                          return !listDocumentMatchesTypeFilters(doc, req,
+                                                                                 requestedType);
                                       }),
                        docs.end());
         }
@@ -1859,19 +2208,7 @@ public:
             out.documents.reserve(page.size());
             std::unordered_set<std::string> seenPaths;
             for (const auto& d : page) {
-                DocumentEntry e;
-                e.name = d.fileName;
-                e.fileName = d.fileName;
-                e.hash = d.sha256Hash;
-                e.path = d.filePath;
-                e.extension = d.fileExtension;
-                e.size = static_cast<uint64_t>(d.fileSize);
-                e.mimeType = d.mimeType;
-                e.fileType = classifiedFileType(d);
-                e.created = toEpochSeconds(d.createdTime);
-                e.modified = toEpochSeconds(d.modifiedTime);
-                e.indexed = toEpochSeconds(d.indexedTime);
-                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+                DocumentEntry e = makeBaseListEntry(d);
                 if (req.pathsOnly) {
                     path_projection::appendUniquePath(
                         out.paths, seenPaths, path_projection::displayPath(e.path, e.fileName),
@@ -1885,123 +2222,33 @@ public:
             return out;
         }
 
-        auto collectDocIds =
-            [](const std::vector<metadata::DocumentInfo>& docs) -> std::vector<int64_t> {
-            std::vector<int64_t> ids;
-            ids.reserve(docs.size());
-            for (const auto& doc : docs)
-                ids.push_back(doc.id);
-            return ids;
-        };
-
-        auto hydrateMetadata = [&](const std::vector<int64_t>& ids)
-            -> std::unordered_map<int64_t,
-                                  std::unordered_map<std::string, metadata::MetadataValue>> {
-            if (ids.empty()) {
-                return {};
-            }
-            auto metaRes =
-                ctx_.metadataRepo->getMetadataForDocuments(std::span<const int64_t>(ids));
-            if (!metaRes) {
-                return {};
-            }
-            return std::move(metaRes.value());
-        };
-
-        auto hydrateSnippets = [&](const std::vector<int64_t>& ids)
-            -> std::pair<std::unordered_map<int64_t, std::string>, bool> {
-            if (ids.empty()) {
-                return {std::unordered_map<int64_t, std::string>{}, false};
-            }
-            const int previewChars = std::clamp(req.snippetLength * 8, 256, 8192);
-            const auto previewStart = std::chrono::steady_clock::now();
-            auto previewRes = ctx_.metadataRepo->batchGetContentPreview(ids, previewChars, 0);
-            const auto previewElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now() - previewStart)
-                                              .count();
-            (void)previewElapsedMs;
-            if (previewRes) {
-                return {std::move(previewRes.value()), false};
-            }
-            return {std::unordered_map<int64_t, std::string>{}, true};
-        };
-
-        const std::vector<int64_t> docIds = collectDocIds(page);
-        std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
-            metadataCache;
+        const std::vector<int64_t> docIds = collectDocumentIds(page);
+        MetadataCache metadataCache;
         if (wantsMetadata) {
-            metadataCache = hydrateMetadata(docIds);
+            metadataCache = hydrateListMetadata(docIds);
         }
 
-        std::unordered_map<int64_t, std::string> snippetPreviewCache;
+        SnippetPreviewCache snippetPreviewCache;
         bool snippetFetchFailed = false;
         if (wantsSnippets) {
-            auto hydrated = hydrateSnippets(docIds);
+            auto hydrated = hydrateListSnippets(docIds, req.snippetLength);
             snippetPreviewCache = std::move(hydrated.first);
             snippetFetchFailed = hydrated.second;
         }
 
-        auto buildEntryForDoc = [&](const metadata::DocumentInfo& d) -> DocumentEntry {
-            DocumentEntry e;
-            e.name = d.fileName;
-            e.fileName = d.fileName;
-            e.hash = d.sha256Hash;
-            e.path = d.filePath;
-            e.extension = d.fileExtension;
-            e.size = static_cast<uint64_t>(d.fileSize);
-            e.mimeType = d.mimeType;
-            e.fileType = classifiedFileType(d);
-            e.created = toEpochSeconds(d.createdTime);
-            e.modified = toEpochSeconds(d.modifiedTime);
-            e.indexed = toEpochSeconds(d.indexedTime);
-            e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
-            const auto* cachedMetadata =
-                [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
-                auto it = metadataCache.find(d.id);
-                return it == metadataCache.end() ? nullptr : &it->second;
-            }();
-            if (req.showSnippets && req.snippetLength > 0) {
-                auto sit = snippetPreviewCache.find(d.id);
-                if (sit != snippetPreviewCache.end()) {
-                    auto snippet = utils::createSnippet(
-                        sit->second, static_cast<size_t>(req.snippetLength), true);
-                    e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
-                } else if (snippetFetchFailed) {
-                    e.snippet = "[Content extraction failed]";
-                } else {
-                    e.snippet = "[Content not available]";
-                }
-            }
-            if (req.showTags || req.showMetadata) {
-                if (cachedMetadata) {
-                    if (req.showTags) {
-                        e.tags = extractTags(*cachedMetadata);
-                    }
-                    if (req.showMetadata) {
-                        for (const auto& [key, value] : *cachedMetadata) {
-                            e.metadata[key] = value.value;
-                        }
-                    }
-                }
-            }
-            return e;
+        auto buildEntryForDoc = [&](const metadata::DocumentInfo& doc) -> DocumentEntry {
+            return buildHydratedListEntry(req, doc, metadataCache, snippetPreviewCache,
+                                          snippetFetchFailed);
         };
 
-        // Build entries in parallel when large pages, else sequential
-        const bool useParallel = page.size() >= 200 || std::getenv("YAMS_LIST_CONCURRENCY");
+        // Build entries in parallel when large pages, else sequential.
+        const auto concurrencyOverride = listConcurrencyOverride();
+        const bool useParallel = page.size() >= 200 || concurrencyOverride.has_value();
         if (useParallel) {
             std::vector<DocumentEntry> tmp(page.size());
             std::atomic<size_t> nextIdx{0};
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-            size_t workers = hw;
-            if (const char* env = std::getenv("YAMS_LIST_CONCURRENCY"); env && *env) {
-                try {
-                    auto v = static_cast<size_t>(std::stoul(env));
-                    if (v > 0)
-                        workers = v;
-                } catch (...) {
-                }
-            }
+            size_t workers = concurrencyOverride.value_or(
+                std::max<size_t>(1, std::thread::hardware_concurrency()));
             workers = std::min(workers, page.size() > 0 ? page.size() : size_t{1});
             auto buildOne = [&](size_t i) { tmp[i] = buildEntryForDoc(page[i]); };
             std::vector<std::thread> ths;
@@ -2219,177 +2466,16 @@ public:
         DeleteByNameResponse resp;
         resp.dryRun = req.dryRun;
 
-        // Use DocumentResolver for all resolution
-        DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
-        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
-        resolveOpts.tryHashPrefix = true; // Allow hash prefix for delete operations
-
-        struct DeleteTarget {
-            std::optional<metadata::DocumentInfo> doc;
-            std::string hash;
-            std::string name;
-        };
-
-        std::vector<DeleteTarget> allTargets;
-        std::unordered_set<std::string> seenHashes;
-
-        auto addUnique = [&](const std::vector<metadata::DocumentInfo>& docs) {
-            for (const auto& doc : docs) {
-                if (seenHashes.insert(doc.sha256Hash).second) {
-                    DeleteTarget target;
-                    target.doc = doc;
-                    target.hash = doc.sha256Hash;
-                    target.name = doc.fileName.empty() ? doc.filePath : doc.fileName;
-                    allTargets.push_back(std::move(target));
-                }
-            }
-        };
-
-        auto addResolved =
-            [&](const std::string& selector,
-                const Result<std::vector<metadata::DocumentInfo>>& resolved) -> Result<void> {
-            if (!resolved) {
-                return Result<void>();
-            }
-            if (!req.force && resolved.value().size() > 1) {
-                return Error{ErrorCode::InvalidOperation, "Multiple documents match '" + selector +
-                                                              "'; use --force to delete all "
-                                                              "matches or specify the exact hash"};
-            }
-            addUnique(resolved.value());
-            return Result<void>();
-        };
-
-        bool rawFullHashWithoutMetadata = false;
-
-        // Resolve hash (full or prefix) using efficient findDocumentsByHashPrefix
-        if (!req.hash.empty()) {
-            if (req.hash.size() == 64) {
-                // Full hash - direct lookup
-                auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
-                if (docRes && docRes.value().has_value()) {
-                    addUnique({docRes.value().value()});
-                } else if (docRes && isHex(req.hash)) {
-                    rawFullHashWithoutMetadata = true;
-                }
-            } else {
-                // Partial hash - use efficient prefix search
-                auto matchResult = ctx_.metadataRepo->findDocumentsByHashPrefix(req.hash, 100);
-                if (matchResult) {
-                    addUnique(matchResult.value());
-                }
-            }
+        auto targets = resolveDeleteTargets(req);
+        if (!targets) {
+            return targets.error();
         }
 
-        // Resolve pattern using glob-to-SQL conversion
-        if (!req.pattern.empty()) {
-            auto pat = globToSqlLike(req.pattern);
-            auto res = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, pat);
-            if (res && !res.value().empty()) {
-                addUnique(res.value());
-            }
+        for (const auto& target : targets.value()) {
+            executeDeleteTarget(req, target, resp);
         }
 
-        // Resolve each name using DocumentResolver
-        for (const auto& n : req.names) {
-            auto resolved = resolver.resolveAll(n, resolveOpts);
-            auto added = addResolved(n, resolved);
-            if (!added) {
-                return added.error();
-            }
-        }
-
-        // Resolve single name if provided
-        if (!req.name.empty()) {
-            auto resolved = resolver.resolveAll(req.name, resolveOpts);
-            auto added = addResolved(req.name, resolved);
-            if (!added) {
-                return added.error();
-            }
-        }
-
-        if (rawFullHashWithoutMetadata && !seenHashes.contains(req.hash)) {
-            DeleteTarget target;
-            target.hash = req.hash;
-            target.name = "hash:" + req.hash.substr(0, 8) + "...";
-            allTargets.push_back(std::move(target));
-        }
-
-        auto cleanupMetadata = [&](const metadata::DocumentInfo& doc,
-                                   DeleteByNameResult& r) -> bool {
-            if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
-                if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
-                    spdlog::warn("Failed to delete vectors for document {}: {}", doc.sha256Hash,
-                                 ctx_.vectorDatabase->getLastError());
-                }
-            }
-
-            auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
-            if (!metaResult) {
-                r.error = "Failed to delete metadata: " + metaResult.error().message;
-                return false;
-            }
-
-            if (ctx_.kgStore) {
-                auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
-                if (!kgResult) {
-                    spdlog::warn("Failed to clean up KG nodes for document {}: {}", doc.sha256Hash,
-                                 kgResult.error().message);
-                }
-            }
-            return true;
-        };
-
-        // Execute deletions
-        for (const auto& target : allTargets) {
-            DeleteByNameResult r;
-            r.name = target.name;
-            r.hash = target.hash;
-
-            if (!req.dryRun) {
-                // Delete from content store
-                auto storeResult = ctx_.store->remove(target.hash);
-                if (!storeResult) {
-                    const bool canForceMetadataCleanup =
-                        req.force && target.doc.has_value() &&
-                        storeResult.error().message.find("Corrupted data") != std::string::npos;
-                    if (!canForceMetadataCleanup) {
-                        r.deleted = false;
-                        r.error = storeResult.error().message;
-                        resp.errors.push_back(r);
-                        continue;
-                    }
-                    spdlog::warn("Storage data is corrupted for {}. Forcing metadata deletion.",
-                                 target.name);
-                }
-                if (storeResult && storeResult.value()) {
-                    r.contentRemoved = true;
-                }
-                if (storeResult && !storeResult.value() && !target.doc.has_value()) {
-                    r.error = "Document not found in store";
-                    resp.errors.push_back(r);
-                    continue;
-                }
-
-                if (target.doc.has_value()) {
-                    if (storeResult && !storeResult.value()) {
-                        spdlog::debug("Cleaning orphaned metadata for {}", target.name);
-                    }
-                    if (!cleanupMetadata(*target.doc, r)) {
-                        resp.errors.push_back(r);
-                        continue;
-                    }
-                }
-
-                r.deleted = true;
-                resp.deleted.push_back(r);
-            } else {
-                r.deleted = false;
-                resp.deleted.push_back(r);
-            }
-        }
-
-        resp.count = req.dryRun ? allTargets.size() : resp.deleted.size();
+        resp.count = req.dryRun ? targets.value().size() : resp.deleted.size();
         return resp;
     }
 

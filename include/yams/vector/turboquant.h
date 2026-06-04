@@ -23,10 +23,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <span>
-#include <vector>
 #include <cstdint>
 #include <random>
+#include <span>
 #include <vector>
 
 // M_PI is not defined by default on Windows; define it for portability
@@ -187,7 +186,7 @@ public:
     // =========================================================================
     // Asymmetric Compressed-Space Scoring
     //
-    // For HNSW traversal without full float reconstruction:
+    // For compressed search-index traversal without full float reconstruction:
     //
     // Given a unit query vector q and a packed stored code C:
     //   q · C = (1/d) · sum_i y_q[i] · centroid[i][code_i]

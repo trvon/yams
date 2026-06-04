@@ -50,6 +50,9 @@ public:
     ServiceManagerSnapshot snapshot() const noexcept;
 
     void dispatch(const OpeningDatabaseEvent&) noexcept;
+    // Race-safe startup helper for async initialization. Returns false if shutdown/stop
+    // already won before DB-open begins; DCHECKs on other invalid lifecycle states.
+    bool tryStartOpeningDatabase() noexcept;
     void dispatch(const DatabaseOpenedEvent&) noexcept;
     void dispatch(const MigrationStartedEvent&) noexcept;
     void dispatch(const MigrationCompletedEvent&) noexcept;

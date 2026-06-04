@@ -18,6 +18,7 @@
 using nlohmann::json;
 
 #include <yams/compat/unistd.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -259,6 +260,10 @@ TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown falls back to direct stop wi
         return !daemon_->isRunning() &&
                !daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
     }));
+    CHECK(daemon_->getLifecycle().snapshot().state == LifecycleState::Stopped);
+    if (const auto* serviceManager = daemon_->getServiceManager()) {
+        CHECK(serviceManager->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped);
+    }
     daemon_->reapCompletedShutdownThread();
 }
 
@@ -320,6 +325,11 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon start and stop", "[daemon][lifecycle]") 
     auto result = daemon_->stop();
     REQUIRE(result);
     REQUIRE_FALSE(daemon_->isRunning());
+    REQUIRE(daemon_->getLifecycle().snapshot().state == LifecycleState::Stopped);
+    if (const auto* serviceManager = daemon_->getServiceManager()) {
+        REQUIRE(serviceManager->getServiceManagerFsmSnapshot().state ==
+                ServiceManagerState::Stopped);
+    }
     REQUIRE_FALSE(fs::exists(config_.pidFile));
 }
 

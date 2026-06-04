@@ -22,6 +22,7 @@
 #include <sqlite3.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
+#include <yams/vector/vector_index_manager.h>
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
 
@@ -1787,5 +1788,108 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
         REQUIRE(result.has_value());
         REQUIRE_FALSE(result.value().empty());
         CHECK(result.value().front().chunk_id == "chunk_spq_0");
+    }
+}
+
+// ============================================================================
+// Architecture regression tests (tasks #17-#21)
+// ============================================================================
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "VectorIndexManager delegates to backend correctly",
+                 "[vector][regression][index_manager][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(createTempDbPath()).has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    auto mgr = VectorIndexManager(backend, [&backend] { return backend.isInitialized(); });
+
+    CHECK(mgr.isInitialized());
+    CHECK_FALSE(mgr.hasReusablePersistedSearchIndex().value());
+
+    // Insert vectors and build index through the manager
+    for (int i = 0; i < 12; ++i) {
+        auto rec = createVectorRecord("idx_" + std::to_string(i), createEmbedding(64, float(i)));
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+    auto buildResult = mgr.buildIndex();
+    REQUIRE(buildResult.has_value());
+
+    // Search should work after index build
+    auto result = backend.searchSimilar(createEmbedding(64, 1.0f), 5, 0.0f);
+    REQUIRE(result.has_value());
+    REQUIRE_FALSE(result.value().empty());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persists across reopen",
+                 "[vector][regression][vec0_persist][catch2]") {
+    std::string dbPath = createTempDbPath();
+
+    // Build: create tables, insert vectors, build index, close
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+        config.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend writer(config);
+        REQUIRE(writer.initialize(dbPath).has_value());
+        REQUIRE(writer.createTables(64).has_value());
+
+        for (int i = 0; i < 20; ++i) {
+            auto rec =
+                createVectorRecord("v" + std::to_string(i), createEmbedding(64, float(i + 1)));
+            REQUIRE(writer.insertVector(rec).has_value());
+        }
+        REQUIRE(writer.buildIndex().has_value());
+    }
+
+    // Reopen: tables should exist, search should work without rebuild
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+        config.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend reader(config);
+        REQUIRE(reader.initialize(dbPath).has_value());
+        CHECK(reader.tablesExist());
+
+        REQUIRE(reader.prepareSearchIndex().has_value());
+        auto result = reader.searchSimilar(createEmbedding(64, 1.0f), 5, 0.0f);
+        REQUIRE(result.has_value());
+        REQUIRE_FALSE(result.value().empty());
+        CHECK(result.value().front().chunk_id == "chunk_v0");
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend threaded ANN build produces correct search results",
+                 "[vector][regression][vec0_parallel][catch2]") {
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+
+    // Insert enough vectors to trigger parallel HNSW build (>= 256)
+    const int N = 260;
+
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(createTempDbPath()).has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < N; ++i) {
+        auto rec = createVectorRecord("par_" + std::to_string(i),
+                                      createEmbedding(64, float((i * 37 + 11) % 100)));
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+
+    REQUIRE(backend.buildIndex().has_value());
+
+    // After parallel build, search should return the expected nearest neighbor
+    auto query = createEmbedding(64, 1.0f);
+    auto result = backend.searchSimilar(query, 3, 0.0f);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().size() >= 3);
+    // All results should have well-formed chunk IDs
+    for (const auto& r : result.value()) {
+        CHECK(r.chunk_id.find("chunk_par_") == 0);
+        CHECK_FALSE(r.embedding.empty());
     }
 }

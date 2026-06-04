@@ -422,6 +422,7 @@ if catch2_dep.found()
     files(
       'unit/daemon/graph_component_catch2_test.cpp',
       'unit/app/services/graph_query_service_catch2_test.cpp',
+      'unit/app/services/graph_context_service_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -473,6 +474,26 @@ if catch2_dep.found()
 #PostIngestQueue unit tests(LruCache template + stage constants)
   catch2_post_ingest_queue_unit_exe = executable('catch2_post_ingest_queue_unit',
     files('unit/daemon/components/post_ingest_queue_unit_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+#PressureLimitedPoller shutdown unit tests (capability-sleep / stop paths)
+  catch2_pressure_limited_poller_exe = executable('catch2_pressure_limited_poller',
+    files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+#Assertion validation tests (fork-based death tests for YAMS_ASSERT / YAMS_PRECONDITION)
+  catch2_assert_val_exe = executable('catch2_assert_val',
+    files('unit/core/assert_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1341,7 +1362,10 @@ if catch2_dep.found()
       'unit/cli/doctor/ref_count_check_catch2_test.cpp',
       'unit/cli/dr_command_catch2_test.cpp',
       'unit/cli/error_hints_catch2_test.cpp',
+      'unit/cli/graph_explore_presenter_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
+      'unit/cli/graph_query_presenter_catch2_test.cpp',
+      'unit/cli/graph_topology_support_catch2_test.cpp',
       'unit/cli/grep_command_path_tree_catch2_test.cpp',
       'unit/cli/homebrew_service_formula_catch2_test.cpp',
       'unit/cli/init_command_catch2_test.cpp',
@@ -2628,6 +2652,18 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'post-ingest'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('pressure_limited_poller', catch2_pressure_limited_poller_exe,
+    suite: ['catch2', 'unit', 'daemon', 'poller'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('assert_val', catch2_assert_val_exe,
+    suite: ['catch2', 'unit', 'core', 'assert'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 15
   )
 
   test('metrics_consistency', catch2_metrics_consistency_exe,

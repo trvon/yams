@@ -28,6 +28,7 @@ yams grep "pattern"            # Code pattern search (fast, exact)
 yams search "query"            # Semantic/hybrid search
 
 # Graph
+yams graph --explore <query>   # Agent context: symbols, relationships, snippets
 yams graph --name <file>       # Show file relationships
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
@@ -248,6 +249,19 @@ yams graph --relations
 yams graph --search "*Controller*"
 yams graph --search "auth*"
 yams graph --search "handle?Request"
+```
+
+### Agent Graph Context
+
+```bash
+# Preferred follow-up after search/grep hints: ranked symbols + line-numbered snippets
+yams graph --explore "authenticateUser" --max-files 3
+
+# Explore a file path when the result path is more useful than a symbol name
+yams graph --explore src/auth/login.ts
+
+# JSON for tool consumers
+yams graph --explore "RequestHandler" --json
 ```
 
 ### File Relationships

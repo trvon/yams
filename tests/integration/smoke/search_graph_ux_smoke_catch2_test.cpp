@@ -192,8 +192,8 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
     CHECK(out.find("src/example.cpp") != std::string::npos);
     CHECK(out.find(fixture.worktree.string()) == std::string::npos);
     CHECK(out.find("-r blob_at_path") == std::string::npos);
-    CHECK(out.find("yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
-    CHECK(out.find("Next: yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
+    CHECK(out.find("yams graph --explore \"src/example.cpp\"") != std::string::npos);
+    CHECK(out.find("Next: yams graph --explore \"src/example.cpp\"") != std::string::npos);
     CHECK(out.find("Alt: yams graph --search \"*example*\"") != std::string::npos);
 
     out.clear();
@@ -240,13 +240,13 @@ TEST_CASE("IntegrationSmoke.SearchNextHintMatchesFirstRenderedResult",
     INFO(out);
     REQUIRE(rc == 0);
 
-    const auto nextPos = out.find("\nNext: yams graph --name ");
+    const auto nextPos = out.find("\nNext: yams graph --explore ");
     REQUIRE(nextPos != std::string::npos);
     const auto rendered = out.substr(0, nextPos);
     const auto firstLineEnd = rendered.find('\n');
     REQUIRE(firstLineEnd != std::string::npos);
     const std::string firstPath = rendered.substr(0, firstLineEnd);
-    CHECK(out.find("Next: yams graph --name \"" + firstPath + "\" --depth 2") != std::string::npos);
+    CHECK(out.find("Next: yams graph --explore \"" + firstPath + "\"") != std::string::npos);
 }
 
 TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
@@ -330,8 +330,8 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
     REQUIRE(rc == 0);
     CHECK(out.find("src/example.cpp") != std::string::npos);
     CHECK(out.find(fixture.worktree.string()) == std::string::npos);
-    CHECK(out.find("[hint: yams graph --name \"src/example.cpp\" --depth 2]") != std::string::npos);
-    CHECK(out.find("Tip: Explore relationships with `yams graph --name <file> --depth 2`") !=
+    CHECK(out.find("[hint: yams graph --explore \"src/example.cpp\"]") != std::string::npos);
+    CHECK(out.find("Tip: Explore relationships with `yams graph --explore <symbol-or-file>`") !=
           std::string::npos);
 }
 

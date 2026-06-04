@@ -126,7 +126,9 @@ TEST_CASE("VectorSchemaMigration migrates readable vec0 V1 data into V2",
     CHECK(tableExists(db.db, "doc_embeddings_v1_backup"));
     CHECK(tableExists(db.db, "doc_metadata_v1_backup"));
     CHECK(countRows(db.db, "SELECT COUNT(*) FROM vectors") == 2);
-    CHECK(countRows(db.db, "SELECT COUNT(*) FROM vectors_hnsw_meta") >= 0);
+    // HNSW shadow tables are no longer created by V1→V2 migration; the active
+    // search-index state is owned by the current backend (vec0 or Simeon PQ).
+    CHECK_FALSE(tableExists(db.db, "vectors_hnsw_meta"));
 
     auto embA = readEmbedding(db.db, "SELECT embedding FROM vectors WHERE chunk_id='chunk_a'");
     auto embB = readEmbedding(db.db, "SELECT embedding FROM vectors WHERE chunk_id='chunk_b'");
@@ -180,7 +182,7 @@ TEST_CASE("VectorSchemaMigration preserves legacy tables when vec0 embeddings ar
     CHECK(tableExists(db.db, "doc_embeddings"));
     CHECK(tableExists(db.db, "doc_metadata"));
     CHECK(countRows(db.db, "SELECT COUNT(*) FROM vectors") == 0);
-    CHECK(countRows(db.db, "SELECT COUNT(*) FROM vectors_hnsw_meta") >= 0);
+    CHECK_FALSE(tableExists(db.db, "vectors_hnsw_meta"));
 }
 
 } // namespace yams::vector
