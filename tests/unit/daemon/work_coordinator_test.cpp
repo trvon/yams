@@ -552,13 +552,14 @@ TEST_CASE("WorkCoordinator double-start precondition fires", "[daemon][work_coor
     SKIP("fork() not available on Windows");
 }
 #else
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 namespace {
 bool forkAssertFires(std::function<void()> fn) {
     pid_t pid = fork();
-    if (pid < 0) return false;
+    if (pid < 0)
+        return false;
     if (pid == 0) {
         fn();
         _exit(0);
