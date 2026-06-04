@@ -1,9 +1,9 @@
-#include <benchmark/benchmark.h>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
+#include <benchmark/benchmark.h>
 
 #include "../common/test_data_generator.h"
 #include "../common/test_helpers_catch2.h"
@@ -43,8 +43,11 @@ protected:
 };
 
 BENCHMARK_DEFINE_F(StorageFixture, Store)(benchmark::State& state) {
+    int iter = 0;
     for (auto _ : state) {
-        auto result = engine_->store(hash_, data_);
+        // Use unique hash per iteration to avoid dedup-path measurement.
+        auto hash = "bench-" + std::to_string(iter++);
+        auto result = engine_->store(hash, data_);
         benchmark::DoNotOptimize(result);
     }
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
@@ -64,9 +67,6 @@ BENCHMARK_DEFINE_F(StorageFixture, Retrieve)(benchmark::State& state) {
     }
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
 }
-BENCHMARK_REGISTER_F(StorageFixture, Retrieve)
-    ->Arg(1024)
-    ->Arg(65536)
-    ->Arg(1048576);
+BENCHMARK_REGISTER_F(StorageFixture, Retrieve)->Arg(1024)->Arg(65536)->Arg(1048576);
 
 } // namespace

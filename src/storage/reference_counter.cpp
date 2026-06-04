@@ -728,7 +728,7 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
             transactionId_ = counter_->pImpl->db->lastInsertRowId();
         }
 
-        YAMS_ASSERT(transactionId_ > 0,
+        YAMS_DCHECK(transactionId_ > 0,
                     "Transaction ID must be assigned by database AUTOINCREMENT");
         spdlog::debug("Started reference counting transaction {}", transactionId_);
     } catch (const std::exception& e) {
