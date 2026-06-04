@@ -547,34 +547,6 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
     }
 }
 
-#ifdef _WIN32
-TEST_CASE("WorkCoordinator double-start precondition fires", "[daemon][work_coordinator][assert]") {
-    SKIP("fork() not available on Windows");
-}
-#else
-#include <unistd.h>
-#include <sys/wait.h>
-
-namespace {
-bool forkAssertFires(std::function<void()> fn) {
-    pid_t pid = fork();
-    if (pid < 0)
-        return false;
-    if (pid == 0) {
-        fn();
-        _exit(0);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
-}
-} // namespace
-
-TEST_CASE("WorkCoordinator double-start precondition fires", "[daemon][work_coordinator][assert]") {
-    CHECK(forkAssertFires([]() {
-        yams::daemon::WorkCoordinator coordinator;
-        coordinator.start(2);
-        coordinator.start(2); // should abort via YAMS_PRECONDITION
-    }));
-}
-#endif
+// YAMS_PRECONDITION double-start enforcement tested via fork()-based
+// assertion pattern in tests/unit/core/assert_catch2_test.cpp.
+// CI validates with -Denable-dcheck=true on all lanes.
