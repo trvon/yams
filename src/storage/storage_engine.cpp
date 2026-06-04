@@ -210,6 +210,10 @@ std::filesystem::path StorageEngine::getTempPath() const {
     // Temp directory is created at construction time (see Impl ctor);
     // skip redundant ensureDirectories on every store call.
 
+    // Assert temp dir still exists (catch external cleanup in dev/CI).
+    YAMS_DCHECK(std::filesystem::exists(pImpl->config.basePath / "temp"),
+                "Temp directory must exist (created at construction)");
+
     // Generate random temp filename using pre-computed hex table
     static thread_local std::random_device rd;
     static thread_local std::mt19937 gen(rd());
@@ -222,6 +226,8 @@ std::filesystem::path StorageEngine::getTempPath() const {
     for (size_t i = 0; i < TEMP_NAME_LENGTH; ++i) {
         tempName.push_back(kHexChars[dis(gen)]);
     }
+    YAMS_DCHECK(tempName.size() == TEMP_NAME_LENGTH,
+                "Temp name must be exactly TEMP_NAME_LENGTH chars");
 
     return pImpl->config.basePath / "temp" / tempName;
 }
@@ -279,6 +285,10 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
             return Result<void>(ErrorCode::Unknown);
         }
     }
+
+    // Temp file must exist and contain data before rename.
+    YAMS_DCHECK(std::filesystem::exists(tempPath),
+                "Temp file must exist after successful write");
 
     // Atomic rename
     std::error_code ec;
@@ -393,6 +403,9 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
 
     // Avoid zero-initialization: allocate uninitialized, read directly, then move into vector.
     auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
+    if (fileSize > 0) {
+        YAMS_DCHECK(buf != nullptr, "make_unique_for_overwrite must return non-null for positive size");
+    }
     file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
     if (!file) {
@@ -407,6 +420,8 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
 
     IStorageEngine::RawObject obj;
     obj.data.assign(buf.get(), buf.get() + fileSize);
+    YAMS_DCHECK(obj.data.size() == static_cast<size_t>(fileSize),
+                "Assigned vector size must match file size");
     obj.header = std::nullopt;
     return obj;
 }
