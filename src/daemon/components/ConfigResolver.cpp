@@ -1075,9 +1075,11 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
                 it != kv.end() && !it->second.empty())
                 policy.preferredModel = it->second;
             if (auto it = kv.find("embeddings.runtime.batch_size"); it != kv.end())
-                policy.batchSize = parseTomlU32(it->second);
+                if (auto v = parseTomlU32(it->second))
+                    policy.batchSize = static_cast<std::size_t>(*v);
             if (auto it = kv.find("embeddings.runtime.batch_target"); it != kv.end())
-                policy.batchTarget = parseTomlU32(it->second);
+                if (auto v = parseTomlU32(it->second))
+                    policy.batchTarget = static_cast<std::size_t>(*v);
             if (auto it = kv.find("embeddings.runtime.repair_lock_timeout_ms"); it != kv.end())
                 if (auto val = parseTomlU32(it->second)) {
                     policy.repairLockTimeoutMs = static_cast<std::uint64_t>(*val);
