@@ -181,9 +181,9 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
         // Store manifests in manifests/ab/cdef...manifest
         auto baseHash = hash.substr(0, hash.length() - 9); // Remove ".manifest"
         if (baseHash.length() < pImpl->config.shardDepth) {
-            // PRECONDITION aborts in dev/CI; the throw preserves backward-compatible
-            // catchable std::invalid_argument for callers that may handle it.
-            YAMS_PRECONDITION(false, "Manifest hash too short for sharding");
+            // DCHECK aborts in dev/CI; in release it compiles out and the throw
+            // preserves backward-compatible catchable std::invalid_argument.
+            YAMS_DCHECK(false, "Manifest hash too short for sharding");
             throw std::invalid_argument("Hash too short for sharding");
         }
         auto prefix = baseHash.substr(0, pImpl->config.shardDepth);
@@ -193,9 +193,9 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
     }
 
     if (hash.length() < pImpl->config.shardDepth) {
-        // PRECONDITION aborts in dev/CI; throw preserves backward-compatible
-        // catchable std::invalid_argument for callers that may handle it.
-        YAMS_PRECONDITION(false, "Hash too short for sharding");
+        // DCHECK aborts in dev/CI; in release it compiles out and the throw
+        // preserves backward-compatible catchable std::invalid_argument.
+        YAMS_DCHECK(false, "Hash too short for sharding");
         throw std::invalid_argument("Hash too short for sharding");
     }
 
@@ -401,11 +401,17 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     file.seekg(0, std::ios::beg);
 
     // Avoid zero-initialization: allocate uninitialized, read directly, then move into vector.
-    auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
-    if (fileSize > 0) {
-        YAMS_DCHECK(buf != nullptr,
-                    "make_unique_for_overwrite must return non-null for positive size");
+    // Guard against UB: make_unique_for_overwrite(0) may return null; assign(null,null) is UB.
+    if (fileSize == 0) {
+        pImpl->stats.readOperations.fetch_add(1);
+        IStorageEngine::RawObject obj;
+        obj.header = std::nullopt;
+        return obj;
     }
+
+    auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
+    YAMS_DCHECK(buf != nullptr,
+                "make_unique_for_overwrite must return non-null for positive size");
     file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
     if (!file) {

@@ -107,13 +107,13 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
 alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
 # Large-scale ingestion benchmark (requires google-benchmark)
-if benchmark_dep.found()
-large_scale_ingestion_bench_deps = [
-test_deps,
-dependency('yams_benchmarks'),
-benchmark_dep,
-benchmark_main_dep,
-] + tracy_deps
+if benchmark_dep.found() and benchmark_main_dep.found()
+  large_scale_ingestion_bench_deps = [
+    test_deps,
+    dependency('yams_benchmarks'),
+    benchmark_dep,
+    benchmark_main_dep,
+  ] + tracy_deps
 
 large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
 files('large_scale_ingestion_bench.cpp'),
@@ -128,7 +128,7 @@ else
 message('Google Benchmark not found; skipping large_scale_ingestion_bench')
 endif
 
-if benchmark_dep.found()
+if benchmark_dep.found() and benchmark_main_dep.found()
   storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
