@@ -148,7 +148,11 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
+else
+  message('Google Benchmark or benchmark_main not found; skipping benchmarks that need benchmark_main')
+endif
 
+if benchmark_dep.found()
   metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
