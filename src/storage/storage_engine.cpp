@@ -400,7 +400,7 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
     file.seekg(0, std::ios::beg);
 
-    // Avoid zero-initialization: allocate uninitialized, read directly, then move into vector.
+    // Avoid zero-initialization: allocate uninitialized, read directly, then copy into vector.
     // Guard against UB: make_unique_for_overwrite(0) may return null; assign(null,null) is UB.
     if (fileSize == 0) {
         pImpl->stats.readOperations.fetch_add(1);

@@ -33,7 +33,10 @@ public:
         hash_ = hash_.substr(0, 64);
 
         // Pre-store data for Retrieve benchmarks.
-        engine_->store(hash_, data_);
+        auto storeResult = engine_->store(hash_, data_);
+        if (!storeResult) {
+            throw std::runtime_error("pre-store failed for retrieve benchmark");
+        }
     }
 
     void TearDown(const benchmark::State&) override {
@@ -75,6 +78,10 @@ BENCHMARK_DEFINE_F(StorageFixture, Retrieve)(benchmark::State& state) {
 
     for (auto _ : state) {
         auto result = engine_->retrieveRaw(hash_);
+        if (!result) {
+            state.SkipWithError("retrieveRaw failed");
+            return;
+        }
         benchmark::DoNotOptimize(result);
     }
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
