@@ -3,12 +3,12 @@
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/metadata/database.h>
 
+#include <sqlite3.h>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
-#include <sqlite3.h>
 
 namespace fs = std::filesystem;
 
@@ -103,14 +103,35 @@ void createAndPopulateDb(const fs::path& dbPath, int docCount,
     db.close();
 }
 
+std::string getJournalMode(const fs::path& dbPath) {
+    sqlite3* raw = nullptr;
+    int rc = sqlite3_open_v2(dbPath.string().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+    REQUIRE((rc == SQLITE_OK));
+
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(raw, "PRAGMA journal_mode", -1, &stmt, nullptr);
+    REQUIRE((rc == SQLITE_OK));
+
+    std::string mode;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (text != nullptr) {
+            mode = text;
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+    return mode;
+}
+
 int countDocuments(const fs::path& dbPath) {
     sqlite3* raw = nullptr;
     int rc = sqlite3_open_v2(dbPath.string().c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
-    REQUIRE(rc == SQLITE_OK);
+    REQUIRE((rc == SQLITE_OK));
 
     sqlite3_stmt* stmt = nullptr;
     rc = sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM documents", -1, &stmt, nullptr);
-    REQUIRE(rc == SQLITE_OK);
+    REQUIRE((rc == SQLITE_OK));
 
     int count = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -149,7 +170,7 @@ TEST_CASE("salvageFromCorruptDb returns empty result when corrupt DB is missing"
     auto corruptPath = dir / "nonexistent.db";
     auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
     REQUIRE(res);
-    REQUIRE(res.value().documentsSalvaged == 0);
+    REQUIRE((res.value().documentsSalvaged == 0));
     REQUIRE_FALSE(res.value().diagnostics.empty());
 
     std::error_code ec;
@@ -172,10 +193,35 @@ TEST_CASE("salvageFromCorruptDb copies documents via ATTACH", "[unit][daemon][db
 
     auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
     REQUIRE(res);
-    REQUIRE(res.value().documentsSalvaged == 5);
-    REQUIRE(res.value().documentsFailed == 0);
+    REQUIRE((res.value().documentsSalvaged == 5));
+    REQUIRE((res.value().documentsFailed == 0));
 
-    REQUIRE(countDocuments(freshPath) == 5);
+    REQUIRE((countDocuments(freshPath) == 5));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("salvageFromCorruptDb preserves fresh DB journaling mode", "[unit][daemon][db_salvage]") {
+    auto dir = makeScratchDir("yams_salvage_journal");
+    auto corruptPath = dir / "corrupt.db";
+    auto freshPath = dir / "fresh.db";
+    auto hashes = makeTestHashes(2);
+
+    createAndPopulateDb(corruptPath, 2, hashes);
+    {
+        yams::metadata::Database db;
+        REQUIRE(db.open(freshPath.string(), yams::metadata::ConnectionMode::Create));
+        REQUIRE(db.execute(kDocumentsTableDdl));
+        REQUIRE(db.execute("PRAGMA journal_mode = WAL"));
+        db.close();
+    }
+
+    REQUIRE((getJournalMode(freshPath) == "wal"));
+    auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
+    REQUIRE(res);
+    CHECK((res.value().documentsSalvaged == 2));
+    CHECK((getJournalMode(freshPath) == "wal"));
 
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -198,10 +244,10 @@ TEST_CASE("salvageFromCorruptDb handles large document counts", "[unit][daemon][
 
     auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
     REQUIRE(res);
-    REQUIRE(res.value().documentsSalvaged == 100);
-    REQUIRE(res.value().documentsFailed == 0);
+    REQUIRE((res.value().documentsSalvaged == 100));
+    REQUIRE((res.value().documentsFailed == 0));
 
-    REQUIRE(countDocuments(freshPath) == 100);
+    REQUIRE((countDocuments(freshPath) == 100));
 
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -253,7 +299,7 @@ TEST_CASE("salvageFromCorruptDb skips duplicate hashes", "[unit][daemon][db_salv
     auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
     REQUIRE(res);
 
-    REQUIRE(countDocuments(freshPath) == 3);
+    REQUIRE((countDocuments(freshPath) == 3));
 
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -270,6 +316,89 @@ TEST_CASE("salvageFromCorruptDb fails cleanly when fresh DB is missing",
 
     auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
     REQUIRE_FALSE(res);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("recovery sentinel cleanup is independent of salvage need",
+          "[unit][daemon][db_salvage][startup_refactor]") {
+    auto dir = makeScratchDir("yams_recovery_sentinel_cleanup");
+    auto dbPath = dir / "yams.db";
+    auto hashes = makeTestHashes(2);
+    createAndPopulateDb(dbPath, 2, hashes);
+
+    const auto sentinelA = dir / "yams.db.recovered-20260101T000000Z";
+    const auto sentinelB = dir / "yams.db.recovered-20260101T000001Z";
+    const auto unrelated = dir / "other.db.recovered-20260101T000000Z";
+    {
+        std::ofstream(sentinelA) << "recovered";
+        std::ofstream(sentinelB) << "recovered";
+        std::ofstream(unrelated) << "keep";
+    }
+
+    const auto qc = yams::daemon::quickCheckSalvageNeeded(dir, dbPath);
+    REQUIRE_FALSE(qc.needsSalvage);
+    REQUIRE((qc.corruptDbCount == 0));
+
+    const auto cleanup = yams::daemon::removeRecoverySentinels(dbPath);
+    REQUIRE(cleanup.errors.empty());
+    REQUIRE((cleanup.removed.size() == 2));
+    REQUIRE_FALSE(fs::exists(sentinelA));
+    REQUIRE_FALSE(fs::exists(sentinelB));
+    REQUIRE(fs::exists(unrelated));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("quick salvage check tracks unreadable corrupt DBs without requesting cleanup",
+          "[unit][daemon][db_salvage][startup_refactor]") {
+    auto dir = makeScratchDir("yams_salvage_unreadable_corrupt");
+    auto dbPath = dir / "yams.db";
+    auto hashes = makeTestHashes(1);
+    createAndPopulateDb(dbPath, 1, hashes);
+
+    const auto unreadableCorrupt = dir / "yams.db.corrupt-bad";
+    {
+        std::ofstream(unreadableCorrupt, std::ios::binary) << "not a sqlite database";
+    }
+
+    const auto qc = yams::daemon::quickCheckSalvageNeeded(dir, dbPath);
+    REQUIRE((qc.corruptDbCount == 1));
+    REQUIRE((qc.unreadableCorruptDbCount == 1));
+    REQUIRE_FALSE(qc.needsSalvage);
+    REQUIRE((qc.maxCorruptCount == 0));
+    REQUIRE(fs::exists(unreadableCorrupt));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB cleanup removes readable artifacts but keeps unreadable evidence",
+          "[unit][daemon][db_salvage][startup_refactor]") {
+    auto dir = makeScratchDir("yams_corrupt_cleanup_safe");
+    auto readableCorrupt = dir / "yams.db.corrupt-readable";
+    auto unreadableCorrupt = dir / "yams.db.corrupt-unreadable";
+    auto readableWal = fs::path(readableCorrupt.string() + "-wal");
+    auto readableShm = fs::path(readableCorrupt.string() + "-shm");
+    auto hashes = makeTestHashes(1);
+
+    createAndPopulateDb(readableCorrupt, 1, hashes);
+    {
+        std::ofstream(readableWal) << "wal";
+        std::ofstream(readableShm) << "shm";
+        std::ofstream(unreadableCorrupt, std::ios::binary) << "not sqlite";
+    }
+
+    const auto cleanup = yams::daemon::removeCorruptDbFiles(dir);
+    REQUIRE(cleanup.errors.empty());
+    REQUIRE((cleanup.removed.size() == 1));
+    REQUIRE((cleanup.removed.front().filename() == readableCorrupt.filename()));
+    REQUIRE_FALSE(fs::exists(readableCorrupt));
+    REQUIRE_FALSE(fs::exists(readableWal));
+    REQUIRE_FALSE(fs::exists(readableShm));
+    REQUIRE(fs::exists(unreadableCorrupt));
 
     std::error_code ec;
     fs::remove_all(dir, ec);

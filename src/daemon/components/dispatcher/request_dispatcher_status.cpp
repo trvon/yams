@@ -72,6 +72,8 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.vectorDbDim = snap.vectorDbDim;
     res.databasePhase = snap.databasePhase;
     res.databasePhaseElapsedMs = snap.databasePhaseElapsedMs;
+    res.maintenancePhase = snap.maintenancePhase;
+    res.maintenancePhaseElapsedMs = snap.maintenancePhaseElapsedMs;
     res.databaseRecoveredAt = snap.databaseRecoveredAt;
     res.databaseRecoveredFrom = snap.databaseRecoveredFrom;
     res.storageWarning = snap.storageWarning;
@@ -576,6 +578,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - state_->readiness.databasePhaseSince)
                             .count());
+                }
+                res.maintenancePhase = state_->readiness.maintenancePhase;
+                if (state_->readiness.maintenancePhaseSince.time_since_epoch().count() != 0) {
+                    res.maintenancePhaseElapsedMs =
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() -
+                                                  state_->readiness.maintenancePhaseSince)
+                                                  .count());
                 }
                 res.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
                 res.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;

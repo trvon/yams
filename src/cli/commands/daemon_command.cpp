@@ -1935,11 +1935,73 @@ private:
                                 std::cout << "\n";
                             }
                         }
+                        auto displayPhase = [](std::string phase) {
+                            std::replace(phase.begin(), phase.end(), '_', ' ');
+                            if (!phase.empty()) {
+                                phase.front() = static_cast<char>(
+                                    std::toupper(static_cast<unsigned char>(phase.front())));
+                            }
+                            return phase;
+                        };
+                        if (j.contains("database_phase")) {
+                            try {
+                                auto phase = j["database_phase"].get<std::string>();
+                                std::cout << "  Database: " << displayPhase(std::move(phase));
+                                if (j.contains("database_phase_elapsed_ms")) {
+                                    auto elapsedMs = j["database_phase_elapsed_ms"].get<uint64_t>();
+                                    if (elapsedMs > 0) {
+                                        std::cout
+                                            << " ("
+                                            << yams::cli::ui::format_duration(elapsedMs / 1000)
+                                            << " elapsed)";
+                                    }
+                                }
+                                std::cout << "\n";
+                            } catch (const std::exception& e) {
+                                spdlog::debug(
+                                    "daemon status bootstrap database phase parse failed: {}",
+                                    e.what());
+                            } catch (...) {
+                                spdlog::debug(
+                                    "daemon status bootstrap database phase parse failed");
+                            }
+                        }
+                        if (j.contains("maintenance_phase")) {
+                            try {
+                                auto phase = j["maintenance_phase"].get<std::string>();
+                                if (!phase.empty() && phase != "idle") {
+                                    std::cout << "  DB Maintenance: "
+                                              << displayPhase(std::move(phase));
+                                    if (j.contains("maintenance_phase_elapsed_ms")) {
+                                        auto elapsedMs =
+                                            j["maintenance_phase_elapsed_ms"].get<uint64_t>();
+                                        if (elapsedMs > 0) {
+                                            std::cout
+                                                << " ("
+                                                << yams::cli::ui::format_duration(elapsedMs / 1000)
+                                                << " elapsed)";
+                                        }
+                                    }
+                                    std::cout << "\n";
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::debug(
+                                    "daemon status bootstrap maintenance phase parse failed: {}",
+                                    e.what());
+                            } catch (...) {
+                                spdlog::debug(
+                                    "daemon status bootstrap maintenance phase parse failed");
+                            }
+                        }
                         if (j.contains("uptime_seconds")) {
                             try {
                                 auto elapsed = j["uptime_seconds"].get<long>();
                                 std::cout << "  Uptime: ~" << elapsed << "s\n";
+                            } catch (const std::exception& e) {
+                                spdlog::debug("daemon status bootstrap uptime parse failed: {}",
+                                              e.what());
                             } catch (...) {
+                                spdlog::debug("daemon status bootstrap uptime parse failed");
                             }
                         }
                         std::cout << "  Hint: Run 'yams daemon status -d' once ready, "
@@ -2128,6 +2190,11 @@ private:
                     extra = elapsedSec.empty() ? std::string("quarantining corrupt DB")
                                                : elapsedSec + " · quarantining corrupt DB";
                     dbSev = Severity::Warn;
+                } else if (phase == dbphase::kSalvaging) {
+                    label = "Salvaging";
+                    extra = elapsedSec.empty() ? std::string("recovering documents")
+                                               : elapsedSec + " · recovering documents";
+                    dbSev = Severity::Warn;
                 } else if (phase == dbphase::kMigrating) {
                     label = "Migrating";
                     extra = elapsedSec;
@@ -2151,6 +2218,22 @@ private:
                 }
                 if (!label.empty()) {
                     overview.push_back({"Database", paintStatus(dbSev, label), extra});
+                }
+
+                if (!s.maintenancePhase.empty() && s.maintenancePhase != "idle") {
+                    const std::string maintenanceElapsed =
+                        s.maintenancePhaseElapsedMs > 0
+                            ? format_duration(s.maintenancePhaseElapsedMs / 1000) + " elapsed"
+                            : "";
+                    std::string maintenanceLabel = s.maintenancePhase;
+                    std::replace(maintenanceLabel.begin(), maintenanceLabel.end(), '_', ' ');
+                    if (!maintenanceLabel.empty()) {
+                        maintenanceLabel.front() = static_cast<char>(
+                            std::toupper(static_cast<unsigned char>(maintenanceLabel.front())));
+                    }
+                    overview.push_back({"DB Maintenance",
+                                        paintStatus(Severity::Warn, maintenanceLabel),
+                                        maintenanceElapsed});
                 }
             }
 

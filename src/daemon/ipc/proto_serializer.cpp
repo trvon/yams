@@ -1429,6 +1429,16 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key(std::string(status_keys::kDatabasePhaseElapsedMs));
             kv->set_value(std::to_string(r.databasePhaseElapsedMs));
         }
+        if (!r.maintenancePhase.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kMaintenancePhase));
+            kv->set_value(r.maintenancePhase);
+        }
+        if (r.maintenancePhaseElapsedMs > 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kMaintenancePhaseElapsedMs));
+            kv->set_value(std::to_string(r.maintenancePhaseElapsedMs));
+        }
         if (!r.databaseRecoveredAt.empty()) {
             auto* kv = o->add_request_counts();
             kv->set_key(std::string(status_keys::kDatabaseRecoveredAt));
@@ -1540,6 +1550,18 @@ template <> struct ProtoBinding<StatusResponse> {
                     r.databasePhaseElapsedMs = std::stoull(kv.value());
                 } catch (...) {
                     r.databasePhaseElapsedMs = 0;
+                }
+                continue;
+            }
+            if (kv.key() == status_keys::kMaintenancePhase) {
+                r.maintenancePhase = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kMaintenancePhaseElapsedMs) {
+                try {
+                    r.maintenancePhaseElapsedMs = std::stoull(kv.value());
+                } catch (...) {
+                    r.maintenancePhaseElapsedMs = 0;
                 }
                 continue;
             }

@@ -49,6 +49,13 @@ struct DaemonReadiness {
     std::string databasePhase;
     std::chrono::steady_clock::time_point databasePhaseSince;
 
+    // Post-startup database maintenance visibility. This is intentionally
+    // separate from databasePhase so async salvage/VACUUM work does not make an
+    // already-available metadata repository look unavailable.
+    // Values: "" (unset), "idle", "recovery_cleanup", "salvaging", "vacuuming".
+    std::string maintenancePhase;
+    std::chrono::steady_clock::time_point maintenancePhaseSince;
+
     // Set by the storage preflight when the data dir responded but was slow.
     // Surfaced as a banner in `yams daemon status`.
     std::string storageWarning;

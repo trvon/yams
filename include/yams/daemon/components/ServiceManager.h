@@ -29,6 +29,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
@@ -36,7 +37,6 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -51,10 +51,10 @@
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
-#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
@@ -662,8 +662,15 @@ private:
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     void finalizeDatabaseStartup(const std::filesystem::path& dbPath);
+    void runStartupSalvageIfNeeded(const std::filesystem::path& dbPath);
+    void schedulePostStartupMaintenance(const std::filesystem::path& dbPath);
+    void scheduleRecoveryArtifactCleanup(const std::filesystem::path& dbPath);
+    void scheduleSalvageIfNeeded(const std::filesystem::path& dbPath);
+    void scheduleVacuumIfUseful(const std::filesystem::path& dbPath);
+    void scheduleInitialSearchBuild();
 
     void setDatabasePhase(std::string_view phase);
+    void setMaintenancePhase(std::string_view phase);
     void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
     bool openDatabaseOnce(const std::filesystem::path& dbPath);
     bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath);
@@ -737,6 +744,7 @@ private:
     TuningConfig tuningConfig_{};
 
     std::atomic<bool> shutdownInvoked_{false};
+    std::mutex maintenanceMutex_;
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
     std::atomic<bool> topologyRebuildPending_{false};
     std::atomic<bool> topologyRebuildInProgress_{false};

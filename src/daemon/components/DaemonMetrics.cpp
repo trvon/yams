@@ -122,7 +122,7 @@ struct MemoryUsageSample {
 };
 
 bool envFlagEnabled(const char* name) {
-    const char* env = std::getenv(name);
+    const char* env = std::getenv(name); // NOLINT(concurrency-mt-unsafe): read-only config snapshot
     if (!env || *env == '\0') {
         return false;
     }
@@ -562,7 +562,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         try {
             root = services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
         } catch (...) {
-            // Metrics collection is best-effort; leave snapshot defaults.
+            spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
         if (!root.empty() && fs::exists(root, ec)) {
             for (fs::recursive_directory_iterator
@@ -629,7 +629,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
                 indexBytes = extIndex;
             }
         } catch (...) {
-            // Metrics collection is best-effort; leave snapshot defaults.
+            spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
         std::uint64_t metaBytes = refsDbBytes + dbBytes + dbWalBytes + dbShmBytes;
         std::uint64_t vecBytes = vecDbBytes + vecIdxBytes;
@@ -837,6 +837,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                             // Rebuilds compete with ingestion/post-ingest and can dominate runtime.
                             bool disableRebuilds = false;
                             try {
+                                // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only daemon setting.
                                 if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
                                     std::string v(env);
                                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
@@ -844,7 +845,8 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                                         (v == "1" || v == "true" || v == "yes" || v == "on");
                                 }
                             } catch (...) {
-                                // Metrics collection is best-effort; leave snapshot defaults.
+                                spdlog::debug("[DaemonMetrics] best-effort metric probe failed "
+                                              "with unknown exception");
                             }
                             if (!disableRebuilds) {
                                 searchComp->checkAndTriggerRebuildIfNeeded();
@@ -852,7 +854,8 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                         }
                     }
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
 
@@ -915,7 +918,8 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             try {
                 MetricsSnapshotRegistry::instance().set(fastSnapshot);
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
         } catch (const std::exception& e) {
             spdlog::warn("DaemonMetrics: polling iteration failed: {}", e.what());
@@ -1008,7 +1012,7 @@ void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& 
     try {
         MetricsSnapshotRegistry::instance().set(fastSnapshot);
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -1092,7 +1096,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                 out.workerActive = services_->getWorkerActive();
                 out.workerQueued = services_->getWorkerQueueDepth();
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             try {
                 if (auto pq = services_->getPostIngestQueue()) {
@@ -1112,7 +1117,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                     }
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             try {
                 auto searchLoad = services_->getSearchLoadMetrics();
@@ -1120,7 +1126,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
                 out.searchQueued = searchLoad.queued;
                 out.searchExecuted = searchLoad.executed;
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             auto topology = services_->getTopologyTelemetrySnapshot();
             out.topologyRebuildRunning = topology.rebuildRunning;
@@ -1151,7 +1158,7 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
             out.topologyLastAlgorithm = topology.lastAlgorithm;
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
     return out;
 }
@@ -1271,7 +1278,7 @@ void DaemonMetrics::populateReadinessSnapshot(MetricsSnapshot& out) const {
                 static_cast<uint8_t>(searchPct);
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -1347,7 +1354,8 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                     out.kgJobsDepth = kgDepth;
                     out.kgJobsCapacity = kgCap;
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
 
                 // High-priority post-ingest channel for repair/stuck-doc recovery.
@@ -1368,7 +1376,8 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                         }
                     }
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
@@ -1445,7 +1454,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -1459,10 +1468,10 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
                 auto current = sess->current();
                 if (current && !current->empty()) {
                     out.watchSession = *current;
-                    out.watchEnabled = sess->watchEnabled(*current);
-                    out.watchIntervalMs = sess->watchIntervalMs(*current);
+                    out.watchEnabled = sess->watchEnabled(current);
+                    out.watchIntervalMs = sess->watchIntervalMs(current);
                     if (out.watchEnabled) {
-                        auto pinned = sess->getPinnedPatterns(*current);
+                        auto pinned = sess->getPinnedPatterns(current);
                         if (!pinned.empty()) {
                             out.watchRoot = pinned.front();
                         }
@@ -1471,7 +1480,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // FSM transport metrics (best-effort)
@@ -1489,7 +1498,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
         out.ipcPoolSize = fsnap.ipcPoolSize;
         out.ioPoolSize = fsnap.ioPoolSize;
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // ResourceGovernor metrics (direct query)
@@ -1500,7 +1509,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
         out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
         out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // ONNX concurrency metrics (direct query)
@@ -1512,7 +1521,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
         out.onnxEmbedUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used;
         out.onnxRerankerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used;
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // DatabaseManager metrics
@@ -1554,7 +1563,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // WorkCoordinator metrics
@@ -1567,7 +1576,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Stream metrics (from StreamMetricsRegistry)
@@ -1580,7 +1589,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             out.streamTtfbAvgMs = ssnap.ttfbSumMs / ssnap.ttfbCount;
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // InternalEventBus metrics (title extraction, FTS5, symbol)
@@ -1611,10 +1620,10 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
             out.deferredQueueDepth = ch->size_approx();
         } catch (...) {
-            // Metrics collection is best-effort; leave snapshot defaults.
+            spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     try {
@@ -1635,7 +1644,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
     // Shared overload snapshot for retry-after and per-command admission metrics.
     try {
@@ -1661,7 +1670,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
             out.addRejected = state_->stats.addRequestsRejected.load(std::memory_order_relaxed);
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -1698,7 +1707,7 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
 #endif
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Vector DB snapshot (size and exact rows when available)
@@ -1709,7 +1718,8 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
                 out.vectorDbReady = state_->readiness.vectorDbReady.load();
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             // Do not touch the live VectorDatabase handle on the status path.
             // During startup the vector backend may be rebuilding HNSW under its internal mutex,
@@ -1726,7 +1736,8 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
                     }
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             // Exact rows via cached value ONLY (updated periodically in background)
             {
@@ -1742,14 +1753,14 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
 #endif
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Ensure readinessStates[vector_db] reflects the final vectorDbReady after healing.
     try {
         out.readinessStates[std::string(readiness::kVectorDb)] = out.vectorDbReady;
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Database init phase + recovery + storage warning. Read under recoveryMutex
@@ -1764,11 +1775,20 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
                     std::chrono::steady_clock::now() - state_->readiness.databasePhaseSince)
                     .count());
         }
+        out.maintenancePhase = state_->readiness.maintenancePhase;
+        if (out.maintenancePhase == maintenance_phase::kIdle) {
+            out.maintenancePhaseElapsedMs = 0;
+        } else if (state_->readiness.maintenancePhaseSince.time_since_epoch().count() != 0) {
+            out.maintenancePhaseElapsedMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - state_->readiness.maintenancePhaseSince)
+                    .count());
+        }
         out.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
         out.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
         out.storageWarning = state_->readiness.storageWarning;
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -1805,22 +1825,26 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.contentStoreRoot = (dd / "storage").string();
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             try {
                 out.metadataDbPath = services_->getMetadataDatabasePath();
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             try {
                 out.vectorDbPath = services_->getVectorDatabasePath();
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             try {
                 out.contentStoreError = services_->getContentStoreError();
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             {
                 std::shared_lock lock(cacheMutex_);
@@ -1860,7 +1884,8 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.lastOrphanScanTime = oss.str();
                 }
             } catch (...) {
-                // Metrics unavailable, leave defaults (0, 0, empty string)
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             // Checkpoint manager stats (PBI-090)
             try {
@@ -1890,18 +1915,22 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             // Content store stats and sizes (logical always, deep stats when detailed)
             bool disableStoreStats = false;
             try {
-                if (const char* env = std::getenv("YAMS_DISABLE_STORE_STATS")) {
+                if (const char* env =
+                        std::getenv("YAMS_DISABLE_STORE_STATS")) { // NOLINT(concurrency-mt-unsafe):
+                                                                   // read-only daemon setting
                     std::string v(env);
                     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                     disableStoreStats = (v == "1" || v == "true" || v == "yes" || v == "on");
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             if (cs) {
                 // Read cached ContentStore stats. cs->getStats() triggers a
@@ -1964,7 +1993,8 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         out.volumeUsedBytes = volumeUsed;
                     }
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
             // Search engine and reason when unavailable
@@ -1983,13 +2013,14 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     else
                         reason = "not_initialized";
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
                 out.searchEngineReason = reason;
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
     // Resolved data dir
     try {
@@ -1999,7 +2030,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                 out.dataDir = dd.string();
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Embedding runtime details (best-effort)
@@ -2019,7 +2050,8 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                             static_cast<uint32_t>(provider->getEmbeddingDim(modelName));
                     }
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
             // Backend label and model details
@@ -2038,7 +2070,8 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                                         static_cast<uint32_t>(mi.value().embeddingDim);
                             }
                         } catch (...) {
-                            // Metrics collection is best-effort; leave snapshot defaults.
+                            spdlog::debug("[DaemonMetrics] best-effort metric probe failed with "
+                                          "unknown exception");
                         }
                     }
                     // Best-effort local model path resolution
@@ -2053,18 +2086,20 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                                     out.embeddingModelPath = p.string();
                             }
                         } catch (...) {
-                            // Metrics collection is best-effort; leave snapshot defaults.
+                            spdlog::debug("[DaemonMetrics] best-effort metric probe failed with "
+                                          "unknown exception");
                         }
                     }
                 } else {
                     out.embeddingBackend = "unknown";
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Add component-level memory where available (provider, vector index)
@@ -2076,7 +2111,8 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     prov = static_cast<std::uint64_t>(mp->getMemoryUsage());
                 }
             } catch (...) {
-                // Metrics collection is best-effort; leave snapshot defaults.
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
             }
             if (prov > 0)
                 out.memoryBreakdownBytes["provider_bytes"] = prov;
@@ -2084,7 +2120,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             // Vector memory is reported by VectorDatabase (sqlite-vec).
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 
     // Vector diagnostics (uses non-blocking cached snapshots)
@@ -2095,7 +2131,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.vectorScoringEnabled = d.scoringEnabled;
         out.searchEngineBuildReason = d.buildReason;
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -2248,7 +2284,7 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 }
 
@@ -2263,12 +2299,13 @@ EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
                     auto loaded = provider->getLoadedModels();
                     info.modelsLoaded = static_cast<int>(loaded.size());
                 } catch (...) {
-                    // Metrics collection is best-effort; leave snapshot defaults.
+                    spdlog::debug(
+                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
         }
     } catch (...) {
-        // Metrics collection is best-effort; leave snapshot defaults.
+        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
 #ifdef YAMS_USE_ONNX_RUNTIME
     info.onnxRuntimeEnabled = true;

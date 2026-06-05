@@ -176,6 +176,9 @@ struct MetricsSnapshot {
     // databasePhase is "" | "opening" | "recovering" | "migrating" | "ready".
     std::string databasePhase;
     std::uint64_t databasePhaseElapsedMs{0};
+    // Post-startup maintenance visibility, separate from database readiness.
+    std::string maintenancePhase;
+    std::uint64_t maintenancePhaseElapsedMs{0};
     std::string databaseRecoveredAt;
     std::string databaseRecoveredFrom;
     std::string storageWarning;

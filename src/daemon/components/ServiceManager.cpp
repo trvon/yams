@@ -20,9 +20,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <yams/common/fs_utils.h>
-#include <yams/core/assert.hpp>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/core/assert.hpp>
 
 #ifdef _WIN32
 #include <io.h>
@@ -1541,6 +1541,17 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                         static_cast<uint64_t>(elapsed);
                 }
             }
+            if (!state.readiness.maintenancePhase.empty()) {
+                j[std::string(status_keys::kMaintenancePhase)] = state.readiness.maintenancePhase;
+                if (state.readiness.maintenancePhaseSince.time_since_epoch().count() != 0) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() -
+                                       state.readiness.maintenancePhaseSince)
+                                       .count();
+                    j[std::string(status_keys::kMaintenancePhaseElapsedMs)] =
+                        static_cast<uint64_t>(elapsed);
+                }
+            }
             if (!state.readiness.storageWarning.empty()) {
                 j[std::string(status_keys::kStorageWarning)] = state.readiness.storageWarning;
             }
@@ -1765,10 +1776,9 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
 }
 
 void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath) {
-    namespace fs = std::filesystem;
-
     if (databaseManager_) {
         databaseManager_->setDatabase(database_);
+        runStartupSalvageIfNeeded(dbPath);
         const bool poolsOk = databaseManager_->initializePools(dbPath);
         if (!poolsOk) {
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
@@ -1777,71 +1787,158 @@ void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath
     }
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
+    schedulePostStartupMaintenance(dbPath);
+}
+
+void ServiceManager::runStartupSalvageIfNeeded(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+
     const auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
     const auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
-
-    if (qc.needsSalvage) {
-        spdlog::info("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB ({}); "
-                     "blocking startup to recover",
-                     qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
-        {
-            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-            state_.readiness.databasePhase = std::string(dbphase::kSalvaging);
-            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-        }
-        auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
-        if (aggregateResult.combined.documentsSalvaged > 0) {
-            spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
-                         aggregateResult.combined.documentsSalvaged,
-                         aggregateResult.salvagedPaths.size());
-            {
-                std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-                state_.readiness.databaseRecoveredFrom =
-                    "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
-                state_.readiness.databaseSalvaged = true;
-            }
-        } else {
-            spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
-        }
-
-        // Clean up corrupt files and .recovered-* sentinels regardless of salvage count.
-        // Corrupt DBs and their sentinels are stale once salvage has examined them;
-        // leaving them causes unbounded disk accumulation on repeated crash/recovery cycles.
-        {
-            auto cleanup = removeCorruptDbFiles(salvageDir);
-            if (!cleanup.removed.empty()) {
-                spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)",
-                             cleanup.removed.size());
-            }
-        }
-        {
-            std::error_code ec;
-            const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
-            int removedSentinelCount = 0;
-            for (const auto& entry : fs::directory_iterator(salvageDir, ec)) {
-                if (ec) {
-                    ec.clear();
-                    continue;
-                }
-                if (entry.path().filename().string().rfind(sentinelPrefix, 0) == 0) {
-                    fs::remove(entry.path(), ec);
-                    ++removedSentinelCount;
-                }
-            }
-            if (removedSentinelCount > 0) {
-                spdlog::info("[ServiceManager] Cleaned up {} recovery sentinel(s)",
-                             removedSentinelCount);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-            state_.readiness.databasePhase = std::string(dbphase::kReady);
-            state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
-        }
-    } else {
-        spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are less "
-                     "than current DB; skipping salvage");
+    if (qc.unreadableCorruptDbCount > 0) {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.storageWarning =
+            std::to_string(qc.unreadableCorruptDbCount) +
+            " unreadable corrupt metadata DB artifact(s) preserved for manual repair";
     }
+    if (!qc.needsSalvage) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> maintenanceLock(maintenanceMutex_);
+    setDatabasePhase(dbphase::kSalvaging);
+    setMaintenancePhase(maintenance_phase::kSalvaging);
+    spdlog::warn("[ServiceManager] Corrupt DB(s) have {} doc(s) more than current DB ({}); "
+                 "running coordinated startup recovery before metadata repository publication",
+                 qc.maxCorruptCount - qc.currentDocCount, qc.currentDocCount);
+
+    auto aggregateResult = salvageFromAllCorruptDbs(salvageDir, dbPath);
+    if (aggregateResult.combined.documentsSalvaged > 0) {
+        spdlog::info("[ServiceManager] Salvaged {} document(s) from {} corrupt DB(s)",
+                     aggregateResult.combined.documentsSalvaged,
+                     aggregateResult.salvagedPaths.size());
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        if (!aggregateResult.salvagedPaths.empty()) {
+            state_.readiness.databaseRecoveredFrom =
+                "salvaged-" + aggregateResult.salvagedPaths.back().filename().string();
+        }
+        state_.readiness.databaseSalvaged = true;
+    } else {
+        spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
+    }
+
+    auto cleanup = removeCorruptDbFiles(salvageDir);
+    if (!cleanup.removed.empty()) {
+        spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)", cleanup.removed.size());
+    }
+    for (const auto& err : cleanup.errors) {
+        spdlog::warn("[ServiceManager] Corrupt DB cleanup error: {}", err);
+    }
+
+    setMaintenancePhase(maintenance_phase::kIdle);
+    setDatabasePhase(dbphase::kReady);
+    writeBootstrapStatusFile(config_, state_, this);
+}
+
+void ServiceManager::schedulePostStartupMaintenance(const std::filesystem::path& dbPath) {
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!state_.readiness.metadataRepoReady.load(std::memory_order_acquire)) {
+        spdlog::debug("[ServiceManager] Deferring post-startup maintenance until metadata repo is "
+                      "ready");
+        return;
+    }
+
+    scheduleRecoveryArtifactCleanup(dbPath);
+    scheduleSalvageIfNeeded(dbPath);
+}
+
+void ServiceManager::scheduleRecoveryArtifactCleanup(const std::filesystem::path& dbPath) {
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!blockingPool_) {
+        spdlog::warn(
+            "[ServiceManager] Cannot schedule recovery cleanup; blocking pool unavailable");
+        return;
+    }
+
+    std::weak_ptr<ServiceManager> weakSelf = weak_from_this();
+    boost::asio::post(blockingPool_->get_executor(), [weakSelf, dbPath]() {
+        auto self = weakSelf.lock();
+        if (!self || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> maintenanceLock(self->maintenanceMutex_);
+        if (self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+        self->setMaintenancePhase(maintenance_phase::kRecoveryCleanup);
+        writeBootstrapStatusFile(self->config_, self->state_, self.get());
+        auto cleanup = removeRecoverySentinels(dbPath);
+        if (!cleanup.removed.empty()) {
+            spdlog::info("[ServiceManager] Cleaned up {} recovery sentinel(s)",
+                         cleanup.removed.size());
+        }
+        for (const auto& err : cleanup.errors) {
+            spdlog::warn("[ServiceManager] Recovery sentinel cleanup error: {}", err);
+        }
+        self->setMaintenancePhase(maintenance_phase::kIdle);
+        writeBootstrapStatusFile(self->config_, self->state_, self.get());
+    });
+}
+
+void ServiceManager::scheduleSalvageIfNeeded(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!state_.readiness.metadataRepoReady.load(std::memory_order_acquire)) {
+        spdlog::debug("[ServiceManager] Skipping salvage scheduling until metadata repo is ready");
+        return;
+    }
+    if (!blockingPool_) {
+        spdlog::warn("[ServiceManager] Cannot schedule DB salvage; blocking pool unavailable");
+        return;
+    }
+
+    std::weak_ptr<ServiceManager> weakSelf = weak_from_this();
+    boost::asio::post(blockingPool_->get_executor(), [weakSelf, dbPath]() {
+        auto self = weakSelf.lock();
+        if (!self || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> maintenanceLock(self->maintenanceMutex_);
+        if (self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+        const auto salvageDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+        const auto qc = quickCheckSalvageNeeded(salvageDir, dbPath);
+        if (qc.unreadableCorruptDbCount > 0) {
+            std::lock_guard<std::mutex> lk(self->state_.readiness.recoveryMutex);
+            self->state_.readiness.storageWarning =
+                std::to_string(qc.unreadableCorruptDbCount) +
+                " unreadable corrupt metadata DB artifact(s) preserved for manual repair";
+        }
+        if (qc.needsSalvage) {
+            spdlog::warn("[ServiceManager] Corrupt DB(s) still appear salvageable after startup "
+                         "recovery; leaving live DB untouched and preserving artifacts");
+        } else {
+            spdlog::info("[ServiceManager] Quick-check: corrupt DB document counts match or are "
+                         "less than current DB; skipping post-startup salvage");
+        }
+
+        writeBootstrapStatusFile(self->config_, self->state_, self.get());
+        self->scheduleVacuumIfUseful(dbPath);
+    });
 }
 
 boost::asio::awaitable<Result<void>>
@@ -1961,7 +2058,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Phase: mark vectors ready (vector backend initialization is opportunistic)
     try {
         serviceFsm_.dispatch(VectorsInitializedEvent{});
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManager] VectorsInitializedEvent dispatch failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("[ServiceManager] VectorsInitializedEvent dispatch failed");
     }
 
     // Executors and sessions
@@ -1976,6 +2076,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     };
     // Session watcher is opt-in: it should not run by default in daemon mode.
     // Enable explicitly via `YAMS_ENABLE_SESSION_WATCHER=1`.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
     const bool enableSessionWatcher = isTruthy(std::getenv("YAMS_ENABLE_SESSION_WATCHER"));
     if (!enableSessionWatcher) {
         spdlog::info("[ServiceManager] Session watcher disabled (default); set "
@@ -1991,7 +2092,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     co_await co_runSessionWatcher(std::move(watcherToken));
                 },
                 boost::asio::use_future);
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] session watcher start failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("[ServiceManager] session watcher start failed");
         }
     }
 
@@ -2060,7 +2164,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         try {
             if (config_.tuning.postIngestCapacity > 0)
                 newPostIngest->setCapacity(config_.tuning.postIngestCapacity);
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] post-ingest capacity override failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("[ServiceManager] post-ingest capacity override failed");
         }
 
         std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
@@ -2077,6 +2184,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (piq) {
                 piq->setDrainCallback([this]() {
                     const bool disableDrainTopologyRebuild = []() {
+                        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
                         if (const char* env = std::getenv("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD")) {
                             return std::string_view(env) == "1";
                         }
@@ -2112,6 +2220,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
     // Skip EmbeddingService init when vectors are disabled (benchmark/compat mode)
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
     const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS"));
     if (!vectorsDisabled) {
         // Initialize EmbeddingService for async embedding generation
@@ -2120,7 +2229,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             uint32_t taThreads = 0;
             try {
                 taThreads = TA::postIngestThreads();
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManager] TuneAdvisor post-ingest thread read failed: {}",
+                              e.what());
             } catch (...) {
+                spdlog::debug("[ServiceManager] TuneAdvisor post-ingest thread read failed");
             }
             (void)taThreads; // Retrieved for future use in embedding service configuration
             auto embeddingService = std::make_shared<EmbeddingService>(
@@ -2212,6 +2325,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (const std::exception& e) {
         spdlog::warn("[ServiceManager] WriteCoordinator init failed: {}", e.what());
     } catch (...) {
+        spdlog::warn("[ServiceManager] WriteCoordinator init failed (unknown)");
     }
 
     // Cross-encoder reranker initialization happens after plugin loading.
@@ -2232,6 +2346,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // AUTOLOAD PLUGINS (MOVED UP)
     try {
         bool enableAutoload = config_.autoLoadPlugins;
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
         if (const char* env = std::getenv("YAMS_AUTOLOAD_PLUGINS")) {
             std::string v(env);
             for (auto& c : v)
@@ -2501,7 +2616,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             try {
                 if (auto vectorDatabase = getVectorDatabase())
                     vdim = vectorDatabase->getConfig().embedding_dim;
+            } catch (const std::exception& e) {
+                spdlog::debug("[Warmup] vector dimension probe failed: {}", e.what());
             } catch (...) {
+                spdlog::debug("[Warmup] vector dimension probe failed with unknown exception");
             }
             if (vdim == 0) {
                 spdlog::info("[Warmup] deferred: vector DB not ready or dim=0");
@@ -2513,164 +2631,225 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
 
-    // Build SearchEngine with timeout
-    try {
-        int progress = 10;
-        if (getMetadataRepo())
-            progress = 40;
-        if (getVectorDatabase())
-            progress = 70;
-        state_.readiness.searchProgress = progress;
-        writeBootstrapStatusFile(config_, state_, this);
-        // Determine vector readiness: honor env disables and presence of vector infra
-        const bool vectorsDisabled =
-            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-            ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
-        bool vectorEnabled = false;
-        if (vectorsDisabled) {
-            spdlog::info(
-                "[SearchBuild] Vector search disabled via env flag; building text-only engine");
-        } else if (auto vectorDatabase = getVectorDatabase()) {
-            try {
-                // Use VectorDatabase directly - it knows the actual DB size
-                auto vectorCount = vectorDatabase->getVectorCount();
-                vectorEnabled = (vectorCount > 0);
-                spdlog::info("[SearchBuild] Vector DB has {} vectors, vector_enabled={}",
-                             vectorCount, vectorEnabled);
-            } catch (const std::exception& e) {
-                spdlog::warn("[SearchBuild] Could not check vector count: {}", e.what());
-            }
-        } else {
-            spdlog::info(
-                "[SearchBuild] Vector components not available; building text-only engine");
-        }
-
-        spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
-                     vectorEnabled);
-        // Nudge progress to indicate we're in the final build step
-        try {
-            state_.readiness.searchProgress =
-                std::max<int>(state_.readiness.searchProgress.load(), 90);
-        } catch (...) {
-        }
-
-        // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
-        // Get embedding generator from model provider if available
-        std::shared_ptr<vector::EmbeddingGenerator> embGen;
-        auto modelProvider = loadModelProvider();
-        spdlog::info("[SearchBuild] Checking embedding generator: modelProvider_={} isAvailable={} "
-                     "modelName='{}'",
-                     modelProvider != nullptr, modelProvider ? modelProvider->isAvailable() : false,
-                     embeddingLifecycle_.modelName());
-        if (modelProvider && modelProvider->isAvailable()) {
-            try {
-                embGen =
-                    embeddingLifecycle_.modelName().empty()
-                        ? modelProvider->getEmbeddingGenerator()
-                        : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
-                spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
-
-                if (auto vectorDatabase = getVectorDatabase()) {
-                    std::string activeModelName = embeddingLifecycle_.modelName();
-                    if (activeModelName.empty()) {
-                        auto loadedModels = modelProvider->getLoadedModels();
-                        if (!loadedModels.empty()) {
-                            activeModelName = loadedModels.front();
-                        }
-                    }
-                    const auto dbEmbeddingDim = vectorDatabase->getConfig().embedding_dim;
-                    const auto modelEmbeddingDim = modelProvider->getEmbeddingDim(activeModelName);
-                    if (dbEmbeddingDim > 0 && modelEmbeddingDim > 0 &&
-                        dbEmbeddingDim != modelEmbeddingDim) {
-                        spdlog::warn("[SearchBuild] Vector DB/model dimension mismatch: db={} "
-                                     "model={} ('{}'). Search vector tiers will be skipped until "
-                                     "you select a matching model or rebuild embeddings.",
-                                     dbEmbeddingDim, modelEmbeddingDim,
-                                     activeModelName.empty() ? "<default>" : activeModelName);
-                    }
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
-            }
-        }
-        try {
-            serviceFsm_.dispatch(SearchEngineBuildStartedEvent{});
-        } catch (...) {
-        }
-        auto buildResult = co_await searchEngineManager_.buildEngine(
-            getMetadataRepo(), getKgStore(), getVectorDatabase(), embGen, "initial",
-            getWorkerExecutor(), !config_.instrumentation.suppressSimeonLexicalBuild);
-
-        if (buildResult.has_value()) {
-            const auto& built = buildResult.value();
-            wireSearchEngineRuntimeAdapters(built, "SearchBuild");
-
-            // Update readiness indicators after successful rebuild
-            state_.readiness.searchEngineReady = true;
-            state_.readiness.searchProgress = 100;
-            try {
-                lifecycleFsm_.setSubsystemDegraded("search", false);
-            } catch (...) {
-            }
-            // Track doc count at build time for re-tuning decisions
-            if (auto metadataRepo = getMetadataRepo()) {
-                auto countRes = metadataRepo->getDocumentCount();
-                if (countRes) {
-                    if (searchComponent_) {
-                        searchComponent_->recordSuccessfulBuild(countRes.value());
-                    } else {
-                        state_.readiness.searchEngineDocCount.store(countRes.value());
-                    }
-                }
-            }
-
-            writeBootstrapStatusFile(config_, state_, this);
-
-            spdlog::info("SearchEngine initialized and published to AppContext (docs={})",
-                         state_.readiness.searchEngineDocCount.load());
-            try {
-                serviceFsm_.dispatch(SearchEngineBuiltEvent{});
-            } catch (...) {
-            }
-            // Drain any topology-rebuild requests that accumulated during
-            // startup (embedding preload fires setTopologyRebuildRequester
-            // before Ready; requestTopologyRebuild short-circuits until now).
-            try {
-                requestTopologyRebuild("ready_drain");
-            } catch (...) {
-            }
-        } else {
-            // Do not leave UI stuck below 100% when we are running degraded.
-            try {
-                state_.readiness.searchEngineReady = false;
-                state_.readiness.searchProgress = 100;
-            } catch (...) {
-            }
-            const auto reason = buildResult.error().message.empty()
-                                    ? std::string{"initial search engine build not ready"}
-                                    : buildResult.error().message;
-            try {
-                lifecycleFsm_.setSubsystemDegraded("search", true, reason);
-            } catch (...) {
-            }
-            writeBootstrapStatusFile(config_, state_, this);
-            spdlog::warn("[SearchBuild] initial engine build not ready; continuing degraded: {}",
-                         reason);
-            try {
-                serviceFsm_.dispatch(SearchEngineBuiltEvent{});
-            } catch (...) {
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Exception wiring SearchEngine: {}", e.what());
-    }
-    spdlog::info("[ServiceManager] Phase: Search Engine Built.");
+    // Full SearchEngine construction is non-critical. Metadata search is already available via
+    // MetadataRepository, and RequestDispatcher falls back to metadata while searchEngineReady is
+    // false. Schedule the heavier hybrid/FTS/vector bootstrap out-of-band.
+    scheduleInitialSearchBuild();
+    spdlog::info("[ServiceManager] Phase: Search Engine Build Scheduled.");
     if (ingestService_) {
         ingestService_->start();
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
 
     co_return Result<void>();
+}
+
+void ServiceManager::scheduleInitialSearchBuild() {
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!state_.readiness.metadataRepoReady.load(std::memory_order_acquire)) {
+        spdlog::debug("[SearchBuild] initial build deferred until metadata repo is ready");
+        return;
+    }
+
+    int progress = 10;
+    if (getMetadataRepo())
+        progress = 40;
+    if (getVectorDatabase())
+        progress = 70;
+    state_.readiness.searchProgress = progress;
+    state_.readiness.searchEngineReady = false;
+    try {
+        serviceFsm_.dispatch(SearchEngineBuildStartedEvent{});
+    } catch (const std::exception& e) {
+        spdlog::debug("[SearchBuild] SearchEngineBuildStartedEvent dispatch failed: {}", e.what());
+    } catch (...) {
+        spdlog::debug(
+            "[SearchBuild] SearchEngineBuildStartedEvent dispatch failed with unknown exception");
+    }
+    writeBootstrapStatusFile(config_, state_, this);
+
+    auto weakSelf = weak_from_this();
+    boost::asio::co_spawn(
+        getWorkerExecutor(),
+        [weakSelf]() -> boost::asio::awaitable<void> {
+            auto self = weakSelf.lock();
+            if (!self || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+                co_return;
+            }
+
+            try {
+                // Determine vector readiness: honor env disables and presence of vector infra.
+                const bool vectorsDisabled =
+                    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
+                    ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
+                    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
+                    ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+                bool vectorEnabled = false;
+                if (vectorsDisabled) {
+                    spdlog::info("[SearchBuild] Vector search disabled via env flag; building "
+                                 "text-only engine");
+                } else if (auto vectorDatabase = self->getVectorDatabase()) {
+                    try {
+                        auto vectorCount = vectorDatabase->getVectorCount();
+                        vectorEnabled = (vectorCount > 0);
+                        spdlog::info("[SearchBuild] Vector DB has {} vectors, vector_enabled={}",
+                                     vectorCount, vectorEnabled);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[SearchBuild] Could not check vector count: {}", e.what());
+                    }
+                } else {
+                    spdlog::info("[SearchBuild] Vector components not available; building "
+                                 "text-only engine");
+                }
+
+                spdlog::info("[SearchBuild] scheduling initial build (vector_enabled hint={})",
+                             vectorEnabled);
+                self->state_.readiness.searchProgress =
+                    std::max<int>(self->state_.readiness.searchProgress.load(), 90);
+
+                std::shared_ptr<vector::EmbeddingGenerator> embGen;
+                auto modelProvider = self->loadModelProvider();
+                spdlog::info("[SearchBuild] Checking embedding generator: modelProvider_={} "
+                             "isAvailable={} modelName='{}'",
+                             modelProvider != nullptr,
+                             modelProvider ? modelProvider->isAvailable() : false,
+                             self->embeddingLifecycle_.modelName());
+                if (modelProvider && modelProvider->isAvailable()) {
+                    try {
+                        embGen = self->embeddingLifecycle_.modelName().empty()
+                                     ? modelProvider->getEmbeddingGenerator()
+                                     : modelProvider->getEmbeddingGenerator(
+                                           self->embeddingLifecycle_.modelName());
+                        spdlog::info("[SearchBuild] Got embedding generator: {}",
+                                     embGen != nullptr);
+
+                        if (auto vectorDatabase = self->getVectorDatabase()) {
+                            std::string activeModelName = self->embeddingLifecycle_.modelName();
+                            if (activeModelName.empty()) {
+                                auto loadedModels = modelProvider->getLoadedModels();
+                                if (!loadedModels.empty()) {
+                                    activeModelName = loadedModels.front();
+                                }
+                            }
+                            const auto dbEmbeddingDim = vectorDatabase->getConfig().embedding_dim;
+                            const auto modelEmbeddingDim =
+                                modelProvider->getEmbeddingDim(activeModelName);
+                            if (dbEmbeddingDim > 0 && modelEmbeddingDim > 0 &&
+                                dbEmbeddingDim != modelEmbeddingDim) {
+                                spdlog::warn("[SearchBuild] Vector DB/model dimension mismatch: "
+                                             "db={} model={} ('{}'). Search vector tiers will be "
+                                             "skipped until you select a matching model or rebuild "
+                                             "embeddings.",
+                                             dbEmbeddingDim, modelEmbeddingDim,
+                                             activeModelName.empty() ? "<default>"
+                                                                     : activeModelName);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[SearchBuild] Failed to get embedding generator: {}",
+                                     e.what());
+                    }
+                }
+
+                auto buildResult = co_await self->searchEngineManager_.buildEngine(
+                    self->getMetadataRepo(), self->getKgStore(), self->getVectorDatabase(), embGen,
+                    "initial", self->getWorkerExecutor(),
+                    !self->config_.instrumentation.suppressSimeonLexicalBuild);
+
+                if (buildResult.has_value()) {
+                    const auto& built = buildResult.value();
+                    self->wireSearchEngineRuntimeAdapters(built, "SearchBuild");
+
+                    self->state_.readiness.searchEngineReady = true;
+                    self->state_.readiness.searchProgress = 100;
+                    try {
+                        self->lifecycleFsm_.setSubsystemDegraded("search", false);
+                    } catch (const std::exception& e) {
+                        spdlog::debug("[SearchBuild] Failed clearing search degradation: {}",
+                                      e.what());
+                    } catch (...) {
+                        spdlog::debug("[SearchBuild] Failed clearing search degradation with "
+                                      "unknown exception");
+                    }
+                    if (auto metadataRepo = self->getMetadataRepo()) {
+                        auto countRes = metadataRepo->getDocumentCount();
+                        if (countRes) {
+                            if (self->searchComponent_) {
+                                self->searchComponent_->recordSuccessfulBuild(countRes.value());
+                            } else {
+                                self->state_.readiness.searchEngineDocCount.store(countRes.value());
+                            }
+                        }
+                    }
+
+                    writeBootstrapStatusFile(self->config_, self->state_, self.get());
+
+                    spdlog::info("SearchEngine initialized and published to AppContext (docs={})",
+                                 self->state_.readiness.searchEngineDocCount.load());
+                    try {
+                        self->requestTopologyRebuild("ready_drain");
+                    } catch (const std::exception& e) {
+                        spdlog::debug(
+                            "[SearchBuild] ready_drain topology rebuild request failed: {}",
+                            e.what());
+                    } catch (...) {
+                        spdlog::debug(
+                            "[SearchBuild] ready_drain topology rebuild request failed with "
+                            "unknown exception");
+                    }
+                } else {
+                    self->state_.readiness.searchEngineReady = false;
+                    self->state_.readiness.searchProgress = 100;
+                    const auto reason = buildResult.error().message.empty()
+                                            ? std::string{"initial search engine build not ready"}
+                                            : buildResult.error().message;
+                    try {
+                        self->lifecycleFsm_.setSubsystemDegraded("search", true, reason);
+                    } catch (const std::exception& e) {
+                        spdlog::debug("[SearchBuild] Failed marking search degraded: {}", e.what());
+                    } catch (...) {
+                        spdlog::debug("[SearchBuild] Failed marking search degraded with unknown "
+                                      "exception");
+                    }
+                    writeBootstrapStatusFile(self->config_, self->state_, self.get());
+                    spdlog::warn("[SearchBuild] initial engine build not ready; continuing "
+                                 "degraded: {}",
+                                 reason);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Exception wiring SearchEngine: {}", e.what());
+                self->state_.readiness.searchEngineReady = false;
+                self->state_.readiness.searchProgress = 100;
+                try {
+                    self->lifecycleFsm_.setSubsystemDegraded("search", true, e.what());
+                } catch (const std::exception& degradeError) {
+                    spdlog::debug(
+                        "[SearchBuild] Failed marking search degraded after exception: {}",
+                        degradeError.what());
+                } catch (...) {
+                    spdlog::debug("[SearchBuild] Failed marking search degraded after exception "
+                                  "with unknown exception");
+                }
+                writeBootstrapStatusFile(self->config_, self->state_, self.get());
+            } catch (...) {
+                spdlog::warn("Exception wiring SearchEngine: unknown exception");
+                self->state_.readiness.searchEngineReady = false;
+                self->state_.readiness.searchProgress = 100;
+                writeBootstrapStatusFile(self->config_, self->state_, self.get());
+            }
+            try {
+                self->serviceFsm_.dispatch(SearchEngineBuiltEvent{});
+            } catch (const std::exception& e) {
+                spdlog::debug("[SearchBuild] SearchEngineBuiltEvent dispatch failed: {}", e.what());
+            } catch (...) {
+                spdlog::debug(
+                    "[SearchBuild] SearchEngineBuiltEvent dispatch failed with unknown exception");
+            }
+            co_return;
+        },
+        boost::asio::detached);
 }
 
 void ServiceManager::startDeferredMetadataWarmup() {
@@ -2718,9 +2897,13 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
 
     auto read_ms = [](const char* env, int def) {
         try {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only watcher tuning snapshot.
             if (const char* v = std::getenv(env))
                 return std::max(100, std::stoi(v));
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] invalid session watcher env {}: {}", env, e.what());
         } catch (...) {
+            spdlog::debug("[ServiceManager] invalid session watcher env {}", env);
         }
         return def;
     };
@@ -2734,12 +2917,16 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
             yams::app::services::AppContext appCtx = getAppContext();
             auto sess = yams::app::services::makeSessionService(&appCtx);
             auto current = sess->current();
-            if (current && sess->watchEnabled(*current)) {
+            if (current) {
+                const auto currentSession = *current;
+                if (!sess->watchEnabled(currentSession)) {
+                    continue;
+                }
                 auto indexingService = yams::app::services::makeIndexingService(appCtx);
                 if (!indexingService) {
                     continue;
                 }
-                auto patterns = sess->getPinnedPatterns(*current);
+                auto patterns = sess->getPinnedPatterns(currentSession);
                 for (const auto& pat : patterns) {
                     std::error_code ec;
                     std::filesystem::path p(pat);
@@ -2776,7 +2963,7 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
                             req.directoryPath = p.string();
                             req.includePatterns = std::move(changed);
                             req.recursive = true;
-                            req.sessionId = *current;
+                            req.sessionId = currentSession;
                             req.noEmbeddings = true;
                             req.noGitignore = false;
                             (void)indexingService->addDirectory(req);
@@ -2784,7 +2971,11 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
                     }
                 }
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] session watcher iteration failed: {}", e.what());
         } catch (...) {
+            spdlog::debug(
+                "[ServiceManager] session watcher iteration failed with unknown exception");
         }
 
         try {
@@ -2794,6 +2985,8 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
         } catch (const std::exception& e) {
             spdlog::debug("[ServiceManager] retrieval-session cleanup failed: {}", e.what());
         } catch (...) {
+            spdlog::debug(
+                "[ServiceManager] retrieval-session cleanup failed with unknown exception");
         }
 
         boost::system::error_code ec;
@@ -2812,9 +3005,27 @@ void ServiceManager::setDatabasePhase(std::string_view phase) {
     state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
 }
 
+void ServiceManager::setMaintenancePhase(std::string_view phase) {
+    const bool valid =
+        phase == maintenance_phase::kIdle || phase == maintenance_phase::kRecoveryCleanup ||
+        phase == maintenance_phase::kSalvaging || phase == maintenance_phase::kVacuuming;
+    YAMS_DCHECK(valid, "ServiceManager maintenance phase must be a known phase string");
+    if (!valid) {
+        spdlog::warn("[ServiceManager] Ignoring invalid maintenance phase '{}'", phase);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+    state_.readiness.maintenancePhase = std::string(phase);
+    if (phase == maintenance_phase::kIdle) {
+        state_.readiness.maintenancePhaseSince = {};
+    } else {
+        state_.readiness.maintenancePhaseSince = std::chrono::steady_clock::now();
+    }
+}
+
 void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPath) {
     const std::filesystem::path walPath(dbPath.string() + "-wal");
-    const std::filesystem::path shmPath(dbPath.string() + "-shm");
     if (!std::filesystem::exists(walPath) || !std::filesystem::exists(dbPath)) {
         return;
     }
@@ -2923,27 +3134,85 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         return;
     }
 
+    constexpr std::uintmax_t kMiB = 1024ULL * 1024ULL;
     const auto spaceInfo = std::filesystem::space(dbPath.parent_path(), ec);
     if (ec || spaceInfo.available <= dbSize) {
         spdlog::info("[ServiceManager] DB file is {} MB but only {} MB free; skipping "
                      "auto-VACUUM",
-                     dbSize / (1024 * 1024), ec ? 0 : spaceInfo.available / (1024 * 1024));
+                     dbSize / kMiB, ec ? 0 : spaceInfo.available / kMiB);
         return;
     }
 
-    spdlog::info("[ServiceManager] DB file is {} MB, auto-VACUUM to reclaim space ({} MB free)",
-                 dbSize / (1024 * 1024), spaceInfo.available / (1024 * 1024));
-    auto vacuumR = database_->execute("VACUUM");
+    spdlog::info("[ServiceManager] DB file is {} MB, background auto-VACUUM to reclaim space "
+                 "({} MB free)",
+                 dbSize / kMiB, spaceInfo.available / kMiB);
+
+    metadata::Database vacuumDb;
+    auto openR = vacuumDb.open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
+    if (!openR) {
+        spdlog::info("[ServiceManager] auto-VACUUM skipped (DB open failed): {}",
+                     openR.error().message);
+        return;
+    }
+
+    sqlite3_progress_handler(
+        vacuumDb.rawHandle(), 1000,
+        [](void* ctx) -> int {
+            auto* self = static_cast<ServiceManager*>(ctx);
+            return self != nullptr && self->shutdownInvoked_.load(std::memory_order_acquire) ? 1
+                                                                                             : 0;
+        },
+        this);
+    auto vacuumR = vacuumDb.execute("VACUUM");
+    sqlite3_progress_handler(vacuumDb.rawHandle(), 0, nullptr, nullptr);
+    vacuumDb.close();
     if (!vacuumR) {
-        spdlog::info("[ServiceManager] auto-VACUUM skipped (DB busy): {}", vacuumR.error().message);
+        if (shutdownInvoked_.load(std::memory_order_acquire)) {
+            spdlog::info("[ServiceManager] auto-VACUUM interrupted by shutdown");
+        } else {
+            spdlog::info("[ServiceManager] auto-VACUUM skipped (DB busy): {}",
+                         vacuumR.error().message);
+        }
         return;
     }
 
     const auto newSize = std::filesystem::file_size(dbPath, ec);
     if (!ec) {
-        spdlog::info("[ServiceManager] auto-VACUUM complete: {} MB -> {} MB",
-                     dbSize / (1024 * 1024), newSize / (1024 * 1024));
+        spdlog::info("[ServiceManager] auto-VACUUM complete: {} MB -> {} MB", dbSize / kMiB,
+                     newSize / kMiB);
     }
+}
+
+void ServiceManager::scheduleVacuumIfUseful(const std::filesystem::path& dbPath) {
+    if (shutdownInvoked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!state_.readiness.metadataRepoReady.load(std::memory_order_acquire)) {
+        spdlog::debug("[ServiceManager] Skipping auto-VACUUM scheduling until metadata repo is "
+                      "ready");
+        return;
+    }
+    if (!blockingPool_) {
+        spdlog::warn("[ServiceManager] Cannot schedule auto-VACUUM; blocking pool unavailable");
+        return;
+    }
+
+    std::weak_ptr<ServiceManager> weakSelf = weak_from_this();
+    boost::asio::post(blockingPool_->get_executor(), [weakSelf, dbPath]() {
+        auto self = weakSelf.lock();
+        if (!self || self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::lock_guard<std::mutex> maintenanceLock(self->maintenanceMutex_);
+        if (self->shutdownInvoked_.load(std::memory_order_acquire)) {
+            return;
+        }
+        self->setMaintenancePhase(maintenance_phase::kVacuuming);
+        writeBootstrapStatusFile(self->config_, self->state_, self.get());
+        self->maybeAutoVacuumDatabase(dbPath);
+        self->setMaintenancePhase(maintenance_phase::kIdle);
+        writeBootstrapStatusFile(self->config_, self->state_, self.get());
+    });
 }
 
 bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
@@ -2978,7 +3247,6 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
         }
 
         state_.readiness.databaseReady = true;
-        maybeAutoVacuumDatabase(dbPath);
         setDatabasePhase(dbphase::kReady);
         spdlog::info("Database opened successfully");
         return true;
@@ -3240,7 +3508,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
                          "progress (SearchEngineFsm), skipping");
             co_return;
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManager] rebuild snapshot probe failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("[ServiceManager] rebuild snapshot probe failed with unknown exception");
     }
 
     try {
@@ -3257,7 +3528,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
                     embeddingLifecycle_.modelName().empty()
                         ? modelProvider->getEmbeddingGenerator()
                         : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManager] embedding generator lookup failed: {}", e.what());
             } catch (...) {
+                spdlog::debug("[ServiceManager] embedding generator lookup failed with unknown "
+                              "exception");
             }
         }
 
@@ -3274,7 +3549,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             state_.readiness.searchEngineReady = true;
             try {
                 lifecycleFsm_.setSubsystemDegraded("search", false);
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManager] failed clearing search degradation: {}", e.what());
             } catch (...) {
+                spdlog::debug("[ServiceManager] failed clearing search degradation with unknown "
+                              "exception");
             }
             // Track doc count at build time for re-tuning decisions
             if (auto metadataRepo = getMetadataRepo()) {
@@ -3293,7 +3572,11 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
         } else {
             try {
                 lifecycleFsm_.setSubsystemDegraded("search", true, rebuildResult.error().message);
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManager] failed marking search degraded: {}", e.what());
             } catch (...) {
+                spdlog::debug("[ServiceManager] failed marking search degraded with unknown "
+                              "exception");
             }
             spdlog::warn("[ServiceManager] co_enableEmbeddingsAndRebuild: failed");
         }
@@ -3323,7 +3606,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 "preloadPreferredModelIfConfigured: provider already adopted/loading/ready");
             co_return;
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("preloadPreferredModelIfConfigured: provider snapshot failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("preloadPreferredModelIfConfigured: provider snapshot failed with unknown "
+                      "exception");
     }
 
     if (embeddingLifecycle_.isLoadingOrReady()) {
@@ -3334,7 +3621,12 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
     // Signal started
     try {
         embeddingLifecycle_.fsm().dispatch(ModelLoadStartedEvent{resolvePreferredModel()});
+    } catch (const std::exception& e) {
+        spdlog::debug("preloadPreferredModelIfConfigured: ModelLoadStartedEvent failed: {}",
+                      e.what());
     } catch (...) {
+        spdlog::debug("preloadPreferredModelIfConfigured: ModelLoadStartedEvent failed with "
+                      "unknown exception");
     }
 
     try {
@@ -3348,7 +3640,10 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
         try {
             buildingAlready =
                 (serviceFsm_.snapshot().state == ServiceManagerState::BuildingSearchEngine);
+        } catch (const std::exception& e) {
+            spdlog::debug("[Rebuild] service FSM snapshot failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("[Rebuild] service FSM snapshot failed with unknown exception");
         }
         if (!buildingAlready) {
             spdlog::info("[Rebuild] search engine rebuild begin (enable vector scoring)");
@@ -3361,7 +3656,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                         embeddingLifecycle_.modelName().empty()
                             ? modelProvider->getEmbeddingGenerator()
                             : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
+                } catch (const std::exception& e) {
+                    spdlog::debug("[Rebuild] embedding generator lookup failed: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("[Rebuild] embedding generator lookup failed with unknown "
+                                  "exception");
                 }
             }
 
@@ -3379,7 +3678,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 state_.readiness.searchProgress = 100;
                 try {
                     lifecycleFsm_.setSubsystemDegraded("search", false);
+                } catch (const std::exception& e) {
+                    spdlog::debug("[Rebuild] failed clearing search degradation: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("[Rebuild] failed clearing search degradation with unknown "
+                                  "exception");
                 }
                 // Track doc count at build time for re-tuning decisions
                 if (auto metadataRepo = getMetadataRepo()) {
@@ -3414,7 +3717,11 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 try {
                     lifecycleFsm_.setSubsystemDegraded("search", true,
                                                        rebuildResult.error().message);
+                } catch (const std::exception& e) {
+                    spdlog::debug("[Rebuild] failed marking search degraded: {}", e.what());
                 } catch (...) {
+                    spdlog::debug(
+                        "[Rebuild] failed marking search degraded with unknown exception");
                 }
                 spdlog::warn("[Rebuild] failed: engine rebuild unsuccessful");
             }
@@ -3465,7 +3772,10 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         // Use readiness progress when available
         try {
             prog = static_cast<int>(state_.readiness.searchProgress.load());
+        } catch (const std::exception& e) {
+            spdlog::debug("AppContext: search progress probe failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("AppContext: search progress probe failed with unknown exception");
         }
 
         if (degraded && details.empty()) {
@@ -3480,8 +3790,10 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         ctx.searchRepairInProgress = degraded;
         ctx.searchRepairDetails = std::move(details);
         ctx.searchRepairProgress = prog;
+    } catch (const std::exception& e) {
+        spdlog::debug("AppContext: search repair status probe failed: {}", e.what());
     } catch (...) {
-        // best-effort only
+        spdlog::debug("AppContext: search repair status probe failed with unknown exception");
     }
 
     return ctx;
@@ -3633,7 +3945,10 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
                     ModelLoadedEvent{embeddingLifecycle_.modelName(), 0});
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("__test_setModelProviderDegraded failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("__test_setModelProviderDegraded failed with unknown exception");
     }
 }
 
@@ -3803,9 +4118,9 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                         rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
                         freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
                     const bool forceImmediate = []() {
-                        if (const char* v = std::getenv("YAMS_TEST_FORCE_TOPOLOGY_REBUILD"))
-                            return v[0] != '\0' && v[0] != '0';
-                        return false;
+                        // NOLINTNEXTLINE(concurrency-mt-unsafe): test-only read.
+                        const char* v = std::getenv("YAMS_TEST_FORCE_TOPOLOGY_REBUILD");
+                        return v != nullptr && v[0] != '\0' && v[0] != '0';
                     }();
                     if (!overlayHeavy && !overlayAged && !forceImmediate) {
                         self->topologyManager_.restoreDirtyHashes(rebuildHashes);

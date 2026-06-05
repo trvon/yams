@@ -304,8 +304,6 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath, const 
     }
 
     sqlite3_busy_timeout(freshDb, 10000);
-    execRaw(freshDb, "PRAGMA foreign_keys = OFF");
-    execRaw(freshDb, "PRAGMA journal_mode = OFF");
 
     spdlog::info("[db_salvage] Attempting ATTACH-based copy");
     if (progress)
@@ -319,13 +317,11 @@ Result<DbSalvageResult> salvageFromCorruptDb(const fs::path& corruptPath, const 
         if (!rowResult) {
             spdlog::error("[db_salvage] Row-by-row fallback also failed: {}",
                           rowResult.error().message);
-            execRaw(freshDb, "PRAGMA foreign_keys = ON");
             sqlite3_close(freshDb);
             return rowResult.error();
         }
     }
 
-    execRaw(freshDb, "PRAGMA foreign_keys = ON");
     sqlite3_close(freshDb);
 
     spdlog::info("[db_salvage] Salvage complete: salvaged={} failed={}", result.documentsSalvaged,
@@ -404,7 +400,7 @@ AggregateSalvageResult salvageFromAllCorruptDbs(const fs::path& dataDir, const f
             ec.clear();
             continue;
         }
-        const auto& name = entry.path().filename().string();
+        const auto name = entry.path().filename().string();
         if (name.rfind(corruptPrefix, 0) == 0) {
             // Skip WAL and SHM sibling files
             if (name.size() >= 4 && (name.substr(name.size() - 4) == "-wal" ||
@@ -482,13 +478,21 @@ SalvageQuickCheck quickCheckSalvageNeeded(const fs::path& dataDir, const fs::pat
             ec.clear();
             continue;
         }
-        const auto& name = entry.path().filename().string();
+        const auto name = entry.path().filename().string();
         if (name.rfind(corruptPrefix, 0) != 0)
             continue;
         if (name.size() >= 4 &&
             (name.substr(name.size() - 4) == "-wal" || name.substr(name.size() - 4) == "-shm"))
             continue;
+        ++qc.corruptDbCount;
         int64_t count = countDocumentsInDb(entry.path());
+        if (count < 0) {
+            ++qc.unreadableCorruptDbCount;
+            spdlog::warn("[db_salvage] Corrupt DB '{}' could not be counted; leaving it for "
+                         "manual repair",
+                         entry.path().filename().string());
+            continue;
+        }
         spdlog::info("[db_salvage] Corrupt DB '{}' has {} docs (current DB has {})",
                      entry.path().filename().string(), count, qc.currentDocCount);
         if (count > qc.currentDocCount) {
@@ -497,6 +501,35 @@ SalvageQuickCheck quickCheckSalvageNeeded(const fs::path& dataDir, const fs::pat
         }
     }
     return qc;
+}
+
+RecoverySentinelCleanup removeRecoverySentinels(const fs::path& dbPath) {
+    RecoverySentinelCleanup cleanup;
+    const fs::path dataDir = dbPath.has_parent_path() ? dbPath.parent_path() : fs::path(".");
+    const std::string sentinelPrefix = dbPath.filename().string() + ".recovered-";
+
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
+        if (ec) {
+            cleanup.errors.push_back("cannot scan " + dataDir.string() + ": " + ec.message());
+            ec.clear();
+            break;
+        }
+        const auto name = entry.path().filename().string();
+        if (name.rfind(sentinelPrefix, 0) != 0) {
+            continue;
+        }
+
+        std::error_code removeEc;
+        if (fs::remove(entry.path(), removeEc)) {
+            cleanup.removed.push_back(entry.path());
+        } else if (removeEc) {
+            cleanup.errors.push_back("cannot remove " + entry.path().string() + ": " +
+                                     removeEc.message());
+        }
+    }
+
+    return cleanup;
 }
 
 CorruptDbCleanup removeCorruptDbFiles(const fs::path& dataDir) {
@@ -511,7 +544,7 @@ CorruptDbCleanup removeCorruptDbFiles(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        const auto& name = entry.path().filename().string();
+        const auto name = entry.path().filename().string();
         if (name.rfind(corruptPrefix, 0) != 0)
             continue;
         if (name.size() >= 4 &&
@@ -521,6 +554,13 @@ CorruptDbCleanup removeCorruptDbFiles(const fs::path& dataDir) {
     }
 
     for (const auto& corruptPath : candidates) {
+        const int64_t docCount = countDocumentsInDb(corruptPath);
+        if (docCount < 0) {
+            spdlog::warn("[db_salvage] Keeping unreadable corrupt DB '{}' for manual repair",
+                         corruptPath.filename().string());
+            continue;
+        }
+
         // Remove the corrupt DB file
         std::error_code removeEc;
         if (!fs::remove(corruptPath, removeEc)) {

@@ -39,6 +39,8 @@ struct SalvageQuickCheck {
     int64_t currentDocCount{0};
     bool needsSalvage{false};
     int64_t maxCorruptCount{0};
+    size_t corruptDbCount{0};
+    size_t unreadableCorruptDbCount{0};
 };
 
 SalvageQuickCheck quickCheckSalvageNeeded(const std::filesystem::path& dataDir,
@@ -48,6 +50,13 @@ struct CorruptDbCleanup {
     std::vector<std::filesystem::path> removed;
     std::vector<std::string> errors;
 };
+
+struct RecoverySentinelCleanup {
+    std::vector<std::filesystem::path> removed;
+    std::vector<std::string> errors;
+};
+
+RecoverySentinelCleanup removeRecoverySentinels(const std::filesystem::path& dbPath);
 
 CorruptDbCleanup removeCorruptDbFiles(const std::filesystem::path& dataDir);
 
