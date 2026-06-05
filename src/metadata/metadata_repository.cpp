@@ -1700,7 +1700,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                             boosted.push_back(' ');
                         std::size_t avail = kMaxBoostedBytes - boosted.size();
                         if (avail < text.size() + 1) {
-                            boosted.append(text.data(), std::min(text.size(), avail));
+                            boosted.append(text.substr(0, std::min(text.size(), avail)));
                             break;
                         }
                         boosted.append(text);
@@ -1717,8 +1717,8 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     boosted.push_back(' ');
                 std::size_t bodySpace =
                     kMaxBoostedBytes > boosted.size() ? kMaxBoostedBytes - boosted.size() : 0;
-                boosted.append(sanitizedContent.data(),
-                               std::min(bodySpace, sanitizedContent.size()));
+                boosted.append(
+                    sanitizedContent.substr(0, std::min(bodySpace, sanitizedContent.size())));
 
                 auto ftsBind = ftsStmt.bindAll(entry.documentId, boosted, sanitizedTitle);
                 if (!ftsBind) {
@@ -3200,9 +3200,15 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
     }
 
     bool allowBackfill = true;
-    if (const char* env = std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); env && *env) {
-        std::string_view value(env);
-        allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
+    {
+        static std::mutex envMutex;
+        std::lock_guard<std::mutex> lock(envMutex);
+        const char* env =
+            std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); // NOLINT(concurrency-mt-unsafe)
+        if (env && *env) {
+            std::string_view value(env);
+            allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
+        }
     }
     if (!allowBackfill) {
         setCachedFtsIndexedIds({});
@@ -5051,7 +5057,7 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
         if (result)
             return result;
 
-        if (result.error().message.find("database is locked") == std::string::npos)
+        if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message))
             return result;
 
         // Exponential backoff with jitter (±25%) to prevent thundering herd
@@ -5215,7 +5221,7 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
             return result;
         }
 
-        if (result.error().message.find("database is locked") == std::string::npos) {
+        if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
             return result;
         }
 
@@ -5263,55 +5269,137 @@ Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t document
                                                                 bool contentExtracted,
                                                                 ExtractionStatus status,
                                                                 const std::string& error) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Check previous extracted state for counter updates. Indexed/FTS counters are managed
-        // only when an FTS row is inserted or removed.
-        bool extractedBefore = false;
-        {
-            auto checkStmt = db.prepareCached(R"(
-                SELECT COALESCE(content_extracted, 0)
-                FROM documents WHERE id = ?
-            )");
-            if (checkStmt) {
-                auto& stmt = *checkStmt.value();
-                if (auto bindRes = stmt.bind(1, documentId); bindRes) {
-                    if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                        extractedBefore = stmt.getInt(0) != 0;
-                    }
-                }
-            }
+    return batchUpdateDocumentExtractionStatuses(
+        {ExtractionStatusUpdate{documentId, contentExtracted, status, error}});
+}
+
+Result<void> MetadataRepository::batchUpdateDocumentExtractionStatuses(
+    const std::vector<ExtractionStatusUpdate>& updates) {
+    if (updates.empty())
+        return Result<void>();
+
+    struct ExtractionDelta {
+        std::uint64_t newlyExtracted = 0;
+        std::uint64_t newlyUnextracted = 0;
+        std::uint64_t rowsUpdated = 0;
+    };
+
+    auto result = executeQuery<ExtractionDelta>([&](Database& db) -> Result<ExtractionDelta> {
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
         }
 
-        auto updateStmt = db.prepare(R"(
+        auto checkStmt = db.prepareCached(R"(
+            SELECT COALESCE(content_extracted, 0)
+            FROM documents WHERE id = ?
+        )");
+        if (!checkStmt) {
+            db.execute("ROLLBACK");
+            return checkStmt.error();
+        }
+
+        auto updateStmt = db.prepareCached(R"(
             UPDATE documents
             SET content_extracted = ?, extraction_status = ?, extraction_error = ?
             WHERE id = ?
         )");
-        if (!updateStmt)
+        if (!updateStmt) {
+            db.execute("ROLLBACK");
             return updateStmt.error();
-
-        auto& stmt = updateStmt.value();
-        if (auto r = stmt.bind(1, contentExtracted ? 1 : 0); !r)
-            return r.error();
-        if (auto r = stmt.bind(2, ExtractionStatusUtils::toString(status)); !r)
-            return r.error();
-        if (auto r = stmt.bind(3, error.empty() ? nullptr : error.c_str()); !r)
-            return r.error();
-        if (auto r = stmt.bind(4, documentId); !r)
-            return r.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        if (!extractedBefore && contentExtracted) {
-            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
-        } else if (extractedBefore && !contentExtracted) {
-            core::saturating_sub(cachedExtractedCount_, uint64_t{1});
         }
 
-        return Result<void>{};
+        auto& check = *checkStmt.value();
+        auto& update = *updateStmt.value();
+        ExtractionDelta delta;
+
+        for (const auto& item : updates) {
+            if (item.documentId < 0) {
+                continue;
+            }
+
+            if (auto r = check.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = check.bind(1, item.documentId); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+
+            auto stepResult = check.step();
+            if (!stepResult) {
+                db.execute("ROLLBACK");
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                continue;
+            }
+
+            const bool extractedBefore = check.getInt(0) != 0;
+
+            if (auto r = update.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = update.bind(1, item.contentExtracted ? 1 : 0); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = update.bind(2, ExtractionStatusUtils::toString(item.status)); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = update.bind(3, item.error.empty() ? nullptr : item.error.c_str()); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = update.bind(4, item.documentId); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+
+            auto execResult = update.execute();
+            if (!execResult) {
+                db.execute("ROLLBACK");
+                return execResult.error();
+            }
+
+            if (db.changes() > 0) {
+                ++delta.rowsUpdated;
+                if (!extractedBefore && item.contentExtracted) {
+                    ++delta.newlyExtracted;
+                } else if (extractedBefore && !item.contentExtracted) {
+                    ++delta.newlyUnextracted;
+                }
+            }
+        }
+
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+
+        return delta;
     });
+
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& delta = result.value();
+    if (delta.newlyExtracted > 0) {
+        cachedExtractedCount_.fetch_add(delta.newlyExtracted, std::memory_order_relaxed);
+    }
+    if (delta.newlyUnextracted > 0) {
+        core::saturating_sub(cachedExtractedCount_, delta.newlyUnextracted);
+    }
+    if (delta.rowsUpdated > 0) {
+        signalCorpusStatsStale();
+    }
+
+    return Result<void>();
 }
 
 Result<void> MetadataRepository::updateDocumentRepairStatus(const std::string& hash,
@@ -5402,7 +5490,7 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
         if (result)
             return result;
 
-        if (result.error().message.find("database is locked") == std::string::npos)
+        if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message))
             return result;
 
         // Exponential backoff with jitter (±25%) to prevent thundering herd

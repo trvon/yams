@@ -2938,7 +2938,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
     auto cached = metadataCache_.infoCache.get(hash);
     if (cached) {
-        return cached.value();
+        return cached;
     }
 
     // Cache miss - query DB
@@ -2960,7 +2960,7 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
     // Try cache first
     auto cached = metadataCache_.tagsCache.get(docId);
     if (cached) {
-        return cached.value();
+        return cached;
     }
 
     // Cache miss - query DB
@@ -3058,7 +3058,11 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                         }
                     }
                     if (!wb->ops.empty()) {
-                        writeCoordinator_->tryEnqueue(wb);
+                        if (!writeCoordinator_->tryEnqueue(wb)) {
+                            spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while "
+                                         "enqueuing title metadata; forcing enqueue");
+                            writeCoordinator_->enqueue(std::move(wb));
+                        }
                     } else {
                         spdlog::debug("[PostIngestQueue] Skipping empty title metadata batch");
                     }
@@ -3093,7 +3097,13 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                 wb->ops.emplace_back(
                     UpdateRepairStatusOp{std::move(failedHashes), metadata::RepairStatus::Failed});
             }
-            writeCoordinator_->tryEnqueue(wb);
+            if (!wb->ops.empty()) {
+                if (!writeCoordinator_->tryEnqueue(wb)) {
+                    spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while enqueuing "
+                                 "extraction failures; forcing enqueue");
+                    writeCoordinator_->enqueue(std::move(wb));
+                }
+            }
         } else {
             spdlog::warn("[PostIngestQueue] WriteCoordinator unavailable; cannot mark {} "
                          "extraction failures",

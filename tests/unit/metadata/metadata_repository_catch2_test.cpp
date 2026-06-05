@@ -1068,6 +1068,54 @@ TEST_CASE("MetadataRepository: indexed count reflects actual FTS rows, not extra
     CHECK(fix.repository_->getCachedIndexedCount() == 1);
 }
 
+TEST_CASE("MetadataRepository: batch extraction status updates share one transaction",
+          "[unit][metadata][repository][extraction]") {
+    MetadataRepositoryFixture fix;
+
+    auto pendingDoc = makeDocumentWithPath("/tmp/yams/batch-extraction-pending.txt",
+                                           "batch-extraction-pending-hash");
+    pendingDoc.contentExtracted = false;
+    pendingDoc.extractionStatus = ExtractionStatus::Pending;
+    auto pendingId = fix.repository_->insertDocument(pendingDoc);
+    REQUIRE(pendingId.has_value());
+
+    auto extractedDoc = makeDocumentWithPath("/tmp/yams/batch-extraction-extracted.txt",
+                                             "batch-extraction-extracted-hash");
+    extractedDoc.contentExtracted = true;
+    extractedDoc.extractionStatus = ExtractionStatus::Success;
+    auto extractedId = fix.repository_->insertDocument(extractedDoc);
+    REQUIRE(extractedId.has_value());
+
+    fix.repository_->initializeCounters();
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
+
+    std::vector<ExtractionStatusUpdate> updates;
+    updates.push_back(
+        ExtractionStatusUpdate{pendingId.value(), true, ExtractionStatus::Success, std::string{}});
+    updates.push_back(ExtractionStatusUpdate{extractedId.value(), false, ExtractionStatus::Failed,
+                                             "extraction failed"});
+    updates.push_back(
+        ExtractionStatusUpdate{999999, true, ExtractionStatus::Success, "missing ignored"});
+
+    auto result = fix.repository_->batchUpdateDocumentExtractionStatuses(updates);
+    REQUIRE(result.has_value());
+
+    auto pendingAfter = fix.repository_->getDocument(pendingId.value());
+    REQUIRE(pendingAfter.has_value());
+    REQUIRE(pendingAfter.value().has_value());
+    CHECK(pendingAfter.value()->contentExtracted);
+    CHECK((pendingAfter.value()->extractionStatus == ExtractionStatus::Success));
+    CHECK(pendingAfter.value()->extractionError.empty());
+
+    auto extractedAfter = fix.repository_->getDocument(extractedId.value());
+    REQUIRE(extractedAfter.has_value());
+    REQUIRE(extractedAfter.value().has_value());
+    CHECK_FALSE(extractedAfter.value()->contentExtracted);
+    CHECK((extractedAfter.value()->extractionStatus == ExtractionStatus::Failed));
+    CHECK((extractedAfter.value()->extractionError == "extraction failed"));
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
+}
+
 TEST_CASE("MetadataRepository: initializeCounters keeps extracted and indexed counts distinct",
           "[unit][metadata][repository][fts5][counters]") {
     MetadataRepositoryFixture fix;
