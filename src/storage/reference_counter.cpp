@@ -525,9 +525,16 @@ Result<void> ReferenceCounter::executeSchemaMigrations() {
 // Single increment operation with both compressed and uncompressed sizes
 Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t compressedSize,
                                          size_t uncompressedSize) {
-    YAMS_PRECONDITION(compressedSize > 0, "Compressed block size must be positive");
-    YAMS_PRECONDITION(uncompressedSize >= compressedSize,
-                      "Uncompressed size must be >= compressed size");
+    YAMS_DCHECK(compressedSize > 0, "Compressed block size must be positive");
+    YAMS_DCHECK(uncompressedSize >= compressedSize,
+                "Uncompressed size must be >= compressed size");
+    if (compressedSize == 0) {
+        return Error{ErrorCode::InvalidArgument, "Compressed block size must be positive"};
+    }
+    if (uncompressedSize < compressedSize) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Uncompressed size must be >= compressed size"};
+    }
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
