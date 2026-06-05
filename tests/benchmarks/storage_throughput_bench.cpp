@@ -31,6 +31,9 @@ public:
         hash_ = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
                 std::to_string(state.range(0) / 1024);
         hash_ = hash_.substr(0, 64);
+
+        // Pre-store data for Retrieve benchmarks.
+        engine_->store(hash_, data_);
     }
 
     void TearDown(const benchmark::State&) override {
@@ -53,6 +56,10 @@ BENCHMARK_DEFINE_F(StorageFixture, Store)(benchmark::State& state) {
                        std::to_string(iter++);
         auto hash = hexIter.substr(hexIter.size() - 64);
         auto result = engine_->store(hash, data_);
+        if (!result) {
+            state.SkipWithError("store failed");
+            return;
+        }
         benchmark::DoNotOptimize(result);
     }
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * state.range(0));
@@ -63,8 +70,8 @@ BENCHMARK_REGISTER_F(StorageFixture, Store)
     ->Arg(1048576); // 1MB
 
 BENCHMARK_DEFINE_F(StorageFixture, Retrieve)(benchmark::State& state) {
-    // Pre-store one object for retrieval
-    engine_->store(hash_, data_);
+    // Data pre-stored in SetUp. Hash collision across size variants is
+    // acceptable: each variant creates its own engine with unique data/hash.
 
     for (auto _ : state) {
         auto result = engine_->retrieveRaw(hash_);
