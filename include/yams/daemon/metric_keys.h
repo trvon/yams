@@ -310,6 +310,15 @@ constexpr std::string_view kReady = "ready";
 
 } // namespace yams::daemon::dbphase
 
+namespace yams::daemon::maintenance_phase {
+
+constexpr std::string_view kIdle = "idle";
+constexpr std::string_view kRecoveryCleanup = "recovery_cleanup";
+constexpr std::string_view kSalvaging = "salvaging";
+constexpr std::string_view kVacuuming = "vacuuming";
+
+} // namespace yams::daemon::maintenance_phase
+
 namespace yams::daemon::status_keys {
 
 // Keys used to piggyback string/integer status fields in
@@ -317,6 +326,8 @@ namespace yams::daemon::status_keys {
 // written to $XDG_RUNTIME_DIR/yams-daemon.status.json.
 constexpr std::string_view kDatabasePhase = "database_phase";
 constexpr std::string_view kDatabasePhaseElapsedMs = "database_phase_elapsed_ms";
+constexpr std::string_view kMaintenancePhase = "maintenance_phase";
+constexpr std::string_view kMaintenancePhaseElapsedMs = "maintenance_phase_elapsed_ms";
 constexpr std::string_view kDatabaseRecoveredAt = "database_recovered_at";
 constexpr std::string_view kDatabaseRecoveredFrom = "database_recovered_from";
 constexpr std::string_view kStorageWarning = "storage_warning";

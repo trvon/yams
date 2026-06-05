@@ -1,5 +1,6 @@
 #include <yams/app/services/document_ingestion_service.h>
 
+#include <yams/core/assert.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
@@ -49,7 +50,9 @@ std::size_t resolveBatchConcurrency(std::size_t batchSize, int maxConcurrent) {
         cap = 1;
     }
 
-    return std::min(batchSize, cap);
+    const auto result = std::min(batchSize, cap);
+    YAMS_POSTCONDITION(result >= 1, "batch concurrency must be at least 1");
+    return result;
 }
 
 } // namespace
@@ -338,6 +341,8 @@ DocumentIngestionService::addBatchAsync(const std::vector<AddOptions>& batch,
         else
             ++out.failed;
     }
+    YAMS_POSTCONDITION(out.succeeded + out.failed == batch.size(),
+                       "batch accounting must match input size");
     co_return out;
 }
 

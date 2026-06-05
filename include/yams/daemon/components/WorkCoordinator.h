@@ -112,7 +112,8 @@ public:
      *
      * @param numThreads Optional thread count override (default: hardware_concurrency)
      *
-     * @throws std::runtime_error if already started or thread creation fails
+     * @pre !started_ — aborts on violation (YAMS_PRECONDITION). This is a programmer
+     *      error; do not call start() twice on the same WorkCoordinator instance.
      */
     void start(std::optional<std::size_t> numThreads = std::nullopt);
 

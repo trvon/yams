@@ -1,4 +1,5 @@
 #include <yams/common/fs_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
@@ -524,6 +525,16 @@ Result<void> ReferenceCounter::executeSchemaMigrations() {
 // Single increment operation with both compressed and uncompressed sizes
 Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t compressedSize,
                                          size_t uncompressedSize) {
+    YAMS_DCHECK(compressedSize > 0, "Compressed block size must be positive");
+    YAMS_DCHECK(uncompressedSize >= compressedSize,
+                "Uncompressed size must be >= compressed size");
+    if (compressedSize == 0) {
+        return Error{ErrorCode::InvalidArgument, "Compressed block size must be positive"};
+    }
+    if (uncompressedSize < compressedSize) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Uncompressed size must be >= compressed size"};
+    }
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
@@ -550,6 +561,8 @@ Result<void> ReferenceCounter::decrement(std::string_view blockHash) {
         stmt.execute();
 
         if (pImpl->db->changes() == 0) {
+            // Concurrent decrements may legitimately produce zero changes
+            // when ref_count already reached 0 — this is not a bug.
             spdlog::warn("Attempted to decrement non-existent or zero reference count for {}",
                          blockHash);
         }
@@ -722,6 +735,8 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
             transactionId_ = counter_->pImpl->db->lastInsertRowId();
         }
 
+        YAMS_DCHECK(transactionId_ > 0,
+                    "Transaction ID must be assigned by database AUTOINCREMENT");
         spdlog::debug("Started reference counting transaction {}", transactionId_);
     } catch (const std::exception& e) {
         active_ = false;
@@ -777,6 +792,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
 void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t compressedSize,
                                               size_t uncompressedSize) {
     std::lock_guard<std::mutex> lock(stateMutex_);
+    YAMS_DCHECK(active_, "Transaction must be active for increment");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -794,6 +810,7 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
 // Decrement in transaction
 void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
     std::lock_guard<std::mutex> lock(stateMutex_);
+    YAMS_DCHECK(active_, "Transaction must be active for decrement");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -810,6 +827,7 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
 
 void ReferenceCounter::Transaction::pruneReference(std::string_view blockHash) {
     std::lock_guard<std::mutex> lock(stateMutex_);
+    YAMS_DCHECK(active_, "Transaction must be active for pruneReference");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -892,6 +910,8 @@ Result<void> ReferenceCounter::Transaction::commit() {
 
             active_ = false;
             committed_ = true;
+            YAMS_POSTCONDITION(!active_ && committed_,
+                               "Transaction must be committed and inactive after commit");
 
             spdlog::debug("Committed transaction {} with {} operations", transactionId_,
                           operations_.size());
@@ -947,6 +967,7 @@ void ReferenceCounter::Transaction::rollback() {
         // Force inactive state even if update failed
         active_ = false;
     }
+    YAMS_POSTCONDITION(!active_, "Transaction must be inactive after rollback");
 }
 
 bool ReferenceCounter::Transaction::isActive() const {

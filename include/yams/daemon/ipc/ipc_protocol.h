@@ -4045,6 +4045,9 @@ struct StatusResponse {
     // Empty when not set; otherwise "opening" | "recovering" | "migrating" | "ready".
     std::string databasePhase;
     uint64_t databasePhaseElapsedMs{0};
+    // Post-startup maintenance phase, separate from database readiness.
+    std::string maintenancePhase;
+    uint64_t maintenancePhaseElapsedMs{0};
     std::string databaseRecoveredAt;
     std::string databaseRecoveredFrom;
     std::string storageWarning;
@@ -4410,6 +4413,9 @@ struct StatusResponse {
 
         // WAL file sizes (appended; older clients tolerate missing tail fields)
         ser << static_cast<uint64_t>(metadataWalBytes) << static_cast<uint64_t>(vectorWalBytes);
+
+        // Maintenance phase (appended; older clients tolerate missing tail fields)
+        ser << maintenancePhase << static_cast<uint64_t>(maintenancePhaseElapsedMs);
     }
 
     template <typename Deserializer>
@@ -4810,6 +4816,13 @@ struct StatusResponse {
         auto vecWalRes = deser.template read<uint64_t>();
         if (vecWalRes)
             res.vectorWalBytes = vecWalRes.value();
+
+        auto maintenancePhaseRes = deser.template read<std::string>();
+        if (maintenancePhaseRes)
+            res.maintenancePhase = std::move(maintenancePhaseRes.value());
+        auto maintenanceElapsedRes = deser.template read<uint64_t>();
+        if (maintenanceElapsedRes)
+            res.maintenancePhaseElapsedMs = maintenanceElapsedRes.value();
 
         return res;
     }

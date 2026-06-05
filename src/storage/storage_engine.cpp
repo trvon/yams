@@ -2,6 +2,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/storage/storage_engine.h>
@@ -134,6 +135,7 @@ struct StorageEngine::Impl {
         std::vector<std::unique_ptr<std::mutex>> mutexes;
 
         explicit MutexPool(size_t size) {
+            YAMS_ASSERT(size > 0, "mutexPoolSize must be positive");
             mutexes.reserve(size);
             for (size_t i = 0; i < size; ++i) {
                 mutexes.emplace_back(std::make_unique<std::mutex>());
@@ -179,6 +181,9 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
         // Store manifests in manifests/ab/cdef...manifest
         auto baseHash = hash.substr(0, hash.length() - 9); // Remove ".manifest"
         if (baseHash.length() < pImpl->config.shardDepth) {
+            // DCHECK aborts in dev/CI; in release it compiles out and the throw
+            // preserves backward-compatible catchable std::invalid_argument.
+            YAMS_DCHECK(false, "Manifest hash too short for sharding");
             throw std::invalid_argument("Hash too short for sharding");
         }
         auto prefix = baseHash.substr(0, pImpl->config.shardDepth);
@@ -188,6 +193,9 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
     }
 
     if (hash.length() < pImpl->config.shardDepth) {
+        // DCHECK aborts in dev/CI; in release it compiles out and the throw
+        // preserves backward-compatible catchable std::invalid_argument.
+        YAMS_DCHECK(false, "Hash too short for sharding");
         throw std::invalid_argument("Hash too short for sharding");
     }
 
@@ -199,23 +207,27 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
 }
 
 std::filesystem::path StorageEngine::getTempPath() const {
-    // Ensure temp directory exists (can be removed by external cleanup).
-    {
-        std::error_code ec;
-        yams::common::ensureDirectories(pImpl->config.basePath / "temp");
-    }
+    // Temp directory is created at construction time (see Impl ctor);
+    // skip redundant ensureDirectories on every store call.
 
-    // Generate random temp filename
+    // Assert temp dir still exists (catch external cleanup in dev/CI).
+    YAMS_DCHECK(std::filesystem::exists(pImpl->config.basePath / "temp"),
+                "Temp directory must exist (created at construction)");
+
+    // Generate random temp filename using pre-computed hex table
     static thread_local std::random_device rd;
     static thread_local std::mt19937 gen(rd());
-    static thread_local std::uniform_int_distribution<> dis(0, 15);
+    static thread_local std::uniform_int_distribution<unsigned> dis(0, 15);
+    static constexpr char kHexChars[] = "0123456789abcdef";
 
     std::string tempName;
     tempName.reserve(TEMP_NAME_LENGTH);
 
     for (size_t i = 0; i < TEMP_NAME_LENGTH; ++i) {
-        tempName += yamsfmt::format("{:x}", dis(gen));
+        tempName.push_back(kHexChars[dis(gen)]);
     }
+    YAMS_DCHECK(tempName.size() == TEMP_NAME_LENGTH,
+                "Temp name must be exactly TEMP_NAME_LENGTH chars");
 
     return pImpl->config.basePath / "temp" / tempName;
 }
@@ -274,6 +286,9 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         }
     }
 
+    // Temp file must exist and contain data before rename.
+    YAMS_DCHECK(std::filesystem::exists(tempPath), "Temp file must exist after successful write");
+
     // Atomic rename
     std::error_code ec;
 #ifdef YAMS_TESTING
@@ -300,6 +315,8 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         return Result<void>(ErrorCode::Unknown);
     }
 
+    YAMS_DCHECK(std::filesystem::exists(path),
+                "Target file must exist after successful atomic rename");
     return {};
 }
 
@@ -342,7 +359,8 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
         pImpl->stats.totalObjects.fetch_add(1);
         pImpl->stats.totalBytes.fetch_add(data.size());
         pImpl->stats.writeOperations.fetch_add(1);
-
+        YAMS_DCHECK(std::filesystem::exists(objectPath),
+                    "Stored object must exist on disk after successful write");
         spdlog::debug("Stored object {} ({} bytes)", hash, data.size());
     } else {
         pImpl->stats.failedOperations.fetch_add(1);
@@ -382,19 +400,33 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
     file.seekg(0, std::ios::beg);
 
-    std::vector<std::byte> data(static_cast<size_t>(fileSize));
-    file.read(reinterpret_cast<char*>(data.data()), fileSize);
+    // Avoid zero-initialization: allocate uninitialized, read directly, then copy into vector.
+    // Guard against UB: make_unique_for_overwrite(0) may return null; assign(null,null) is UB.
+    if (fileSize == 0) {
+        pImpl->stats.readOperations.fetch_add(1);
+        IStorageEngine::RawObject obj;
+        obj.header = std::nullopt;
+        return obj;
+    }
+
+    auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
+    YAMS_DCHECK(buf != nullptr, "make_unique_for_overwrite must return non-null for positive size");
+    file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
     if (!file) {
         pImpl->stats.failedOperations.fetch_add(1);
         return Result<IStorageEngine::RawObject>(ErrorCode::CorruptedData);
     }
 
+    YAMS_DCHECK(static_cast<size_t>(file.tellg()) == static_cast<size_t>(fileSize),
+                "File read should consume entire file");
     // Update statistics
     pImpl->stats.readOperations.fetch_add(1);
 
     IStorageEngine::RawObject obj;
-    obj.data = std::move(data);
+    obj.data.assign(buf.get(), buf.get() + static_cast<size_t>(fileSize));
+    YAMS_DCHECK(obj.data.size() == static_cast<size_t>(fileSize),
+                "Assigned vector size must match file size");
     obj.header = std::nullopt;
     return obj;
 }
@@ -482,6 +514,10 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     }
 
     // Update statistics using saturating subtraction to prevent underflow
+    YAMS_DCHECK(pImpl->stats.totalBytes.load() >= static_cast<uint64_t>(fileSize),
+                "totalBytes counter should not underflow on remove");
+    YAMS_DCHECK(pImpl->stats.totalObjects.load() >= uint64_t{1},
+                "totalObjects counter should not underflow on remove");
     core::saturating_sub(pImpl->stats.totalObjects, uint64_t{1});
     core::saturating_sub(pImpl->stats.totalBytes, static_cast<uint64_t>(fileSize));
     pImpl->stats.deleteOperations.fetch_add(1);

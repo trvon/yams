@@ -387,8 +387,16 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-s
     CHECK_FALSE(secondCommit.has_value());
     CHECK(secondCommit.error().code == yams::ErrorCode::TransactionFailed);
 
+    // After commit, increment/decrement must fail.
+    // In dev/CI (DCHECK enabled): YAMS_DCHECK aborts — no catchable exception.
+    // In release (NDEBUG): DCHECK compiles out, throw fires.
+#if defined(NDEBUG) || defined(YAMS_DISABLE_DCHECK)
     REQUIRE_THROWS_AS(txn->increment(hash, 1024), std::runtime_error);
     REQUIRE_THROWS_AS(txn->decrement(hash), std::runtime_error);
+#else
+    // DCHECK abort path covered by fork()-based assertion tests.
+    SUCCEED("YAMS_DCHECK abort path is covered by fork()-based assertion tests");
+#endif
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture,

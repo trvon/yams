@@ -81,11 +81,12 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         coordinator.join();
     }
 
-    SECTION("Cannot start twice") {
+    SECTION("Starts with correct worker count") {
         WorkCoordinator coordinator;
         coordinator.start(2);
-
-        REQUIRE_THROWS_AS(coordinator.start(2), std::runtime_error);
+        // YAMS_PRECONDITION prevents double-start — process aborts on violation.
+        // Double-start enforcement is not asserted here (abort terminates process).
+        REQUIRE(coordinator.getWorkerCount() == 2);
 
         coordinator.stop();
         coordinator.join();
@@ -545,3 +546,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         REQUIRE(slowJoinCount == 0);
     }
 }
+
+// YAMS_PRECONDITION double-start enforcement is not asserted in this file because
+// it terminates the process (SIGABRT). Consider adding a fork()-based assertion
+// test (similar to tests/unit/core/assert_catch2_test.cpp) to cover this invariant.

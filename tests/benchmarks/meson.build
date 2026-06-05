@@ -44,10 +44,12 @@ if enable_profiling
   endif
 endif
 
-# Google Benchmark dependency
+# Google Benchmark dependency (library + main entry point)
 benchmark_dep = dependency('benchmark', required: false)
+benchmark_main_dep = dependency('benchmark', modules: ['benchmark::benchmark_main'], required: false)
 if not benchmark_dep.found()
   benchmark_dep = dependency('google-benchmark', required: false)
+  benchmark_main_dep = dependency('google-benchmark', modules: ['benchmark::benchmark_main'], required: false)
 endif
 
 api_bench = executable('yams_api_benchmarks', files('api_benchmarks.cpp'),
@@ -105,28 +107,39 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
 alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
 # Large-scale ingestion benchmark (requires google-benchmark)
-if benchmark_dep.found()
+if benchmark_dep.found() and benchmark_main_dep.found()
   large_scale_ingestion_bench_deps = [
     test_deps,
     dependency('yams_benchmarks'),
     benchmark_dep,
+    benchmark_main_dep,
   ] + tracy_deps
 
-  large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
-    files('large_scale_ingestion_bench.cpp'),
+large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
+files('large_scale_ingestion_bench.cpp'),
+include_directories: incs,
+dependencies: large_scale_ingestion_bench_deps,
+cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+install: false,
+)
+
+alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
+else
+message('Google Benchmark not found; skipping large_scale_ingestion_bench')
+endif
+
+if benchmark_dep.found() and benchmark_main_dep.found()
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
+
+  storage_bench = executable('yams_storage_throughput_benchmarks',
+    files('storage_throughput_bench.cpp'),
     include_directories: incs,
-    dependencies: large_scale_ingestion_bench_deps,
+    dependencies: storage_bench_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
 
-  alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
-else
-  message('Google Benchmark not found; skipping large_scale_ingestion_bench')
-endif
-
-if benchmark_dep.found()
-  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
     files('retrieval_service_benchmarks.cpp'),
@@ -135,7 +148,11 @@ if benchmark_dep.found()
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
+else
+  message('Google Benchmark or benchmark_main not found; skipping benchmarks that need benchmark_main')
+endif
 
+if benchmark_dep.found()
   metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),

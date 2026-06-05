@@ -6571,6 +6571,33 @@ TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_max_per_batch") == 8);
 }
 
+TEST_CASE("StatusResponse: maintenance phase fields round-trip",
+          "[daemon][status][protocol][maintenance]") {
+    StatusResponse s{};
+    s.databasePhase = "ready";
+    s.databasePhaseElapsedMs = 11;
+    s.maintenancePhase = "salvaging";
+    s.maintenancePhaseElapsedMs = 222;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    CHECK(decoded.databasePhase == "ready");
+    CHECK(decoded.databasePhaseElapsedMs == 11);
+    CHECK(decoded.maintenancePhase == "salvaging");
+    CHECK(decoded.maintenancePhaseElapsedMs == 222);
+}
+
 TEST_CASE("StatusResponse: freshness requestCounts keys round-trip",
           "[daemon][status][protocol][freshness]") {
     StatusResponse s{};
