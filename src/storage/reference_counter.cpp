@@ -785,7 +785,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
 void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t compressedSize,
                                               size_t uncompressedSize) {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    YAMS_PRECONDITION(active_, "Transaction must be active for increment");
+    YAMS_DCHECK(active_, "Transaction must be active for increment");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -803,6 +803,7 @@ void ReferenceCounter::Transaction::increment(std::string_view blockHash, size_t
 // Decrement in transaction
 void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
     std::lock_guard<std::mutex> lock(stateMutex_);
+    YAMS_DCHECK(active_, "Transaction must be active for decrement");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }
@@ -819,6 +820,7 @@ void ReferenceCounter::Transaction::decrement(std::string_view blockHash) {
 
 void ReferenceCounter::Transaction::pruneReference(std::string_view blockHash) {
     std::lock_guard<std::mutex> lock(stateMutex_);
+    YAMS_DCHECK(active_, "Transaction must be active for pruneReference");
     if (!active_) {
         throw std::runtime_error("Transaction is not active");
     }

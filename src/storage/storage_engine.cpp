@@ -410,8 +410,7 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     }
 
     auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
-    YAMS_DCHECK(buf != nullptr,
-                "make_unique_for_overwrite must return non-null for positive size");
+    YAMS_DCHECK(buf != nullptr, "make_unique_for_overwrite must return non-null for positive size");
     file.read(reinterpret_cast<char*>(buf.get()), fileSize);
 
     if (!file) {

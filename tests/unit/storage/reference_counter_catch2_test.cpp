@@ -387,8 +387,9 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-s
     CHECK_FALSE(secondCommit.has_value());
     CHECK(secondCommit.error().code == yams::ErrorCode::TransactionFailed);
 
-    // YAMS_PRECONDITION active_ guard replaces old throw — process aborts on
-    // post-commit increment/decrement. Verified via fork()-based assertion test.
+    // YAMS_DCHECK active_ guard aborts in dev/CI; in release it compiles out
+    // and the throw preserves backward-compatible catchable std::runtime_error.
+    // Verified via fork()-based assertion test in assert_catch2_test.cpp.
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture,

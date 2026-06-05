@@ -85,7 +85,8 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         WorkCoordinator coordinator;
         coordinator.start(2);
         // YAMS_PRECONDITION prevents double-start — process aborts on violation.
-        // Verified via fork()-based assertion test pattern.
+        // This invariant is not asserted in this file (abort terminates the process).
+        // Consider adding a fork()-based test similar to assert_catch2_test.cpp.
         REQUIRE(coordinator.getWorkerCount() == 2);
 
         coordinator.stop();
@@ -547,6 +548,6 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
     }
 }
 
-// YAMS_PRECONDITION double-start enforcement tested via fork()-based
-// assertion pattern in tests/unit/core/assert_catch2_test.cpp.
-// CI validates with -Denable-dcheck=true on all lanes.
+// YAMS_PRECONDITION double-start enforcement is not asserted in this file because
+// it terminates the process (SIGABRT). Consider adding a fork()-based assertion
+// test (similar to tests/unit/core/assert_catch2_test.cpp) to cover this invariant.
