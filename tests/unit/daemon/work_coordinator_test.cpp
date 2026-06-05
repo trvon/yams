@@ -81,12 +81,11 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         coordinator.join();
     }
 
-    SECTION("Rejects start when already running") {
+    SECTION("Starts with correct worker count") {
         WorkCoordinator coordinator;
         coordinator.start(2);
         // YAMS_PRECONDITION prevents double-start — process aborts on violation.
-        // This invariant is not asserted in this file (abort terminates the process).
-        // Consider adding a fork()-based test similar to assert_catch2_test.cpp.
+        // Double-start enforcement is not asserted here (abort terminates process).
         REQUIRE(coordinator.getWorkerCount() == 2);
 
         coordinator.stop();
