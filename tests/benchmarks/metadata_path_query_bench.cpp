@@ -1,10 +1,12 @@
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <yams/metadata/connection_pool.h>
@@ -21,6 +23,8 @@ struct RepoContext {
     std::filesystem::path dbPath;
     std::unique_ptr<ConnectionPool> pool;
     std::unique_ptr<MetadataRepository> repo;
+    std::vector<int64_t> docIds;
+    std::vector<std::string> hashes;
 };
 
 DocumentInfo makeDocWithPath(const std::string& path, const std::string& hash) {
@@ -72,6 +76,19 @@ RepoContext makeRepositoryWithDocs(std::size_t count) {
         auto inserted = ctx.repo->insertDocument(doc);
         if (!inserted)
             throw std::runtime_error("insertDocument failed: " + inserted.error().message);
+
+        const int64_t docId = inserted.value();
+        ctx.docIds.push_back(docId);
+        ctx.hashes.push_back(doc.sha256Hash);
+
+        auto tag =
+            ctx.repo->setMetadata(docId, "tag:bench", MetadataValue(i % 2 == 0 ? "even" : "odd"));
+        if (!tag)
+            throw std::runtime_error("setMetadata tag:bench failed: " + tag.error().message);
+        auto category = ctx.repo->setMetadata(docId, "category",
+                                              MetadataValue(i % 5 == 0 ? "markdown" : "plain"));
+        if (!category)
+            throw std::runtime_error("setMetadata category failed: " + category.error().message);
     }
 
     return ctx;
@@ -136,9 +153,85 @@ BENCHMARK_DEFINE_F(MetadataQueryFixture, QuerySuffixFts)(benchmark::State& state
     }
 }
 
+BENCHMARK_DEFINE_F(MetadataQueryFixture, BatchGetDocumentsByHash)(benchmark::State& state) {
+    const auto batchSize =
+        std::min<std::size_t>(static_cast<std::size_t>(state.range(1)), ctx_.hashes.size());
+    std::vector<std::string> hashes(ctx_.hashes.begin(), ctx_.hashes.begin() + batchSize);
+    for (auto _ : state) {
+        auto res = ctx_.repo->batchGetDocumentsByHash(hashes);
+        benchmark::DoNotOptimize(res);
+        if (!res)
+            state.SkipWithError("batchGetDocumentsByHash failed");
+        else if (res.value().size() != batchSize)
+            state.SkipWithError("batchGetDocumentsByHash returned wrong result count");
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(batchSize));
+}
+
+BENCHMARK_DEFINE_F(MetadataQueryFixture, MetadataValueCountsByTag)(benchmark::State& state) {
+    DocumentQueryOptions opts;
+    opts.pathPrefix = "/workspace";
+    opts.prefixIsDirectory = true;
+    opts.includeSubdirectories = true;
+    const std::vector<std::string> keys = {"tag:bench", "category"};
+    for (auto _ : state) {
+        auto res = ctx_.repo->getMetadataValueCounts(keys, opts);
+        benchmark::DoNotOptimize(res);
+        if (!res)
+            state.SkipWithError("getMetadataValueCounts failed");
+        else if (res.value().at("tag:bench").empty())
+            state.SkipWithError("getMetadataValueCounts returned no tag counts");
+    }
+}
+
+BENCHMARK_DEFINE_F(MetadataQueryFixture, BatchSetMetadata)(benchmark::State& state) {
+    const auto batchSize =
+        std::min<std::size_t>(static_cast<std::size_t>(state.range(1)), ctx_.docIds.size());
+    std::vector<std::tuple<int64_t, std::string, MetadataValue>> entries;
+    entries.reserve(batchSize);
+    for (std::size_t i = 0; i < batchSize; ++i) {
+        entries.emplace_back(ctx_.docIds[i], "bench:touch", MetadataValue(static_cast<int64_t>(i)));
+    }
+
+    for (auto _ : state) {
+        auto res = ctx_.repo->setMetadataBatch(entries);
+        benchmark::DoNotOptimize(res);
+        if (!res)
+            state.SkipWithError("setMetadataBatch failed");
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(batchSize));
+}
+
+BENCHMARK_DEFINE_F(MetadataQueryFixture, BatchUpdateExtractionStatus)(benchmark::State& state) {
+    const auto batchSize =
+        std::min<std::size_t>(static_cast<std::size_t>(state.range(1)), ctx_.docIds.size());
+    std::vector<ExtractionStatusUpdate> updates;
+    updates.reserve(batchSize);
+    for (std::size_t i = 0; i < batchSize; ++i) {
+        updates.push_back(
+            ExtractionStatusUpdate{ctx_.docIds[i], true, ExtractionStatus::Success, ""});
+    }
+
+    for (auto _ : state) {
+        auto res = ctx_.repo->batchUpdateDocumentExtractionStatuses(updates);
+        benchmark::DoNotOptimize(res);
+        if (!res)
+            state.SkipWithError("batchUpdateDocumentExtractionStatuses failed");
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(batchSize));
+}
+
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QueryExactPath)->Arg(128)->Arg(1024);
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QueryDirectoryPrefix)->Arg(128)->Arg(1024);
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QuerySuffixFts)->Arg(128)->Arg(1024);
+BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchGetDocumentsByHash)
+    ->Args({128, 16})
+    ->Args({1024, 64});
+BENCHMARK_REGISTER_F(MetadataQueryFixture, MetadataValueCountsByTag)->Arg(128)->Arg(1024);
+BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchSetMetadata)->Args({128, 16})->Args({1024, 64});
+BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchUpdateExtractionStatus)
+    ->Args({128, 16})
+    ->Args({1024, 64});
 
 } // namespace
 

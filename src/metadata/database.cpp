@@ -26,7 +26,7 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
+    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME"); // NOLINT(concurrency-mt-unsafe)
     bool enabled = env && *env && std::string_view(env) != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
@@ -201,6 +201,8 @@ Result<void> Statement::bind(int index, std::string_view value) {
                          ", len=" + std::to_string(len) + "): length exceeds int max"};
     }
 
+    // sqlite3_bind_text receives the explicit byte length below; null termination is not required.
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     int rc = sqlite3_bind_text(stmt_, index, value.data(), static_cast<int>(len), SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
         sqlite3* db = sqlite3_db_handle(stmt_);
@@ -329,9 +331,10 @@ double Statement::getDouble(int column) const {
 
 std::string Statement::getString(int column) const {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt_, column));
-    if (!text)
+    int size = sqlite3_column_bytes(stmt_, column);
+    if (!text || size <= 0)
         return "";
-    return std::string(text);
+    return std::string(text, static_cast<size_t>(size));
 }
 
 std::vector<std::byte> Statement::getBlob(int column) const {

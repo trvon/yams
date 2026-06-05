@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -2265,4 +2266,205 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
     auto& [info, preview] = result.value().at("truncate_hash");
     CHECK(preview.size() <= 200);
     CHECK_FALSE(preview.empty());
+}
+
+TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and latest write wins",
+          "[unit][metadata][repository][batch][metadata-value]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/typed-metadata.txt", "typed-metadata-hash");
+    auto insert = fix.repository_->insertDocument(doc);
+    REQUIRE(insert.has_value());
+    const int64_t docId = insert.value();
+
+    const std::vector<uint8_t> blob = {0x00, 0x01, 0x41, 0xFE, 0xFF};
+    std::vector<std::tuple<int64_t, std::string, MetadataValue>> entries = {
+        {docId, "author", MetadataValue("old")},
+        {docId, "author", MetadataValue("new")},
+        {docId, "revision", MetadataValue(int64_t{42})},
+        {docId, "score", MetadataValue(0.875)},
+        {docId, "published", MetadataValue(true)},
+        {docId, "payload", MetadataValue::fromBlob(blob)},
+    };
+
+    auto setBatch = fix.repository_->setMetadataBatch(entries);
+    REQUIRE(setBatch.has_value());
+
+    auto all = fix.repository_->getAllMetadata(docId);
+    REQUIRE(all.has_value());
+    REQUIRE(all.value().size() == 5);
+
+    CHECK(all.value().at("author").type == MetadataValueType::String);
+    CHECK(all.value().at("author").asString() == "new");
+    CHECK(all.value().at("revision").type == MetadataValueType::Integer);
+    CHECK(all.value().at("revision").asInteger() == 42);
+    CHECK(all.value().at("score").type == MetadataValueType::Real);
+    CHECK(all.value().at("score").asReal() == Catch::Approx(0.875));
+    CHECK(all.value().at("published").type == MetadataValueType::Boolean);
+    CHECK(all.value().at("published").asBoolean());
+    CHECK(all.value().at("payload").type == MetadataValueType::Blob);
+
+    auto payload = all.value().at("payload").asVariant();
+    REQUIRE(std::holds_alternative<std::vector<uint8_t>>(payload));
+    CHECK(std::get<std::vector<uint8_t>>(payload) == blob);
+
+    std::vector<int64_t> ids{docId, 999999};
+    auto batch = fix.repository_->getMetadataForDocuments(ids);
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value().contains(docId));
+    CHECK(batch.value().at(docId).at("author").asString() == "new");
+    CHECK_FALSE(batch.value().contains(999999));
+}
+
+TEST_CASE("MetadataRepository: batch document mutations preserve observable behavior",
+          "[unit][metadata][repository][batch][document]") {
+    MetadataRepositoryFixture fix;
+
+    auto parent = makeDocumentWithPath("/tmp/batch-parent.txt", "batch-parent-hash");
+    auto child = makeDocumentWithPath("/tmp/batch-child.txt", "batch-child-hash");
+    auto survivor = makeDocumentWithPath("/tmp/batch-survivor.md", "batch-survivor-hash");
+
+    auto parentInsert = fix.repository_->insertDocument(parent);
+    auto childInsert = fix.repository_->insertDocument(child);
+    auto survivorInsert = fix.repository_->insertDocument(survivor);
+    REQUIRE(parentInsert.has_value());
+    REQUIRE(childInsert.has_value());
+    REQUIRE(survivorInsert.has_value());
+
+    const int64_t parentId = parentInsert.value();
+    const int64_t childId = childInsert.value();
+    const int64_t survivorId = survivorInsert.value();
+
+    REQUIRE(fix.repository_
+                ->insertContent(DocumentContent{parentId, "parent content", 14, "test", "en"})
+                .has_value());
+    REQUIRE(
+        fix.repository_->setMetadata(parentId, "tag:batch", MetadataValue("delete")).has_value());
+    REQUIRE(fix.repository_->indexDocumentContent(parentId, "parent", "parent content", "text")
+                .has_value());
+
+    DocumentRelationship rel;
+    rel.parentId = parentId;
+    rel.childId = childId;
+    rel.relationshipType = RelationshipType::References;
+    rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    auto relInsert = fix.repository_->insertRelationship(rel);
+    REQUIRE(relInsert.has_value());
+
+    auto mimeUpdate = fix.repository_->updateDocumentsMimeBatch(
+        {{childId, "text/markdown"}, {survivorId, "application/json"}, {999999, "ignored/type"}});
+    REQUIRE(mimeUpdate.has_value());
+    CHECK(mimeUpdate.value() == 2);
+
+    auto updatedChild = fix.repository_->getDocument(childId);
+    REQUIRE(updatedChild.has_value());
+    REQUIRE(updatedChild.value().has_value());
+    CHECK(updatedChild.value()->mimeType == "text/markdown");
+
+    auto deleted = fix.repository_->deleteDocumentsBatch({parentId, 999999});
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value() == 1);
+
+    auto missingParent = fix.repository_->getDocument(parentId);
+    REQUIRE(missingParent.has_value());
+    CHECK_FALSE(missingParent.value().has_value());
+
+    auto removedContent = fix.repository_->getContent(parentId);
+    REQUIRE(removedContent.has_value());
+    CHECK_FALSE(removedContent.value().has_value());
+
+    auto removedMetadata = fix.repository_->getAllMetadata(parentId);
+    REQUIRE(removedMetadata.has_value());
+    CHECK(removedMetadata.value().empty());
+
+    auto childRels = fix.repository_->getRelationships(childId);
+    REQUIRE(childRels.has_value());
+    CHECK(childRels.value().empty());
+
+    auto survivorDoc = fix.repository_->getDocument(survivorId);
+    REQUIRE(survivorDoc.has_value());
+    REQUIRE(survivorDoc.value().has_value());
+    CHECK(survivorDoc.value()->mimeType == "application/json");
+}
+
+TEST_CASE("MetadataRepository: batch get APIs skip missing inputs and keep keyed results",
+          "[unit][metadata][repository][batch][read]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/batch-a.txt", "batch-get-hash-a");
+    auto docB = makeDocumentWithPath("/tmp/batch-b.txt", "batch-get-hash-b");
+    auto docC = makeDocumentWithPath("/tmp/batch-c.txt", "batch-get-hash-c");
+    auto insertA = fix.repository_->insertDocument(docA);
+    auto insertB = fix.repository_->insertDocument(docB);
+    auto insertC = fix.repository_->insertDocument(docC);
+    REQUIRE(insertA.has_value());
+    REQUIRE(insertB.has_value());
+    REQUIRE(insertC.has_value());
+
+    REQUIRE(fix.repository_
+                ->insertContent(DocumentContent{insertA.value(), "alpha body", 10, "test", "en"})
+                .has_value());
+    REQUIRE(fix.repository_
+                ->insertContent(DocumentContent{insertC.value(), "gamma body", 10, "test", "en"})
+                .has_value());
+
+    auto docs = fix.repository_->batchGetDocumentsByHash(
+        {"batch-get-hash-a", "missing-hash", "batch-get-hash-c", "batch-get-hash-a"});
+    REQUIRE(docs.has_value());
+    CHECK(docs.value().size() == 2);
+    CHECK(docs.value().at("batch-get-hash-a").id == insertA.value());
+    CHECK(docs.value().at("batch-get-hash-c").id == insertC.value());
+    CHECK_FALSE(docs.value().contains("missing-hash"));
+
+    auto content = fix.repository_->batchGetContent(
+        {insertA.value(), insertB.value(), insertC.value(), 999999, insertA.value()});
+    REQUIRE(content.has_value());
+    CHECK(content.value().size() == 2);
+    CHECK(content.value().at(insertA.value()).contentText == "alpha body");
+    CHECK(content.value().at(insertC.value()).contentText == "gamma body");
+    CHECK_FALSE(content.value().contains(insertB.value()));
+    CHECK_FALSE(content.value().contains(999999));
+
+    auto emptyDocs = fix.repository_->batchGetDocumentsByHash({});
+    REQUIRE(emptyDocs.has_value());
+    CHECK(emptyDocs.value().empty());
+
+    auto emptyContent = fix.repository_->batchGetContent({});
+    REQUIRE(emptyContent.has_value());
+    CHECK(emptyContent.value().empty());
+}
+
+TEST_CASE("MetadataRepository: removeFromIndexByHashBatch reports actual FTS removals",
+          "[unit][metadata][repository][batch][fts5]") {
+    MetadataRepositoryFixture fix;
+
+    auto indexed = makeDocumentWithPath("/tmp/indexed.txt", "batch-indexed-hash");
+    auto notIndexed = makeDocumentWithPath("/tmp/not-indexed.txt", "batch-not-indexed-hash");
+    auto indexedInsert = fix.repository_->insertDocument(indexed);
+    auto notIndexedInsert = fix.repository_->insertDocument(notIndexed);
+    REQUIRE(indexedInsert.has_value());
+    REQUIRE(notIndexedInsert.has_value());
+
+    REQUIRE(fix.repository_
+                ->indexDocumentContent(indexedInsert.value(), "indexed", "needle", "text/plain")
+                .has_value());
+
+    auto beforeIndexed = fix.repository_->hasFtsEntry(indexedInsert.value());
+    auto beforeNotIndexed = fix.repository_->hasFtsEntry(notIndexedInsert.value());
+    REQUIRE(beforeIndexed.has_value());
+    REQUIRE(beforeNotIndexed.has_value());
+    REQUIRE(beforeIndexed.value());
+    REQUIRE_FALSE(beforeNotIndexed.value());
+
+    auto removed = fix.repository_->removeFromIndexByHashBatch(
+        {"batch-indexed-hash", "batch-not-indexed-hash", "missing-hash"});
+    REQUIRE(removed.has_value());
+    CHECK(removed.value() == 1);
+
+    auto afterIndexed = fix.repository_->hasFtsEntry(indexedInsert.value());
+    auto afterNotIndexed = fix.repository_->hasFtsEntry(notIndexedInsert.value());
+    REQUIRE(afterIndexed.has_value());
+    REQUIRE(afterNotIndexed.has_value());
+    CHECK_FALSE(afterIndexed.value());
+    CHECK_FALSE(afterNotIndexed.value());
 }
