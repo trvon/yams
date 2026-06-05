@@ -178,7 +178,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
   ] + tracy_deps + [benchmark_dep]
 
   # RAG retrieval quality benchmark
-  retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json'), benchmark_main_dep]
+  retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json')]
   retrieval_quality_bench_rpath = []
   if host_machine.system() == 'darwin'
     retrieval_quality_bench_rpath += ['/opt/homebrew/lib']
@@ -213,7 +213,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
   alias_target('bench_fusion_experiment', fusion_experiment)
 
   # PBI-004: End-to-end ingestion pipeline benchmark
-  ingestion_e2e_bench_deps = search_bench_deps + [test_deps, benchmark_main_dep]
+  ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
 
   ingestion_e2e_bench = executable('ingestion_e2e_bench',
     files('../../src/search/benchmarks/ingestion_e2e_bench.cpp'),
