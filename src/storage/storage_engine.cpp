@@ -359,8 +359,8 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
         pImpl->stats.totalObjects.fetch_add(1);
         pImpl->stats.totalBytes.fetch_add(data.size());
         pImpl->stats.writeOperations.fetch_add(1);
-        YAMS_POSTCONDITION(std::filesystem::exists(objectPath),
-                           "Stored object must exist on disk after successful write");
+        YAMS_DCHECK(std::filesystem::exists(objectPath),
+                    "Stored object must exist on disk after successful write");
         spdlog::debug("Stored object {} ({} bytes)", hash, data.size());
     } else {
         pImpl->stats.failedOperations.fetch_add(1);
@@ -424,7 +424,7 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
     pImpl->stats.readOperations.fetch_add(1);
 
     IStorageEngine::RawObject obj;
-    obj.data.assign(buf.get(), buf.get() + fileSize);
+    obj.data.assign(buf.get(), buf.get() + static_cast<size_t>(fileSize));
     YAMS_DCHECK(obj.data.size() == static_cast<size_t>(fileSize),
                 "Assigned vector size must match file size");
     obj.header = std::nullopt;

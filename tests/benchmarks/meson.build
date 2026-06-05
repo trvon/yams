@@ -149,7 +149,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     install: false,
   )
 
-  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
+  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
     include_directories: incs,
