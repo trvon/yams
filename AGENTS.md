@@ -88,8 +88,17 @@ Default retrieval choice:
 
 - Exact symbol/text/pattern: `yams grep`
 - Concept / prior work / decisions / history: `yams search`
+- Codebase navigation / blast-radius questions: `yams graph --explore <symbol-or-file>` first, then raw graph traversal if needed
 - Need artifact contents after retrieval: `yams get`
 - Need exact implementation detail in a known file: local `Read`
+
+Graph-navigation rules:
+
+- Treat `yams graph --explore "<symbol-or-file-or-query>"` as the preferred first hop when you need to understand callers/callees, includes/imports, symbol ownership, likely related tests, or neighboring implementation files.
+- Search and grep results now emit `graph_explore_hint`; follow that exact hint before broad local `rg` when it names a relevant file.
+- Use raw graph traversal for precise inspection: `yams graph --name <path> --depth 1|2`, `yams graph --node-key <key> -r <relation>`, `yams graph --relations`, `yams graph --list-types`, and `yams graph --list-type <type> --scope-cwd`.
+- Use topology views when choosing where to start in unfamiliar subsystems: `yams graph --topology-snapshots`, `yams graph --topology-clusters`, then `yams graph --cluster <cluster-id>` to inspect medoids/bridges/core files.
+- If `--explore` is unavailable or fails, fall back to `yams graph --name <path> --depth 1 --limit 50`, then local reads of the most relevant connected files.
 
 Reporting when retrieval is used:
 

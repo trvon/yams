@@ -157,7 +157,12 @@ Always ask first for:
 - Do not start discovery with `Read`, `Glob`, `Grep`, `rg`, or ad-hoc bash search when YAMS retrieval can narrow the target first.
 - Use `yams grep` first for symbols, strings, APIs, and code patterns.
 - Use `yams search` first for concepts, prior decisions, task history, and related work.
-- When exploring how code connects (callers, callees, includes, imports, dependencies), prefer `yams graph --explore <symbol-or-file>` for agent-readable snippets and relationship context; use `yams graph --name <file>` or `yams graph --node-key <key>` when you need raw traversal. Use the `graph_explore_hint` field in JSON output to discover the precise command for a result.
+- Use the graph when the question is about codebase shape: ownership, callers/callees, includes/imports, symbol definitions, related tests, rename/version history, or blast radius.
+- Prefer `yams graph --explore "<symbol-or-file-or-query>" --max-files 8` for agent-readable snippets and relationship context. Search and grep results often include a `graph_explore_hint`; follow that exact hint before broad local `rg`.
+- Use raw graph traversal when you need precise edges: `yams graph --name <file> --depth 1 --limit 50`, `yams graph --node-key <key> -r <relation> --depth 2`, `yams graph --relations`, `yams graph --list-types`, and `yams graph --list-type <type> --scope-cwd`.
+- Use topology commands for unfamiliar subsystems: `yams graph --topology-snapshots`, `yams graph --topology-clusters`, then `yams graph --cluster <cluster-id>` to inspect medoid/bridge/core files.
+- Graph relation summaries are navigation signals, not proof. Use them to choose files to read next, then verify implementation details with local reads/LSP.
+- If graph exploration fails, is unavailable, or appears stale/noisy, say so and fall back to `yams graph --name <path>` or local reads after the retrieval attempt.
 - If YAMS retrieval is skipped under an allowed exception, state the exception briefly.
 - Treat `served - used` as weak negative signal (`not_used`), not rejection.
 - Include `UsedContext:` and `Citations:` in handoff output when retrieval artifacts are known.

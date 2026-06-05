@@ -106,26 +106,25 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
 
 alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
-# Large-scale ingestion benchmark (requires google-benchmark)
-if benchmark_dep.found() and benchmark_main_dep.found()
+# Large-scale ingestion benchmark (requires google-benchmark and provides its own main)
+if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [
     test_deps,
     dependency('yams_benchmarks'),
     benchmark_dep,
-    benchmark_main_dep,
   ] + tracy_deps
 
-large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
-files('large_scale_ingestion_bench.cpp'),
-include_directories: incs,
-dependencies: large_scale_ingestion_bench_deps,
-cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-install: false,
-)
+  large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
+    files('large_scale_ingestion_bench.cpp'),
+    include_directories: incs,
+    dependencies: large_scale_ingestion_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
 
-alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
+  alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
 else
-message('Google Benchmark not found; skipping large_scale_ingestion_bench')
+  message('Google Benchmark not found; skipping large_scale_ingestion_bench')
 endif
 
 if benchmark_dep.found() and benchmark_main_dep.found()
@@ -138,8 +137,12 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
+else
+  message('Google Benchmark benchmark_main not found; skipping storage throughput benchmark')
+endif
 
-  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
+if benchmark_dep.found()
+  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
     files('retrieval_service_benchmarks.cpp'),
@@ -149,7 +152,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     install: false,
   )
 else
-  message('Google Benchmark or benchmark_main not found; skipping benchmarks that need benchmark_main')
+  message('Google Benchmark not found; skipping retrieval service benchmark')
 endif
 
 if benchmark_dep.found()

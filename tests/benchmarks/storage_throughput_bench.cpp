@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
 #include <benchmark/benchmark.h>
 
@@ -41,7 +42,8 @@ public:
 
     void TearDown(const benchmark::State&) override {
         engine_.reset();
-        std::filesystem::remove_all(tempDir_);
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir_, ec);
     }
 
 protected:

@@ -311,6 +311,27 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction commit",
     CHECK(stats.value().rollbacks == 0u);
 }
 
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction increment without size",
+                 "[storage][refcount][transaction][catch2]") {
+    const std::string hash = generateHash(250);
+
+    auto txn = refCounter->beginTransaction();
+    REQUIRE(txn != nullptr);
+    txn->increment(hash);
+
+    auto result = txn->commit();
+    REQUIRE(result.has_value());
+
+    auto count = refCounter->getRefCount(hash);
+    REQUIRE(count.has_value());
+    CHECK(count.value() == 1u);
+
+    auto stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBytes == 1u);
+    CHECK(stats.value().totalUncompressedBytes == 1u);
+}
+
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction rollback",
                  "[storage][refcount][transaction][catch2]") {
     const std::string incrementedHash = generateHash(300);

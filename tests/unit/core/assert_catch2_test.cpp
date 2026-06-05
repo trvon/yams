@@ -8,15 +8,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 #ifndef _WIN32
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #include <boost/asio/co_spawn.hpp>
@@ -26,7 +28,9 @@
 
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/pressure_limited_poller.h>
+#include <yams/storage/reference_counter.h>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
@@ -317,11 +321,95 @@ TEST_CASE("YAMS_DCHECK fires in debug build", "[assert][dcheck]") {
 
     // In debug: fires.  In release (NDEBUG): does not fire.
     // We can't test both in one binary, so we assert the debug behavior.
-#ifndef NDEBUG
+#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
     CHECK(fired);
 #else
     CHECK_FALSE(fired);
 #endif
+#endif
+}
+
+namespace {
+std::filesystem::path assertion_test_refcount_db_path(std::string_view suffix) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path() /
+           ("yams_assert_refcount_" + std::to_string(stamp) + "_" + std::string(suffix) + ".db");
+}
+
+void trigger_refcount_increment_after_commit_dcheck() {
+    const auto dbPath = assertion_test_refcount_db_path("increment");
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+    std::filesystem::remove(dbPath.string() + "-wal", ec);
+    std::filesystem::remove(dbPath.string() + "-shm", ec);
+
+    yams::storage::ReferenceCounter counter(
+        yams::storage::ReferenceCounter::Config{.databasePath = dbPath});
+    auto txn = counter.beginTransaction();
+    txn->increment("assert_refcount_increment", 1, 1);
+    auto commit = txn->commit();
+    if (!commit) {
+        std::abort();
+    }
+    txn->increment("assert_refcount_increment", 1, 1);
+}
+
+void trigger_refcount_decrement_after_commit_dcheck() {
+    const auto dbPath = assertion_test_refcount_db_path("decrement");
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+    std::filesystem::remove(dbPath.string() + "-wal", ec);
+    std::filesystem::remove(dbPath.string() + "-shm", ec);
+
+    yams::storage::ReferenceCounter counter(
+        yams::storage::ReferenceCounter::Config{.databasePath = dbPath});
+    auto txn = counter.beginTransaction();
+    txn->increment("assert_refcount_decrement", 1, 1);
+    auto commit = txn->commit();
+    if (!commit) {
+        std::abort();
+    }
+    txn->decrement("assert_refcount_decrement");
+}
+
+void trigger_work_coordinator_double_start_precondition() {
+    yams::daemon::WorkCoordinator coordinator;
+    coordinator.start(1);
+    coordinator.start(1);
+}
+} // namespace
+
+TEST_CASE("YAMS_DCHECK fires on refcount increment after commit", "[assert][refcount]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    const bool fired = assertionFires([]() { trigger_refcount_increment_after_commit_dcheck(); });
+#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
+    CHECK(fired);
+#else
+    CHECK_FALSE(fired);
+#endif
+#endif
+}
+
+TEST_CASE("YAMS_DCHECK fires on refcount decrement after commit", "[assert][refcount]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    const bool fired = assertionFires([]() { trigger_refcount_decrement_after_commit_dcheck(); });
+#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
+    CHECK(fired);
+#else
+    CHECK_FALSE(fired);
+#endif
+#endif
+}
+
+TEST_CASE("YAMS_PRECONDITION fires on WorkCoordinator double start", "[assert][work_coordinator]") {
+#ifdef _WIN32
+    SKIP("fork() not available on Windows");
+#else
+    CHECK(assertionFires([]() { trigger_work_coordinator_double_start_precondition(); }));
 #endif
 }
 

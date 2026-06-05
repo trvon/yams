@@ -112,6 +112,7 @@ private:
     std::string pattern_;
     std::vector<std::string> paths_;
     std::string includePatterns_;
+    std::vector<std::string> globPatterns_;
     size_t afterContext_ = 0;
     size_t beforeContext_ = 0;
     size_t context_ = 0;
@@ -245,9 +246,9 @@ public:
                         "to end options or -e/--expr)");
 
         // Explicit pattern option to handle leading '-' patterns ergonomically
-        cmd->add_option(
-            "-e,--expr", pattern_,
-            "Explicit pattern (use when pattern starts with '-' or to avoid ambiguity)");
+        cmd->add_option("-e,--expr,--regexp", pattern_,
+                        "Explicit pattern (rg-compatible --regexp; use when pattern starts with "
+                        "'-' or to avoid ambiguity)");
 
         cmd->add_option("paths", paths_,
                         "Files or directories to search (default: all indexed files)");
@@ -257,6 +258,8 @@ public:
         // Pattern filtering
         cmd->add_option("--include", includePatterns_,
                         "File patterns to include (e.g., '*.md,*.txt')");
+        cmd->add_option("-g,--glob", globPatterns_,
+                        "rg-compatible file glob filter (repeatable; merged with --include)");
 
         // Context options
         cmd->add_option("-A,--after", afterContext_, "Show N lines after match")->default_val(0);
@@ -358,8 +361,8 @@ public:
             }
 
             if (pattern_.empty()) {
-                bool hasFilters =
-                    !filterTags_.empty() || !paths_.empty() || !includePatterns_.empty();
+                bool hasFilters = !filterTags_.empty() || !paths_.empty() ||
+                                  !includePatterns_.empty() || !globPatterns_.empty();
                 if (hasFilters) {
                     pattern_ = ".*";
                     regexOnly_ = true;
@@ -464,11 +467,7 @@ public:
             {
                 std::vector<std::string> cwdPatterns;
                 if (scopeToCwd_ || !cwdOverride_.empty()) {
-                    std::string cwdDir = cwdOverride_;
-                    if (cwdDir.empty()) {
-                        std::error_code ec;
-                        cwdDir = std::filesystem::current_path(ec).string();
-                    }
+                    const auto cwdDir = resolvedCwdScopeRoot().lexically_normal().generic_string();
                     cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
                     spdlog::debug("[CLI] Scoping grep to CWD: {} ({} patterns)", cwdDir,
                                   cwdPatterns.size());
@@ -513,7 +512,7 @@ public:
                 }
 
                 // Map all CLI options to daemon protocol
-                dreq.includePatterns = parseCommaSeparated(includePatterns_);
+                dreq.includePatterns = explicitIncludePatterns();
                 auto langPatterns = languageIncludePatterns();
                 dreq.includePatterns.insert(dreq.includePatterns.end(), langPatterns.begin(),
                                             langPatterns.end());
@@ -1434,7 +1433,7 @@ private:
     }
 
     // Helper function to parse comma-separated strings into vector
-    std::vector<std::string> parseCommaSeparated(const std::string& input) {
+    std::vector<std::string> parseCommaSeparated(const std::string& input) const {
         std::vector<std::string> result;
         if (input.empty())
             return result;
@@ -1471,6 +1470,12 @@ private:
         return patterns;
     }
 
+    std::vector<std::string> explicitIncludePatterns() const {
+        auto patterns = parseCommaSeparated(includePatterns_);
+        patterns.insert(patterns.end(), globPatterns_.begin(), globPatterns_.end());
+        return patterns;
+    }
+
     bool pathMatchesLiveFilters(const std::filesystem::path& path) const {
         if (!extension_.empty()) {
             std::string ext = extension_;
@@ -1488,6 +1493,27 @@ private:
                 return false;
             }
         }
+        auto includePatterns = explicitIncludePatterns();
+        if (!includePatterns.empty()) {
+            const auto genericPath = path.lexically_normal().generic_string();
+            const auto filename = path.filename().generic_string();
+            bool matched = false;
+            for (const auto& pattern : includePatterns) {
+                const bool pathMatch = yams::app::services::utils::matchGlob(genericPath, pattern);
+                const bool fileMatch = yams::app::services::utils::matchGlob(filename, pattern);
+                const bool suffixMatch =
+                    !pattern.empty() && pattern.front() != '*' &&
+                    !std::filesystem::path(pattern).is_absolute() &&
+                    yams::app::services::utils::matchGlob(genericPath, "*" + pattern);
+                if (pathMatch || fileMatch || suffixMatch) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1500,17 +1526,32 @@ private:
         });
     }
 
+    std::filesystem::path resolvedCwdScopeRoot() const {
+        std::error_code ec;
+        std::filesystem::path root =
+            cwdOverride_.empty() ? invocationCwd_ : std::filesystem::path{cwdOverride_};
+        if (!root.is_absolute()) {
+            root = invocationCwd_ / root;
+        }
+        auto resolved = std::filesystem::weakly_canonical(root, ec);
+        return ec ? root : resolved;
+    }
+
     std::filesystem::path liveFallbackRoot() const {
-        if (!cwdOverride_.empty()) {
-            return std::filesystem::path(cwdOverride_);
+        if (!cwdOverride_.empty() || scopeToCwd_) {
+            return resolvedCwdScopeRoot();
         }
         if (!paths_.empty() && paths_.size() == 1 &&
             std::filesystem::is_directory(paths_.front())) {
-            return std::filesystem::path(paths_.front());
+            std::filesystem::path root{paths_.front()};
+            if (!root.is_absolute()) {
+                root = invocationCwd_ / root;
+            }
+            std::error_code ec;
+            auto resolved = std::filesystem::weakly_canonical(root, ec);
+            return ec ? root : resolved;
         }
-        std::error_code ec;
-        auto cwd = std::filesystem::current_path(ec);
-        return ec ? std::filesystem::path{"."} : cwd;
+        return invocationCwd_.empty() ? std::filesystem::path{"."} : invocationCwd_;
     }
 
     bool lineMatchesLivePattern(const std::string& line,
@@ -1750,9 +1791,10 @@ private:
         if (!paths_.empty()) {
             queryPatterns.insert(queryPatterns.end(), paths_.begin(), paths_.end());
         }
-        if (!includePatterns_.empty()) {
-            auto expanded = splitPatterns({includePatterns_});
-            queryPatterns.insert(queryPatterns.end(), expanded.begin(), expanded.end());
+        auto includePatterns = explicitIncludePatterns();
+        if (!includePatterns.empty()) {
+            queryPatterns.insert(queryPatterns.end(), includePatterns.begin(),
+                                 includePatterns.end());
         }
         if (!extension_.empty()) {
             std::string ext = extension_;
@@ -1761,11 +1803,7 @@ private:
             queryPatterns.push_back(std::string("**/*") + ext);
         }
         if (scopeToCwd_ || !cwdOverride_.empty()) {
-            std::string cwdDir = cwdOverride_;
-            if (cwdDir.empty()) {
-                std::error_code ec;
-                cwdDir = std::filesystem::current_path(ec).string();
-            }
+            const auto cwdDir = resolvedCwdScopeRoot().lexically_normal().generic_string();
             auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
             queryPatterns.insert(queryPatterns.end(), cwdPats.begin(), cwdPats.end());
         }

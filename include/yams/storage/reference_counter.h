@@ -97,7 +97,9 @@ public:
         void increment(std::string_view blockHash, size_t blockSize) {
             increment(blockHash, blockSize, blockSize);
         }
-        void increment(std::string_view blockHash) { increment(blockHash, 0, 0); }
+        // Unknown-size legacy transaction records use a 1-byte sentinel because the
+        // reference schema intentionally rejects zero-sized block rows.
+        void increment(std::string_view blockHash) { increment(blockHash, 1, 1); }
         virtual void decrement(std::string_view blockHash) = 0;
         virtual void pruneReference(std::string_view blockHash) = 0;
         virtual Result<void> commit() = 0;

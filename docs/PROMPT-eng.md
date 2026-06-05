@@ -106,6 +106,38 @@ yams search "$TASK" --limit 20
 yams search "task=$TASK" --type keyword --limit 20
 ```
 
+### 1a) Use the Graph for Codebase Navigation
+
+Recent YAMS graph work makes the graph useful as an agent navigation layer, not only as a low-level database. Use it before broad local filesystem exploration when the task is "how does this subsystem connect?", "what else might break?", or "where should I read next?"
+
+```bash
+# Agent-readable context for a symbol, file, or natural-language query
+yams graph --explore "<symbol-or-file-or-query>" --max-files 8
+
+# Follow hints emitted by search/grep JSON or table output
+yams search "<concept>" --limit 10 --json   # read graph_explore_hint
+yams grep "<symbol>" --cwd .                # hints appear beside files
+
+# Raw traversal when you need exact edge data
+yams graph --name <path> --depth 1 --limit 50
+yams graph --node-key <key> -r <relation> --depth 2
+yams graph --relations
+yams graph --list-types
+yams graph --list-type function --scope-cwd --limit 50
+
+# Topology views for unfamiliar areas
+yams graph --topology-snapshots
+yams graph --topology-clusters
+yams graph --cluster <cluster-id>
+```
+
+Graph guidance:
+
+- Prefer `--explore` after `yams search` / `yams grep` identifies a likely file; search/grep often provide the exact `graph_explore_hint` to run.
+- Use relation summaries (`calls`, `includes`, `contains`, `defined_in`, `located_in`, `has_version`, `semantic_neighbor`) to pick the next file before local `Read`.
+- For blast-radius review, start with `--explore` on changed files, then raw `--name`/`--node-key` traversal with relation filters for precise caller/include context.
+- If graph exploration fails or returns stale/noisy context, say so and fall back to local reads or LSP navigation.
+
 ### 2) Start Work (Index Baseline + Claim)
 
 ```bash
