@@ -17,6 +17,7 @@
 #include <yams/profiling.h>
 
 #include "corpus_stats_ops.hpp"
+#include "metadata_write_helpers.hpp"
 #include "result_helpers.hpp"
 #include "transaction_helpers.hpp"
 
@@ -25,6 +26,7 @@ namespace yams::metadata {
 using repository::beginTransactionWithRetry;
 using repository::classifyExtensionBucket;
 using repository::ExtensionBucket;
+using repository::MetadataTagDelta;
 using repository::scope_exit;
 
 namespace {
@@ -85,6 +87,83 @@ void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
         }
     }
 }
+
+void applyMetadataTagDelta(std::atomic<uint64_t>& cachedTagCount,
+                           std::atomic<uint64_t>& cachedDocsWithTags,
+                           const std::atomic<uint64_t>& cachedDocumentCount,
+                           const MetadataTagDelta& delta) {
+    if (delta.tagCountDelta > 0) {
+        cachedTagCount.fetch_add(static_cast<uint64_t>(delta.tagCountDelta),
+                                 std::memory_order_relaxed);
+    } else if (delta.tagCountDelta < 0) {
+        core::saturating_sub(cachedTagCount, static_cast<uint64_t>(-delta.tagCountDelta));
+    }
+
+    if (delta.docsWithTagsDelta > 0) {
+        cachedDocsWithTags.fetch_add(static_cast<uint64_t>(delta.docsWithTagsDelta),
+                                     std::memory_order_relaxed);
+    } else if (delta.docsWithTagsDelta < 0) {
+        core::saturating_sub(cachedDocsWithTags, static_cast<uint64_t>(-delta.docsWithTagsDelta));
+    }
+
+    const auto docsWithTags = cachedDocsWithTags.load(std::memory_order_relaxed);
+    const auto docCount = cachedDocumentCount.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount.load(std::memory_order_relaxed);
+    YAMS_DCHECK(docsWithTags <= docCount,
+                "metadata tag counter invariant violated: docsWithTags <= docCount");
+    YAMS_DCHECK(tagCount >= docsWithTags,
+                "metadata tag counter invariant violated: tagCount >= docsWithTags");
+}
+
+Result<MetadataTagDelta> calculateDocumentDeleteTagDelta(Database& db, int64_t documentId) {
+    YAMS_TRY_UNWRAP(tagCountStmt, db.prepareCached("SELECT COUNT(*) FROM metadata WHERE "
+                                                   "document_id = ? AND (key = 'tag' OR key "
+                                                   "LIKE 'tag:%')"));
+    YAMS_TRY(tagCountStmt->reset());
+    YAMS_TRY(tagCountStmt->bind(1, documentId));
+    YAMS_TRY_UNWRAP(hasRow, tagCountStmt->step());
+
+    MetadataTagDelta delta;
+    if (!hasRow) {
+        return delta;
+    }
+
+    const auto priorTagCount = tagCountStmt->getInt64(0);
+    if (priorTagCount > 0) {
+        delta.tagCountDelta = -priorTagCount;
+        delta.docsWithTagsDelta = -1;
+    }
+    return delta;
+}
+
+struct InsertDocumentWithMetadataResult {
+    int64_t docId{0};
+    bool insertedNewDocument{false};
+    MetadataTagDelta metadataTagDelta{};
+    uint64_t metadataWriteCount{0};
+};
+
+struct DeleteDocumentResult {
+    bool deleted{false};
+    uint64_t totalSizeBytesRemoved{0};
+    uint64_t pathDepthSumRemoved{0};
+    bool extractedRemoved{false};
+    bool indexedRemoved{false};
+    bool embeddedRemoved{false};
+    std::string removedExtension;
+    MetadataTagDelta metadataTagDelta{};
+};
+
+struct DeleteDocumentsBatchResult {
+    size_t deletedCount{0};
+    uint64_t totalSizeBytesRemoved{0};
+    uint64_t pathDepthSumRemoved{0};
+    uint64_t extractedRemoved{0};
+    uint64_t indexedRemoved{0};
+    uint64_t embeddedRemoved{0};
+    std::unordered_map<std::string, int64_t> removedExtensionCounts;
+    MetadataTagDelta metadataTagDelta{};
+};
 } // namespace
 
 // Document operations
@@ -206,143 +285,128 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
     const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
     TreeSnapshotRecord* snapshot) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocumentWithMetadata");
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        // Wrap everything in a single BEGIN IMMEDIATE to reduce lock acquisitions
-        // from ~15-20 per document down to 1.
-        YAMS_TRY(beginTransactionWithRetry(db));
-        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
+    auto result = executeQuery<InsertDocumentWithMetadataResult>(
+        [&](Database& db) -> Result<InsertDocumentWithMetadataResult> {
+            // Wrap everything in a single BEGIN IMMEDIATE to reduce lock acquisitions
+            // from ~15-20 per document down to 1.
+            YAMS_TRY(beginTransactionWithRetry(db));
+            auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
 
-        // --- 1. INSERT document ---
-        std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
-                          "file_size, sha256_hash, mime_type, created_time, modified_time, "
-                          "indexed_time, content_extracted, extraction_status, extraction_error";
+            // --- 1. INSERT document ---
+            std::string sql =
+                "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
+                "file_size, sha256_hash, mime_type, created_time, modified_time, "
+                "indexed_time, content_extracted, extraction_status, extraction_error";
 
-        if (hasPathIndexing_) {
-            sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
-        }
-
-        sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
-        if (hasPathIndexing_) {
-            sql += ", ?, ?, ?, ?, ?";
-        }
-        sql += ")";
-
-        auto stmtResult = db.prepare(sql);
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-
-        if (hasPathIndexing_) {
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError,
-                info.pathPrefix, info.reversePath, info.pathHash, info.parentHash, info.pathDepth);
-            if (!bindResult)
-                return bindResult.error();
-        } else {
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
-            if (!bindResult)
-                return bindResult.error();
-        }
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        int changes = db.changes();
-        int64_t docId;
-
-        if (changes > 0) {
-            docId = db.lastInsertRowId();
-            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
-            cachedTotalSizeBytes_.fetch_add(
-                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
-                std::memory_order_relaxed);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, info.fileExtension, 1);
-            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
-                                          std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
+            if (hasPathIndexing_) {
+                sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
             }
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+
+            sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+            if (hasPathIndexing_) {
+                sql += ", ?, ?, ?, ?, ?";
             }
-            if (info.contentExtracted) {
-                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+            sql += ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+
+            if (hasPathIndexing_) {
+                auto bindResult =
+                    stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                                 info.sha256Hash, info.mimeType, info.createdTime,
+                                 info.modifiedTime, info.indexedTime, info.contentExtracted ? 1 : 0,
+                                 ExtractionStatusUtils::toString(info.extractionStatus),
+                                 info.extractionError, info.pathPrefix, info.reversePath,
+                                 info.pathHash, info.parentHash, info.pathDepth);
+                if (!bindResult)
+                    return bindResult.error();
+            } else {
+                auto bindResult = stmt.bindAll(
+                    info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                    info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
+                    info.indexedTime, info.contentExtracted ? 1 : 0,
+                    ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
+                if (!bindResult)
+                    return bindResult.error();
             }
-            spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash,
-                          docId);
-        } else {
-            auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-            if (!checkStmt)
-                return checkStmt.error();
-            auto& stmt2 = checkStmt.value();
-            if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
-                return bindRes.error();
-            auto stepRes = stmt2.step();
-            if (!stepRes)
-                return stepRes.error();
-            if (!stepRes.value())
-                return Error{ErrorCode::DatabaseError,
-                             "Document insert ignored but existing record not found"};
-            docId = stmt2.getInt64(0);
-            spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash,
-                          docId);
-        }
 
-        // --- 2. Batch upsert metadata (if any) ---
-        if (!tags.empty()) {
-            // Use ON CONFLICT upsert to avoid DELETE+INSERT write amplification.
-            // Prepare once, bind+execute+reset per tag pair.
-            static const std::string metaUpsertSql =
-                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-                "value_type = excluded.value_type";
+            auto execResult = stmt.execute();
+            if (!execResult)
+                return execResult.error();
 
-            YAMS_TRY_UNWRAP(metaStmt, db.prepareCached(metaUpsertSql));
-            for (const auto& [key, value] : tags) {
-                YAMS_TRY(metaStmt->bind(1, docId));
-                YAMS_TRY(metaStmt->bind(2, key));
-                YAMS_TRY(metaStmt->bind(3, value.value));
-                YAMS_TRY(metaStmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
-                YAMS_TRY(metaStmt->execute());
-                YAMS_TRY(metaStmt->reset()); // Reset for next iteration
+            int changes = db.changes();
+            int64_t docId;
+            bool insertedNewDocument = false;
+
+            if (changes > 0) {
+                docId = db.lastInsertRowId();
+                insertedNewDocument = true;
+                spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash,
+                              docId);
+            } else {
+                auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+                if (!checkStmt)
+                    return checkStmt.error();
+                auto& stmt2 = checkStmt.value();
+                if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
+                    return bindRes.error();
+                auto stepRes = stmt2.step();
+                if (!stepRes)
+                    return stepRes.error();
+                if (!stepRes.value())
+                    return Error{ErrorCode::DatabaseError,
+                                 "Document insert ignored but existing record not found"};
+                docId = stmt2.getInt64(0);
+                spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash,
+                              docId);
             }
-        }
 
-        // --- 3. Upsert tree snapshot (if provided) ---
-        if (snapshot) {
-            snapshot->ingestDocumentId = docId;
+            MetadataTagDelta metadataTagDelta{};
+            uint64_t metadataWriteCount = 0;
 
-            std::string directoryPath = snapshot->metadata.count("directory_path")
-                                            ? snapshot->metadata.at("directory_path")
+            // --- 2. Batch upsert metadata (if any) ---
+            if (!tags.empty()) {
+                std::vector<repository::MetadataWriteEntry> metadataWrites;
+                metadataWrites.reserve(tags.size());
+                for (const auto& [key, value] : tags) {
+                    metadataWrites.emplace_back(docId, key, value);
+                }
+
+                const auto dedupedMetadataWrites =
+                    repository::deduplicateMetadataWrites(metadataWrites);
+                YAMS_TRY_UNWRAP(
+                    delta, repository::upsertMetadataWritesWithTagDelta(db, dedupedMetadataWrites));
+                metadataTagDelta = delta;
+                metadataWriteCount = dedupedMetadataWrites.size();
+            }
+
+            // --- 3. Upsert tree snapshot (if provided) ---
+            if (snapshot) {
+                snapshot->ingestDocumentId = docId;
+
+                std::string directoryPath = snapshot->metadata.count("directory_path")
+                                                ? snapshot->metadata.at("directory_path")
+                                                : "";
+                std::string snapshotLabel = snapshot->metadata.count("snapshot_label")
+                                                ? snapshot->metadata.at("snapshot_label")
+                                                : "";
+                std::string gitCommit = snapshot->metadata.count("git_commit")
+                                            ? snapshot->metadata.at("git_commit")
                                             : "";
-            std::string snapshotLabel = snapshot->metadata.count("snapshot_label")
-                                            ? snapshot->metadata.at("snapshot_label")
+                std::string gitBranch = snapshot->metadata.count("git_branch")
+                                            ? snapshot->metadata.at("git_branch")
                                             : "";
-            std::string gitCommit =
-                snapshot->metadata.count("git_commit") ? snapshot->metadata.at("git_commit") : "";
-            std::string gitBranch =
-                snapshot->metadata.count("git_branch") ? snapshot->metadata.at("git_branch") : "";
-            std::string gitRemote;
-            if (auto it = snapshot->metadata.find("git_remote"); it != snapshot->metadata.end()) {
-                gitRemote.append(it->second);
-            }
+                std::string gitRemote;
+                if (auto it = snapshot->metadata.find("git_remote");
+                    it != snapshot->metadata.end()) {
+                    gitRemote.append(it->second);
+                }
 
-            auto snapStmtResult = db.prepare(R"(
+                auto snapStmtResult = db.prepare(R"(
                 INSERT INTO tree_snapshots (
                     snapshot_id, created_at, directory_path, tree_root_hash,
                     snapshot_label, git_commit, git_branch, git_remote, files_count
@@ -357,46 +421,97 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                     git_remote = excluded.git_remote,
                     files_count = excluded.files_count
             )");
-            if (!snapStmtResult)
-                return snapStmtResult.error();
+                if (!snapStmtResult)
+                    return snapStmtResult.error();
 
-            Statement snapStmt = std::move(snapStmtResult).value();
-            snapStmt.bind(1, snapshot->snapshotId);
-            snapStmt.bind(2, static_cast<int64_t>(snapshot->createdTime));
-            snapStmt.bind(3, directoryPath);
-            if (snapshot->rootTreeHash.empty())
-                snapStmt.bind(4, nullptr);
-            else
-                snapStmt.bind(4, snapshot->rootTreeHash);
-            if (snapshotLabel.empty())
-                snapStmt.bind(5, nullptr);
-            else
-                snapStmt.bind(5, snapshotLabel);
-            if (gitCommit.empty())
-                snapStmt.bind(6, nullptr);
-            else
-                snapStmt.bind(6, gitCommit);
-            if (gitBranch.empty())
-                snapStmt.bind(7, nullptr);
-            else
-                snapStmt.bind(7, gitBranch);
-            if (gitRemote.empty())
-                snapStmt.bind(8, nullptr);
-            else
-                snapStmt.bind(8, gitRemote);
-            snapStmt.bind(9, static_cast<int64_t>(snapshot->fileCount));
+                Statement snapStmt = std::move(snapStmtResult).value();
+                snapStmt.bind(1, snapshot->snapshotId);
+                snapStmt.bind(2, static_cast<int64_t>(snapshot->createdTime));
+                snapStmt.bind(3, directoryPath);
+                if (snapshot->rootTreeHash.empty())
+                    snapStmt.bind(4, nullptr);
+                else
+                    snapStmt.bind(4, snapshot->rootTreeHash);
+                if (snapshotLabel.empty())
+                    snapStmt.bind(5, nullptr);
+                else
+                    snapStmt.bind(5, snapshotLabel);
+                if (gitCommit.empty())
+                    snapStmt.bind(6, nullptr);
+                else
+                    snapStmt.bind(6, gitCommit);
+                if (gitBranch.empty())
+                    snapStmt.bind(7, nullptr);
+                else
+                    snapStmt.bind(7, gitBranch);
+                if (gitRemote.empty())
+                    snapStmt.bind(8, nullptr);
+                else
+                    snapStmt.bind(8, gitRemote);
+                snapStmt.bind(9, static_cast<int64_t>(snapshot->fileCount));
 
-            auto snapExecResult = snapStmt.execute();
-            if (!snapExecResult)
-                return snapExecResult.error();
+                auto snapExecResult = snapStmt.execute();
+                if (!snapExecResult)
+                    return snapExecResult.error();
+            }
+
+            // --- COMMIT ---
+            YAMS_TRY(db.execute("COMMIT"));
+            rollback.dismiss();
+
+            return InsertDocumentWithMetadataResult{docId, insertedNewDocument, metadataTagDelta,
+                                                    metadataWriteCount};
+        });
+
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& update = result.value();
+    if (update.insertedNewDocument) {
+        cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+        cachedTotalSizeBytes_.fetch_add(static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
+                                        std::memory_order_relaxed);
+        applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_, cachedBinaryDocCount_,
+                                 info.fileExtension, 1);
+        cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
+                                      std::memory_order_relaxed);
+        auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+        const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
+        while (nextDepth > currentDepthMax &&
+               !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_relaxed)) {
         }
-
-        // --- COMMIT ---
-        YAMS_TRY(db.execute("COMMIT"));
-        rollback.dismiss();
-
-        return docId;
-    });
+        {
+            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+            updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+        }
+        if (info.contentExtracted) {
+            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (update.metadataWriteCount > 0) {
+        signalCorpusStatsStale();
+        if (update.metadataTagDelta.tagCountDelta > 0) {
+            cachedTagCount_.fetch_add(static_cast<uint64_t>(update.metadataTagDelta.tagCountDelta),
+                                      std::memory_order_relaxed);
+        }
+        if (update.metadataTagDelta.docsWithTagsDelta > 0) {
+            cachedDocsWithTags_.fetch_add(
+                static_cast<uint64_t>(update.metadataTagDelta.docsWithTagsDelta),
+                std::memory_order_relaxed);
+        }
+        const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+        const auto docCount = cachedDocumentCount_.load(std::memory_order_relaxed);
+        const auto tagCount = cachedTagCount_.load(std::memory_order_relaxed);
+        YAMS_DCHECK(docsWithTags <= docCount,
+                    "metadata tag counter invariant violated: docsWithTags <= docCount");
+        YAMS_DCHECK(tagCount >= docsWithTags,
+                    "metadata tag counter invariant violated: tagCount >= docsWithTags");
+        metadataChangeCounter_.fetch_add(update.metadataWriteCount, std::memory_order_release);
+    }
+    return update.docId;
 }
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {
@@ -456,22 +571,19 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
         int64_t priorFileSize = info.fileSize;
         std::string priorExtension = info.fileExtension;
         int priorPathDepth = info.pathDepth;
-        auto priorStmt = db.prepareCached("SELECT file_size FROM documents WHERE id = ?");
+        bool priorContentExtracted = info.contentExtracted;
+
+        auto priorStmt = db.prepareCached(
+            "SELECT file_size, file_extension, path_depth, content_extracted FROM documents "
+            "WHERE id = ?");
         if (priorStmt) {
             auto& stmt = *priorStmt.value();
             YAMS_TRY(stmt.bind(1, info.id));
             if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                 priorFileSize = stmt.getInt64(0);
-            }
-        }
-        auto priorAttrsStmt =
-            db.prepareCached("SELECT file_extension, path_depth FROM documents WHERE id = ?");
-        if (priorAttrsStmt) {
-            auto& stmt = *priorAttrsStmt.value();
-            YAMS_TRY(stmt.bind(1, info.id));
-            if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                priorExtension = stmt.getString(0);
-                priorPathDepth = stmt.getInt(1);
+                priorExtension = stmt.getString(1);
+                priorPathDepth = stmt.getInt(2);
+                priorContentExtracted = stmt.getInt(3) != 0;
             }
         }
 
@@ -524,13 +636,31 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                 updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
                 updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
             }
+            if (info.contentExtracted && !priorContentExtracted) {
+                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+            } else if (!info.contentExtracted && priorContentExtracted) {
+                core::saturating_sub(cachedExtractedCount_, uint64_t{1});
+            }
+
+            YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                        "metadata: extracted count must not exceed total document count after "
+                        "update");
+            signalCorpusStatsStale();
         }
         return Result<void>();
     });
 }
 
 Result<void> MetadataRepository::deleteDocument(int64_t id) {
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<DeleteDocumentResult>([&](Database& db) -> Result<DeleteDocumentResult> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                repository::rollbackIgnoringErrors(db);
+            }
+        });
+
         // Query document flags before deletion to update counters
         bool wasExtracted = false;
         bool wasIndexed = false;
@@ -538,6 +668,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         uint64_t priorFileSize = 0;
         std::string priorExtension;
         int priorPathDepth = 0;
+        YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
         {
             // Use prepareCached for better performance on repeated deletes.
             // wasIndexed checks actual FTS row presence; wasEmbedded checks
@@ -584,47 +715,63 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         if (!execResult)
             return execResult.error();
 
-        // Update component-owned metrics (using saturating subtraction to prevent underflow)
+        DeleteDocumentResult deleteResult;
         if (db.changes() > 0) {
-            core::saturating_sub(cachedDocumentCount_, uint64_t{1});
-            saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, priorExtension, -1);
-            saturatingSubBytes(cachedPathDepthSum_,
-                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
-            }
-            if (wasExtracted) {
-                core::saturating_sub(cachedExtractedCount_, uint64_t{1});
-            }
-            if (wasIndexed) {
-                core::saturating_sub(cachedIndexedCount_, uint64_t{1});
-            }
-            if (wasEmbedded) {
-                core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
-            }
-
-            YAMS_DCHECK(
-                cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: indexed count must not exceed total document count after delete");
-            YAMS_DCHECK(
-                cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: extracted count must not exceed total document count after delete");
-            YAMS_DCHECK(
-                cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: embedded count must not exceed total document count after delete");
+            deleteResult.deleted = true;
+            deleteResult.totalSizeBytesRemoved = priorFileSize;
+            deleteResult.pathDepthSumRemoved = static_cast<uint64_t>(std::max(priorPathDepth, 0));
+            deleteResult.extractedRemoved = wasExtracted;
+            deleteResult.indexedRemoved = wasIndexed;
+            deleteResult.embeddedRemoved = wasEmbedded;
+            deleteResult.removedExtension = std::move(priorExtension);
+            deleteResult.metadataTagDelta = metadataTagDelta;
         }
 
-        return Result<void>();
+        YAMS_TRY(repository::commitOrRollback(db));
+        committed = true;
+        return deleteResult;
     });
 
-    if (result) {
-        // Signal enumeration cache invalidation (document deletion cascades to metadata)
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    if (!result) {
+        return result.error();
     }
-    return result;
+
+    const auto& deleteResult = result.value();
+    if (!deleteResult.deleted) {
+        return Result<void>();
+    }
+
+    core::saturating_sub(cachedDocumentCount_, uint64_t{1});
+    saturatingSubBytes(cachedTotalSizeBytes_, deleteResult.totalSizeBytesRemoved);
+    applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_, cachedBinaryDocCount_,
+                             deleteResult.removedExtension, -1);
+    saturatingSubBytes(cachedPathDepthSum_, deleteResult.pathDepthSumRemoved);
+    {
+        std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+        updateExtensionCountMap(cachedExtensionCounts_, deleteResult.removedExtension, -1);
+    }
+    if (deleteResult.extractedRemoved) {
+        core::saturating_sub(cachedExtractedCount_, uint64_t{1});
+    }
+    if (deleteResult.indexedRemoved) {
+        core::saturating_sub(cachedIndexedCount_, uint64_t{1});
+    }
+    if (deleteResult.embeddedRemoved) {
+        core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
+    }
+    applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                          deleteResult.metadataTagDelta);
+
+    YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: indexed count must not exceed total document count after delete");
+    YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: extracted count must not exceed total document count after delete");
+    YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                "metadata: embedded count must not exceed total document count after delete");
+
+    // Signal enumeration cache invalidation (document deletion cascades to metadata)
+    metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    return Result<void>();
 }
 
 Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_t>& ids) {
@@ -632,19 +779,20 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         return size_t{0};
     }
 
-    auto result = executeQuery<size_t>([&](Database& db) -> Result<size_t> {
-        // Begin transaction for batch operation
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
+    auto result = executeQuery<DeleteDocumentsBatchResult>(
+        [&](Database& db) -> Result<DeleteDocumentsBatchResult> {
+            // Begin transaction for batch operation
+            auto beginResult = beginTransactionWithRetry(db);
+            if (!beginResult) {
+                return beginResult.error();
+            }
 
-        size_t deletedCount = 0;
+            DeleteDocumentsBatchResult batchResult;
 
-        // Prepare statement for checking document flags.
-        // wasIndexed checks actual FTS row presence; wasEmbedded checks
-        // document_embeddings_status.has_embedding.
-        auto checkStmtResult = db.prepareCached(R"(
+            // Prepare statement for checking document flags.
+            // wasIndexed checks actual FTS row presence; wasEmbedded checks
+            // document_embeddings_status.has_embedding.
+            auto checkStmtResult = db.prepareCached(R"(
             SELECT d.id, d.content_extracted, d.file_size, d.file_extension, d.path_depth,
                    CASE WHEN EXISTS(
                        SELECT 1 FROM documents_fts WHERE rowid = d.id
@@ -654,111 +802,137 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             LEFT JOIN document_embeddings_status des ON des.document_id = d.id
             WHERE d.id = ?
         )");
-        if (!checkStmtResult) {
-            db.execute("ROLLBACK");
-            return checkStmtResult.error();
-        }
-        auto& checkStmt = *checkStmtResult.value();
-
-        // Prepare statement for deletion
-        auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
-        if (!deleteStmtResult) {
-            db.execute("ROLLBACK");
-            return deleteStmtResult.error();
-        }
-        auto& deleteStmt = *deleteStmtResult.value();
-
-        // Process each document
-        for (int64_t id : ids) {
-            // Check flags before deletion
-            bool wasExtracted = false;
-            bool wasIndexed = false;
-            bool wasEmbedded = false;
-            uint64_t priorFileSize = 0;
-            std::string priorExtension;
-            int priorPathDepth = 0;
-
-            if (auto r = checkStmt.reset(); !r) {
+            if (!checkStmtResult) {
                 db.execute("ROLLBACK");
-                return r.error();
+                return checkStmtResult.error();
             }
-            if (auto r = checkStmt.bind(1, id); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
-                wasExtracted = checkStmt.getInt(1) != 0;
-                priorFileSize = static_cast<uint64_t>(std::max<int64_t>(checkStmt.getInt64(2), 0));
-                priorExtension = checkStmt.getString(3);
-                priorPathDepth = checkStmt.getInt(4);
-                wasIndexed = checkStmt.getInt(5) != 0;
-                wasEmbedded = checkStmt.getInt(6) != 0;
-            }
+            auto& checkStmt = *checkStmtResult.value();
 
-            // Delete document
-            if (auto r = deleteStmt.reset(); !r) {
+            // Prepare statement for deletion
+            auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
+            if (!deleteStmtResult) {
                 db.execute("ROLLBACK");
-                return r.error();
+                return deleteStmtResult.error();
             }
-            if (auto r = deleteStmt.bind(1, id); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto execRes = deleteStmt.execute(); !execRes) {
-                db.execute("ROLLBACK");
-                return execRes.error();
-            }
+            auto& deleteStmt = *deleteStmtResult.value();
 
-            // Update metrics
-            if (db.changes() > 0) {
-                deletedCount++;
-                core::saturating_sub(cachedDocumentCount_, uint64_t{1});
-                saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
-                applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                         cachedBinaryDocCount_, priorExtension, -1);
-                saturatingSubBytes(cachedPathDepthSum_,
-                                   static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-                {
-                    std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                    updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
+            // Process each document
+            for (int64_t id : ids) {
+                // Check flags before deletion
+                bool wasExtracted = false;
+                bool wasIndexed = false;
+                bool wasEmbedded = false;
+                uint64_t priorFileSize = 0;
+                std::string priorExtension;
+                int priorPathDepth = 0;
+                YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
+
+                if (auto r = checkStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
                 }
-                if (wasExtracted) {
-                    core::saturating_sub(cachedExtractedCount_, uint64_t{1});
+                if (auto r = checkStmt.bind(1, id); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
                 }
-                if (wasIndexed) {
-                    core::saturating_sub(cachedIndexedCount_, uint64_t{1});
+                auto stepRes = checkStmt.step();
+                if (!stepRes) {
+                    db.execute("ROLLBACK");
+                    return stepRes.error();
                 }
-                if (wasEmbedded) {
-                    core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
+                if (stepRes.value()) {
+                    wasExtracted = checkStmt.getInt(1) != 0;
+                    priorFileSize =
+                        static_cast<uint64_t>(std::max<int64_t>(checkStmt.getInt64(2), 0));
+                    priorExtension = checkStmt.getString(3);
+                    priorPathDepth = checkStmt.getInt(4);
+                    wasIndexed = checkStmt.getInt(5) != 0;
+                    wasEmbedded = checkStmt.getInt(6) != 0;
                 }
 
-                YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: indexed count must not exceed total document count after "
-                            "batch delete");
-                YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: extracted count must not exceed total document count after "
-                            "batch delete");
-                YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: embedded count must not exceed total document count after "
-                            "batch delete");
+                // Delete document
+                if (auto r = deleteStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = deleteStmt.bind(1, id); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto execRes = deleteStmt.execute(); !execRes) {
+                    db.execute("ROLLBACK");
+                    return execRes.error();
+                }
+
+                // Update metrics
+                if (db.changes() > 0) {
+                    batchResult.deletedCount++;
+                    batchResult.totalSizeBytesRemoved += priorFileSize;
+                    batchResult.pathDepthSumRemoved +=
+                        static_cast<uint64_t>(std::max(priorPathDepth, 0));
+                    batchResult.metadataTagDelta.tagCountDelta += metadataTagDelta.tagCountDelta;
+                    batchResult.metadataTagDelta.docsWithTagsDelta +=
+                        metadataTagDelta.docsWithTagsDelta;
+                    if (!priorExtension.empty()) {
+                        batchResult.removedExtensionCounts[priorExtension] += 1;
+                    }
+                    if (wasExtracted) {
+                        batchResult.extractedRemoved += 1;
+                    }
+                    if (wasIndexed) {
+                        batchResult.indexedRemoved += 1;
+                    }
+                    if (wasEmbedded) {
+                        batchResult.embeddedRemoved += 1;
+                    }
+                }
             }
-        }
 
-        // Commit transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
+            // Commit transaction
+            auto commitResult = db.execute("COMMIT");
+            if (!commitResult) {
+                db.execute("ROLLBACK");
+                return commitResult.error();
+            }
 
-        return deletedCount;
-    });
+            return batchResult;
+        });
 
     if (result) {
+        const auto& batchResult = result.value();
+        core::saturating_sub(cachedDocumentCount_, static_cast<uint64_t>(batchResult.deletedCount));
+        saturatingSubBytes(cachedTotalSizeBytes_, batchResult.totalSizeBytesRemoved);
+        saturatingSubBytes(cachedPathDepthSum_, batchResult.pathDepthSumRemoved);
+        for (const auto& [extension, count] : batchResult.removedExtensionCounts) {
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, extension, -count);
+        }
+        {
+            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+            for (const auto& [extension, count] : batchResult.removedExtensionCounts) {
+                updateExtensionCountMap(cachedExtensionCounts_, extension, -count);
+            }
+        }
+        core::saturating_sub(cachedExtractedCount_, batchResult.extractedRemoved);
+        core::saturating_sub(cachedIndexedCount_, batchResult.indexedRemoved);
+        core::saturating_sub(cachedEmbeddedCount_, batchResult.embeddedRemoved);
+        applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                              batchResult.metadataTagDelta);
+
+        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: indexed count must not exceed total document count after batch "
+                    "delete");
+        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: extracted count must not exceed total document count after batch "
+                    "delete");
+        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
+                    "metadata: embedded count must not exceed total document count after batch "
+                    "delete");
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+        return batchResult.deletedCount;
     }
-    return result;
+    return result.error();
 }
 
 Result<size_t> MetadataRepository::updateDocumentsMimeBatch(

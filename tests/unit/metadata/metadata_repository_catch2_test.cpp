@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -25,6 +26,10 @@ using namespace yams;
 using namespace yams::metadata;
 using namespace yams::search;
 
+// Catch2's expression-decomposition macros intentionally overload operator<=,
+// which triggers false positives from chained-comparison linters on ordinary
+// CHECK/REQUIRE assertions in this file.
+// NOLINTBEGIN(bugprone-chained-comparison)
 namespace {
 
 std::filesystem::path tempDbPath(const char* prefix) {
@@ -63,12 +68,12 @@ TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[me
     const auto expected = computePathDerivedValues(info.filePath);
     populatePathDerivedFields(info);
 
-    CHECK(info.filePath == expected.normalizedPath);
-    CHECK(info.pathPrefix == expected.pathPrefix);
-    CHECK(info.reversePath == expected.reversePath);
-    CHECK(info.pathHash == expected.pathHash);
-    CHECK(info.parentHash == expected.parentHash);
-    CHECK(info.pathDepth == expected.pathDepth);
+    CHECK((info.filePath == expected.normalizedPath));
+    CHECK((info.pathPrefix == expected.pathPrefix));
+    CHECK((info.reversePath == expected.reversePath));
+    CHECK((info.pathHash == expected.pathHash));
+    CHECK((info.parentHash == expected.parentHash));
+    CHECK((info.pathDepth == expected.pathDepth));
 }
 
 struct MetadataRepositoryFixture {
@@ -81,7 +86,7 @@ struct MetadataRepositoryFixture {
 
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
         auto initResult = pool_->initialize();
-        REQUIRE(initResult.has_value());
+        REQUIRE((initResult.has_value()));
 
         repository_ = std::make_unique<MetadataRepository>(*pool_);
     }
@@ -99,6 +104,79 @@ struct MetadataRepositoryFixture {
     std::unique_ptr<MetadataRepository> repository_;
 };
 
+struct EmbeddingStatusRow {
+    bool hasEmbedding = false;
+    std::optional<std::string> modelId;
+    int64_t chunkCount = 0;
+};
+
+Result<std::optional<EmbeddingStatusRow>> getEmbeddingStatusRow(ConnectionPool& pool,
+                                                                const std::string& hash) {
+    auto connResult = pool.acquire();
+    if (!connResult) {
+        return connResult.error();
+    }
+
+    auto& db = **connResult.value();
+    auto stmtResult = db.prepare(R"(
+        SELECT COALESCE(des.has_embedding, 0), des.model_id, COALESCE(des.chunk_count, 0)
+        FROM documents d
+        LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+        WHERE d.sha256_hash = ?
+    )");
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto& stmt = stmtResult.value();
+    if (auto bindResult = stmt.bind(1, hash); !bindResult) {
+        return bindResult.error();
+    }
+
+    auto stepResult = stmt.step();
+    if (!stepResult) {
+        return stepResult.error();
+    }
+    if (!stepResult.value()) {
+        return std::optional<EmbeddingStatusRow>{};
+    }
+
+    EmbeddingStatusRow row;
+    row.hasEmbedding = stmt.getInt(0) != 0;
+    if (!stmt.isNull(1)) {
+        row.modelId = stmt.getString(1);
+    }
+    row.chunkCount = stmt.getInt64(2);
+    return std::optional<EmbeddingStatusRow>{row};
+}
+
+Result<void> setEmbeddingChunkCount(ConnectionPool& pool, const std::string& hash,
+                                    int64_t chunkCount) {
+    auto connResult = pool.acquire();
+    if (!connResult) {
+        return connResult.error();
+    }
+
+    auto& db = **connResult.value();
+    auto stmtResult = db.prepare(R"(
+        UPDATE document_embeddings_status
+        SET chunk_count = ?
+        WHERE document_id = (SELECT id FROM documents WHERE sha256_hash = ?)
+    )");
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto& stmt = stmtResult.value();
+    if (auto bindCount = stmt.bind(1, chunkCount); !bindCount) {
+        return bindCount.error();
+    }
+    if (auto bindHash = stmt.bind(2, hash); !bindHash) {
+        return bindHash.error();
+    }
+    return stmt.execute();
+}
+
 } // namespace
 
 TEST_CASE("MetadataRepository: path-derived fields support exact path lookup",
@@ -106,20 +184,20 @@ TEST_CASE("MetadataRepository: path-derived fields support exact path lookup",
     MetadataRepositoryFixture fix;
 
     auto docInfo = makeDocumentWithPath("/tmp/../tmp/yams/path-index.md", "path-index-hash");
-    REQUIRE(!docInfo.pathHash.empty());
-    REQUIRE(!docInfo.reversePath.empty());
-    REQUIRE(docInfo.pathDepth > 0);
+    REQUIRE((!docInfo.pathHash.empty()));
+    REQUIRE((!docInfo.reversePath.empty()));
+    REQUIRE((docInfo.pathDepth > 0));
 
     auto insert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(insert.has_value());
+    REQUIRE((insert.has_value()));
 
     auto found = fix.repository_->findDocumentByExactPath(docInfo.filePath);
-    REQUIRE(found.has_value());
-    REQUIRE(found.value().has_value());
-    CHECK(found.value()->pathHash == docInfo.pathHash);
-    CHECK(found.value()->pathPrefix == docInfo.pathPrefix);
-    CHECK(found.value()->parentHash == docInfo.parentHash);
-    CHECK(found.value()->pathDepth == docInfo.pathDepth);
+    REQUIRE((found.has_value()));
+    REQUIRE((found.value().has_value()));
+    CHECK((found.value()->pathHash == docInfo.pathHash));
+    CHECK((found.value()->pathPrefix == docInfo.pathPrefix));
+    CHECK((found.value()->parentHash == docInfo.parentHash));
+    CHECK((found.value()->pathDepth == docInfo.pathDepth));
 }
 
 TEST_CASE("MetadataRepository: insert and get document", "[unit][metadata][repository]") {
@@ -135,21 +213,21 @@ TEST_CASE("MetadataRepository: insert and get document", "[unit][metadata][repos
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto result = fix.repository_->insertDocument(docInfo);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto docId = result.value();
-    CHECK(docId > 0);
+    CHECK((docId > 0));
 
     auto getResult = fix.repository_->getDocument(docId);
-    REQUIRE(getResult.has_value());
-    REQUIRE(getResult.value().has_value());
+    REQUIRE((getResult.has_value()));
+    REQUIRE((getResult.value().has_value()));
 
     auto retrievedDoc = getResult.value().value();
-    CHECK(retrievedDoc.id == docId);
-    CHECK(retrievedDoc.sha256Hash == docInfo.sha256Hash);
-    CHECK(retrievedDoc.fileName == docInfo.fileName);
-    CHECK(retrievedDoc.fileSize == docInfo.fileSize);
-    CHECK(retrievedDoc.mimeType == docInfo.mimeType);
+    CHECK((retrievedDoc.id == docId));
+    CHECK((retrievedDoc.sha256Hash == docInfo.sha256Hash));
+    CHECK((retrievedDoc.fileName == docInfo.fileName));
+    CHECK((retrievedDoc.fileSize == docInfo.fileSize));
+    CHECK((retrievedDoc.mimeType == docInfo.mimeType));
 }
 
 TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
@@ -167,19 +245,19 @@ TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
     auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
     auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
 
-    REQUIRE(writePool->initialize().has_value());
-    REQUIRE(readPool->initialize().has_value());
+    REQUIRE((writePool->initialize().has_value()));
+    REQUIRE((readPool->initialize().has_value()));
 
     auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool.txt", "dual-pool-hash");
     auto insertResult = repository->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     auto readOk = repository->getDocumentByHash("dual-pool-hash");
-    REQUIRE(readOk.has_value());
-    REQUIRE(readOk.value().has_value());
+    REQUIRE((readOk.has_value()));
+    REQUIRE((readOk.value().has_value()));
 
     readPool->shutdown();
 
@@ -190,7 +268,7 @@ TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
     value.value = "still-writeable";
     value.type = MetadataValueType::String;
     auto writeAfterReadPoolDown = repository->setMetadata(docId, "dual_pool_test", value);
-    REQUIRE(writeAfterReadPoolDown.has_value());
+    REQUIRE((writeAfterReadPoolDown.has_value()));
 
     repository.reset();
     writePool->shutdown();
@@ -216,24 +294,24 @@ TEST_CASE("MetadataRepository: dual-pool session count read route isolation",
     auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
     auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
 
-    REQUIRE(writePool->initialize().has_value());
-    REQUIRE(readPool->initialize().has_value());
+    REQUIRE((writePool->initialize().has_value()));
+    REQUIRE((readPool->initialize().has_value()));
 
     auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool-session.txt", "dual-pool-session-hash");
     auto insertResult = repository->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     MetadataValue sessionValue;
     sessionValue.value = "sess-123";
     sessionValue.type = MetadataValueType::String;
-    REQUIRE(repository->setMetadata(docId, "session_id", sessionValue).has_value());
+    REQUIRE((repository->setMetadata(docId, "session_id", sessionValue).has_value()));
 
     auto countOk = repository->countDocumentsBySessionId("sess-123");
-    REQUIRE(countOk.has_value());
-    REQUIRE(countOk.value() == 1);
+    REQUIRE((countOk.has_value()));
+    REQUIRE((countOk.value() == 1));
 
     readPool->shutdown();
 
@@ -243,7 +321,7 @@ TEST_CASE("MetadataRepository: dual-pool session count read route isolation",
     MetadataValue writeValue;
     writeValue.value = "still-writeable-after-read-pool-down";
     writeValue.type = MetadataValueType::String;
-    REQUIRE(repository->setMetadata(docId, "dual_pool_write_check", writeValue).has_value());
+    REQUIRE((repository->setMetadata(docId, "dual_pool_write_check", writeValue).has_value()));
 
     repository.reset();
     writePool->shutdown();
@@ -269,17 +347,17 @@ TEST_CASE("MetadataRepository: dual-pool embedding-hash read route isolation",
     auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
     auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
 
-    REQUIRE(writePool->initialize().has_value());
-    REQUIRE(readPool->initialize().has_value());
+    REQUIRE((writePool->initialize().has_value()));
+    REQUIRE((readPool->initialize().has_value()));
 
     auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool-embed-hash.txt", "dual-pool-embed-hash");
     auto insertResult = repository->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
 
     auto readOk = repository->hasDocumentEmbeddingByHash("dual-pool-embed-hash");
-    REQUIRE(readOk.has_value());
+    REQUIRE((readOk.has_value()));
     REQUIRE_FALSE(readOk.value());
 
     readPool->shutdown();
@@ -305,8 +383,8 @@ TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed has
 
     auto docAId = fix.repository_->insertDocument(docA);
     auto docBId = fix.repository_->insertDocument(docB);
-    REQUIRE(docAId.has_value());
-    REQUIRE(docBId.has_value());
+    REQUIRE((docAId.has_value()));
+    REQUIRE((docBId.has_value()));
 
     REQUIRE(fix.repository_
                 ->updateDocumentEmbeddingStatusByHash("reconcile-hash-a", true, "legacy-embed")
@@ -317,10 +395,10 @@ TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed has
 
     auto beforeA = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-a");
     auto beforeB = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-b");
-    REQUIRE(beforeA.has_value());
-    REQUIRE(beforeB.has_value());
-    CHECK(beforeA.value());
-    CHECK(beforeB.value());
+    REQUIRE((beforeA.has_value()));
+    REQUIRE((beforeB.has_value()));
+    CHECK((beforeA.value()));
+    CHECK((beforeB.value()));
 
     REQUIRE(fix.repository_
                 ->reconcileDocumentEmbeddingStatusByHashes({"reconcile-hash-a", "missing-hash"})
@@ -328,14 +406,156 @@ TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed has
 
     auto afterA = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-a");
     auto afterB = fix.repository_->hasDocumentEmbeddingByHash("reconcile-hash-b");
-    REQUIRE(afterA.has_value());
-    REQUIRE(afterB.has_value());
-    CHECK(afterA.value());
+    REQUIRE((afterA.has_value()));
+    REQUIRE((afterB.has_value()));
+    CHECK((afterA.value()));
     CHECK_FALSE(afterB.value());
 
     auto stats = fix.repository_->getCorpusStats();
-    REQUIRE(stats.has_value());
-    CHECK(stats.value().embeddingCount == 1);
+    REQUIRE((stats.has_value()));
+    CHECK((stats.value().embeddingCount == 1));
+}
+
+TEST_CASE(
+    "MetadataRepository: batch embedding status update ignores missing hashes and duplicate inputs",
+    "[unit][metadata][repository][embeddings]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/batch_embed.txt", "batch-embed-hash");
+    REQUIRE((fix.repository_->insertDocument(doc).has_value()));
+
+    REQUIRE(fix.repository_->batchUpdateDocumentEmbeddingStatusByHashes({}, true, "ignored-model")
+                .has_value());
+
+    auto warmStats = fix.repository_->getCorpusStats();
+    REQUIRE((warmStats.has_value()));
+    CHECK((warmStats.value().embeddingCount == 0));
+
+    REQUIRE(
+        fix.repository_
+            ->batchUpdateDocumentEmbeddingStatusByHashes(
+                {"missing-batch-hash", "batch-embed-hash", "batch-embed-hash"}, true, "batch-model")
+            .has_value());
+
+    auto hasEmbedding = fix.repository_->hasDocumentEmbeddingByHash("batch-embed-hash");
+    REQUIRE((hasEmbedding.has_value()));
+    CHECK((hasEmbedding.value()));
+
+    auto missingEmbedding = fix.repository_->hasDocumentEmbeddingByHash("missing-batch-hash");
+    REQUIRE((missingEmbedding.has_value()));
+    CHECK_FALSE(missingEmbedding.value());
+
+    auto storedStatus = getEmbeddingStatusRow(*fix.pool_, "batch-embed-hash");
+    REQUIRE((storedStatus.has_value()));
+    REQUIRE((storedStatus.value().has_value()));
+    CHECK((storedStatus.value()->hasEmbedding));
+    REQUIRE((storedStatus.value()->modelId.has_value()));
+    CHECK((storedStatus.value()->modelId.value() == "batch-model"));
+
+    auto afterEnableStats = fix.repository_->getCorpusStats();
+    REQUIRE((afterEnableStats.has_value()));
+    CHECK((afterEnableStats.value().embeddingCount == 1));
+
+    REQUIRE(fix.repository_
+                ->batchUpdateDocumentEmbeddingStatusByHashes(
+                    {"batch-embed-hash", "missing-batch-hash", "batch-embed-hash"}, false, "")
+                .has_value());
+
+    auto disabledStatus = getEmbeddingStatusRow(*fix.pool_, "batch-embed-hash");
+    REQUIRE((disabledStatus.has_value()));
+    REQUIRE((disabledStatus.value().has_value()));
+    CHECK_FALSE(disabledStatus.value()->hasEmbedding);
+    CHECK_FALSE(disabledStatus.value()->modelId.has_value());
+
+    auto afterDisableStats = fix.repository_->getCorpusStats();
+    REQUIRE((afterDisableStats.has_value()));
+    CHECK((afterDisableStats.value().embeddingCount == 0));
+}
+
+TEST_CASE("MetadataRepository: reconcile empty vector-backed hash set clears embedding ownership",
+          "[unit][metadata][repository][embeddings]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/reconcile_clear_a.txt", "reconcile-clear-hash-a");
+    auto docB = makeDocumentWithPath("/tmp/reconcile_clear_b.txt", "reconcile-clear-hash-b");
+    REQUIRE((fix.repository_->insertDocument(docA).has_value()));
+    REQUIRE((fix.repository_->insertDocument(docB).has_value()));
+
+    REQUIRE(
+        fix.repository_
+            ->updateDocumentEmbeddingStatusByHash("reconcile-clear-hash-a", true, "legacy-model")
+            .has_value());
+    REQUIRE(
+        fix.repository_
+            ->updateDocumentEmbeddingStatusByHash("reconcile-clear-hash-b", true, "legacy-model")
+            .has_value());
+    REQUIRE((setEmbeddingChunkCount(*fix.pool_, "reconcile-clear-hash-a", 4).has_value()));
+    REQUIRE((setEmbeddingChunkCount(*fix.pool_, "reconcile-clear-hash-b", 6).has_value()));
+
+    auto beforeStats = fix.repository_->getCorpusStats();
+    REQUIRE((beforeStats.has_value()));
+    CHECK((beforeStats.value().embeddingCount == 2));
+
+    REQUIRE((fix.repository_->reconcileDocumentEmbeddingStatusByHashes({}, "").has_value()));
+
+    auto statusA = getEmbeddingStatusRow(*fix.pool_, "reconcile-clear-hash-a");
+    auto statusB = getEmbeddingStatusRow(*fix.pool_, "reconcile-clear-hash-b");
+    REQUIRE((statusA.has_value()));
+    REQUIRE((statusB.has_value()));
+    REQUIRE((statusA.value().has_value()));
+    REQUIRE((statusB.value().has_value()));
+    CHECK_FALSE(statusA.value()->hasEmbedding);
+    CHECK_FALSE(statusB.value()->hasEmbedding);
+    CHECK_FALSE(statusA.value()->modelId.has_value());
+    CHECK_FALSE(statusB.value()->modelId.has_value());
+    CHECK((statusA.value()->chunkCount == 0));
+    CHECK((statusB.value()->chunkCount == 0));
+
+    auto afterStats = fix.repository_->getCorpusStats();
+    REQUIRE((afterStats.has_value()));
+    CHECK((afterStats.value().embeddingCount == 0));
+}
+
+TEST_CASE("MetadataRepository: reconcile preserves chunk count and omitted model ids",
+          "[unit][metadata][repository][embeddings]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/reconcile_preserve.txt", "reconcile-preserve-hash");
+    REQUIRE((fix.repository_->insertDocument(doc).has_value()));
+    REQUIRE(
+        fix.repository_
+            ->updateDocumentEmbeddingStatusByHash("reconcile-preserve-hash", true, "legacy-model")
+            .has_value());
+    REQUIRE((setEmbeddingChunkCount(*fix.pool_, "reconcile-preserve-hash", 7).has_value()));
+
+    REQUIRE(
+        fix.repository_->reconcileDocumentEmbeddingStatusByHashes({"reconcile-preserve-hash"}, "")
+            .has_value());
+
+    auto preserved = getEmbeddingStatusRow(*fix.pool_, "reconcile-preserve-hash");
+    REQUIRE((preserved.has_value()));
+    REQUIRE((preserved.value().has_value()));
+    CHECK((preserved.value()->hasEmbedding));
+    REQUIRE((preserved.value()->modelId.has_value()));
+    CHECK((preserved.value()->modelId.value() == "legacy-model"));
+    CHECK((preserved.value()->chunkCount == 7));
+
+    REQUIRE(fix.repository_
+                ->reconcileDocumentEmbeddingStatusByHashes(
+                    {"reconcile-preserve-hash", "reconcile-preserve-hash"}, "fresh-model")
+                .has_value());
+
+    auto updated = getEmbeddingStatusRow(*fix.pool_, "reconcile-preserve-hash");
+    REQUIRE((updated.has_value()));
+    REQUIRE((updated.value().has_value()));
+    CHECK((updated.value()->hasEmbedding));
+    REQUIRE((updated.value()->modelId.has_value()));
+    CHECK((updated.value()->modelId.value() == "fresh-model"));
+    CHECK((updated.value()->chunkCount == 7));
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE((stats.has_value()));
+    CHECK((stats.value().embeddingCount == 1));
 }
 
 TEST_CASE("MetadataRepository: vector hash ownership ignores missing documents",
@@ -345,18 +565,115 @@ TEST_CASE("MetadataRepository: vector hash ownership ignores missing documents",
     auto docA = makeDocumentWithPath("/tmp/existing_vector_a.txt", "existing-vector-hash-a");
     auto docB = makeDocumentWithPath("/tmp/existing_vector_b.txt", "existing-vector-hash-b");
 
-    REQUIRE(fix.repository_->insertDocument(docA).has_value());
-    REQUIRE(fix.repository_->insertDocument(docB).has_value());
+    REQUIRE((fix.repository_->insertDocument(docA).has_value()));
+    REQUIRE((fix.repository_->insertDocument(docB).has_value()));
 
     auto existing = fix.repository_->getExistingDocumentHashes(
         {"existing-vector-hash-a", "orphan-vector-hash", "existing-vector-hash-b",
          "existing-vector-hash-a"});
 
-    REQUIRE(existing.has_value());
-    CHECK(existing.value().size() == 2);
-    CHECK(existing.value().contains("existing-vector-hash-a"));
-    CHECK(existing.value().contains("existing-vector-hash-b"));
+    REQUIRE((existing.has_value()));
+    CHECK((existing.value().size() == 2));
+    CHECK((existing.value().contains("existing-vector-hash-a")));
+    CHECK((existing.value().contains("existing-vector-hash-b")));
     CHECK_FALSE(existing.value().contains("orphan-vector-hash"));
+}
+
+TEST_CASE("MetadataRepository: repair status update increments attempts and persists state",
+          "[unit][metadata][repository][repair]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/repair-single.txt", "repair-single-hash");
+    auto insert = fix.repository_->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+    const auto docId = insert.value();
+
+    REQUIRE(
+        (fix.repository_->updateDocumentRepairStatus("repair-single-hash", RepairStatus::Processing)
+             .has_value()));
+
+    auto firstRead = fix.repository_->getDocument(docId);
+    REQUIRE((firstRead.has_value()));
+    REQUIRE((firstRead.value().has_value()));
+    CHECK((firstRead.value()->repairStatus == RepairStatus::Processing));
+    CHECK((firstRead.value()->repairAttempts == 1));
+    CHECK((firstRead.value()->repairAttemptedAt.time_since_epoch().count() > 0));
+
+    const auto firstAttemptedAt = firstRead.value()->repairAttemptedAt.time_since_epoch().count();
+
+    REQUIRE((fix.repository_->updateDocumentRepairStatus("repair-single-hash", RepairStatus::Failed)
+                 .has_value()));
+
+    auto secondRead = fix.repository_->getDocument(docId);
+    REQUIRE((secondRead.has_value()));
+    REQUIRE((secondRead.value().has_value()));
+    CHECK((secondRead.value()->repairStatus == RepairStatus::Failed));
+    CHECK((secondRead.value()->repairAttempts == 2));
+    CHECK((secondRead.value()->repairAttemptedAt.time_since_epoch().count() >= firstAttemptedAt));
+}
+
+TEST_CASE("MetadataRepository: repair status update ignores missing hash",
+          "[unit][metadata][repository][repair]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/repair-missing-control.txt", "repair-missing-control");
+    auto insert = fix.repository_->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    REQUIRE(
+        (fix.repository_->updateDocumentRepairStatus("repair-missing-hash", RepairStatus::Completed)
+             .has_value()));
+
+    auto control = fix.repository_->getDocument(insert.value());
+    REQUIRE((control.has_value()));
+    REQUIRE((control.value().has_value()));
+    CHECK((control.value()->repairStatus == RepairStatus::Pending));
+    CHECK((control.value()->repairAttempts == 0));
+    CHECK((control.value()->repairAttemptedAt.time_since_epoch().count() == 0));
+}
+
+TEST_CASE("MetadataRepository: batch repair status update skips missing hashes and preserves no-op "
+          "empty batch",
+          "[unit][metadata][repository][repair]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/repair-batch-a.txt", "repair-batch-hash-a");
+    auto docB = makeDocumentWithPath("/tmp/repair-batch-b.txt", "repair-batch-hash-b");
+    auto insertA = fix.repository_->insertDocument(docA);
+    auto insertB = fix.repository_->insertDocument(docB);
+    REQUIRE((insertA.has_value()));
+    REQUIRE((insertB.has_value()));
+
+    REQUIRE((fix.repository_->batchUpdateDocumentRepairStatuses({}, RepairStatus::Processing)
+                 .has_value()));
+
+    auto beforeA = fix.repository_->getDocument(insertA.value());
+    auto beforeB = fix.repository_->getDocument(insertB.value());
+    REQUIRE((beforeA.has_value()));
+    REQUIRE((beforeA.value().has_value()));
+    REQUIRE((beforeB.has_value()));
+    REQUIRE((beforeB.value().has_value()));
+    CHECK((beforeA.value()->repairAttempts == 0));
+    CHECK((beforeB.value()->repairAttempts == 0));
+
+    REQUIRE((fix.repository_
+                 ->batchUpdateDocumentRepairStatuses(
+                     {"repair-batch-hash-a", "repair-missing-hash", "repair-batch-hash-b"},
+                     RepairStatus::Processing)
+                 .has_value()));
+
+    auto afterA = fix.repository_->getDocument(insertA.value());
+    auto afterB = fix.repository_->getDocument(insertB.value());
+    REQUIRE((afterA.has_value()));
+    REQUIRE((afterA.value().has_value()));
+    REQUIRE((afterB.has_value()));
+    REQUIRE((afterB.value().has_value()));
+    CHECK((afterA.value()->repairStatus == RepairStatus::Processing));
+    CHECK((afterB.value()->repairStatus == RepairStatus::Processing));
+    CHECK((afterA.value()->repairAttempts == 1));
+    CHECK((afterB.value()->repairAttempts == 1));
+    CHECK((afterA.value()->repairAttemptedAt.time_since_epoch().count() > 0));
+    CHECK((afterB.value()->repairAttemptedAt.time_since_epoch().count() > 0));
 }
 
 TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
@@ -372,7 +689,7 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
     doc1.modifiedTime = doc1.createdTime;
     doc1.indexedTime = doc1.createdTime;
     auto doc1Res = fix.repository_->insertDocument(doc1);
-    REQUIRE(doc1Res.has_value());
+    REQUIRE((doc1Res.has_value()));
 
     // doc2: recent document (inside filter range)
     auto doc2 = makeDocumentWithPath("/tmp/b.txt", "hash-b");
@@ -380,7 +697,7 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
     doc2.modifiedTime = nowSec;
     doc2.indexedTime = nowSec;
     auto doc2Res = fix.repository_->insertDocument(doc2);
-    REQUIRE(doc2Res.has_value());
+    REQUIRE((doc2Res.has_value()));
 
     // doc3: another recent document (inside filter range)
     auto doc3 = makeDocumentWithPath("/tmp/c.txt", "hash-c");
@@ -388,21 +705,21 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
     doc3.modifiedTime = nowSec;
     doc3.indexedTime = nowSec;
     auto doc3Res = fix.repository_->insertDocument(doc3);
-    REQUIRE(doc3Res.has_value());
+    REQUIRE((doc3Res.has_value()));
 
     MetadataValue v1;
     v1.value = "PBI-070";
     v1.type = MetadataValueType::String;
     // doc1 gets PBI-070 but is outside time filter
-    REQUIRE(fix.repository_->setMetadata(doc1Res.value(), "pbi", v1).has_value());
+    REQUIRE((fix.repository_->setMetadata(doc1Res.value(), "pbi", v1).has_value()));
     // doc2 gets PBI-070 (inside time filter)
-    REQUIRE(fix.repository_->setMetadata(doc2Res.value(), "pbi", v1).has_value());
+    REQUIRE((fix.repository_->setMetadata(doc2Res.value(), "pbi", v1).has_value()));
 
     MetadataValue v2;
     v2.value = "PBI-071";
     v2.type = MetadataValueType::String;
     // doc3 gets PBI-071 (inside time filter)
-    REQUIRE(fix.repository_->setMetadata(doc3Res.value(), "pbi", v2).has_value());
+    REQUIRE((fix.repository_->setMetadata(doc3Res.value(), "pbi", v2).has_value()));
 
     DocumentQueryOptions opts;
     opts.modifiedAfter = std::chrono::duration_cast<std::chrono::seconds>(
@@ -410,11 +727,11 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
                              .count();
 
     auto countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
-    REQUIRE(countsRes.has_value());
+    REQUIRE((countsRes.has_value()));
 
     const auto& map = countsRes.value();
     auto it = map.find("pbi");
-    REQUIRE(it != map.end());
+    REQUIRE((it != map.end()));
 
     std::unordered_map<std::string, int64_t> counts;
     for (const auto& row : it->second) {
@@ -423,9 +740,9 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
 
     // Only doc2 (PBI-070) and doc3 (PBI-071) are in the time range
     // doc1 (PBI-070) is filtered out because it's 48 hours old
-    REQUIRE(counts.size() == 2);
-    REQUIRE(counts["PBI-070"] == 1);
-    REQUIRE(counts["PBI-071"] == 1);
+    REQUIRE((counts.size() == 2));
+    REQUIRE((counts["PBI-070"] == 1));
+    REQUIRE((counts["PBI-071"] == 1));
 }
 
 TEST_CASE("MetadataRepository: metadata value counts materialized view stays consistent",
@@ -437,51 +754,51 @@ TEST_CASE("MetadataRepository: metadata value counts materialized view stays con
 
     auto docARes = fix.repository_->insertDocument(docA);
     auto docBRes = fix.repository_->insertDocument(docB);
-    REQUIRE(docARes.has_value());
-    REQUIRE(docBRes.has_value());
+    REQUIRE((docARes.has_value()));
+    REQUIRE((docBRes.has_value()));
 
     MetadataValue v1;
     v1.value = "PBI-500";
     v1.type = MetadataValueType::String;
-    REQUIRE(fix.repository_->setMetadata(docARes.value(), "pbi", v1).has_value());
-    REQUIRE(fix.repository_->setMetadata(docBRes.value(), "pbi", v1).has_value());
+    REQUIRE((fix.repository_->setMetadata(docARes.value(), "pbi", v1).has_value()));
+    REQUIRE((fix.repository_->setMetadata(docBRes.value(), "pbi", v1).has_value()));
 
     DocumentQueryOptions opts;
     auto countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
-    REQUIRE(countsRes.has_value());
+    REQUIRE((countsRes.has_value()));
     auto it = countsRes.value().find("pbi");
-    REQUIRE(it != countsRes.value().end());
-    REQUIRE(it->second.size() == 1);
-    CHECK(it->second.front().value == "PBI-500");
-    CHECK(it->second.front().count == 2);
+    REQUIRE((it != countsRes.value().end()));
+    REQUIRE((it->second.size() == 1));
+    CHECK((it->second.front().value == "PBI-500"));
+    CHECK((it->second.front().count == 2));
 
     MetadataValue v2;
     v2.value = "PBI-600";
     v2.type = MetadataValueType::String;
-    REQUIRE(fix.repository_->setMetadata(docBRes.value(), "pbi", v2).has_value());
+    REQUIRE((fix.repository_->setMetadata(docBRes.value(), "pbi", v2).has_value()));
 
     countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
-    REQUIRE(countsRes.has_value());
+    REQUIRE((countsRes.has_value()));
     it = countsRes.value().find("pbi");
-    REQUIRE(it != countsRes.value().end());
+    REQUIRE((it != countsRes.value().end()));
     std::unordered_map<std::string, int64_t> latest;
     for (const auto& row : it->second) {
         latest[row.value] = row.count;
     }
-    REQUIRE(latest.size() == 2);
-    CHECK(latest["PBI-500"] == 1);
-    CHECK(latest["PBI-600"] == 1);
+    REQUIRE((latest.size() == 2));
+    CHECK((latest["PBI-500"] == 1));
+    CHECK((latest["PBI-600"] == 1));
 
     auto deleteResult = fix.repository_->deleteDocument(docARes.value());
-    REQUIRE(deleteResult.has_value());
+    REQUIRE((deleteResult.has_value()));
 
     countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
-    REQUIRE(countsRes.has_value());
+    REQUIRE((countsRes.has_value()));
     it = countsRes.value().find("pbi");
-    REQUIRE(it != countsRes.value().end());
-    REQUIRE(it->second.size() == 1);
-    CHECK(it->second.front().value == "PBI-600");
-    CHECK(it->second.front().count == 1);
+    REQUIRE((it != countsRes.value().end()));
+    REQUIRE((it->second.size() == 1));
+    CHECK((it->second.front().value == "PBI-600"));
+    CHECK((it->second.front().count == 1));
 }
 
 TEST_CASE("MetadataRepository: semantic duplicate groups round-trip",
@@ -492,8 +809,8 @@ TEST_CASE("MetadataRepository: semantic duplicate groups round-trip",
     auto docB = makeDocumentWithPath("/tmp/semantic-b.txt", "semantic-b");
     auto aId = fix.repository_->insertDocument(docA);
     auto bId = fix.repository_->insertDocument(docB);
-    REQUIRE(aId.has_value());
-    REQUIRE(bId.has_value());
+    REQUIRE((aId.has_value()));
+    REQUIRE((bId.has_value()));
 
     const auto now =
         std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -513,7 +830,7 @@ TEST_CASE("MetadataRepository: semantic duplicate groups round-trip",
     group.lastComputedAt = now;
 
     auto groupId = fix.repository_->upsertSemanticDuplicateGroup(group);
-    REQUIRE(groupId.has_value());
+    REQUIRE((groupId.has_value()));
 
     SemanticDuplicateGroupMember canonical;
     canonical.documentId = aId.value();
@@ -539,29 +856,29 @@ TEST_CASE("MetadataRepository: semantic duplicate groups round-trip",
                 .has_value());
 
     auto fetched = fix.repository_->getSemanticDuplicateGroupByKey("semantic:test-group");
-    REQUIRE(fetched.has_value());
-    REQUIRE(fetched.value().has_value());
-    CHECK(fetched.value()->canonicalDocumentId == aId.value());
-    CHECK(fetched.value()->memberCount == 2);
+    REQUIRE((fetched.has_value()));
+    REQUIRE((fetched.value().has_value()));
+    CHECK((fetched.value()->canonicalDocumentId == aId.value()));
+    CHECK((fetched.value()->memberCount == 2));
 
     auto listed = fix.repository_->listSemanticDuplicateGroups();
-    REQUIRE(listed.has_value());
+    REQUIRE((listed.has_value()));
     REQUIRE_FALSE(listed.value().empty());
 
     auto byDoc = fix.repository_->getSemanticDuplicateGroupsForDocuments(
         std::array<int64_t, 2>{aId.value(), bId.value()});
-    REQUIRE(byDoc.has_value());
-    REQUIRE(byDoc.value().contains(aId.value()));
-    REQUIRE(byDoc.value().contains(bId.value()));
-    CHECK(byDoc.value().at(aId.value()).group.groupKey == "semantic:test-group");
-    CHECK(byDoc.value().at(aId.value()).members.size() == 2);
+    REQUIRE((byDoc.has_value()));
+    REQUIRE((byDoc.value().contains(aId.value())));
+    REQUIRE((byDoc.value().contains(bId.value())));
+    CHECK((byDoc.value().at(aId.value()).group.groupKey == "semantic:test-group"));
+    CHECK((byDoc.value().at(aId.value()).members.size() == 2));
 
     REQUIRE(fix.repository_->updateSemanticDuplicateGroupStatus("semantic:test-group", "applied")
                 .has_value());
     auto updated = fix.repository_->getSemanticDuplicateGroupByKey("semantic:test-group");
-    REQUIRE(updated.has_value());
-    REQUIRE(updated.value().has_value());
-    CHECK(updated.value()->status == "applied");
+    REQUIRE((updated.has_value()));
+    REQUIRE((updated.value().has_value()));
+    CHECK((updated.value()->status == "applied"));
 }
 
 TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS join fails",
@@ -573,23 +890,23 @@ TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS jo
 
     auto aId = fix.repository_->insertDocument(docA);
     auto bId = fix.repository_->insertDocument(docB);
-    REQUIRE(aId.has_value());
-    REQUIRE(bId.has_value());
+    REQUIRE((aId.has_value()));
+    REQUIRE((bId.has_value()));
 
     MetadataValue ownerA;
     ownerA.type = MetadataValueType::String;
     ownerA.value = "alice";
-    REQUIRE(fix.repository_->setMetadata(aId.value(), "owner", ownerA).has_value());
+    REQUIRE((fix.repository_->setMetadata(aId.value(), "owner", ownerA).has_value()));
 
     MetadataValue ownerB;
     ownerB.type = MetadataValueType::String;
     ownerB.value = "bob";
-    REQUIRE(fix.repository_->setMetadata(bId.value(), "owner", ownerB).has_value());
+    REQUIRE((fix.repository_->setMetadata(bId.value(), "owner", ownerB).has_value()));
 
     // Force the FTS-join query path to fail while pathFtsAvailable_ remains true in the repository.
     Database db;
-    REQUIRE(db.open(fix.dbPath_.string()).has_value());
-    REQUIRE(db.execute("DROP TABLE IF EXISTS documents_path_fts").has_value());
+    REQUIRE((db.open(fix.dbPath_.string()).has_value()));
+    REQUIRE((db.execute("DROP TABLE IF EXISTS documents_path_fts").has_value()));
     db.close();
 
     DocumentQueryOptions fallbackOpts;
@@ -597,18 +914,18 @@ TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS jo
     fallbackOpts.containsUsesFts = true;
 
     auto fallbackRes = fix.repository_->getMetadataValueCounts({"owner"}, fallbackOpts);
-    REQUIRE(fallbackRes.has_value());
+    REQUIRE((fallbackRes.has_value()));
 
     DocumentQueryOptions baselineOpts = fallbackOpts;
     baselineOpts.containsUsesFts = false;
     auto baselineRes = fix.repository_->getMetadataValueCounts({"owner"}, baselineOpts);
-    REQUIRE(baselineRes.has_value());
+    REQUIRE((baselineRes.has_value()));
 
     const auto& fallbackMap = fallbackRes.value();
     const auto& baselineMap = baselineRes.value();
-    REQUIRE(fallbackMap.contains("owner"));
-    REQUIRE(baselineMap.contains("owner"));
-    REQUIRE(fallbackMap.at("owner").size() == baselineMap.at("owner").size());
+    REQUIRE((fallbackMap.contains("owner")));
+    REQUIRE((baselineMap.contains("owner")));
+    REQUIRE((fallbackMap.at("owner").size() == baselineMap.at("owner").size()));
 
     std::unordered_map<std::string, int64_t> fallbackCounts;
     std::unordered_map<std::string, int64_t> baselineCounts;
@@ -619,8 +936,8 @@ TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS jo
         baselineCounts[row.value] = row.count;
     }
 
-    CHECK(fallbackCounts == baselineCounts);
-    CHECK(fallbackCounts["alice"] == 1);
+    CHECK((fallbackCounts == baselineCounts));
+    CHECK((fallbackCounts["alice"] == 1));
     CHECK_FALSE(fallbackCounts.contains("bob"));
 }
 
@@ -628,7 +945,7 @@ TEST_CASE("MetadataRepository: get document not found", "[unit][metadata][reposi
     MetadataRepositoryFixture fix;
 
     auto result = fix.repository_->getDocument(999999);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
     CHECK_FALSE(result.value().has_value());
 }
 
@@ -645,15 +962,15 @@ TEST_CASE("MetadataRepository: get document by hash", "[unit][metadata][reposito
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
 
     auto findResult = fix.repository_->getDocumentByHash("hash456");
-    REQUIRE(findResult.has_value());
-    REQUIRE(findResult.value().has_value());
+    REQUIRE((findResult.has_value()));
+    REQUIRE((findResult.value().has_value()));
 
     auto foundDoc = findResult.value().value();
-    CHECK(foundDoc.sha256Hash == "hash456");
-    CHECK(foundDoc.fileName == "hash_test.txt");
+    CHECK((foundDoc.sha256Hash == "hash456"));
+    CHECK((foundDoc.fileName == "hash_test.txt"));
 }
 
 TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]") {
@@ -669,7 +986,7 @@ TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]")
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     docInfo.id = docId;
@@ -679,15 +996,15 @@ TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]")
         std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
     auto updateResult = fix.repository_->updateDocument(docInfo);
-    REQUIRE(updateResult.has_value());
+    REQUIRE((updateResult.has_value()));
 
     auto getResult = fix.repository_->getDocument(docId);
-    REQUIRE(getResult.has_value());
-    REQUIRE(getResult.value().has_value());
+    REQUIRE((getResult.has_value()));
+    REQUIRE((getResult.value().has_value()));
 
     auto updatedDoc = getResult.value().value();
-    CHECK(updatedDoc.fileName == "updated.txt");
-    CHECK(updatedDoc.fileSize == 4096);
+    CHECK((updatedDoc.fileName == "updated.txt"));
+    CHECK((updatedDoc.fileSize == 4096));
 }
 
 TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
@@ -702,17 +1019,17 @@ TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
         "/reports/summary.pdf", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
         "application/pdf");
 
-    REQUIRE(fix.repository_->insertDocument(docA).has_value());
-    REQUIRE(fix.repository_->insertDocument(docB).has_value());
-    REQUIRE(fix.repository_->insertDocument(docC).has_value());
+    REQUIRE((fix.repository_->insertDocument(docA).has_value()));
+    REQUIRE((fix.repository_->insertDocument(docB).has_value()));
+    REQUIRE((fix.repository_->insertDocument(docC).has_value()));
 
     SECTION("Exact path lookup") {
         DocumentQueryOptions exactOpts;
         exactOpts.exactPath = "/notes/todo.md";
         auto exactRes = fix.repository_->queryDocuments(exactOpts);
-        REQUIRE(exactRes.has_value());
-        REQUIRE(exactRes.value().size() == 1);
-        CHECK(exactRes.value().front().filePath == "/notes/todo.md");
+        REQUIRE((exactRes.has_value()));
+        REQUIRE((exactRes.value().size() == 1));
+        CHECK((exactRes.value().front().filePath == "/notes/todo.md"));
     }
 
     SECTION("Directory prefix with subdirectories") {
@@ -721,14 +1038,14 @@ TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
         prefixOpts.prefixIsDirectory = true;
         prefixOpts.includeSubdirectories = true;
         auto prefixRes = fix.repository_->queryDocuments(prefixOpts);
-        REQUIRE(prefixRes.has_value());
+        REQUIRE((prefixRes.has_value()));
         std::vector<std::string> notePaths;
         for (const auto& d : prefixRes.value())
             notePaths.push_back(d.filePath);
         std::sort(notePaths.begin(), notePaths.end());
-        REQUIRE(notePaths.size() == 2);
-        CHECK(notePaths[0] == "/notes/log.txt");
-        CHECK(notePaths[1] == "/notes/todo.md");
+        REQUIRE((notePaths.size() == 2));
+        CHECK((notePaths[0] == "/notes/log.txt"));
+        CHECK((notePaths[1] == "/notes/todo.md"));
     }
 
     SECTION("Contains fragment via FTS") {
@@ -736,18 +1053,18 @@ TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
         containsOpts.containsFragment = "todo.md";
         containsOpts.containsUsesFts = true;
         auto containsRes = fix.repository_->queryDocuments(containsOpts);
-        REQUIRE(containsRes.has_value());
-        REQUIRE(containsRes.value().size() == 1);
-        CHECK(containsRes.value().front().filePath == "/notes/todo.md");
+        REQUIRE((containsRes.has_value()));
+        REQUIRE((containsRes.value().size() == 1));
+        CHECK((containsRes.value().front().filePath == "/notes/todo.md"));
     }
 
     SECTION("Extension filter") {
         DocumentQueryOptions extOpts;
         extOpts.extension = ".txt";
         auto extRes = fix.repository_->queryDocuments(extOpts);
-        REQUIRE(extRes.has_value());
-        REQUIRE(extRes.value().size() == 1);
-        CHECK(extRes.value().front().filePath == "/notes/log.txt");
+        REQUIRE((extRes.has_value()));
+        REQUIRE((extRes.value().size() == 1));
+        CHECK((extRes.value().front().filePath == "/notes/log.txt"));
     }
 }
 
@@ -777,16 +1094,16 @@ TEST_CASE("MetadataRepository: list projection matches queryDocuments for shared
     auto bId = fix.repository_->insertDocument(docB);
     auto cId = fix.repository_->insertDocument(docC);
     auto dId = fix.repository_->insertDocument(docD);
-    REQUIRE(aId.has_value());
-    REQUIRE(bId.has_value());
-    REQUIRE(cId.has_value());
-    REQUIRE(dId.has_value());
+    REQUIRE((aId.has_value()));
+    REQUIRE((bId.has_value()));
+    REQUIRE((cId.has_value()));
+    REQUIRE((dId.has_value()));
 
     auto setStringMeta = [&](int64_t docId, const std::string& key, const std::string& value) {
         MetadataValue mv;
         mv.type = MetadataValueType::String;
         mv.value = value;
-        REQUIRE(fix.repository_->setMetadata(docId, key, mv).has_value());
+        REQUIRE((fix.repository_->setMetadata(docId, key, mv).has_value()));
     };
 
     setStringMeta(aId.value(), "owner", "alice");
@@ -799,26 +1116,26 @@ TEST_CASE("MetadataRepository: list projection matches queryDocuments for shared
         CAPTURE(label);
         auto docsRes = fix.repository_->queryDocuments(opts);
         auto projRes = fix.repository_->queryDocumentsForListProjection(opts);
-        REQUIRE(docsRes.has_value());
-        REQUIRE(projRes.has_value());
+        REQUIRE((docsRes.has_value()));
+        REQUIRE((projRes.has_value()));
 
         const auto& docs = docsRes.value();
         const auto& projs = projRes.value();
-        REQUIRE(docs.size() == projs.size());
+        REQUIRE((docs.size() == projs.size()));
 
         for (size_t i = 0; i < docs.size(); ++i) {
             CAPTURE(i);
-            CHECK(projs[i].id == docs[i].id);
-            CHECK(projs[i].filePath == docs[i].filePath);
-            CHECK(projs[i].fileName == docs[i].fileName);
-            CHECK(projs[i].fileExtension == docs[i].fileExtension);
-            CHECK(projs[i].fileSize == docs[i].fileSize);
-            CHECK(projs[i].sha256Hash == docs[i].sha256Hash);
-            CHECK(projs[i].mimeType == docs[i].mimeType);
-            CHECK(projs[i].createdTime == docs[i].createdTime);
-            CHECK(projs[i].modifiedTime == docs[i].modifiedTime);
-            CHECK(projs[i].indexedTime == docs[i].indexedTime);
-            CHECK(projs[i].extractionStatus == docs[i].extractionStatus);
+            CHECK((projs[i].id == docs[i].id));
+            CHECK((projs[i].filePath == docs[i].filePath));
+            CHECK((projs[i].fileName == docs[i].fileName));
+            CHECK((projs[i].fileExtension == docs[i].fileExtension));
+            CHECK((projs[i].fileSize == docs[i].fileSize));
+            CHECK((projs[i].sha256Hash == docs[i].sha256Hash));
+            CHECK((projs[i].mimeType == docs[i].mimeType));
+            CHECK((projs[i].createdTime == docs[i].createdTime));
+            CHECK((projs[i].modifiedTime == docs[i].modifiedTime));
+            CHECK((projs[i].indexedTime == docs[i].indexedTime));
+            CHECK((projs[i].extractionStatus == docs[i].extractionStatus));
         }
     };
 
@@ -879,14 +1196,14 @@ TEST_CASE("MetadataRepository: delete document", "[unit][metadata][repository]")
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     auto deleteResult = fix.repository_->deleteDocument(docId);
-    REQUIRE(deleteResult.has_value());
+    REQUIRE((deleteResult.has_value()));
 
     auto getResult = fix.repository_->getDocument(docId);
-    REQUIRE(getResult.has_value());
+    REQUIRE((getResult.has_value()));
     CHECK_FALSE(getResult.value().has_value());
 }
 
@@ -903,20 +1220,20 @@ TEST_CASE("MetadataRepository: set and get metadata", "[unit][metadata][reposito
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     MetadataValue value("Test Author");
 
     auto setResult = fix.repository_->setMetadata(docId, "author", value);
-    REQUIRE(setResult.has_value());
+    REQUIRE((setResult.has_value()));
 
     auto getResult = fix.repository_->getMetadata(docId, "author");
-    REQUIRE(getResult.has_value());
-    REQUIRE(getResult.value().has_value());
+    REQUIRE((getResult.has_value()));
+    REQUIRE((getResult.value().has_value()));
 
     auto retrievedValue = getResult.value().value();
-    CHECK(retrievedValue.asString() == "Test Author");
+    CHECK((retrievedValue.asString() == "Test Author"));
 }
 
 TEST_CASE("MetadataRepository: get all metadata", "[unit][metadata][repository]") {
@@ -932,7 +1249,7 @@ TEST_CASE("MetadataRepository: get all metadata", "[unit][metadata][repository]"
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     MetadataValue authorValue("John Doe");
@@ -945,14 +1262,14 @@ TEST_CASE("MetadataRepository: get all metadata", "[unit][metadata][repository]"
     fix.repository_->setMetadata(docId, "rating", ratingValue);
 
     auto getAllResult = fix.repository_->getAllMetadata(docId);
-    REQUIRE(getAllResult.has_value());
+    REQUIRE((getAllResult.has_value()));
 
     auto metadata = getAllResult.value();
-    CHECK(metadata.size() == 3);
+    CHECK((metadata.size() == 3));
 
-    CHECK(metadata["author"].asString() == "John Doe");
-    CHECK(metadata["year"].asInteger() == 2024);
-    CHECK(metadata["rating"].asReal() == Catch::Approx(4.5));
+    CHECK((metadata["author"].asString() == "John Doe"));
+    CHECK((metadata["year"].asInteger() == 2024));
+    CHECK((metadata["rating"].asReal() == Catch::Approx(4.5)));
 }
 
 TEST_CASE("MetadataRepository: remove metadata", "[unit][metadata][repository]") {
@@ -968,21 +1285,21 @@ TEST_CASE("MetadataRepository: remove metadata", "[unit][metadata][repository]")
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     MetadataValue value("Temporary");
     fix.repository_->setMetadata(docId, "temp", value);
 
     auto getResult = fix.repository_->getMetadata(docId, "temp");
-    REQUIRE(getResult.has_value());
-    REQUIRE(getResult.value().has_value());
+    REQUIRE((getResult.has_value()));
+    REQUIRE((getResult.value().has_value()));
 
     auto removeResult = fix.repository_->removeMetadata(docId, "temp");
-    REQUIRE(removeResult.has_value());
+    REQUIRE((removeResult.has_value()));
 
     getResult = fix.repository_->getMetadata(docId, "temp");
-    REQUIRE(getResult.has_value());
+    REQUIRE((getResult.has_value()));
     CHECK_FALSE(getResult.value().has_value());
 }
 
@@ -1000,28 +1317,28 @@ TEST_CASE("MetadataRepository: hasFtsEntry reports FTS5 presence correctly",
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     SECTION("returns false before indexing") {
         auto hasFts = fix.repository_->hasFtsEntry(docId);
-        REQUIRE(hasFts.has_value());
+        REQUIRE((hasFts.has_value()));
         CHECK_FALSE(hasFts.value());
     }
 
     SECTION("returns true after indexing") {
         auto indexResult = fix.repository_->indexDocumentContent(
             docId, "Test Document", "Searchable content here", "text/plain");
-        REQUIRE(indexResult.has_value());
+        REQUIRE((indexResult.has_value()));
 
         auto hasFts = fix.repository_->hasFtsEntry(docId);
-        REQUIRE(hasFts.has_value());
-        CHECK(hasFts.value());
+        REQUIRE((hasFts.has_value()));
+        CHECK((hasFts.value()));
     }
 
     SECTION("returns false for non-existent document ID") {
         auto hasFts = fix.repository_->hasFtsEntry(999999);
-        REQUIRE(hasFts.has_value());
+        REQUIRE((hasFts.has_value()));
         CHECK_FALSE(hasFts.value());
     }
 }
@@ -1040,17 +1357,17 @@ TEST_CASE("MetadataRepository: indexed count reflects actual FTS rows, not extra
     doc.modifiedTime = doc.createdTime;
 
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     const auto docId = insertResult.value();
 
     REQUIRE(fix.repository_->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
                 .has_value());
 
     auto indexedWithoutFts = fix.repository_->getIndexedDocumentCount();
-    REQUIRE(indexedWithoutFts.has_value());
-    CHECK(indexedWithoutFts.value() == 0);
-    CHECK(fix.repository_->getCachedIndexedCount() == 0);
-    CHECK(fix.repository_->getCachedExtractedCount() == 1);
+    REQUIRE((indexedWithoutFts.has_value()));
+    CHECK((indexedWithoutFts.value() == 0));
+    CHECK((fix.repository_->getCachedIndexedCount() == 0));
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
 
     DocumentContent content;
     content.documentId = docId;
@@ -1058,15 +1375,15 @@ TEST_CASE("MetadataRepository: indexed count reflects actual FTS rows, not extra
     content.contentLength = static_cast<int64_t>(content.contentText.size());
     content.extractionMethod = "test";
     content.language = "en";
-    REQUIRE(fix.repository_->insertContent(content).has_value());
+    REQUIRE((fix.repository_->insertContent(content).has_value()));
     REQUIRE(fix.repository_
                 ->indexDocumentContent(docId, doc.fileName, content.contentText, "text/plain")
                 .has_value());
 
     auto indexedWithFts = fix.repository_->getIndexedDocumentCount();
-    REQUIRE(indexedWithFts.has_value());
-    CHECK(indexedWithFts.value() == 1);
-    CHECK(fix.repository_->getCachedIndexedCount() == 1);
+    REQUIRE((indexedWithFts.has_value()));
+    CHECK((indexedWithFts.value() == 1));
+    CHECK((fix.repository_->getCachedIndexedCount() == 1));
 }
 
 TEST_CASE("MetadataRepository: batch extraction status updates share one transaction",
@@ -1078,14 +1395,14 @@ TEST_CASE("MetadataRepository: batch extraction status updates share one transac
     pendingDoc.contentExtracted = false;
     pendingDoc.extractionStatus = ExtractionStatus::Pending;
     auto pendingId = fix.repository_->insertDocument(pendingDoc);
-    REQUIRE(pendingId.has_value());
+    REQUIRE((pendingId.has_value()));
 
     auto extractedDoc = makeDocumentWithPath("/tmp/yams/batch-extraction-extracted.txt",
                                              "batch-extraction-extracted-hash");
     extractedDoc.contentExtracted = true;
     extractedDoc.extractionStatus = ExtractionStatus::Success;
     auto extractedId = fix.repository_->insertDocument(extractedDoc);
-    REQUIRE(extractedId.has_value());
+    REQUIRE((extractedId.has_value()));
 
     fix.repository_->initializeCounters();
     CHECK((fix.repository_->getCachedExtractedCount() == 1));
@@ -1099,18 +1416,18 @@ TEST_CASE("MetadataRepository: batch extraction status updates share one transac
         ExtractionStatusUpdate{999999, true, ExtractionStatus::Success, "missing ignored"});
 
     auto result = fix.repository_->batchUpdateDocumentExtractionStatuses(updates);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto pendingAfter = fix.repository_->getDocument(pendingId.value());
-    REQUIRE(pendingAfter.has_value());
-    REQUIRE(pendingAfter.value().has_value());
-    CHECK(pendingAfter.value()->contentExtracted);
+    REQUIRE((pendingAfter.has_value()));
+    REQUIRE((pendingAfter.value().has_value()));
+    CHECK((pendingAfter.value()->contentExtracted));
     CHECK((pendingAfter.value()->extractionStatus == ExtractionStatus::Success));
-    CHECK(pendingAfter.value()->extractionError.empty());
+    CHECK((pendingAfter.value()->extractionError.empty()));
 
     auto extractedAfter = fix.repository_->getDocument(extractedId.value());
-    REQUIRE(extractedAfter.has_value());
-    REQUIRE(extractedAfter.value().has_value());
+    REQUIRE((extractedAfter.has_value()));
+    REQUIRE((extractedAfter.value().has_value()));
     CHECK_FALSE(extractedAfter.value()->contentExtracted);
     CHECK((extractedAfter.value()->extractionStatus == ExtractionStatus::Failed));
     CHECK((extractedAfter.value()->extractionError == "extraction failed"));
@@ -1130,15 +1447,15 @@ TEST_CASE("MetadataRepository: initializeCounters keeps extracted and indexed co
     doc.modifiedTime = doc.createdTime;
 
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     const auto docId = insertResult.value();
 
     REQUIRE(fix.repository_->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
                 .has_value());
 
     fix.repository_->initializeCounters();
-    CHECK(fix.repository_->getCachedExtractedCount() == 1);
-    CHECK(fix.repository_->getCachedIndexedCount() == 0);
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
+    CHECK((fix.repository_->getCachedIndexedCount() == 0));
 
     DocumentContent content;
     content.documentId = docId;
@@ -1146,15 +1463,15 @@ TEST_CASE("MetadataRepository: initializeCounters keeps extracted and indexed co
     content.contentLength = static_cast<int64_t>(content.contentText.size());
     content.extractionMethod = "test";
     content.language = "en";
-    REQUIRE(fix.repository_->insertContent(content).has_value());
+    REQUIRE((fix.repository_->insertContent(content).has_value()));
     REQUIRE(fix.repository_
                 ->indexDocumentContent(docId, doc.fileName, content.contentText, "text/plain")
                 .has_value());
 
     auto exactIndexed = fix.repository_->getIndexedDocumentCount();
-    REQUIRE(exactIndexed.has_value());
-    CHECK(exactIndexed.value() == 1);
-    CHECK(fix.repository_->getCachedExtractedCount() == 1);
+    REQUIRE((exactIndexed.has_value()));
+    CHECK((exactIndexed.value() == 1));
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
 }
 
 TEST_CASE("MetadataRepository: getFts5IndexedRowIdSet returns indexed document IDs",
@@ -1172,7 +1489,7 @@ TEST_CASE("MetadataRepository: getFts5IndexedRowIdSet returns indexed document I
     doc1.createdTime = now;
     doc1.modifiedTime = now;
     auto id1Res = fix.repository_->insertDocument(doc1);
-    REQUIRE(id1Res.has_value());
+    REQUIRE((id1Res.has_value()));
     auto docId1 = id1Res.value();
 
     DocumentInfo doc2;
@@ -1183,36 +1500,36 @@ TEST_CASE("MetadataRepository: getFts5IndexedRowIdSet returns indexed document I
     doc2.createdTime = now;
     doc2.modifiedTime = now;
     auto id2Res = fix.repository_->insertDocument(doc2);
-    REQUIRE(id2Res.has_value());
+    REQUIRE((id2Res.has_value()));
     auto docId2 = id2Res.value();
 
     // Before indexing: set should be empty
     auto setBefore = fix.repository_->getFts5IndexedRowIdSet();
-    REQUIRE(setBefore.has_value());
-    CHECK(setBefore.value().count(docId1) == 0);
-    CHECK(setBefore.value().count(docId2) == 0);
+    REQUIRE((setBefore.has_value()));
+    CHECK((setBefore.value().count(docId1) == 0));
+    CHECK((setBefore.value().count(docId2) == 0));
 
     // Index only doc1
     auto indexResult = fix.repository_->indexDocumentContent(
         docId1, "Doc One", "First document content", "text/plain");
-    REQUIRE(indexResult.has_value());
+    REQUIRE((indexResult.has_value()));
 
     // Set should contain only doc1
     auto setAfter = fix.repository_->getFts5IndexedRowIdSet();
-    REQUIRE(setAfter.has_value());
-    CHECK(setAfter.value().count(docId1) == 1);
-    CHECK(setAfter.value().count(docId2) == 0);
+    REQUIRE((setAfter.has_value()));
+    CHECK((setAfter.value().count(docId1) == 1));
+    CHECK((setAfter.value().count(docId2) == 0));
 
     // Index doc2
     auto indexResult2 = fix.repository_->indexDocumentContent(
         docId2, "Doc Two", "Second document content", "text/plain");
-    REQUIRE(indexResult2.has_value());
+    REQUIRE((indexResult2.has_value()));
 
     // Set should contain both
     auto setFinal = fix.repository_->getFts5IndexedRowIdSet();
-    REQUIRE(setFinal.has_value());
-    CHECK(setFinal.value().count(docId1) == 1);
-    CHECK(setFinal.value().count(docId2) == 1);
+    REQUIRE((setFinal.has_value()));
+    CHECK((setFinal.value().count(docId1) == 1));
+    CHECK((setFinal.value().count(docId2) == 1));
 }
 
 TEST_CASE("MetadataRepository: search functionality", "[unit][metadata][repository]") {
@@ -1228,18 +1545,18 @@ TEST_CASE("MetadataRepository: search functionality", "[unit][metadata][reposito
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     auto indexResult = fix.repository_->indexDocumentContent(
         docId, "Test Document", "This is a test document with searchable content", "text/plain");
-    REQUIRE(indexResult.has_value());
+    REQUIRE((indexResult.has_value()));
 
     auto searchResult = fix.repository_->search("test", 10, 0);
-    REQUIRE(searchResult.has_value());
+    REQUIRE((searchResult.has_value()));
 
     auto results = searchResult.value();
-    CHECK(results.results.size() > 0);
+    CHECK((results.results.size() > 0));
 }
 
 TEST_CASE("MetadataRepository: search totalCount honors docIds filter",
@@ -1251,8 +1568,8 @@ TEST_CASE("MetadataRepository: search totalCount honors docIds filter",
 
     auto insert1 = fix.repository_->insertDocument(doc1);
     auto insert2 = fix.repository_->insertDocument(doc2);
-    REQUIRE(insert1.has_value());
-    REQUIRE(insert2.has_value());
+    REQUIRE((insert1.has_value()));
+    REQUIRE((insert2.has_value()));
 
     auto docId1 = insert1.value();
     auto docId2 = insert2.value();
@@ -1268,12 +1585,12 @@ TEST_CASE("MetadataRepository: search totalCount honors docIds filter",
 
     const std::optional<std::vector<int64_t>> scopedDocIds = std::vector<int64_t>{docId1};
     auto searchResult = fix.repository_->search("needle", 1, 0, scopedDocIds);
-    REQUIRE(searchResult.has_value());
+    REQUIRE((searchResult.has_value()));
 
     const auto& results = searchResult.value();
-    REQUIRE(results.results.size() == 1);
-    CHECK(results.results.front().document.id == docId1);
-    CHECK(results.totalCount == 1);
+    REQUIRE((results.results.size() == 1));
+    CHECK((results.results.front().document.id == docId1));
+    CHECK((results.totalCount == 1));
 }
 
 TEST_CASE("MetadataRepository: fuzzy search returns content matches",
@@ -1285,7 +1602,7 @@ TEST_CASE("MetadataRepository: fuzzy search returns content matches",
         "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
 
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     constexpr char kRareTerm[] = "blorptastic";
@@ -1298,18 +1615,18 @@ TEST_CASE("MetadataRepository: fuzzy search returns content matches",
     content.extractionMethod = "test";
     content.language = "en";
     auto contentInsertResult = fix.repository_->insertContent(content);
-    REQUIRE(contentInsertResult.has_value());
+    REQUIRE((contentInsertResult.has_value()));
 
     auto indexResult =
         fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain");
-    REQUIRE(indexResult.has_value());
+    REQUIRE((indexResult.has_value()));
 
     auto fuzzyResult = fix.repository_->fuzzySearch(kRareTerm, 0.6f, 10);
-    REQUIRE(fuzzyResult.has_value());
+    REQUIRE((fuzzyResult.has_value()));
 
     const auto& searchResults = fuzzyResult.value();
-    REQUIRE(searchResults.results.size() == 1);
-    CHECK(searchResults.results.front().document.id == docId);
+    REQUIRE((searchResults.results.size() == 1));
+    CHECK((searchResults.results.front().document.id == docId));
 }
 
 TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fallback",
@@ -1321,7 +1638,7 @@ TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fall
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
 
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     constexpr char kIndexedTerm[] = "blorptastic";
@@ -1333,21 +1650,21 @@ TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fall
     content.contentLength = static_cast<int64_t>(contentText.length());
     content.extractionMethod = "test";
     content.language = "en";
-    REQUIRE(fix.repository_->insertContent(content).has_value());
+    REQUIRE((fix.repository_->insertContent(content).has_value()));
 
     REQUIRE(fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain")
                 .has_value());
     fix.repository_->addSymSpellTerm(kIndexedTerm, 1);
 
     auto fuzzyResult = fix.repository_->fuzzySearch("blorptastik", 0.6f, 10);
-    REQUIRE(fuzzyResult.has_value());
-    REQUIRE(fuzzyResult.value().results.size() == 1);
-    CHECK(fuzzyResult.value().results.front().document.id == docId);
+    REQUIRE((fuzzyResult.has_value()));
+    REQUIRE((fuzzyResult.value().results.size() == 1));
+    CHECK((fuzzyResult.value().results.front().document.id == docId));
 
     auto keywordResult = fix.repository_->search("blorptastik", 10);
-    REQUIRE(keywordResult.has_value());
-    CHECK(keywordResult.value().results.empty());
-    CHECK(keywordResult.value().totalCount == 0);
+    REQUIRE((keywordResult.has_value()));
+    CHECK((keywordResult.value().results.empty()));
+    CHECK((keywordResult.value().totalCount == 0));
 }
 
 TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata][repository]") {
@@ -1363,7 +1680,7 @@ TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata
     docInfo.modifiedTime = docInfo.createdTime;
 
     auto createResult = fix.repository_->insertDocument(docInfo);
-    REQUIRE(createResult.has_value());
+    REQUIRE((createResult.has_value()));
     auto docId = createResult.value();
 
     std::string badContent = "alpha";
@@ -1372,10 +1689,10 @@ TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata
 
     auto indexResult =
         fix.repository_->indexDocumentContent(docId, "Bad UTF-8", badContent, "text/plain");
-    REQUIRE(indexResult.has_value());
+    REQUIRE((indexResult.has_value()));
 
     auto searchResult = fix.repository_->search("alpha", 10, 0);
-    REQUIRE(searchResult.has_value());
+    REQUIRE((searchResult.has_value()));
     const auto& results = searchResult.value();
     REQUIRE_FALSE(results.results.empty());
 
@@ -1384,12 +1701,12 @@ TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata
         if (item.document.sha256Hash == "search_bad_utf8") {
             matchedDocument = true;
             auto sanitized = common::sanitizeUtf8(item.snippet);
-            CHECK(item.snippet == sanitized);
-            CHECK(item.snippet.find(static_cast<char>(0xFF)) == std::string::npos);
+            CHECK((item.snippet == sanitized));
+            CHECK((item.snippet.find(static_cast<char>(0xFF)) == std::string::npos));
         }
     }
 
-    CHECK(matchedDocument);
+    CHECK((matchedDocument));
 }
 
 TEST_CASE("MetadataRepository: counts and modified since", "[unit][metadata][repository]") {
@@ -1413,31 +1730,31 @@ TEST_CASE("MetadataRepository: counts and modified since", "[unit][metadata][rep
     d3.contentExtracted = true;
     d3.modifiedTime = now - std::chrono::hours(3);
 
-    REQUIRE(fix.repository_->insertDocument(d1).has_value());
-    REQUIRE(fix.repository_->insertDocument(d2).has_value());
-    REQUIRE(fix.repository_->insertDocument(d3).has_value());
+    REQUIRE((fix.repository_->insertDocument(d1).has_value()));
+    REQUIRE((fix.repository_->insertDocument(d2).has_value()));
+    REQUIRE((fix.repository_->insertDocument(d3).has_value()));
 
     auto total = fix.repository_->getDocumentCount();
-    REQUIRE(total.has_value());
-    CHECK(total.value() >= 3);
+    REQUIRE((total.has_value()));
+    CHECK((total.value() >= 3));
 
     auto extracted = fix.repository_->getContentExtractedDocumentCount();
-    REQUIRE(extracted.has_value());
-    CHECK(extracted.value() >= 2);
+    REQUIRE((extracted.has_value()));
+    CHECK((extracted.value() >= 2));
 
     auto c_pending = fix.repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Pending);
     auto c_success = fix.repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Success);
     auto c_failed = fix.repository_->getDocumentCountByExtractionStatus(ExtractionStatus::Failed);
-    REQUIRE(c_pending.has_value());
-    REQUIRE(c_success.has_value());
-    REQUIRE(c_failed.has_value());
-    CHECK(c_pending.value() >= 1);
-    CHECK(c_success.value() >= 1);
-    CHECK(c_failed.value() >= 1);
+    REQUIRE((c_pending.has_value()));
+    REQUIRE((c_success.has_value()));
+    REQUIRE((c_failed.has_value()));
+    CHECK((c_pending.value() >= 1));
+    CHECK((c_success.value() >= 1));
+    CHECK((c_failed.value() >= 1));
 
     auto since = clock::now() - std::chrono::seconds(60);
     auto modifiedRes = fix.repository_->findDocumentsModifiedSince(since);
-    REQUIRE(modifiedRes.has_value());
+    REQUIRE((modifiedRes.has_value()));
     bool foundRecent = false;
     for (const auto& doc : modifiedRes.value()) {
         if (doc.sha256Hash == d2.sha256Hash) {
@@ -1445,7 +1762,7 @@ TEST_CASE("MetadataRepository: counts and modified since", "[unit][metadata][rep
             break;
         }
     }
-    CHECK(foundRecent);
+    CHECK((foundRecent));
 }
 
 TEST_CASE("MetadataRepository: path tree upsert creates nodes and counts",
@@ -1455,31 +1772,31 @@ TEST_CASE("MetadataRepository: path tree upsert creates nodes and counts",
     auto docInfo = makeDocumentWithPath(
         "/src/example.txt", "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     auto docId = docInsert.value();
     docInfo.id = docId;
 
     auto upsert = fix.repository_->upsertPathTreeForDocument(docInfo, docId, true, {});
-    REQUIRE(upsert.has_value());
+    REQUIRE((upsert.has_value()));
 
     auto lookup = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(lookup.has_value());
-    REQUIRE(lookup.value().has_value());
+    REQUIRE((lookup.has_value()));
+    REQUIRE((lookup.value().has_value()));
     auto node = lookup.value().value();
-    CHECK(node.fullPath == "/src");
-    CHECK(node.docCount == 1);
+    CHECK((node.fullPath == "/src"));
+    CHECK((node.docCount == 1));
 
     auto repeat = fix.repository_->upsertPathTreeForDocument(docInfo, docId, false, {});
-    REQUIRE(repeat.has_value());
+    REQUIRE((repeat.has_value()));
     auto afterRepeat = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(afterRepeat.has_value());
-    REQUIRE(afterRepeat.value().has_value());
-    CHECK(afterRepeat.value()->docCount == 1);
+    REQUIRE((afterRepeat.has_value()));
+    REQUIRE((afterRepeat.value().has_value()));
+    CHECK((afterRepeat.value()->docCount == 1));
 
     auto fullLookup = fix.repository_->findPathTreeNodeByFullPath("/src/example.txt");
-    REQUIRE(fullLookup.has_value());
-    REQUIRE(fullLookup.value().has_value());
-    CHECK(fullLookup.value()->fullPath == "/src/example.txt");
+    REQUIRE((fullLookup.has_value()));
+    REQUIRE((fullLookup.value().has_value()));
+    CHECK((fullLookup.value()->fullPath == "/src/example.txt"));
 }
 
 TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings",
@@ -1489,11 +1806,11 @@ TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings",
     auto docInfo = makeDocumentWithPath(
         "/src/lib/foo.cpp", "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     auto docId = docInsert.value();
     docInfo.id = docId;
 
-    REQUIRE(fix.repository_->upsertPathTreeForDocument(docInfo, docId, true, {}).has_value());
+    REQUIRE((fix.repository_->upsertPathTreeForDocument(docInfo, docId, true, {}).has_value()));
 
     std::vector<float> embedding{1.0F, 2.0F, 3.0F};
     REQUIRE(
@@ -1503,9 +1820,9 @@ TEST_CASE("MetadataRepository: path tree centroid accumulates embeddings",
             .has_value());
 
     auto node = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(node.has_value());
-    REQUIRE(node.value().has_value());
-    CHECK(node.value()->centroidWeight == 1);
+    REQUIRE((node.has_value()));
+    REQUIRE((node.value().has_value()));
+    CHECK((node.value()->centroidWeight == 1));
 }
 
 TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes empty nodes",
@@ -1516,36 +1833,36 @@ TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes em
         makeDocumentWithPath("/project/src/lib/util.cpp",
                              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     auto docId = docInsert.value();
     docInfo.id = docId;
 
     std::vector<float> embedding{1.0F, 2.0F, 3.0F};
     auto upsert = fix.repository_->upsertPathTreeForDocument(
         docInfo, docId, true, std::span<const float>(embedding.data(), embedding.size()));
-    REQUIRE(upsert.has_value());
+    REQUIRE((upsert.has_value()));
 
     auto leafNode = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
-    REQUIRE(leafNode.has_value());
-    REQUIRE(leafNode.value().has_value());
-    CHECK(leafNode.value()->docCount == 1);
-    CHECK(leafNode.value()->centroidWeight == 1);
+    REQUIRE((leafNode.has_value()));
+    REQUIRE((leafNode.value().has_value()));
+    CHECK((leafNode.value()->docCount == 1));
+    CHECK((leafNode.value()->centroidWeight == 1));
 
     auto libNode = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib");
-    REQUIRE(libNode.has_value());
-    REQUIRE(libNode.value().has_value());
-    CHECK(libNode.value()->docCount == 1);
+    REQUIRE((libNode.has_value()));
+    REQUIRE((libNode.value().has_value()));
+    CHECK((libNode.value()->docCount == 1));
 
     auto remove = fix.repository_->removePathTreeForDocument(
         docInfo, docId, std::span<const float>(embedding.data(), embedding.size()));
-    REQUIRE(remove.has_value());
+    REQUIRE((remove.has_value()));
 
     auto afterRemoveLeaf = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
-    REQUIRE(afterRemoveLeaf.has_value());
+    REQUIRE((afterRemoveLeaf.has_value()));
     CHECK_FALSE(afterRemoveLeaf.value().has_value());
 
     auto afterRemoveLib = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib");
-    REQUIRE(afterRemoveLib.has_value());
+    REQUIRE((afterRemoveLib.has_value()));
     CHECK_FALSE(afterRemoveLib.value().has_value());
 }
 
@@ -1556,13 +1873,13 @@ TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
     auto doc1 = makeDocumentWithPath(
         "/shared/file1.txt", "1111111111111111111111111111111111111111111111111111111111111111");
     auto doc1Insert = fix.repository_->insertDocument(doc1);
-    REQUIRE(doc1Insert.has_value());
+    REQUIRE((doc1Insert.has_value()));
     doc1.id = doc1Insert.value();
 
     auto doc2 = makeDocumentWithPath(
         "/shared/file2.txt", "2222222222222222222222222222222222222222222222222222222222222222");
     auto doc2Insert = fix.repository_->insertDocument(doc2);
-    REQUIRE(doc2Insert.has_value());
+    REQUIRE((doc2Insert.has_value()));
     doc2.id = doc2Insert.value();
 
     std::vector<float> emb1{1.0F, 0.0F, 0.0F};
@@ -1570,27 +1887,27 @@ TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
 
     auto upsert1 = fix.repository_->upsertPathTreeForDocument(
         doc1, doc1.id, true, std::span<const float>(emb1.data(), emb1.size()));
-    REQUIRE(upsert1.has_value());
+    REQUIRE((upsert1.has_value()));
 
     auto upsert2 = fix.repository_->upsertPathTreeForDocument(
         doc2, doc2.id, true, std::span<const float>(emb2.data(), emb2.size()));
-    REQUIRE(upsert2.has_value());
+    REQUIRE((upsert2.has_value()));
 
     auto sharedNode = fix.repository_->findPathTreeNodeByFullPath("/shared");
-    REQUIRE(sharedNode.has_value());
-    REQUIRE(sharedNode.value().has_value());
-    CHECK(sharedNode.value()->docCount == 2);
-    CHECK(sharedNode.value()->centroidWeight == 2);
+    REQUIRE((sharedNode.has_value()));
+    REQUIRE((sharedNode.value().has_value()));
+    CHECK((sharedNode.value()->docCount == 2));
+    CHECK((sharedNode.value()->centroidWeight == 2));
 
     auto remove1 = fix.repository_->removePathTreeForDocument(
         doc1, doc1.id, std::span<const float>(emb1.data(), emb1.size()));
-    REQUIRE(remove1.has_value());
+    REQUIRE((remove1.has_value()));
 
     auto afterRemove = fix.repository_->findPathTreeNodeByFullPath("/shared");
-    REQUIRE(afterRemove.has_value());
-    REQUIRE(afterRemove.value().has_value());
-    CHECK(afterRemove.value()->docCount == 1);
-    CHECK(afterRemove.value()->centroidWeight == 1);
+    REQUIRE((afterRemove.has_value()));
+    REQUIRE((afterRemove.value().has_value()));
+    CHECK((afterRemove.value()->docCount == 1));
+    CHECK((afterRemove.value()->centroidWeight == 1));
 }
 
 TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
@@ -1604,9 +1921,9 @@ TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
     auto missingId = fix.repository_->insertDocument(missingDoc);
     auto treeAId = fix.repository_->insertDocument(treeDocA);
     auto treeBId = fix.repository_->insertDocument(treeDocB);
-    REQUIRE(missingId.has_value());
-    REQUIRE(treeAId.has_value());
-    REQUIRE(treeBId.has_value());
+    REQUIRE((missingId.has_value()));
+    REQUIRE((treeAId.has_value()));
+    REQUIRE((treeBId.has_value()));
 
     treeDocA.id = treeAId.value();
     treeDocB.id = treeBId.value();
@@ -1616,46 +1933,46 @@ TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
         fix.repository_->upsertPathTreeForDocument(treeDocB, treeDocB.id, true, {}).has_value());
 
     auto missingCount = fix.repository_->countDocsMissingPathTree();
-    REQUIRE(missingCount.has_value());
-    CHECK(missingCount.value() == 1);
+    REQUIRE((missingCount.has_value()));
+    CHECK((missingCount.value() == 1));
 
     auto missingDocs = fix.repository_->findDocsMissingPathTree(5);
-    REQUIRE(missingDocs.has_value());
-    REQUIRE(missingDocs.value().size() == 1);
-    CHECK(missingDocs.value().front().sha256Hash == missingDoc.sha256Hash);
+    REQUIRE((missingDocs.has_value()));
+    REQUIRE((missingDocs.value().size() == 1));
+    CHECK((missingDocs.value().front().sha256Hash == missingDoc.sha256Hash));
 
     auto rootChildren = fix.repository_->listPathTreeChildren("/", 10);
-    REQUIRE(rootChildren.has_value());
+    REQUIRE((rootChildren.has_value()));
     auto repairIt =
         std::find_if(rootChildren.value().begin(), rootChildren.value().end(),
                      [](const PathTreeNode& node) { return node.fullPath == "/repair"; });
-    REQUIRE(repairIt != rootChildren.value().end());
-    CHECK(repairIt->docCount == 2);
+    REQUIRE((repairIt != rootChildren.value().end()));
+    CHECK((repairIt->docCount == 2));
 
     auto repairChildren = fix.repository_->listPathTreeChildren("/repair", 10);
-    REQUIRE(repairChildren.has_value());
-    REQUIRE(repairChildren.value().size() == 1);
-    CHECK(repairChildren.value().front().fullPath == "/repair/tree");
-    CHECK(repairChildren.value().front().docCount == 2);
+    REQUIRE((repairChildren.has_value()));
+    REQUIRE((repairChildren.value().size() == 1));
+    CHECK((repairChildren.value().front().fullPath == "/repair/tree"));
+    CHECK((repairChildren.value().front().docCount == 2));
 
     auto limitedChildren = fix.repository_->listPathTreeChildren("/repair/tree", 1);
-    REQUIRE(limitedChildren.has_value());
-    REQUIRE(limitedChildren.value().size() == 1);
-    CHECK(limitedChildren.value().front().fullPath == "/repair/tree/a.txt");
+    REQUIRE((limitedChildren.has_value()));
+    REQUIRE((limitedChildren.value().size() == 1));
+    CHECK((limitedChildren.value().front().fullPath == "/repair/tree/a.txt"));
 
     auto missingParentChildren = fix.repository_->listPathTreeChildren("/repair/missing.txt", 10);
-    REQUIRE(missingParentChildren.has_value());
-    CHECK(missingParentChildren.value().empty());
+    REQUIRE((missingParentChildren.has_value()));
+    CHECK((missingParentChildren.value().empty()));
 
     auto prefixDocs = fix.repository_->findDocumentsByPathTreePrefix("/repair/tree", true, 10);
-    REQUIRE(prefixDocs.has_value());
+    REQUIRE((prefixDocs.has_value()));
     std::vector<std::string> hashes;
     for (const auto& doc : prefixDocs.value()) {
         hashes.push_back(doc.sha256Hash);
     }
-    CHECK(std::find(hashes.begin(), hashes.end(), treeDocA.sha256Hash) != hashes.end());
-    CHECK(std::find(hashes.begin(), hashes.end(), treeDocB.sha256Hash) != hashes.end());
-    CHECK(std::find(hashes.begin(), hashes.end(), missingDoc.sha256Hash) == hashes.end());
+    CHECK((std::find(hashes.begin(), hashes.end(), treeDocA.sha256Hash) != hashes.end()));
+    CHECK((std::find(hashes.begin(), hashes.end(), treeDocB.sha256Hash) != hashes.end()));
+    CHECK((std::find(hashes.begin(), hashes.end(), missingDoc.sha256Hash) == hashes.end()));
 }
 
 TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
@@ -1681,16 +1998,16 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
     target.metadata["snapshot_label"] = "target";
     target.metadata["git_commit"] = "def456";
 
-    REQUIRE(fix.repository_->upsertTreeSnapshot(base).has_value());
-    REQUIRE(fix.repository_->upsertTreeSnapshot(target).has_value());
+    REQUIRE((fix.repository_->upsertTreeSnapshot(base).has_value()));
+    REQUIRE((fix.repository_->upsertTreeSnapshot(target).has_value()));
 
     auto snapshots = fix.repository_->listTreeSnapshots(10);
-    REQUIRE(snapshots.has_value());
-    REQUIRE(snapshots.value().size() >= 2);
-    CHECK(snapshots.value().front().snapshotId == "snapshot-target");
-    CHECK(snapshots.value().front().metadata.at("snapshot_label") == "target");
-    CHECK(snapshots.value().front().metadata.at("git_commit") == "def456");
-    CHECK(snapshots.value().front().fileCount == 2);
+    REQUIRE((snapshots.has_value()));
+    REQUIRE((snapshots.value().size() >= 2));
+    CHECK((snapshots.value().front().snapshotId == "snapshot-target"));
+    CHECK((snapshots.value().front().metadata.at("snapshot_label") == "target"));
+    CHECK((snapshots.value().front().metadata.at("git_commit") == "def456"));
+    CHECK((snapshots.value().front().fileCount == 2));
 
     TreeDiffDescriptor descriptor;
     descriptor.baseSnapshotId = base.snapshotId;
@@ -1698,8 +2015,8 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
     descriptor.computedAt = 300;
     descriptor.status = "pending";
     auto diffId = fix.repository_->beginTreeDiff(descriptor);
-    REQUIRE(diffId.has_value());
-    REQUIRE(diffId.value() > 0);
+    REQUIRE((diffId.has_value()));
+    REQUIRE((diffId.value() > 0));
 
     TreeChangeRecord added;
     added.type = TreeChangeType::Added;
@@ -1728,11 +2045,11 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
     allChanges.targetSnapshotId = target.snapshotId;
     allChanges.limit = 10;
     auto changes = fix.repository_->listTreeChanges(allChanges);
-    REQUIRE(changes.has_value());
-    REQUIRE(changes.value().size() == 3);
-    CHECK(changes.value()[0].type == TreeChangeType::Added);
-    CHECK(changes.value()[1].type == TreeChangeType::Moved);
-    CHECK(changes.value()[2].type == TreeChangeType::Deleted);
+    REQUIRE((changes.has_value()));
+    REQUIRE((changes.value().size() == 3));
+    CHECK((changes.value()[0].type == TreeChangeType::Added));
+    CHECK((changes.value()[1].type == TreeChangeType::Moved));
+    CHECK((changes.value()[2].type == TreeChangeType::Deleted));
 
     TreeDiffQuery addedUnderSrc;
     addedUnderSrc.baseSnapshotId = base.snapshotId;
@@ -1740,13 +2057,13 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
     addedUnderSrc.pathPrefix = "/repo/src";
     addedUnderSrc.typeFilter = TreeChangeType::Added;
     auto filtered = fix.repository_->listTreeChanges(addedUnderSrc);
-    REQUIRE(filtered.has_value());
-    REQUIRE(filtered.value().size() == 1);
-    CHECK(filtered.value().front().newPath == added.newPath);
-    REQUIRE(filtered.value().front().mode.has_value());
-    CHECK(filtered.value().front().mode.value() == 0644);
-    REQUIRE(filtered.value().front().contentDeltaHash.has_value());
-    CHECK(filtered.value().front().contentDeltaHash.value() == "delta-hash");
+    REQUIRE((filtered.has_value()));
+    REQUIRE((filtered.value().size() == 1));
+    CHECK((filtered.value().front().newPath == added.newPath));
+    REQUIRE((filtered.value().front().mode.has_value()));
+    CHECK((filtered.value().front().mode.value() == 0644));
+    REQUIRE((filtered.value().front().contentDeltaHash.has_value()));
+    CHECK((filtered.value().front().contentDeltaHash.value() == "delta-hash"));
 
     REQUIRE(fix.repository_->finalizeTreeDiff(diffId.value(), changes.value().size(), "complete")
                 .has_value());
@@ -1756,20 +2073,20 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
             SELECT files_added, files_deleted, files_modified, files_renamed, status
             FROM tree_diffs WHERE diff_id = ?
         )");
-        REQUIRE(stmtResult.has_value());
+        REQUIRE((stmtResult.has_value()));
         auto& stmt = stmtResult.value();
-        REQUIRE(stmt.bind(1, diffId.value()).has_value());
+        REQUIRE((stmt.bind(1, diffId.value()).has_value()));
         auto step = stmt.step();
-        REQUIRE(step.has_value());
-        REQUIRE(step.value());
-        CHECK(stmt.getInt64(0) == 1);
-        CHECK(stmt.getInt64(1) == 0);
-        CHECK(stmt.getInt64(2) == 0);
-        CHECK(stmt.getInt64(3) == 1);
-        CHECK(stmt.getString(4) == "complete");
+        REQUIRE((step.has_value()));
+        REQUIRE((step.value()));
+        CHECK((stmt.getInt64(0) == 1));
+        CHECK((stmt.getInt64(1) == 0));
+        CHECK((stmt.getInt64(2) == 0));
+        CHECK((stmt.getInt64(3) == 1));
+        CHECK((stmt.getString(4) == "complete"));
         return Result<void>();
     });
-    REQUIRE(verifyStatus.has_value());
+    REQUIRE((verifyStatus.has_value()));
 }
 
 // --- batchInsertContentAndIndex counter accuracy tests ---
@@ -1794,7 +2111,7 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
         doc.contentExtracted = false;
         doc.extractionStatus = ExtractionStatus::Pending;
         auto result = fix.repository_->insertDocument(doc);
-        REQUIRE(result.has_value());
+        REQUIRE((result.has_value()));
         docIds.push_back(result.value());
     }
 
@@ -1817,17 +2134,17 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
         entries.push_back(std::move(entry));
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
-    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore + 3);
-    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 3);
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedBefore + 3));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore + 3));
 
     for (auto docId : docIds) {
         auto docResult = fix.repository_->getDocument(docId);
-        REQUIRE(docResult.has_value());
-        REQUIRE(docResult.value().has_value());
-        CHECK(docResult.value()->repairStatus == RepairStatus::Completed);
-        CHECK(docResult.value()->repairAttempts == 1);
+        REQUIRE((docResult.has_value()));
+        REQUIRE((docResult.value().has_value()));
+        CHECK((docResult.value()->repairStatus == RepairStatus::Completed));
+        CHECK((docResult.value()->repairAttempts == 1));
     }
 }
 
@@ -1849,15 +2166,15 @@ TEST_CASE("batchInsertContentAndIndex: skips stale missing document ids",
     stale.language = "en";
 
     auto batchResult = fix.repository_->batchInsertContentAndIndex({stale});
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
-    CHECK(fix.repository_->getCachedDocumentCount() == docsBefore);
-    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore);
-    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore);
+    CHECK((fix.repository_->getCachedDocumentCount() == docsBefore));
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedBefore));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore));
 
     auto exactIndexed = fix.repository_->getIndexedDocumentCount();
-    REQUIRE(exactIndexed.has_value());
-    CHECK(static_cast<uint64_t>(exactIndexed.value()) == indexedBefore);
+    REQUIRE((exactIndexed.has_value()));
+    CHECK((static_cast<uint64_t>(exactIndexed.value()) == indexedBefore));
 }
 
 TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
@@ -1875,13 +2192,13 @@ TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         doc.modifiedTime = doc.createdTime;
         auto result = fix.repository_->insertDocument(doc);
-        REQUIRE(result.has_value());
+        REQUIRE((result.has_value()));
         docIds.push_back(result.value());
     }
 
     auto initialIds = fix.repository_->getAllFts5IndexedDocumentIds();
-    REQUIRE(initialIds.has_value());
-    REQUIRE(initialIds.value().empty());
+    REQUIRE((initialIds.has_value()));
+    REQUIRE((initialIds.value().empty()));
 
     std::vector<BatchContentEntry> entries;
     for (int i = 0; i < 3; ++i) {
@@ -1896,15 +2213,15 @@ TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
     }
 
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     auto indexedIds = fix.repository_->getAllFts5IndexedDocumentIds();
-    REQUIRE(indexedIds.has_value());
+    REQUIRE((indexedIds.has_value()));
 
     auto actual = indexedIds.value();
     std::sort(actual.begin(), actual.end());
     std::sort(docIds.begin(), docIds.end());
-    CHECK(actual == docIds);
+    CHECK((actual == docIds));
 }
 
 TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-count",
@@ -1920,24 +2237,24 @@ TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-
     doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     doc.modifiedTime = doc.createdTime;
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     // First batch insert — transitions to extracted+indexed
     std::vector<BatchContentEntry> entries = {
         {docId, "Title", "Content", "text/plain", "test", "en"}};
     auto batch1 = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batch1.has_value());
+    REQUIRE((batch1.has_value()));
 
     auto extractedAfterFirst = fix.repository_->getCachedExtractedCount();
     auto indexedAfterFirst = fix.repository_->getCachedIndexedCount();
 
     // Re-insert same document — counters should not change
     auto batch2 = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batch2.has_value());
+    REQUIRE((batch2.has_value()));
 
-    CHECK(fix.repository_->getCachedExtractedCount() == extractedAfterFirst);
-    CHECK(fix.repository_->getCachedIndexedCount() == indexedAfterFirst);
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedAfterFirst));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedAfterFirst));
 }
 
 TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
@@ -1956,7 +2273,7 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
     doc1.createdTime = now;
     doc1.modifiedTime = now;
     auto id1 = fix.repository_->insertDocument(doc1);
-    REQUIRE(id1.has_value());
+    REQUIRE((id1.has_value()));
 
     DocumentInfo doc2;
     doc2.sha256Hash = "counter_mixed_2";
@@ -1966,13 +2283,13 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
     doc2.createdTime = now;
     doc2.modifiedTime = now;
     auto id2 = fix.repository_->insertDocument(doc2);
-    REQUIRE(id2.has_value());
+    REQUIRE((id2.has_value()));
 
     // Pre-extract doc1 via batchInsertContentAndIndex so it has extraction_status='Success'
     std::vector<BatchContentEntry> preEntries = {
         {id1.value(), "Title 1", "Content 1", "text/plain", "test", "en"}};
     auto preResult = fix.repository_->batchInsertContentAndIndex(preEntries);
-    REQUIRE(preResult.has_value());
+    REQUIRE((preResult.has_value()));
 
     auto extractedBefore = fix.repository_->getCachedExtractedCount();
     auto indexedBefore = fix.repository_->getCachedIndexedCount();
@@ -1982,11 +2299,11 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
         {id1.value(), "Title 1 updated", "Content 1 updated", "text/plain", "test", "en"},
         {id2.value(), "Title 2", "Content 2", "text/plain", "test", "en"}};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     // Only doc2 (fresh) should increment counters
-    CHECK(fix.repository_->getCachedExtractedCount() == extractedBefore + 1);
-    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 1);
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedBefore + 1));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore + 1));
 }
 
 TEST_CASE(
@@ -2002,7 +2319,7 @@ TEST_CASE(
     doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     doc.modifiedTime = doc.createdTime;
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     BatchContentEntry initialEntry;
@@ -2012,22 +2329,22 @@ TEST_CASE(
     initialEntry.mimeType = "text/plain";
     initialEntry.extractionMethod = "test";
     initialEntry.language = "en";
-    REQUIRE(fix.repository_->batchInsertContentAndIndex({initialEntry}).has_value());
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({initialEntry}).has_value()));
 
     REQUIRE(fix.pool_
                 ->withConnection([&](Database& db) -> Result<void> {
                     auto stmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-                    REQUIRE(stmtResult.has_value());
+                    REQUIRE((stmtResult.has_value()));
                     auto& stmt = stmtResult.value();
-                    REQUIRE(stmt.bind(1, docId).has_value());
-                    REQUIRE(stmt.execute().has_value());
+                    REQUIRE((stmt.bind(1, docId).has_value()));
+                    REQUIRE((stmt.execute().has_value()));
                     return {};
                 })
                 .has_value());
 
     fix.repository_->initializeCounters();
     auto indexedBefore = fix.repository_->getCachedIndexedCount();
-    REQUIRE(indexedBefore == 0);
+    REQUIRE((indexedBefore == 0));
 
     BatchContentEntry repairEntry;
     repairEntry.documentId = docId;
@@ -2041,13 +2358,13 @@ TEST_CASE(
     repairEntry.priorExtractionStatus = ExtractionStatus::Success;
 
     auto batchResult = fix.repository_->batchInsertContentAndIndex({repairEntry});
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     auto indexedIds = fix.repository_->getAllFts5IndexedDocumentIds();
-    REQUIRE(indexedIds.has_value());
+    REQUIRE((indexedIds.has_value()));
     REQUIRE(std::find(indexedIds.value().begin(), indexedIds.value().end(), docId) !=
             indexedIds.value().end());
-    CHECK(fix.repository_->getCachedIndexedCount() == indexedBefore + 1);
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore + 1));
 }
 
 TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
@@ -2066,17 +2383,17 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
     doc.contentExtracted = true;
     doc.extractionStatus = ExtractionStatus::Success;
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
     auto docId = insertResult.value();
 
     // Manually set an extraction error via raw SQL
     fix.pool_->withConnection([&](Database& db) -> Result<void> {
         auto stmtResult =
             db.prepare("UPDATE documents SET extraction_error = 'stale error' WHERE id = ?");
-        REQUIRE(stmtResult.has_value());
+        REQUIRE((stmtResult.has_value()));
         auto& stmt = stmtResult.value();
-        REQUIRE(stmt.bind(1, docId).has_value());
-        REQUIRE(stmt.execute().has_value());
+        REQUIRE((stmt.bind(1, docId).has_value()));
+        REQUIRE((stmt.execute().has_value()));
         return {};
     });
 
@@ -2084,18 +2401,18 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
     std::vector<BatchContentEntry> entries = {
         {docId, "Title", "Content", "text/plain", "test", "en"}};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     // Verify error is cleared
     fix.pool_->withConnection([&](Database& db) -> Result<void> {
         auto stmtResult = db.prepare("SELECT extraction_error FROM documents WHERE id = ?");
-        REQUIRE(stmtResult.has_value());
+        REQUIRE((stmtResult.has_value()));
         auto& stmt = stmtResult.value();
-        REQUIRE(stmt.bind(1, docId).has_value());
+        REQUIRE((stmt.bind(1, docId).has_value()));
         auto hasRow = stmt.step();
-        REQUIRE(hasRow.has_value());
-        REQUIRE(hasRow.value());
-        CHECK(stmt.isNull(0));
+        REQUIRE((hasRow.has_value()));
+        REQUIRE((hasRow.value()));
+        CHECK((stmt.isNull(0)));
         return {};
     });
 }
@@ -2121,7 +2438,7 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
         doc.createdTime = now;
         doc.modifiedTime = now;
         auto result = fix.repository_->insertDocument(doc);
-        REQUIRE(result.has_value());
+        REQUIRE((result.has_value()));
         docIds.push_back(result.value());
         hashes.push_back(doc.sha256Hash);
     }
@@ -2134,23 +2451,24 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
                            "text/plain", "test", "en"});
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     // Fetch with combined method
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto& map = result.value();
-    CHECK(map.size() == 3);
+    CHECK((map.size() == 3));
 
     for (int i = 0; i < 3; ++i) {
         std::string hash = "preview_hash_" + std::to_string(i);
-        REQUIRE(map.count(hash) == 1);
+        REQUIRE((map.count(hash) == 1));
         auto& [info, preview] = map.at(hash);
-        CHECK(info.id == docIds[static_cast<size_t>(i)]);
-        CHECK(info.sha256Hash == hash);
+        CHECK((info.id == docIds[static_cast<size_t>(i)]));
+        CHECK((info.sha256Hash == hash));
         CHECK_FALSE(preview.empty());
-        CHECK(preview.find("Content text for document " + std::to_string(i)) != std::string::npos);
+        CHECK(
+            (preview.find("Content text for document " + std::to_string(i)) != std::string::npos));
     }
 }
 
@@ -2168,17 +2486,17 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents without content",
     doc.createdTime = now;
     doc.modifiedTime = now;
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
 
     std::vector<std::string> hashes = {"no_content_hash"};
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto& map = result.value();
-    REQUIRE(map.size() == 1);
+    REQUIRE((map.size() == 1));
     auto& [info, preview] = map.at("no_content_hash");
-    CHECK(info.id == insertResult.value());
-    CHECK(preview.empty());
+    CHECK((info.id == insertResult.value()));
+    CHECK((preview.empty()));
 }
 
 TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
@@ -2197,12 +2515,12 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
     doc1.createdTime = now;
     doc1.modifiedTime = now;
     auto id1 = fix.repository_->insertDocument(doc1);
-    REQUIRE(id1.has_value());
+    REQUIRE((id1.has_value()));
 
     std::vector<BatchContentEntry> entries = {
         {id1.value(), "Title", "Has content", "text/plain", "test", "en"}};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     // Doc without content
     DocumentInfo doc2;
@@ -2214,16 +2532,16 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
     doc2.createdTime = now;
     doc2.modifiedTime = now;
     auto id2 = fix.repository_->insertDocument(doc2);
-    REQUIRE(id2.has_value());
+    REQUIRE((id2.has_value()));
 
     std::vector<std::string> hashes = {"mixed_hash_with", "mixed_hash_without"};
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto& map = result.value();
-    CHECK(map.size() == 2);
+    CHECK((map.size() == 2));
     CHECK_FALSE(map.at("mixed_hash_with").second.empty());
-    CHECK(map.at("mixed_hash_without").second.empty());
+    CHECK((map.at("mixed_hash_without").second.empty()));
 }
 
 TEST_CASE("batchGetDocumentsWithContentPreview: empty hash list",
@@ -2232,8 +2550,8 @@ TEST_CASE("batchGetDocumentsWithContentPreview: empty hash list",
 
     std::vector<std::string> hashes;
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 500);
-    REQUIRE(result.has_value());
-    CHECK(result.value().empty());
+    REQUIRE((result.has_value()));
+    CHECK((result.value().empty()));
 }
 
 TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
@@ -2250,21 +2568,21 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
     doc.createdTime = now;
     doc.modifiedTime = now;
     auto insertResult = fix.repository_->insertDocument(doc);
-    REQUIRE(insertResult.has_value());
+    REQUIRE((insertResult.has_value()));
 
     // Insert large content (10KB)
     std::string largeContent(10000, 'x');
     std::vector<BatchContentEntry> entries = {
         {insertResult.value(), "Title", largeContent, "text/plain", "test", "en"}};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
-    REQUIRE(batchResult.has_value());
+    REQUIRE((batchResult.has_value()));
 
     std::vector<std::string> hashes = {"truncate_hash"};
     auto result = fix.repository_->batchGetDocumentsWithContentPreview(hashes, 200);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     auto& [info, preview] = result.value().at("truncate_hash");
-    CHECK(preview.size() <= 200);
+    CHECK((preview.size() <= 200));
     CHECK_FALSE(preview.empty());
 }
 
@@ -2274,7 +2592,7 @@ TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and lates
 
     auto doc = makeDocumentWithPath("/tmp/typed-metadata.txt", "typed-metadata-hash");
     auto insert = fix.repository_->insertDocument(doc);
-    REQUIRE(insert.has_value());
+    REQUIRE((insert.has_value()));
     const int64_t docId = insert.value();
 
     const std::vector<uint8_t> blob = {0x00, 0x01, 0x41, 0xFE, 0xFF};
@@ -2288,31 +2606,31 @@ TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and lates
     };
 
     auto setBatch = fix.repository_->setMetadataBatch(entries);
-    REQUIRE(setBatch.has_value());
+    REQUIRE((setBatch.has_value()));
 
     auto all = fix.repository_->getAllMetadata(docId);
-    REQUIRE(all.has_value());
-    REQUIRE(all.value().size() == 5);
+    REQUIRE((all.has_value()));
+    REQUIRE((all.value().size() == 5));
 
-    CHECK(all.value().at("author").type == MetadataValueType::String);
-    CHECK(all.value().at("author").asString() == "new");
-    CHECK(all.value().at("revision").type == MetadataValueType::Integer);
-    CHECK(all.value().at("revision").asInteger() == 42);
-    CHECK(all.value().at("score").type == MetadataValueType::Real);
-    CHECK(all.value().at("score").asReal() == Catch::Approx(0.875));
-    CHECK(all.value().at("published").type == MetadataValueType::Boolean);
-    CHECK(all.value().at("published").asBoolean());
-    CHECK(all.value().at("payload").type == MetadataValueType::Blob);
+    CHECK((all.value().at("author").type == MetadataValueType::String));
+    CHECK((all.value().at("author").asString() == "new"));
+    CHECK((all.value().at("revision").type == MetadataValueType::Integer));
+    CHECK((all.value().at("revision").asInteger() == 42));
+    CHECK((all.value().at("score").type == MetadataValueType::Real));
+    CHECK((all.value().at("score").asReal() == Catch::Approx(0.875)));
+    CHECK((all.value().at("published").type == MetadataValueType::Boolean));
+    CHECK((all.value().at("published").asBoolean()));
+    CHECK((all.value().at("payload").type == MetadataValueType::Blob));
 
     auto payload = all.value().at("payload").asVariant();
-    REQUIRE(std::holds_alternative<std::vector<uint8_t>>(payload));
-    CHECK(std::get<std::vector<uint8_t>>(payload) == blob);
+    REQUIRE((std::holds_alternative<std::vector<uint8_t>>(payload)));
+    CHECK((std::get<std::vector<uint8_t>>(payload) == blob));
 
     std::vector<int64_t> ids{docId, 999999};
     auto batch = fix.repository_->getMetadataForDocuments(ids);
-    REQUIRE(batch.has_value());
-    REQUIRE(batch.value().contains(docId));
-    CHECK(batch.value().at(docId).at("author").asString() == "new");
+    REQUIRE((batch.has_value()));
+    REQUIRE((batch.value().contains(docId)));
+    CHECK((batch.value().at(docId).at("author").asString() == "new"));
     CHECK_FALSE(batch.value().contains(999999));
 }
 
@@ -2327,9 +2645,9 @@ TEST_CASE("MetadataRepository: batch document mutations preserve observable beha
     auto parentInsert = fix.repository_->insertDocument(parent);
     auto childInsert = fix.repository_->insertDocument(child);
     auto survivorInsert = fix.repository_->insertDocument(survivor);
-    REQUIRE(parentInsert.has_value());
-    REQUIRE(childInsert.has_value());
-    REQUIRE(survivorInsert.has_value());
+    REQUIRE((parentInsert.has_value()));
+    REQUIRE((childInsert.has_value()));
+    REQUIRE((survivorInsert.has_value()));
 
     const int64_t parentId = parentInsert.value();
     const int64_t childId = childInsert.value();
@@ -2349,42 +2667,42 @@ TEST_CASE("MetadataRepository: batch document mutations preserve observable beha
     rel.relationshipType = RelationshipType::References;
     rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     auto relInsert = fix.repository_->insertRelationship(rel);
-    REQUIRE(relInsert.has_value());
+    REQUIRE((relInsert.has_value()));
 
     auto mimeUpdate = fix.repository_->updateDocumentsMimeBatch(
         {{childId, "text/markdown"}, {survivorId, "application/json"}, {999999, "ignored/type"}});
-    REQUIRE(mimeUpdate.has_value());
-    CHECK(mimeUpdate.value() == 2);
+    REQUIRE((mimeUpdate.has_value()));
+    CHECK((mimeUpdate.value() == 2));
 
     auto updatedChild = fix.repository_->getDocument(childId);
-    REQUIRE(updatedChild.has_value());
-    REQUIRE(updatedChild.value().has_value());
-    CHECK(updatedChild.value()->mimeType == "text/markdown");
+    REQUIRE((updatedChild.has_value()));
+    REQUIRE((updatedChild.value().has_value()));
+    CHECK((updatedChild.value()->mimeType == "text/markdown"));
 
     auto deleted = fix.repository_->deleteDocumentsBatch({parentId, 999999});
-    REQUIRE(deleted.has_value());
-    CHECK(deleted.value() == 1);
+    REQUIRE((deleted.has_value()));
+    CHECK((deleted.value() == 1));
 
     auto missingParent = fix.repository_->getDocument(parentId);
-    REQUIRE(missingParent.has_value());
+    REQUIRE((missingParent.has_value()));
     CHECK_FALSE(missingParent.value().has_value());
 
     auto removedContent = fix.repository_->getContent(parentId);
-    REQUIRE(removedContent.has_value());
+    REQUIRE((removedContent.has_value()));
     CHECK_FALSE(removedContent.value().has_value());
 
     auto removedMetadata = fix.repository_->getAllMetadata(parentId);
-    REQUIRE(removedMetadata.has_value());
-    CHECK(removedMetadata.value().empty());
+    REQUIRE((removedMetadata.has_value()));
+    CHECK((removedMetadata.value().empty()));
 
     auto childRels = fix.repository_->getRelationships(childId);
-    REQUIRE(childRels.has_value());
-    CHECK(childRels.value().empty());
+    REQUIRE((childRels.has_value()));
+    CHECK((childRels.value().empty()));
 
     auto survivorDoc = fix.repository_->getDocument(survivorId);
-    REQUIRE(survivorDoc.has_value());
-    REQUIRE(survivorDoc.value().has_value());
-    CHECK(survivorDoc.value()->mimeType == "application/json");
+    REQUIRE((survivorDoc.has_value()));
+    REQUIRE((survivorDoc.value().has_value()));
+    CHECK((survivorDoc.value()->mimeType == "application/json"));
 }
 
 TEST_CASE("MetadataRepository: batch get APIs skip missing inputs and keep keyed results",
@@ -2397,9 +2715,9 @@ TEST_CASE("MetadataRepository: batch get APIs skip missing inputs and keep keyed
     auto insertA = fix.repository_->insertDocument(docA);
     auto insertB = fix.repository_->insertDocument(docB);
     auto insertC = fix.repository_->insertDocument(docC);
-    REQUIRE(insertA.has_value());
-    REQUIRE(insertB.has_value());
-    REQUIRE(insertC.has_value());
+    REQUIRE((insertA.has_value()));
+    REQUIRE((insertB.has_value()));
+    REQUIRE((insertC.has_value()));
 
     REQUIRE(fix.repository_
                 ->insertContent(DocumentContent{insertA.value(), "alpha body", 10, "test", "en"})
@@ -2410,28 +2728,28 @@ TEST_CASE("MetadataRepository: batch get APIs skip missing inputs and keep keyed
 
     auto docs = fix.repository_->batchGetDocumentsByHash(
         {"batch-get-hash-a", "missing-hash", "batch-get-hash-c", "batch-get-hash-a"});
-    REQUIRE(docs.has_value());
-    CHECK(docs.value().size() == 2);
-    CHECK(docs.value().at("batch-get-hash-a").id == insertA.value());
-    CHECK(docs.value().at("batch-get-hash-c").id == insertC.value());
+    REQUIRE((docs.has_value()));
+    CHECK((docs.value().size() == 2));
+    CHECK((docs.value().at("batch-get-hash-a").id == insertA.value()));
+    CHECK((docs.value().at("batch-get-hash-c").id == insertC.value()));
     CHECK_FALSE(docs.value().contains("missing-hash"));
 
     auto content = fix.repository_->batchGetContent(
         {insertA.value(), insertB.value(), insertC.value(), 999999, insertA.value()});
-    REQUIRE(content.has_value());
-    CHECK(content.value().size() == 2);
-    CHECK(content.value().at(insertA.value()).contentText == "alpha body");
-    CHECK(content.value().at(insertC.value()).contentText == "gamma body");
+    REQUIRE((content.has_value()));
+    CHECK((content.value().size() == 2));
+    CHECK((content.value().at(insertA.value()).contentText == "alpha body"));
+    CHECK((content.value().at(insertC.value()).contentText == "gamma body"));
     CHECK_FALSE(content.value().contains(insertB.value()));
     CHECK_FALSE(content.value().contains(999999));
 
     auto emptyDocs = fix.repository_->batchGetDocumentsByHash({});
-    REQUIRE(emptyDocs.has_value());
-    CHECK(emptyDocs.value().empty());
+    REQUIRE((emptyDocs.has_value()));
+    CHECK((emptyDocs.value().empty()));
 
     auto emptyContent = fix.repository_->batchGetContent({});
-    REQUIRE(emptyContent.has_value());
-    CHECK(emptyContent.value().empty());
+    REQUIRE((emptyContent.has_value()));
+    CHECK((emptyContent.value().empty()));
 }
 
 TEST_CASE("MetadataRepository: removeFromIndexByHashBatch reports actual FTS removals",
@@ -2442,8 +2760,8 @@ TEST_CASE("MetadataRepository: removeFromIndexByHashBatch reports actual FTS rem
     auto notIndexed = makeDocumentWithPath("/tmp/not-indexed.txt", "batch-not-indexed-hash");
     auto indexedInsert = fix.repository_->insertDocument(indexed);
     auto notIndexedInsert = fix.repository_->insertDocument(notIndexed);
-    REQUIRE(indexedInsert.has_value());
-    REQUIRE(notIndexedInsert.has_value());
+    REQUIRE((indexedInsert.has_value()));
+    REQUIRE((notIndexedInsert.has_value()));
 
     REQUIRE(fix.repository_
                 ->indexDocumentContent(indexedInsert.value(), "indexed", "needle", "text/plain")
@@ -2451,20 +2769,21 @@ TEST_CASE("MetadataRepository: removeFromIndexByHashBatch reports actual FTS rem
 
     auto beforeIndexed = fix.repository_->hasFtsEntry(indexedInsert.value());
     auto beforeNotIndexed = fix.repository_->hasFtsEntry(notIndexedInsert.value());
-    REQUIRE(beforeIndexed.has_value());
-    REQUIRE(beforeNotIndexed.has_value());
-    REQUIRE(beforeIndexed.value());
+    REQUIRE((beforeIndexed.has_value()));
+    REQUIRE((beforeNotIndexed.has_value()));
+    REQUIRE((beforeIndexed.value()));
     REQUIRE_FALSE(beforeNotIndexed.value());
 
     auto removed = fix.repository_->removeFromIndexByHashBatch(
         {"batch-indexed-hash", "batch-not-indexed-hash", "missing-hash"});
-    REQUIRE(removed.has_value());
-    CHECK(removed.value() == 1);
+    REQUIRE((removed.has_value()));
+    CHECK((removed.value() == 1));
 
     auto afterIndexed = fix.repository_->hasFtsEntry(indexedInsert.value());
     auto afterNotIndexed = fix.repository_->hasFtsEntry(notIndexedInsert.value());
-    REQUIRE(afterIndexed.has_value());
-    REQUIRE(afterNotIndexed.has_value());
+    REQUIRE((afterIndexed.has_value()));
+    REQUIRE((afterNotIndexed.has_value()));
     CHECK_FALSE(afterIndexed.value());
     CHECK_FALSE(afterNotIndexed.value());
 }
+// NOLINTEND(bugprone-chained-comparison)

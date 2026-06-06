@@ -1,98 +1,92 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <span>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
+#include <yams/core/assert.hpp>
+#include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
 
 #include "crud_ops.hpp"
+#include "metadata_write_helpers.hpp"
 #include "result_helpers.hpp"
 #include "transaction_helpers.hpp"
 
 namespace yams::metadata {
 
 using repository::beginTransactionWithRetry;
+using repository::commitOrRollback;
+using repository::MetadataTagDelta;
+using repository::rollbackIgnoringErrors;
 using repository::scope_exit;
 
 namespace {
-bool isTagMetadataKey(std::string_view key) {
-    return key == "tag" || key.starts_with("tag:");
+void applyMetadataTagDelta(std::atomic<uint64_t>& cachedTagCount,
+                           std::atomic<uint64_t>& cachedDocsWithTags,
+                           const std::atomic<uint64_t>& cachedDocumentCount,
+                           const MetadataTagDelta& delta) {
+    if (delta.tagCountDelta > 0) {
+        cachedTagCount.fetch_add(static_cast<uint64_t>(delta.tagCountDelta),
+                                 std::memory_order_relaxed);
+    } else if (delta.tagCountDelta < 0) {
+        core::saturating_sub(cachedTagCount, static_cast<uint64_t>(-delta.tagCountDelta));
+    }
+
+    if (delta.docsWithTagsDelta > 0) {
+        cachedDocsWithTags.fetch_add(static_cast<uint64_t>(delta.docsWithTagsDelta),
+                                     std::memory_order_relaxed);
+    } else if (delta.docsWithTagsDelta < 0) {
+        core::saturating_sub(cachedDocsWithTags, static_cast<uint64_t>(-delta.docsWithTagsDelta));
+    }
+
+    const auto docsWithTags = cachedDocsWithTags.load(std::memory_order_relaxed);
+    const auto docCount = cachedDocumentCount.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount.load(std::memory_order_relaxed);
+    YAMS_DCHECK(docsWithTags <= docCount,
+                "metadata tag counter invariant violated: docsWithTags <= docCount");
+    YAMS_DCHECK(tagCount >= docsWithTags,
+                "metadata tag counter invariant violated: tagCount >= docsWithTags");
 }
 } // namespace
 
 // Metadata operations
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
-    uint64_t tagCountDelta = 0;
-    uint64_t docsWithTagsDelta = 0;
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        if (isTagMetadataKey(key)) {
-            auto countStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? "
-                                              "AND (key = 'tag' OR key LIKE 'tag:%')");
-            if (countStmt) {
-                auto& stmt = *countStmt.value();
-                YAMS_TRY(stmt.reset());
-                YAMS_TRY(stmt.bind(1, documentId));
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                const auto priorTagCount = hasRow ? stmt.getInt64(0) : 0;
+    std::vector<repository::MetadataWriteEntry> entries;
+    entries.emplace_back(documentId, key, value);
 
-                auto existsStmt = db.prepareCached(
-                    "SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
-                if (existsStmt) {
-                    auto& estmt = *existsStmt.value();
-                    YAMS_TRY(estmt.reset());
-                    YAMS_TRY(estmt.bind(1, documentId));
-                    YAMS_TRY(estmt.bind(2, key));
-                    YAMS_TRY_UNWRAP(existsRow, estmt.step());
-                    const auto priorKeyCount = existsRow ? estmt.getInt64(0) : 0;
-                    if (priorKeyCount == 0) {
-                        tagCountDelta = 1;
-                        if (priorTagCount == 0) {
-                            docsWithTagsDelta = 1;
-                        }
-                    }
-                }
+    auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
             }
-        }
+        });
 
-        // Single-row fast path: avoid batch scaffolding + explicit transaction.
-        // Use ON CONFLICT to avoid DELETE+INSERT semantics of OR REPLACE (less write
-        // amplification).
-        static const std::string sql =
-            "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-            "value_type = excluded.value_type";
-        YAMS_TRY_UNWRAP(stmt, db.prepareCached(sql));
-        YAMS_TRY(stmt->bind(1, documentId));
-        YAMS_TRY(stmt->bind(2, key));
-        YAMS_TRY(stmt->bind(3, value.value));
-        YAMS_TRY(stmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
-        YAMS_TRY(stmt->execute());
-        return {};
+        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(db, entries));
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return delta;
     });
 
-    if (result) {
-        if (tagCountDelta > 0) {
-            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
-        }
-        if (docsWithTagsDelta > 0) {
-            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
-        }
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    if (!result) {
+        return result.error();
     }
-    return result;
+
+    signalCorpusStatsStale();
+    applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                          result.value());
+    metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    return {};
 }
 
 Result<void> MetadataRepository::setMetadataBatch(
@@ -101,151 +95,31 @@ Result<void> MetadataRepository::setMetadataBatch(
         return Result<void>();
     }
 
-    // Deduplicate entries by (document_id, key) within the batch.
-    // Duplicate pairs cause SQLite ON CONFLICT DO UPDATE to fail.
-    // Keep the last entry for each key (latest write wins).
-    std::vector<std::tuple<int64_t, std::string, MetadataValue>> deduped;
-    deduped.reserve(entries.size());
-    std::unordered_map<uint64_t, size_t> seen;
-    for (const auto& entry : entries) {
-        auto docId = std::get<0>(entry);
-        auto& key = std::get<1>(entry);
-        uint64_t hash = static_cast<uint64_t>(docId) * 31 + std::hash<std::string>{}(key);
-        auto it = seen.find(hash);
-        if (it != seen.end()) {
-            deduped[it->second] = entry;
-        } else {
-            seen[hash] = deduped.size();
-            deduped.push_back(entry);
-        }
-    }
-
-    uint64_t tagCountDelta = 0;
-    uint64_t docsWithTagsDelta = 0;
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // Chunked multi-row upsert:
-        // - Avoid INSERT OR REPLACE delete+insert semantics (less write amplification)
-        // - Avoid per-entry MetadataEntry allocations/copies
-        // - Reuse cached statement for the common "full chunk" shape
-        constexpr int kColumnsPerRow = 4; // document_id, key, value, value_type
-        constexpr int kSqliteParamLimit = 999;
-        constexpr int kMaxRowsPerChunk = kSqliteParamLimit / kColumnsPerRow; // 249
-
-        auto buildUpsertSql = [](int rows) -> std::string {
-            std::string sql;
-            sql.reserve(static_cast<size_t>(rows) * 20 + 200);
-            sql += "INSERT INTO metadata (document_id, key, value, value_type) VALUES ";
-            for (int i = 0; i < rows; ++i) {
-                if (i > 0)
-                    sql += ',';
-                sql += "(?, ?, ?, ?)";
-            }
-            sql += " ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-                   "value_type = excluded.value_type";
-            return sql;
-        };
-
-        const std::string fullChunkSql = buildUpsertSql(kMaxRowsPerChunk);
-
-        // Wrap the full operation in a single transaction.
-        // beginTransactionWithRetry() uses BEGIN IMMEDIATE on SQLite to avoid mid-loop lock
-        // surprises; commit/rollback uses Database::execute.
+    const auto dedupedEntries = repository::deduplicateMetadataWrites(entries);
+    auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
         YAMS_TRY(beginTransactionWithRetry(db));
-        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
-
-        std::unordered_map<int64_t, std::vector<std::string>> pendingTagKeysByDoc;
-        for (const auto& [documentId, key, _value] : deduped) {
-            if (isTagMetadataKey(key)) {
-                pendingTagKeysByDoc[documentId].push_back(key);
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                repository::rollbackIgnoringErrors(db);
             }
-        }
+        });
 
-        if (!pendingTagKeysByDoc.empty()) {
-            auto tagCountStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id "
-                                                 "= ? AND (key = 'tag' OR key LIKE 'tag:%')");
-            auto keyExistsStmt =
-                db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
-            if (tagCountStmt && keyExistsStmt) {
-                for (auto& [documentId, keys] : pendingTagKeysByDoc) {
-                    auto& tcStmt = *tagCountStmt.value();
-                    YAMS_TRY(tcStmt.reset());
-                    YAMS_TRY(tcStmt.bind(1, documentId));
-                    YAMS_TRY_UNWRAP(tagRow, tcStmt.step());
-                    const auto priorTagCount = tagRow ? tcStmt.getInt64(0) : 0;
-                    bool docWillGainFirstTag = priorTagCount == 0;
-                    std::unordered_set<std::string> seenKeys;
-                    for (const auto& tagKey : keys) {
-                        if (!seenKeys.insert(tagKey).second) {
-                            continue;
-                        }
-                        auto& keStmt = *keyExistsStmt.value();
-                        YAMS_TRY(keStmt.reset());
-                        YAMS_TRY(keStmt.bind(1, documentId));
-                        YAMS_TRY(keStmt.bind(2, tagKey));
-                        YAMS_TRY_UNWRAP(keyRow, keStmt.step());
-                        const auto priorKeyCount = keyRow ? keStmt.getInt64(0) : 0;
-                        if (priorKeyCount == 0) {
-                            ++tagCountDelta;
-                            if (docWillGainFirstTag) {
-                                ++docsWithTagsDelta;
-                                docWillGainFirstTag = false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (size_t offset = 0; offset < deduped.size(); offset += kMaxRowsPerChunk) {
-            const int rows = static_cast<int>(
-                std::min(deduped.size() - offset, static_cast<size_t>(kMaxRowsPerChunk)));
-
-            if (rows == kMaxRowsPerChunk) {
-                YAMS_TRY_UNWRAP(stmt, db.prepareCached(fullChunkSql));
-                int bindIndex = 1;
-                for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
-                    YAMS_TRY(stmt->bind(bindIndex++, documentId));
-                    YAMS_TRY(stmt->bind(bindIndex++, key));
-                    YAMS_TRY(stmt->bind(bindIndex++, value.value));
-                    YAMS_TRY(
-                        stmt->bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
-                }
-                YAMS_TRY(stmt->execute());
-            } else {
-                const std::string tailSql = buildUpsertSql(rows);
-                YAMS_TRY_UNWRAP(stmt, db.prepare(tailSql));
-                int bindIndex = 1;
-                for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
-                    YAMS_TRY(stmt.bind(bindIndex++, documentId));
-                    YAMS_TRY(stmt.bind(bindIndex++, key));
-                    YAMS_TRY(stmt.bind(bindIndex++, value.value));
-                    YAMS_TRY(
-                        stmt.bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
-                }
-                YAMS_TRY(stmt.execute());
-            }
-        }
-
-        YAMS_TRY(db.execute("COMMIT"));
-        rollback.dismiss();
-        return {};
+        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(db, dedupedEntries));
+        YAMS_TRY(repository::commitOrRollback(db));
+        committed = true;
+        return delta;
     });
 
-    if (result) {
-        // Signal corpus stats stale - metadata batch may affect corpus statistics
-        signalCorpusStatsStale();
-        if (tagCountDelta > 0) {
-            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
-        }
-        if (docsWithTagsDelta > 0) {
-            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
-        }
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    if (!result) {
+        return result.error();
     }
-    return result;
+
+    signalCorpusStatsStale();
+    applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                          result.value());
+    metadataChangeCounter_.fetch_add(dedupedEntries.size(), std::memory_order_release);
+    return {};
 }
 
 Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t documentId,
@@ -338,16 +212,39 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
 }
 
 Result<void> MetadataRepository::removeMetadata(int64_t documentId, const std::string& key) {
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        YAMS_TRY_UNWRAP(delta, repository::calculateMetadataTagDeltaForDelete(db, documentId, key));
+
         repository::CrudOps<repository::MetadataEntry> ops;
-        ops.deleteWhere(db, "document_id = ? AND key = ?", documentId, key);
-        return {};
+        YAMS_TRY_UNWRAP(deletedRows,
+                        ops.deleteWhere(db, "document_id = ? AND key = ?", documentId, key));
+        if (deletedRows == 0) {
+            YAMS_TRY(commitOrRollback(db));
+            committed = true;
+            return MetadataTagDelta{};
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return delta;
     });
 
-    if (result) {
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    if (!result) {
+        return result.error();
     }
-    return result;
+
+    signalCorpusStatsStale();
+    applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                          result.value());
+    metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    return {};
 }
 } // namespace yams::metadata

@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/sqlite_retry.h>
@@ -20,6 +21,9 @@
 namespace yams::metadata {
 
 using repository::beginTransactionWithRetry;
+using repository::commitOrRollback;
+using repository::rollbackIgnoringErrors;
+using repository::scope_exit;
 
 Result<int64_t> MetadataRepository::getEmbeddedDocumentCount() {
     return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
@@ -127,6 +131,10 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
             signalCorpusStatsStale();
         }
 
+        YAMS_DCHECK(cachedEmbeddedCount_.load(std::memory_order_relaxed) <=
+                        cachedDocumentCount_.load(std::memory_order_relaxed),
+                    "metadata: embedded count must not exceed total document count after "
+                    "embedding status update");
         return Result<void>();
     });
 }
@@ -206,6 +214,10 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
             signalCorpusStatsStale();
         }
 
+        YAMS_DCHECK(cachedEmbeddedCount_.load(std::memory_order_relaxed) <=
+                        cachedDocumentCount_.load(std::memory_order_relaxed),
+                    "metadata: embedded count must not exceed total document count after "
+                    "embedding hash update");
         return Result<void>();
     });
 }
@@ -222,14 +234,9 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
     thread_local std::mt19937 rng(std::random_device{}());
 
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
+        auto result = executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+            YAMS_TRY(beginTransactionWithRetry(db));
+            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
 
             // Ensure model_id exists in vector_models (FK constraint) - once per batch
             if (!modelId.empty()) {
@@ -252,7 +259,6 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                 WHERE d.sha256_hash = ?
             )");
             if (!lookupStmt) {
-                db.execute("ROLLBACK");
                 return lookupStmt.error();
             }
 
@@ -265,7 +271,6 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                     updated_at = excluded.updated_at
             )");
             if (!updateStmt) {
-                db.execute("ROLLBACK");
                 return updateStmt.error();
             }
 
@@ -276,13 +281,11 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
             for (const auto& hash : hashes) {
                 lstmt.reset();
                 if (auto r = lstmt.bind(1, hash); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
 
                 auto stepResult = lstmt.step();
                 if (!stepResult) {
-                    db.execute("ROLLBACK");
                     return stepResult.error();
                 }
                 if (!stepResult.value())
@@ -293,21 +296,17 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
 
                 ustmt.reset();
                 if (auto r = ustmt.bind(1, documentId); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
 
                 auto execResult = ustmt.execute();
                 if (!execResult) {
-                    db.execute("ROLLBACK");
                     return execResult.error();
                 }
 
@@ -318,26 +317,28 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                 }
             }
 
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult)
-                return commitResult.error();
-
-            if (embeddedDelta > 0) {
-                cachedEmbeddedCount_.fetch_add(static_cast<uint64_t>(embeddedDelta),
-                                               std::memory_order_relaxed);
-            } else if (embeddedDelta < 0) {
-                core::saturating_sub(cachedEmbeddedCount_, static_cast<uint64_t>(-embeddedDelta));
-            }
-
-            signalCorpusStatsStale();
-            return Result<void>();
+            YAMS_TRY(commitOrRollback(db));
+            rollback.dismiss();
+            return embeddedDelta;
         });
 
-        if (result)
-            return result;
+        if (result) {
+            if (result.value() > 0) {
+                cachedEmbeddedCount_.fetch_add(static_cast<uint64_t>(result.value()),
+                                               std::memory_order_relaxed);
+            } else if (result.value() < 0) {
+                core::saturating_sub(cachedEmbeddedCount_, static_cast<uint64_t>(-result.value()));
+            }
+            signalCorpusStatsStale();
+            YAMS_DCHECK(cachedEmbeddedCount_.load(std::memory_order_relaxed) <=
+                            cachedDocumentCount_.load(std::memory_order_relaxed),
+                        "metadata: embedded count must not exceed total document count after "
+                        "embedding batch update");
+            return Result<void>();
+        }
 
         if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message))
-            return result;
+            return result.error();
 
         // Exponential backoff with jitter (±25%) to prevent thundering herd
         int baseDelayMs = kBaseDelayMs * (1 << attempt);
@@ -362,32 +363,21 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
     uniqueHashes.erase(std::unique(uniqueHashes.begin(), uniqueHashes.end()), uniqueHashes.end());
 
     thread_local std::mt19937 rng(std::random_device{}());
-    std::size_t reconciledEmbeddedDocs = 0;
 
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
-
-            auto rollback = [&db](const Result<void>& err) -> Result<void> {
-                db.execute("ROLLBACK");
-                return err;
-            };
+        auto result = executeQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+            YAMS_TRY(beginTransactionWithRetry(db));
+            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
 
             if (auto createTemp =
                     db.execute("CREATE TEMP TABLE IF NOT EXISTS temp_embedding_reconcile_hashes ("
                                "sha256_hash TEXT PRIMARY KEY)");
                 !createTemp) {
-                return rollback(createTemp.error());
+                return createTemp.error();
             }
             if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
                 !clearTemp) {
-                return rollback(clearTemp.error());
+                return clearTemp.error();
             }
 
             if (!modelId.empty()) {
@@ -396,17 +386,17 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                     VALUES (?, ?, 0)
                 )");
                 if (!ensureModelStmt) {
-                    return rollback(ensureModelStmt.error());
+                    return ensureModelStmt.error();
                 }
                 auto& mstmt = ensureModelStmt.value();
                 if (auto r = mstmt.bind(1, modelId); !r) {
-                    return rollback(r.error());
+                    return r.error();
                 }
                 if (auto r = mstmt.bind(2, modelId); !r) {
-                    return rollback(r.error());
+                    return r.error();
                 }
                 if (auto exec = mstmt.execute(); !exec) {
-                    return rollback(exec.error());
+                    return exec.error();
                 }
             }
 
@@ -415,30 +405,31 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                     "INSERT OR IGNORE INTO temp_embedding_reconcile_hashes (sha256_hash) "
                     "VALUES (?)");
                 if (!insertHashStmt) {
-                    return rollback(insertHashStmt.error());
+                    return insertHashStmt.error();
                 }
                 auto& hstmt = insertHashStmt.value();
                 for (const auto& hash : uniqueHashes) {
                     hstmt.reset();
                     if (auto r = hstmt.bind(1, hash); !r) {
-                        return rollback(r.error());
+                        return r.error();
                     }
                     if (auto exec = hstmt.execute(); !exec) {
-                        return rollback(exec.error());
+                        return exec.error();
                     }
                 }
             }
 
+            std::size_t reconciledEmbeddedDocs = 0;
             auto countStmt = db.prepare(R"(
                 SELECT COUNT(*)
                 FROM documents d
                 JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
             )");
             if (!countStmt) {
-                return rollback(countStmt.error());
+                return countStmt.error();
             }
             if (auto step = countStmt.value().step(); !step) {
-                return rollback(step.error());
+                return step.error();
             } else if (step.value()) {
                 reconciledEmbeddedDocs = static_cast<std::size_t>(countStmt.value().getInt64(0));
             }
@@ -470,38 +461,39 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                     updated_at = excluded.updated_at
             )");
             if (!reconcileStmt) {
-                return rollback(reconcileStmt.error());
+                return reconcileStmt.error();
             }
             auto& rstmt = reconcileStmt.value();
             if (auto r = rstmt.bind(1, modelId.empty() ? nullptr : modelId.c_str()); !r) {
-                return rollback(r.error());
+                return r.error();
             }
             if (auto exec = rstmt.execute(); !exec) {
-                return rollback(exec.error());
+                return exec.error();
             }
 
             if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
                 !clearTemp) {
-                return rollback(clearTemp.error());
+                return clearTemp.error();
             }
 
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult) {
-                db.execute("ROLLBACK");
-                return commitResult.error();
-            }
-            return Result<void>();
+            YAMS_TRY(commitOrRollback(db));
+            rollback.dismiss();
+            return reconciledEmbeddedDocs;
         });
 
         if (result) {
-            cachedEmbeddedCount_.store(static_cast<uint64_t>(reconciledEmbeddedDocs),
+            cachedEmbeddedCount_.store(static_cast<uint64_t>(result.value()),
                                        std::memory_order_relaxed);
             signalCorpusStatsStale();
-            return result;
+            YAMS_DCHECK(cachedEmbeddedCount_.load(std::memory_order_relaxed) <=
+                            cachedDocumentCount_.load(std::memory_order_relaxed),
+                        "metadata: embedded count must not exceed total document count after "
+                        "embedding reconciliation");
+            return Result<void>();
         }
 
         if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
-            return result;
+            return result.error();
         }
 
         int baseDelayMs = kBaseDelayMs * (1 << attempt);
@@ -720,13 +712,8 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
 
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
         auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
+            YAMS_TRY(beginTransactionWithRetry(db));
+            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
 
             auto updateStmt = db.prepare(R"(
                 UPDATE documents
@@ -734,7 +721,6 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
                 WHERE sha256_hash = ?
             )");
             if (!updateStmt) {
-                db.execute("ROLLBACK");
                 return updateStmt.error();
             }
 
@@ -744,25 +730,20 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
             for (const auto& hash : hashes) {
                 stmt.reset();
                 if (auto r = stmt.bind(1, statusStr.c_str()); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = stmt.bind(2, hash); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
 
                 auto execResult = stmt.execute();
                 if (!execResult) {
-                    db.execute("ROLLBACK");
                     return execResult.error();
                 }
             }
 
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult)
-                return commitResult.error();
-
+            YAMS_TRY(commitOrRollback(db));
+            rollback.dismiss();
             return Result<void>();
         });
 

@@ -11,9 +11,17 @@
 #include <string_view>
 #include <vector>
 
+#include <yams/core/assert.hpp>
 #include <yams/metadata/metadata_repository.h>
 
+#include "result_helpers.hpp"
+#include "transaction_helpers.hpp"
+
 namespace yams::metadata {
+
+using repository::beginTransactionWithRetry;
+using repository::rollbackIgnoringErrors;
+using repository::scope_exit;
 
 namespace {
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
@@ -65,42 +73,47 @@ std::vector<std::string> splitPathSegments(const std::string& normalizedPath) {
     return segments;
 }
 
+Result<std::optional<PathTreeNode>> findPathTreeNodeInDb(Database& db, int64_t parentId,
+                                                         std::string_view pathSegment) {
+    const bool parentIsNull = parentId == kPathTreeNullParent;
+    const char* sql = parentIsNull
+                          ? "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                            "centroid_weight, centroid FROM path_tree_nodes "
+                            "WHERE parent_id IS NULL AND path_segment = ?"
+                          : "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                            "centroid_weight, centroid FROM path_tree_nodes "
+                            "WHERE parent_id = ? AND path_segment = ?";
+
+    auto stmtResult = db.prepare(sql);
+    if (!stmtResult)
+        return stmtResult.error();
+
+    auto stmt = std::move(stmtResult).value();
+    int bindIndex = 1;
+
+    if (!parentIsNull) {
+        if (auto bindResult = stmt.bind(bindIndex++, parentId); !bindResult)
+            return bindResult.error();
+    }
+    if (auto bindResult = stmt.bind(bindIndex, pathSegment); !bindResult)
+        return bindResult.error();
+
+    auto stepResult = stmt.step();
+    if (!stepResult)
+        return stepResult.error();
+    if (!stepResult.value())
+        return std::optional<PathTreeNode>{};
+
+    return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
+}
+
 } // namespace
 
 Result<std::optional<PathTreeNode>>
 MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegment) {
     return executeReadQuery<std::optional<PathTreeNode>>(
         [&](Database& db) -> Result<std::optional<PathTreeNode>> {
-            const bool parentIsNull = parentId == kPathTreeNullParent;
-            const char* sql =
-                parentIsNull ? "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight, centroid FROM path_tree_nodes "
-                               "WHERE parent_id IS NULL AND path_segment = ?"
-                             : "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight, centroid FROM path_tree_nodes "
-                               "WHERE parent_id = ? AND path_segment = ?";
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            int bindIndex = 1;
-
-            if (!parentIsNull) {
-                if (auto bindResult = stmt.bind(bindIndex++, parentId); !bindResult)
-                    return bindResult.error();
-            }
-            if (auto bindResult = stmt.bind(bindIndex, pathSegment); !bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            if (!stepResult.value())
-                return std::optional<PathTreeNode>{};
-
-            return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
+            return findPathTreeNodeInDb(db, parentId, pathSegment);
         });
 }
 
@@ -605,213 +618,216 @@ Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& i
     if (segments.empty())
         return Result<void>();
 
-    const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
-    int64_t parentNodeId = kPathTreeNullParent;
-    std::string currentPath = isAbsolute ? std::string("/") : std::string{};
-
-    // Collect all node IDs along the path for later cleanup
-    std::vector<int64_t> pathNodeIds;
-
-    for (const auto& part : segments) {
-        if (!currentPath.empty() && currentPath.back() != '/')
-            currentPath.push_back('/');
-        currentPath += part;
-
-        auto nodeResult = findPathTreeNode(parentNodeId, part);
-        if (!nodeResult)
-            return nodeResult.error();
-
-        if (!nodeResult.value()) {
-            // Node doesn't exist, nothing to remove
-            return Result<void>();
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
         }
 
-        pathNodeIds.push_back(nodeResult.value()->id);
-        parentNodeId = nodeResult.value()->id;
-    }
-
-    // First pass: Remove document associations and decrement counts from leaf to root
-    for (auto it = pathNodeIds.rbegin(); it != pathNodeIds.rend(); ++it) {
-        int64_t nodeId = *it;
-
-        // Remove the document-node association
-        auto removeAssoc = executeQuery<void>([&](Database& db) -> Result<void> {
-            auto deleteStmt = db.prepare(
-                "DELETE FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
-            if (!deleteStmt)
-                return deleteStmt.error();
-
-            auto stmt = std::move(deleteStmt).value();
-            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                return bindNode.error();
-            if (auto bindDoc = stmt.bind(2, documentId); !bindDoc)
-                return bindDoc.error();
-
-            return stmt.execute();
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
         });
-        if (!removeAssoc)
-            return removeAssoc.error();
 
-        // Decrement doc_count
-        auto decrementCount = executeQuery<void>([&](Database& db) -> Result<void> {
-            auto updateStmt =
-                db.prepare("UPDATE path_tree_nodes "
-                           "SET doc_count = MAX(0, doc_count - 1), last_updated = unixepoch() "
-                           "WHERE node_id = ?");
-            if (!updateStmt)
-                return updateStmt.error();
+        int64_t parentNodeId = kPathTreeNullParent;
+        std::vector<int64_t> pathNodeIds;
+        pathNodeIds.reserve(segments.size());
 
-            auto stmt = std::move(updateStmt).value();
-            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                return bindNode.error();
+        for (const auto& part : segments) {
+            auto nodeResult = findPathTreeNodeInDb(db, parentNodeId, part);
+            if (!nodeResult)
+                return nodeResult.error();
 
-            return stmt.execute();
-        });
-        if (!decrementCount)
-            return decrementCount.error();
-
-        // Recalculate centroid if embedding was provided
-        if (!embeddingValues.empty()) {
-            auto recalc = executeQuery<void>([&](Database& db) -> Result<void> {
-                // Get current centroid and weight
-                auto selectStmt =
-                    db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes "
-                               "WHERE node_id = ?");
-                if (!selectStmt)
-                    return selectStmt.error();
-
-                auto stmt = std::move(selectStmt).value();
-                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                    return bindNode.error();
-
-                auto stepRes = stmt.step();
-                if (!stepRes)
-                    return stepRes.error();
-                if (!stepRes.value())
-                    return Result<void>(); // Node doesn't exist anymore
-
-                std::vector<float> centroid;
-                int64_t currentWeight = stmt.getInt64(1);
-
-                if (!stmt.isNull(0)) {
-                    centroid = blobToFloatVector(stmt.getBlob(0));
-                }
-
-                if (currentWeight <= 1) {
-                    // Reset centroid when no documents remain
-                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
-                                                 "SET centroid = NULL, centroid_weight = 0, "
-                                                 "last_updated = unixepoch() "
-                                                 "WHERE node_id = ?");
-                    if (!updateStmt)
-                        return updateStmt.error();
-
-                    auto update = std::move(updateStmt).value();
-                    if (auto bindNode = update.bind(1, nodeId); !bindNode)
-                        return bindNode.error();
-
-                    return update.execute();
-                }
-
-                if (centroid.size() == embeddingValues.size()) {
-                    const double oldWeightFactor = static_cast<double>(currentWeight);
-                    const int64_t newWeight = currentWeight - 1;
-                    const double newWeightFactor = static_cast<double>(newWeight);
-                    for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
-                        double updated =
-                            (centroid[i] * oldWeightFactor - embeddingValues[i]) / newWeightFactor;
-                        centroid[i] = static_cast<float>(updated);
-                    }
-
-                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
-                                                 "SET centroid = ?, centroid_weight = ?, "
-                                                 "last_updated = unixepoch() "
-                                                 "WHERE node_id = ?");
-                    if (!updateStmt)
-                        return updateStmt.error();
-
-                    auto update = std::move(updateStmt).value();
-
-                    std::span<const std::byte> blob(
-                        reinterpret_cast<const std::byte*>(centroid.data()),
-                        centroid.size() * sizeof(float));
-                    if (auto bindBlob = update.bind(1, blob); !bindBlob)
-                        return bindBlob.error();
-                    if (auto bindWeight = update.bind(2, newWeight); !bindWeight)
-                        return bindWeight.error();
-                    if (auto bindNode = update.bind(3, nodeId); !bindNode)
-                        return bindNode.error();
-
-                    return update.execute();
-                }
-
+            if (!nodeResult.value()) {
                 return Result<void>();
-            });
-            if (!recalc)
-                return recalc.error();
-        }
-    }
+            }
 
-    // Second pass: Delete empty nodes from leaf to root, but keep top-level directories
-    // This ensures parent nodes are only checked after all their children have been processed
-    for (size_t i = 0; i < pathNodeIds.size(); ++i) {
-        size_t reverseIdx = pathNodeIds.size() - 1 - i;
-        int64_t nodeId = pathNodeIds[reverseIdx];
-
-        // Keep first-level directories (direct children of root) even if empty
-        bool isFirstLevel = (reverseIdx == 0);
-        if (isFirstLevel) {
-            continue; // Don't delete top-level directories
+            pathNodeIds.push_back(nodeResult.value()->id);
+            parentNodeId = nodeResult.value()->id;
         }
 
-        // Check if node is now empty and has no children
-        auto shouldDelete = executeQuery<bool>([&](Database& db) -> Result<bool> {
-            auto checkStmt = db.prepare(
-                "SELECT doc_count, "
-                "(SELECT COUNT(*) FROM path_tree_nodes WHERE parent_id = ?) as child_count "
-                "FROM path_tree_nodes WHERE node_id = ?");
-            if (!checkStmt)
-                return checkStmt.error();
+        auto deleteAssocStmtResult = db.prepare(
+            "DELETE FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
+        if (!deleteAssocStmtResult)
+            return deleteAssocStmtResult.error();
+        auto deleteAssocStmt = std::move(deleteAssocStmtResult).value();
 
-            auto stmt = std::move(checkStmt).value();
-            if (auto bind1 = stmt.bind(1, nodeId); !bind1)
-                return bind1.error();
-            if (auto bind2 = stmt.bind(2, nodeId); !bind2)
-                return bind2.error();
+        auto decrementStmtResult =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET doc_count = MAX(0, doc_count - 1), last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!decrementStmtResult)
+            return decrementStmtResult.error();
+        auto decrementStmt = std::move(decrementStmtResult).value();
 
-            auto stepRes = stmt.step();
+        auto selectCentroidStmtResult =
+            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
+        if (!selectCentroidStmtResult)
+            return selectCentroidStmtResult.error();
+        auto selectCentroidStmt = std::move(selectCentroidStmtResult).value();
+
+        auto clearCentroidStmtResult =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET centroid = NULL, centroid_weight = 0, last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!clearCentroidStmtResult)
+            return clearCentroidStmtResult.error();
+        auto clearCentroidStmt = std::move(clearCentroidStmtResult).value();
+
+        auto updateCentroidStmtResult =
+            db.prepare("UPDATE path_tree_nodes "
+                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
+                       "WHERE node_id = ?");
+        if (!updateCentroidStmtResult)
+            return updateCentroidStmtResult.error();
+        auto updateCentroidStmt = std::move(updateCentroidStmtResult).value();
+
+        auto checkDeleteStmtResult =
+            db.prepare("SELECT doc_count, "
+                       "(SELECT COUNT(*) FROM path_tree_nodes WHERE parent_id = ?) as child_count "
+                       "FROM path_tree_nodes WHERE node_id = ?");
+        if (!checkDeleteStmtResult)
+            return checkDeleteStmtResult.error();
+        auto checkDeleteStmt = std::move(checkDeleteStmtResult).value();
+
+        auto deleteNodeStmtResult = db.prepare("DELETE FROM path_tree_nodes WHERE node_id = ?");
+        if (!deleteNodeStmtResult)
+            return deleteNodeStmtResult.error();
+        auto deleteNodeStmt = std::move(deleteNodeStmtResult).value();
+
+        for (auto it = pathNodeIds.rbegin(); it != pathNodeIds.rend(); ++it) {
+            const int64_t nodeId = *it;
+
+            if (auto resetResult = deleteAssocStmt.reset(); !resetResult)
+                return resetResult.error();
+            if (auto bindNode = deleteAssocStmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+            if (auto bindDoc = deleteAssocStmt.bind(2, documentId); !bindDoc)
+                return bindDoc.error();
+            if (auto execResult = deleteAssocStmt.execute(); !execResult)
+                return execResult.error();
+
+            const bool removedAssociation = db.changes() > 0;
+            if (!removedAssociation) {
+                return Error{ErrorCode::DatabaseError,
+                             "path-tree: resolved node on a document path lost its document "
+                             "association before removal"};
+            }
+
+            if (auto resetResult = decrementStmt.reset(); !resetResult)
+                return resetResult.error();
+            if (auto bindNode = decrementStmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+            if (auto execResult = decrementStmt.execute(); !execResult)
+                return execResult.error();
+
+            if (embeddingValues.empty()) {
+                continue;
+            }
+
+            if (auto resetResult = selectCentroidStmt.reset(); !resetResult)
+                return resetResult.error();
+            if (auto bindNode = selectCentroidStmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+
+            auto stepRes = selectCentroidStmt.step();
             if (!stepRes)
                 return stepRes.error();
-            if (!stepRes.value())
-                return false; // Node doesn't exist
+            if (!stepRes.value()) {
+                continue;
+            }
 
-            int64_t docCount = stmt.getInt64(0);
-            int64_t childCount = stmt.getInt64(1);
+            std::vector<float> centroid;
+            const int64_t currentWeight = selectCentroidStmt.getInt64(1);
+            if (!selectCentroidStmt.isNull(0)) {
+                centroid = blobToFloatVector(selectCentroidStmt.getBlob(0));
+            }
 
-            return (docCount == 0 && childCount == 0);
-        });
-
-        if (!shouldDelete)
-            return shouldDelete.error();
-
-        if (shouldDelete.value()) {
-            auto deleteNode = executeQuery<void>([&](Database& db) -> Result<void> {
-                auto deleteStmt = db.prepare("DELETE FROM path_tree_nodes WHERE node_id = ?");
-                if (!deleteStmt)
-                    return deleteStmt.error();
-
-                auto stmt = std::move(deleteStmt).value();
-                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
+            if (currentWeight <= 1) {
+                if (auto resetResult = clearCentroidStmt.reset(); !resetResult)
+                    return resetResult.error();
+                if (auto bindNode = clearCentroidStmt.bind(1, nodeId); !bindNode)
                     return bindNode.error();
+                if (auto execResult = clearCentroidStmt.execute(); !execResult)
+                    return execResult.error();
+                continue;
+            }
 
-                return stmt.execute();
-            });
-            if (!deleteNode)
-                return deleteNode.error();
+            YAMS_DCHECK(centroid.size() == embeddingValues.size(),
+                        "path-tree: centroid dimension must match removed embedding dimension");
+            if (centroid.size() != embeddingValues.size()) {
+                continue;
+            }
+
+            const int64_t newWeight = currentWeight - 1;
+            const double oldWeightFactor = static_cast<double>(currentWeight);
+            const double newWeightFactor = static_cast<double>(newWeight);
+            for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
+                double updated =
+                    (centroid[i] * oldWeightFactor - embeddingValues[i]) / newWeightFactor;
+                centroid[i] = static_cast<float>(updated);
+            }
+
+            if (auto resetResult = updateCentroidStmt.reset(); !resetResult)
+                return resetResult.error();
+            std::span<const std::byte> blob(reinterpret_cast<const std::byte*>(centroid.data()),
+                                            centroid.size() * sizeof(float));
+            if (auto bindBlob = updateCentroidStmt.bind(1, blob); !bindBlob)
+                return bindBlob.error();
+            if (auto bindWeight = updateCentroidStmt.bind(2, newWeight); !bindWeight)
+                return bindWeight.error();
+            if (auto bindNode = updateCentroidStmt.bind(3, nodeId); !bindNode)
+                return bindNode.error();
+            if (auto execResult = updateCentroidStmt.execute(); !execResult)
+                return execResult.error();
         }
-    }
 
-    return Result<void>();
+        for (size_t i = 0; i < pathNodeIds.size(); ++i) {
+            const size_t reverseIdx = pathNodeIds.size() - 1 - i;
+            const int64_t nodeId = pathNodeIds[reverseIdx];
+            const bool isFirstLevel = (reverseIdx == 0);
+            if (isFirstLevel) {
+                continue;
+            }
+
+            if (auto resetResult = checkDeleteStmt.reset(); !resetResult)
+                return resetResult.error();
+            if (auto bind1 = checkDeleteStmt.bind(1, nodeId); !bind1)
+                return bind1.error();
+            if (auto bind2 = checkDeleteStmt.bind(2, nodeId); !bind2)
+                return bind2.error();
+
+            auto stepRes = checkDeleteStmt.step();
+            if (!stepRes)
+                return stepRes.error();
+            if (!stepRes.value()) {
+                continue;
+            }
+
+            const int64_t docCount = checkDeleteStmt.getInt64(0);
+            const int64_t childCount = checkDeleteStmt.getInt64(1);
+            if (docCount != 0 || childCount != 0) {
+                continue;
+            }
+
+            if (auto resetResult = deleteNodeStmt.reset(); !resetResult)
+                return resetResult.error();
+            if (auto bindNode = deleteNodeStmt.bind(1, nodeId); !bindNode)
+                return bindNode.error();
+            if (auto execResult = deleteNodeStmt.execute(); !execResult)
+                return execResult.error();
+        }
+
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            return commitResult.error();
+        }
+
+        committed = true;
+        return Result<void>();
+    });
 }
 
 // -----------------------------------------------------------------------------

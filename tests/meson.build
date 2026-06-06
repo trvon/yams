@@ -1611,6 +1611,7 @@ if catch2_dep.found()
     files(
       'unit/metadata/fts5_catch2_test.cpp',
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
+      'unit/metadata/search_query_helpers_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1671,7 +1672,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_metadata_repository_exe = executable('catch2_metadata_repository',
-    files('unit/metadata/metadata_repository_catch2_test.cpp'),
+    files(
+      'unit/metadata/metadata_repository_catch2_test.cpp',
+      'unit/metadata/metadata_repository_tag_stats_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

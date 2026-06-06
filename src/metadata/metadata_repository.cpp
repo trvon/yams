@@ -130,6 +130,43 @@ SemanticDuplicateGroupMember mapSemanticDuplicateGroupMemberRow(const Statement&
     return member;
 }
 
+Result<void> bindOptionalInt64(Statement& stmt, int index, const std::optional<int64_t>& value) {
+    if (value.has_value()) {
+        return stmt.bind(index, *value);
+    }
+    return stmt.bind(index, nullptr);
+}
+
+Result<void> bindOptionalDouble(Statement& stmt, int index, const std::optional<double>& value) {
+    if (value.has_value()) {
+        return stmt.bind(index, *value);
+    }
+    return stmt.bind(index, nullptr);
+}
+
+Result<void> bindNullableText(Statement& stmt, int index, std::string_view value) {
+    if (value.empty()) {
+        return stmt.bind(index, nullptr);
+    }
+    return stmt.bind(index, value);
+}
+
+Result<void> bindSemanticDuplicateGroupMemberInsert(Statement& stmt, int64_t groupId,
+                                                    const SemanticDuplicateGroupMember& member) {
+    YAMS_TRY(stmt.bind(1, groupId));
+    YAMS_TRY(stmt.bind(2, member.documentId));
+    YAMS_TRY(stmt.bind(3, member.role));
+    YAMS_TRY(bindOptionalDouble(stmt, 4, member.similarityToCanonical));
+    YAMS_TRY(bindOptionalDouble(stmt, 5, member.titleOverlap));
+    YAMS_TRY(bindOptionalDouble(stmt, 6, member.pathOverlap));
+    YAMS_TRY(bindOptionalDouble(stmt, 7, member.pairScore));
+    YAMS_TRY(stmt.bind(8, member.decision));
+    YAMS_TRY(bindNullableText(stmt, 9, member.reason));
+    YAMS_TRY(stmt.bind(10, member.createdAt));
+    YAMS_TRY(stmt.bind(11, member.updatedAt));
+    return Result<void>();
+}
+
 constexpr const char* kDocumentColumnListNew =
     "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
@@ -226,6 +263,14 @@ Result<std::vector<RowT>> executePreparedVectorQuery(Database& db, const std::st
                                                      RowMapper&& mapRow) {
     return executePreparedVectorQuery<RowT>(db, sql, params, std::forward<RowMapper>(mapRow),
                                             [](RowT&) {});
+}
+
+uint64_t clampNonNegativeCount(int64_t value) {
+    return static_cast<uint64_t>(std::max<int64_t>(value, 0));
+}
+
+void storeNonNegativeCount(std::atomic<uint64_t>& target, int64_t value) {
+    target.store(clampNonNegativeCount(value), std::memory_order_release);
 }
 
 } // namespace
@@ -1110,20 +1155,11 @@ MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& g
         YAMS_TRY(stmt.bind(2, group.algorithmVersion));
         YAMS_TRY(stmt.bind(3, group.status));
         YAMS_TRY(stmt.bind(4, group.reviewState));
-        if (group.canonicalDocumentId.has_value())
-            YAMS_TRY(stmt.bind(5, *group.canonicalDocumentId));
-        else
-            YAMS_TRY(stmt.bind(5, nullptr));
+        YAMS_TRY(bindOptionalInt64(stmt, 5, group.canonicalDocumentId));
         YAMS_TRY(stmt.bind(6, group.memberCount));
         YAMS_TRY(stmt.bind(7, group.maxPairScore));
-        if (group.threshold.has_value())
-            YAMS_TRY(stmt.bind(8, *group.threshold));
-        else
-            YAMS_TRY(stmt.bind(8, nullptr));
-        if (group.evidenceJson.empty())
-            YAMS_TRY(stmt.bind(9, nullptr));
-        else
-            YAMS_TRY(stmt.bind(9, group.evidenceJson));
+        YAMS_TRY(bindOptionalDouble(stmt, 8, group.threshold));
+        YAMS_TRY(bindNullableText(stmt, 9, group.evidenceJson));
         YAMS_TRY(stmt.bind(10, group.createdAt));
         YAMS_TRY(stmt.bind(11, group.updatedAt));
         YAMS_TRY(stmt.bind(12, group.lastComputedAt));
@@ -1146,120 +1182,31 @@ MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& g
 Result<void> MetadataRepository::replaceSemanticDuplicateGroupMembers(
     int64_t groupId, const std::vector<SemanticDuplicateGroupMember>& members) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        YAMS_TRY(db.execute("BEGIN IMMEDIATE"));
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
 
-        auto deleteResult =
-            db.prepare("DELETE FROM semantic_duplicate_group_members WHERE group_id = ?");
-        if (!deleteResult) {
-            db.execute("ROLLBACK");
-            return deleteResult.error();
-        }
+        YAMS_TRY_UNWRAP(
+            deleteStmt,
+            db.prepare("DELETE FROM semantic_duplicate_group_members WHERE group_id = ?"));
+        YAMS_TRY(deleteStmt.bind(1, groupId));
+        YAMS_TRY(deleteStmt.execute());
 
-        Statement deleteStmt = std::move(deleteResult).value();
-        if (auto r = deleteStmt.bind(1, groupId); !r) {
-            db.execute("ROLLBACK");
-            return r.error();
-        }
-        if (auto r = deleteStmt.execute(); !r) {
-            db.execute("ROLLBACK");
-            return r.error();
-        }
-
-        auto insertResult = db.prepare(R"(
+        YAMS_TRY_UNWRAP(insertStmt, db.prepare(R"(
             INSERT INTO semantic_duplicate_group_members (
                 group_id, document_id, role, similarity_to_canonical,
                 title_overlap, path_overlap, pair_score, decision, reason,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        )");
-        if (!insertResult) {
-            db.execute("ROLLBACK");
-            return insertResult.error();
-        }
+        )"));
 
-        Statement insertStmt = std::move(insertResult).value();
         for (const auto& member : members) {
-            insertStmt.reset();
-            if (auto r = insertStmt.bind(1, groupId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(2, member.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(3, member.role); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.similarityToCanonical.has_value()) {
-                if (auto r = insertStmt.bind(4, *member.similarityToCanonical); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(4, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.titleOverlap.has_value()) {
-                if (auto r = insertStmt.bind(5, *member.titleOverlap); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(5, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.pathOverlap.has_value()) {
-                if (auto r = insertStmt.bind(6, *member.pathOverlap); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(6, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.pairScore.has_value()) {
-                if (auto r = insertStmt.bind(7, *member.pairScore); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(7, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(8, member.decision); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.reason.empty()) {
-                if (auto r = insertStmt.bind(9, nullptr); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(9, member.reason); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(10, member.createdAt); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(11, member.updatedAt); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.execute(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
+            YAMS_TRY(insertStmt.reset());
+            YAMS_TRY(bindSemanticDuplicateGroupMemberInsert(insertStmt, groupId, member));
+            YAMS_TRY(insertStmt.execute());
         }
 
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
         return Result<void>();
     });
 }
@@ -2088,6 +2035,140 @@ Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     });
 }
 
+Result<int64_t> MetadataRepository::queryTotalSizeBytesForInitialization() {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult = db.prepare("SELECT COALESCE(SUM(file_size), 0) FROM documents");
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+        auto& stmt = stmtResult.value();
+        YAMS_TRY_UNWRAP(hasRow, stmt.step());
+        if (!hasRow) {
+            return int64_t{0};
+        }
+        return stmt.getInt64(0);
+    });
+}
+
+Result<std::unordered_map<std::string, int64_t>>
+MetadataRepository::queryExtensionCountsForInitialization() {
+    return executeReadQuery<std::unordered_map<std::string, int64_t>>(
+        [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
+            auto stmtResult = db.prepare(
+                "SELECT file_extension, COUNT(*) FROM documents GROUP BY file_extension");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            std::unordered_map<std::string, int64_t> counts;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
+                    break;
+                }
+                counts[stmt.getString(0)] = stmt.getInt64(1);
+            }
+            return counts;
+        });
+}
+
+Result<std::pair<int64_t, int64_t>> MetadataRepository::queryPathDepthStatsForInitialization() {
+    return executeReadQuery<std::pair<int64_t, int64_t>>(
+        [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+            auto stmtResult = db.prepare(
+                "SELECT COALESCE(SUM(path_depth), 0), COALESCE(MAX(path_depth), 0) FROM documents");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow) {
+                return std::pair<int64_t, int64_t>{0, 0};
+            }
+            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+        });
+}
+
+Result<std::pair<int64_t, int64_t>> MetadataRepository::queryTagStatsForInitialization() {
+    return executeReadQuery<std::pair<int64_t, int64_t>>(
+        [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT COUNT(DISTINCT document_id), COUNT(*)
+                FROM metadata
+                WHERE key = 'tag' OR key LIKE 'tag:%'
+            )");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto& stmt = stmtResult.value();
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow) {
+                return std::pair<int64_t, int64_t>{0, 0};
+            }
+            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+        });
+}
+
+void MetadataRepository::applyInitializedExtensionCounts(
+    std::unordered_map<std::string, int64_t> counts) {
+    std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+    cachedExtensionCounts_ = std::move(counts);
+    const auto bucketCounts = calculateExtensionBucketCounts(cachedExtensionCounts_);
+    cachedCodeDocCount_.store(bucketCounts.code, std::memory_order_release);
+    cachedProseDocCount_.store(bucketCounts.prose, std::memory_order_release);
+    cachedBinaryDocCount_.store(bucketCounts.binary, std::memory_order_release);
+}
+
+void MetadataRepository::logInitializedCounters() const {
+    const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
+    const auto totalBytes = cachedTotalSizeBytes_.load(std::memory_order_relaxed);
+    const auto indexed = cachedIndexedCount_.load(std::memory_order_relaxed);
+    const auto extracted = cachedExtractedCount_.load(std::memory_order_relaxed);
+    const auto embedded = cachedEmbeddedCount_.load(std::memory_order_relaxed);
+    const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount_.load(std::memory_order_relaxed);
+    const auto pathDepthSum = cachedPathDepthSum_.load(std::memory_order_relaxed);
+    const auto pathDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+    std::size_t extensionCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+        extensionCount = cachedExtensionCounts_.size();
+    }
+
+    spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
+                 "extracted={}, embedded={}, docs_with_tags={}, tag_count={}, exts={}, "
+                 "path_sum={}, path_max={}",
+                 total, totalBytes, indexed, extracted, embedded, docsWithTags, tagCount,
+                 extensionCount, pathDepthSum, pathDepthMax);
+}
+
+void MetadataRepository::debugCheckInitializedCounters() const {
+    const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
+    const auto indexed = cachedIndexedCount_.load(std::memory_order_relaxed);
+    const auto extracted = cachedExtractedCount_.load(std::memory_order_relaxed);
+    const auto embedded = cachedEmbeddedCount_.load(std::memory_order_relaxed);
+    const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount_.load(std::memory_order_relaxed);
+    const auto pathDepthSum = cachedPathDepthSum_.load(std::memory_order_relaxed);
+    const auto pathDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+
+    YAMS_DCHECK(indexed <= total,
+                "metadata: indexed count must not exceed total after initialization");
+    YAMS_DCHECK(extracted <= total,
+                "metadata: extracted count must not exceed total after initialization");
+    YAMS_DCHECK(embedded <= total,
+                "metadata: embedded count must not exceed total after initialization");
+    YAMS_DCHECK(docsWithTags <= total,
+                "metadata: tagged document count must not exceed total after initialization");
+    YAMS_DCHECK(tagCount >= docsWithTags,
+                "metadata: tag entry count must cover each tagged document after initialization");
+    YAMS_DCHECK(pathDepthMax <= pathDepthSum,
+                "metadata: max path depth must not exceed depth sum after initialization");
+}
+
 void MetadataRepository::initializeCounters() {
     if (countersInitialized_.exchange(true, std::memory_order_acquire)) {
         return; // Already initialized
@@ -2096,136 +2177,35 @@ void MetadataRepository::initializeCounters() {
     try {
         // Query actual counts from DB once at startup
         if (auto totalResult = getDocumentCount(); totalResult) {
-            cachedDocumentCount_.store(static_cast<uint64_t>(totalResult.value()),
-                                       std::memory_order_release);
+            storeNonNegativeCount(cachedDocumentCount_, totalResult.value());
         }
-        auto totalSizeResult = executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-            auto stmtResult = db.prepare("SELECT COALESCE(SUM(file_size), 0) FROM documents");
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-            auto& stmt = stmtResult.value();
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                return int64_t{0};
-            }
-            return stmt.getInt64(0);
-        });
-        if (totalSizeResult) {
-            cachedTotalSizeBytes_.store(
-                static_cast<uint64_t>(std::max<int64_t>(totalSizeResult.value(), 0)),
-                std::memory_order_release);
+        if (auto totalSizeResult = queryTotalSizeBytesForInitialization(); totalSizeResult) {
+            storeNonNegativeCount(cachedTotalSizeBytes_, totalSizeResult.value());
         }
         if (auto indexedResult = getIndexedDocumentCount(); indexedResult) {
-            cachedIndexedCount_.store(static_cast<uint64_t>(indexedResult.value()),
-                                      std::memory_order_release);
+            storeNonNegativeCount(cachedIndexedCount_, indexedResult.value());
         }
         if (auto extractedResult = getContentExtractedDocumentCount(); extractedResult) {
-            cachedExtractedCount_.store(static_cast<uint64_t>(extractedResult.value()),
-                                        std::memory_order_release);
+            storeNonNegativeCount(cachedExtractedCount_, extractedResult.value());
         }
         if (auto embeddedResult = getEmbeddedDocumentCount(); embeddedResult) {
-            cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
-                                       std::memory_order_release);
+            storeNonNegativeCount(cachedEmbeddedCount_, embeddedResult.value());
         }
-        auto extensionStatsResult = executeReadQuery<std::unordered_map<std::string, int64_t>>(
-            [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
-                auto stmtResult = db.prepare(
-                    "SELECT file_extension, COUNT(*) FROM documents GROUP BY file_extension");
-                if (!stmtResult) {
-                    return stmtResult.error();
-                }
-                auto stmt = std::move(stmtResult).value();
-                std::unordered_map<std::string, int64_t> counts;
-                while (true) {
-                    auto stepResult = stmt.step();
-                    if (!stepResult) {
-                        return stepResult.error();
-                    }
-                    if (!stepResult.value()) {
-                        break;
-                    }
-                    counts[stmt.getString(0)] = stmt.getInt64(1);
-                }
-                return counts;
-            });
-        if (extensionStatsResult) {
-            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-            cachedExtensionCounts_ = std::move(extensionStatsResult.value());
-            const auto bucketCounts = calculateExtensionBucketCounts(cachedExtensionCounts_);
-            cachedCodeDocCount_.store(bucketCounts.code, std::memory_order_release);
-            cachedProseDocCount_.store(bucketCounts.prose, std::memory_order_release);
-            cachedBinaryDocCount_.store(bucketCounts.binary, std::memory_order_release);
+        if (auto extensionStatsResult = queryExtensionCountsForInitialization();
+            extensionStatsResult) {
+            applyInitializedExtensionCounts(std::move(extensionStatsResult.value()));
         }
-        auto pathStatsResult = executeReadQuery<
-            std::pair<int64_t, int64_t>>([&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
-            auto stmtResult = db.prepare(
-                "SELECT COALESCE(SUM(path_depth), 0), COALESCE(MAX(path_depth), 0) FROM documents");
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-            auto stmt = std::move(stmtResult).value();
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                return std::pair<int64_t, int64_t>{0, 0};
-            }
-            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
-        });
-        if (pathStatsResult) {
-            cachedPathDepthSum_.store(
-                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().first, 0)),
-                std::memory_order_release);
-            cachedPathDepthMax_.store(
-                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().second, 0)),
-                std::memory_order_release);
+        if (auto pathStatsResult = queryPathDepthStatsForInitialization(); pathStatsResult) {
+            storeNonNegativeCount(cachedPathDepthSum_, pathStatsResult.value().first);
+            storeNonNegativeCount(cachedPathDepthMax_, pathStatsResult.value().second);
         }
-        auto tagStatsResult = executeReadQuery<std::pair<int64_t, int64_t>>(
-            [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
-                auto stmtResult = db.prepare(R"(
-                    SELECT COUNT(DISTINCT document_id), COUNT(*)
-                    FROM metadata
-                    WHERE key = 'tag' OR key LIKE 'tag:%'
-                )");
-                if (!stmtResult) {
-                    return stmtResult.error();
-                }
-                auto& stmt = stmtResult.value();
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                if (!hasRow) {
-                    return std::pair<int64_t, int64_t>{0, 0};
-                }
-                return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
-            });
-        if (tagStatsResult) {
-            cachedDocsWithTags_.store(
-                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().first, 0)),
-                std::memory_order_release);
-            cachedTagCount_.store(
-                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().second, 0)),
-                std::memory_order_release);
+        if (auto tagStatsResult = queryTagStatsForInitialization(); tagStatsResult) {
+            storeNonNegativeCount(cachedDocsWithTags_, tagStatsResult.value().first);
+            storeNonNegativeCount(cachedTagCount_, tagStatsResult.value().second);
         }
-        spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
-                     "extracted={}, embedded={}, docs_with_tags={}, tag_count={}, exts={}, "
-                     "path_sum={}, path_max={}",
-                     cachedDocumentCount_.load(), cachedTotalSizeBytes_.load(),
-                     cachedIndexedCount_.load(), cachedExtractedCount_.load(),
-                     cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
-                     cachedTagCount_.load(), cachedExtensionCounts_.size(),
-                     cachedPathDepthSum_.load(), cachedPathDepthMax_.load());
 
-        // Cross-check: derived counters must be consistent with the primary count.
-        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: indexed count must not exceed total after initialization");
-        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: extracted count must not exceed total after initialization");
-        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: embedded count must not exceed total after initialization");
+        logInitializedCounters();
+        debugCheckInitializedCounters();
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }

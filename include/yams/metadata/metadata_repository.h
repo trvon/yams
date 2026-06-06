@@ -998,6 +998,14 @@ private:
 
     Result<void> ensureFuzzyIndexInitialized();
 
+    Result<int64_t> queryTotalSizeBytesForInitialization();
+    Result<std::unordered_map<std::string, int64_t>> queryExtensionCountsForInitialization();
+    Result<std::pair<int64_t, int64_t>> queryPathDepthStatsForInitialization();
+    Result<std::pair<int64_t, int64_t>> queryTagStatsForInitialization();
+    void applyInitializedExtensionCounts(std::unordered_map<std::string, int64_t> counts);
+    void logInitializedCounters() const;
+    void debugCheckInitializedCounters() const;
+
     // Internal helpers that accept an existing Database& to avoid nested connection acquisition
     // These are used within executeQuery lambdas to prevent deadlock when sub-queries are needed
     Result<std::optional<DocumentInfo>> getDocumentInternal(Database& db, int64_t id);
