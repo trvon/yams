@@ -539,4 +539,59 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
                                              << " iterations");
         REQUIRE((slowJoinCount == 0));
     }
+
+    SECTION("joinWithTimeout leaves timed-out workers joinable for a later join") {
+        WorkCoordinator coordinator;
+        coordinator.start(1);
+
+        std::mutex gateMutex;
+        std::condition_variable gateCv;
+        bool allowExit = false;
+        std::atomic<bool> entered{false};
+        std::atomic<bool> finished{false};
+
+        boost::asio::post(coordinator.getExecutor(), [&]() {
+            {
+                std::lock_guard<std::mutex> lk(gateMutex);
+                entered.store(true, std::memory_order_release);
+            }
+            gateCv.notify_all();
+
+            std::unique_lock<std::mutex> lk(gateMutex);
+            gateCv.wait(lk, [&] { return allowExit; });
+            finished.store(true, std::memory_order_release);
+        });
+
+        bool started = wait_for_condition(
+            1000ms, 5ms, [&]() { return entered.load(std::memory_order_acquire); });
+        REQUIRE((started));
+
+        coordinator.stop();
+
+        constexpr auto kTimeout = 100ms;
+        const auto joinStart = std::chrono::steady_clock::now();
+        bool joined = coordinator.joinWithTimeout(kTimeout);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - joinStart);
+
+        CHECK_FALSE((joined));
+        CHECK((elapsed >= kTimeout));
+        CHECK((coordinator.getWorkerCount() == 1));
+        CHECK((coordinator.isRunning()));
+        CHECK_FALSE((finished.load(std::memory_order_acquire)));
+
+        {
+            std::lock_guard<std::mutex> lk(gateMutex);
+            allowExit = true;
+        }
+        gateCv.notify_all();
+
+        bool finishedAfterRelease = wait_for_condition(
+            1000ms, 5ms, [&]() { return finished.load(std::memory_order_acquire); });
+        REQUIRE((finishedAfterRelease));
+
+        coordinator.join();
+        CHECK_FALSE((coordinator.isRunning()));
+        CHECK((coordinator.getWorkerCount() == 0));
+    }
 }

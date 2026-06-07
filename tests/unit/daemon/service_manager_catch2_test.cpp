@@ -4,23 +4,23 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <system_error>
+#include <thread>
 
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/database.h>
-
-#ifdef _WIN32
-#include <process.h>
-#define getpid _getpid
-#endif
 
 namespace fs = std::filesystem;
 using namespace yams;
@@ -46,8 +46,8 @@ void seedMetadataDb(const fs::path& dbPath, const std::string& value = "seed") {
 void writeCorruptDb(const fs::path& dbPath) {
     std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
     REQUIRE(out.good());
-    const std::string header = "SQLite format 3\0";
-    out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    static constexpr char kSqliteHeader[] = "SQLite format 3";
+    out.write(kSqliteHeader, static_cast<std::streamsize>(sizeof(kSqliteHeader)));
     const std::string garbage(4096, '\xff');
     out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
     out.close();
@@ -116,7 +116,7 @@ bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& pa
 void requireReadyDatabaseState(const StateComponent& state) {
     CHECK(state.readiness.databaseReady.load());
     std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
-    CHECK(state.readiness.databasePhase == "ready");
+    CHECK((state.readiness.databasePhase == "ready"));
 }
 
 } // namespace
@@ -131,9 +131,10 @@ struct ServiceManagerFixture {
 
     ServiceManagerFixture() {
         // Create isolated test directory
-        testDir_ = fs::temp_directory_path() /
-                   ("sm_test_" + std::to_string(::getpid()) + "_" +
-                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        testDir_ =
+            fs::temp_directory_path() /
+            ("sm_test_" + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+             "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         fs::create_directories(testDir_);
 
         // Setup basic config
@@ -175,7 +176,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getName returns correct component name",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
-    REQUIRE(std::string(sm.getName()) == "ServiceManager");
+    REQUIRE((std::string(sm.getName()) == "ServiceManager"));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager service accessors after construction",
@@ -183,12 +184,12 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager service accessors after 
     ServiceManager sm(config_, state_, lifecycleFsm_);
 
     // PBI-057: Vector DB initialization is deferred to async phase
-    REQUIRE(sm.getVectorDatabase() == nullptr);
+    REQUIRE((sm.getVectorDatabase() == nullptr));
 
     // Other services are initialized during initialize(), not in constructor
-    REQUIRE(sm.getContentStore() == nullptr);
-    REQUIRE(sm.getMetadataRepo() == nullptr);
-    REQUIRE(sm.getModelProvider() == nullptr);
+    REQUIRE((sm.getContentStore() == nullptr));
+    REQUIRE((sm.getMetadataRepo() == nullptr));
+    REQUIRE((sm.getModelProvider() == nullptr));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager multiple construction is idempotent",
@@ -216,8 +217,8 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     ServiceManager sm(config_, state_, lifecycleFsm_);
 
     const auto& cfg = sm.getConfig();
-    REQUIRE(cfg.dataDir == config_.dataDir);
-    REQUIRE(cfg.socketPath == config_.socketPath);
+    REQUIRE((cfg.dataDir == config_.dataDir));
+    REQUIRE((cfg.socketPath == config_.socketPath));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor before init",
@@ -344,7 +345,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     std::atomic<bool> firstBarrierSet{false};
     sm->startAsyncInit(&firstBarrierPromise, &firstBarrierSet);
 
-    REQUIRE(firstBarrierFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE((firstBarrierFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
     CHECK(firstBarrierSet.load(std::memory_order_acquire));
 
     std::promise<void> secondBarrierPromise;
@@ -352,12 +353,12 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     std::atomic<bool> secondBarrierSet{false};
     sm->startAsyncInit(&secondBarrierPromise, &secondBarrierSet);
 
-    CHECK(secondBarrierFuture.wait_for(std::chrono::milliseconds(200)) ==
-          std::future_status::timeout);
+    CHECK((secondBarrierFuture.wait_for(std::chrono::milliseconds(200)) ==
+           std::future_status::timeout));
     CHECK_FALSE(secondBarrierSet.load(std::memory_order_acquire));
 
     const auto snapshot = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(snapshot.state == ServiceManagerState::Ready);
+    REQUIRE((snapshot.state == ServiceManagerState::Ready));
     requireReadyDatabaseState(state_);
 
     sm->shutdown();
@@ -379,7 +380,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(init);
     sm->startAsyncInit();
     const auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     requireReadyDatabaseState(state_);
     std::optional<fs::path> quarantinedPath;
@@ -388,7 +389,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         REQUIRE_FALSE(state_.readiness.databaseRecoveredFrom.empty());
         quarantinedPath = findQuarantinedFile(config_.dataDir);
         REQUIRE(quarantinedPath.has_value());
-        CHECK(state_.readiness.databaseRecoveredFrom == quarantinedPath->string());
+        CHECK((state_.readiness.databaseRecoveredFrom == quarantinedPath->string()));
     }
     CHECK(fs::exists(*quarantinedPath));
     CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, "corrupt-sidecar"));
@@ -413,7 +414,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
     REQUIRE(init);
     sm->startAsyncInit();
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     requireReadyDatabaseState(state_);
     {
@@ -421,7 +422,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
         CHECK(state_.readiness.databaseRecoveredFrom.empty());
     }
     CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
-    CHECK(startupProbeRowCount(dbPath) == 1U);
+    CHECK((startupProbeRowCount(dbPath) == 1U));
 
     sm->shutdown();
     CHECK(walSidecarCleared(dbPath));
@@ -439,18 +440,155 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(init);
     sm->startAsyncInit();
     const auto readySnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(readySnap.state == ServiceManagerState::Ready);
+    REQUIRE((readySnap.state == ServiceManagerState::Ready));
 
     sm->shutdown();
     const auto firstShutdown = sm->getServiceManagerFsmSnapshot();
-    CHECK(firstShutdown.state == ServiceManagerState::Stopped);
-    CHECK(sm->__test_getAbiHost() == nullptr);
+    CHECK((firstShutdown.state == ServiceManagerState::Stopped));
+    CHECK((sm->__test_getAbiHost() == nullptr));
 
     REQUIRE_NOTHROW(sm->shutdown());
     const auto secondShutdown = sm->getServiceManagerFsmSnapshot();
-    CHECK(secondShutdown.state == ServiceManagerState::Stopped);
-    CHECK(sm->getMetadataRepo() == nullptr);
-    CHECK(sm->getContentStore() == nullptr);
+    CHECK((secondShutdown.state == ServiceManagerState::Stopped));
+    CHECK((sm->getMetadataRepo() == nullptr));
+    CHECK((sm->getContentStore() == nullptr));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown waits for an in-flight worker task",
+                 "[daemon][service_manager][shutdown][regression]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.enableAutoRepair = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto readySnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((readySnap.state == ServiceManagerState::Ready));
+
+    std::mutex gateMutex;
+    std::condition_variable gateCv;
+    bool allowWorkerExit = false;
+    std::atomic<bool> workerEntered{false};
+    std::atomic<bool> workerFinished{false};
+    std::atomic<bool> shutdownReturned{false};
+
+    boost::asio::post(sm->getWorkerExecutor(), [&]() {
+        {
+            std::lock_guard<std::mutex> lk(gateMutex);
+            workerEntered.store(true, std::memory_order_release);
+        }
+        gateCv.notify_all();
+
+        std::unique_lock<std::mutex> lk(gateMutex);
+        gateCv.wait(lk, [&] { return allowWorkerExit; });
+        workerFinished.store(true, std::memory_order_release);
+    });
+
+    {
+        std::unique_lock<std::mutex> lk(gateMutex);
+        REQUIRE(gateCv.wait_for(lk, std::chrono::seconds(5),
+                                [&] { return workerEntered.load(std::memory_order_acquire); }));
+    }
+
+    std::thread shutdownThread([&]() {
+        sm->shutdown();
+        shutdownReturned.store(true, std::memory_order_release);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_FALSE(shutdownReturned.load(std::memory_order_acquire));
+    CHECK_FALSE(workerFinished.load(std::memory_order_acquire));
+
+    {
+        std::lock_guard<std::mutex> lk(gateMutex);
+        allowWorkerExit = true;
+    }
+    gateCv.notify_all();
+
+    {
+        std::unique_lock<std::mutex> lk(gateMutex);
+        REQUIRE(gateCv.wait_for(lk, std::chrono::seconds(5),
+                                [&] { return workerFinished.load(std::memory_order_acquire); }));
+    }
+
+    shutdownThread.join();
+    CHECK(shutdownReturned.load(std::memory_order_acquire));
+    CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown interrupts blocked auto-repair graph health probe",
+                 "[daemon][service_manager][shutdown][auto_repair][regression]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.enableAutoRepair = false;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto readySnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((readySnap.state == ServiceManagerState::Ready));
+
+    auto writePool = sm->getWriteConnectionPool();
+    REQUIRE((writePool != nullptr));
+
+    std::vector<std::unique_ptr<metadata::PooledConnection>> heldConnections;
+    heldConnections.reserve(32);
+    for (std::size_t i = 0; i < 128; ++i) {
+        auto conn = writePool->acquire(std::chrono::milliseconds(0));
+        if (!conn) {
+            break;
+        }
+        heldConnections.emplace_back();
+        std::swap(heldConnections.back(), conn.value());
+    }
+    REQUIRE_FALSE(heldConnections.empty());
+    REQUIRE_FALSE(writePool->acquire(std::chrono::milliseconds(0)).has_value());
+
+    std::atomic<bool> probeStarted{false};
+    std::atomic<bool> probeFinished{false};
+    std::atomic<bool> shutdownReturned{false};
+
+    boost::asio::post(sm->getWorkerExecutor(), [sm, &probeStarted, &probeFinished]() {
+        probeStarted.store(true, std::memory_order_release);
+        repair::RepairHealthProbe probe(sm->getMetadataRepo(), sm->getVectorDatabase(),
+                                        sm->getGraphComponent(), sm->getKgStore());
+        repair::RepairHealthOptions opts;
+        opts.checkFts5 = false;
+        opts.checkEmbeddings = false;
+        opts.checkGraph = true;
+        opts.scanDocuments = false;
+        (void)probe.probe(opts);
+        probeFinished.store(true, std::memory_order_release);
+    });
+
+    REQUIRE(yams::test::wait_for_condition(
+        std::chrono::seconds(5), std::chrono::milliseconds(5),
+        [&]() { return probeStarted.load(std::memory_order_acquire); }));
+
+    std::thread shutdownThread([&]() {
+        sm->shutdown();
+        shutdownReturned.store(true, std::memory_order_release);
+    });
+
+    REQUIRE(yams::test::wait_for_condition(
+        std::chrono::seconds(5), std::chrono::milliseconds(5), [&]() {
+            return shutdownReturned.load(std::memory_order_acquire) &&
+                   probeFinished.load(std::memory_order_acquire);
+        }));
+
+    shutdownThread.join();
+    CHECK(shutdownReturned.load(std::memory_order_acquire));
+    CHECK(probeFinished.load(std::memory_order_acquire));
+    CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
+
+    heldConnections.clear();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
@@ -474,12 +612,12 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         REQUIRE(init);
         sm->startAsyncInit();
         auto smSnap = sm->waitForServiceManagerTerminalState(30);
-        REQUIRE(smSnap.state == ServiceManagerState::Ready);
+        REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
         INFO("cycle=" << cycle);
         requireReadyDatabaseState(cycleState);
         CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
-        CHECK(startupProbeRowCount(dbPath) == 1U);
+        CHECK((startupProbeRowCount(dbPath) == 1U));
 
         sm->shutdown();
         CHECK(walSidecarCleared(dbPath));

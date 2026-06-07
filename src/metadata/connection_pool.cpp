@@ -17,6 +17,17 @@ namespace yams::metadata {
 
 namespace {
 
+std::string getenvCopy(std::string_view name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    const std::string key(name);
+    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
+    if (!env || !*env) {
+        return {};
+    }
+    return std::string(env);
+}
+
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -24,8 +35,8 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    const std::string env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = !env.empty() && std::string_view(env) != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -51,8 +62,8 @@ bool sqlite_profile_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_SQL_TRACE");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    const std::string env = getenvCopy("YAMS_SQL_TRACE");
+    bool enabled = !env.empty() && std::string_view(env) != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -65,7 +76,7 @@ int sqlite_profile_min_ms() {
     }
 
     int value = 200;
-    if (const char* env = std::getenv("YAMS_SQL_TRACE_MIN_MS")) {
+    if (const std::string env = getenvCopy("YAMS_SQL_TRACE_MIN_MS"); !env.empty()) {
         try {
             int parsed = std::stoi(env);
             if (parsed > 0) {
@@ -262,6 +273,9 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
     if (shutdown_) {
         return Error{ErrorCode::InvalidState, "Pool is shut down"};
     }
+    if (acquireInterrupted_.load(std::memory_order_acquire)) {
+        return Error{ErrorCode::OperationCancelled, "Connection acquire interrupted for shutdown"};
+    }
 
     class WaitingRequestGuard {
     public:
@@ -344,7 +358,10 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
         }
 
         waitingGuard.activate();
-        if (!cv_.wait_until(lock, deadline, [this] { return !available_.empty() || shutdown_; })) {
+        if (!cv_.wait_until(lock, deadline, [this] {
+                return !available_.empty() || shutdown_ ||
+                       acquireInterrupted_.load(std::memory_order_acquire);
+            })) {
             waitingGuard.markTimeout();
             waitingGuard.finish();
             failedAcquisitions_++;
@@ -389,6 +406,11 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
         if (shutdown_) {
             failedAcquisitions_++;
             return Error{ErrorCode::InvalidState, "Pool is shut down"};
+        }
+        if (acquireInterrupted_.load(std::memory_order_acquire)) {
+            failedAcquisitions_++;
+            return Error{ErrorCode::OperationCancelled,
+                         "Connection acquire interrupted for shutdown"};
         }
     }
 
@@ -481,6 +503,11 @@ ConnectionPool::Stats ConnectionPool::getStats() const {
     out.slowHolderCount = slowHolderCount_.load(std::memory_order_relaxed);
     out.maxHolderMicros = maxHolderMicros_.load(std::memory_order_relaxed);
     return out;
+}
+
+void ConnectionPool::interruptPendingAcquires() {
+    acquireInterrupted_.store(true, std::memory_order_release);
+    cv_.notify_all();
 }
 
 Result<void> ConnectionPool::healthCheck() {
@@ -602,7 +629,7 @@ Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
 Result<void> ConnectionPool::configureConnection(Database& db) {
     // Allow env-var override for busy_timeout (default from config, typically 15000ms)
     auto effectiveBusyTimeout = config_.busyTimeout;
-    if (const char* envBusy = std::getenv("YAMS_DB_BUSY_TIMEOUT_MS"); envBusy && *envBusy) {
+    if (const std::string envBusy = getenvCopy("YAMS_DB_BUSY_TIMEOUT_MS"); !envBusy.empty()) {
         try {
             auto v = std::stoul(envBusy);
             if (v > 0)
@@ -638,7 +665,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
 
     // Additional pragmas for performance (more relaxed when running tests)
-    if (std::getenv("YAMS_TEST_TMPDIR")) {
+    if (!getenvCopy("YAMS_TEST_TMPDIR").empty()) {
         db.execute("PRAGMA synchronous = OFF");
     } else {
         db.execute("PRAGMA synchronous = NORMAL");
@@ -681,7 +708,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     // Both are overridable: YAMS_DB_CACHE_SIZE_MB (write pool), YAMS_DB_READ_CACHE_SIZE_MB.
     int defaultCacheMB = config_.readOnly ? 32 : 256;
     const char* envName = config_.readOnly ? "YAMS_DB_READ_CACHE_SIZE_MB" : "YAMS_DB_CACHE_SIZE_MB";
-    if (const char* envCache = std::getenv(envName)) {
+    if (const std::string envCache = getenvCopy(envName); !envCache.empty()) {
         try {
             int mb = std::stoi(envCache);
             if (mb > 0)
@@ -692,9 +719,10 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
     // Also check the generic env var as fallback for read pool
     if (config_.readOnly) {
-        if (const char* envGeneric = std::getenv("YAMS_DB_CACHE_SIZE_MB")) {
+        if (const std::string envGeneric = getenvCopy("YAMS_DB_CACHE_SIZE_MB");
+            !envGeneric.empty()) {
             // Only use generic if specific read var wasn't set
-            if (!std::getenv("YAMS_DB_READ_CACHE_SIZE_MB")) {
+            if (getenvCopy("YAMS_DB_READ_CACHE_SIZE_MB").empty()) {
                 try {
                     int mb = std::stoi(envGeneric);
                     if (mb > 0)

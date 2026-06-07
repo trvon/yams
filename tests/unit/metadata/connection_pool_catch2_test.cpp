@@ -62,7 +62,7 @@ TEST_CASE("Connection pool prunes idle connections to min", "[metadata][connecti
 
     auto stats = pool.getStats();
     // After prune, available connections should not exceed minConnections by much
-    CHECK(stats.availableConnections <= cfg.minConnections);
+    CHECK((stats.availableConnections <= cfg.minConnections));
 
     pool.shutdown();
 }
@@ -87,10 +87,48 @@ TEST_CASE("Connection pool waiting counter resets on timeout", "[metadata][conne
     REQUIRE_FALSE(second.has_value());
 
     auto stats = pool.getStats();
-    CHECK(stats.waitingRequests == 0u);
-    CHECK(stats.maxObservedWaiting >= 1u);
-    CHECK(stats.totalWaitMicros > 0u);
-    CHECK(stats.timeoutCount == 1u);
+    CHECK((stats.waitingRequests == 0u));
+    CHECK((stats.maxObservedWaiting >= 1u));
+    CHECK((stats.totalWaitMicros > 0u));
+    CHECK((stats.timeoutCount == 1u));
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool shutdown interrupt wakes blocked acquires",
+          "[metadata][connection_pool][shutdown]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_interrupt_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    auto first = pool.acquire();
+    REQUIRE(first.has_value());
+
+    std::promise<yams::Result<std::unique_ptr<PooledConnection>>> blockedPromise;
+    auto blockedFuture = blockedPromise.get_future();
+
+    std::thread blocked([&]() { blockedPromise.set_value(pool.acquire(std::chrono::seconds(5))); });
+
+    const auto waitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < waitDeadline &&
+           pool.getStats().waitingRequests == 0u) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE((pool.getStats().waitingRequests > 0u));
+
+    pool.interruptPendingAcquires();
+
+    auto interrupted = blockedFuture.get();
+    blocked.join();
+
+    REQUIRE_FALSE(interrupted.has_value());
+    CHECK(((interrupted.error().code == yams::ErrorCode::OperationCancelled)));
+    CHECK((interrupted.error().message.find("shutdown") != std::string::npos));
+    CHECK((pool.getStats().waitingRequests == 0u));
 
     pool.shutdown();
 }
@@ -111,10 +149,10 @@ TEST_CASE("Connection pool immediate acquire does not count waiting",
     }
 
     auto stats = pool.getStats();
-    CHECK(stats.waitingRequests == 0u);
-    CHECK(stats.maxObservedWaiting == 0u);
-    CHECK(stats.totalWaitMicros == 0u);
-    CHECK(stats.timeoutCount == 0u);
+    CHECK((stats.waitingRequests == 0u));
+    CHECK((stats.maxObservedWaiting == 0u));
+    CHECK((stats.totalWaitMicros == 0u));
+    CHECK((stats.timeoutCount == 0u));
 
     pool.shutdown();
 }
@@ -135,14 +173,14 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
         auto conn =
             pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "fast_path");
         REQUIRE(conn.has_value());
-        CHECK(conn.value()->holderTag() == "fast_path");
+        CHECK((conn.value()->holderTag() == "fast_path"));
     }
 
     {
         auto conn =
             pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal, "slow_path");
         REQUIRE(conn.has_value());
-        CHECK(conn.value()->holderTag() == "slow_path");
+        CHECK((conn.value()->holderTag() == "slow_path"));
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
     }
 
@@ -151,9 +189,9 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
     for (auto v : stats.holderDurationBuckets) {
         total += v;
     }
-    CHECK(total >= 2u);
-    CHECK(stats.slowHolderCount >= 1u);
-    CHECK(stats.maxHolderMicros >= 50'000u);
+    CHECK((total >= 2u));
+    CHECK((stats.slowHolderCount >= 1u));
+    CHECK((stats.maxHolderMicros >= 50'000u));
 
     pool.shutdown();
 }
@@ -173,8 +211,8 @@ TEST_CASE("Connection pool records source location for untagged acquire",
         REQUIRE(conn.has_value());
         const auto& tag = conn.value()->holderTag();
         CHECK_FALSE(tag.empty());
-        CHECK(tag.find("connection_pool_catch2_test.cpp") != std::string::npos);
-        CHECK(tag.find("<untagged>") == std::string::npos);
+        CHECK((tag.find("connection_pool_catch2_test.cpp") != std::string::npos));
+        CHECK((tag.find("<untagged>") == std::string::npos));
     }
 
     pool.shutdown();
@@ -217,12 +255,12 @@ TEST_CASE("Connection pool timeout holder summary includes withConnection call s
         holder.join();
         FAIL("second acquire unexpectedly succeeded while withConnection held the only connection");
     }
-    CHECK(blocked.error().message.find("connection_pool_catch2_test.cpp") != std::string::npos);
-    CHECK(blocked.error().message.find("holders=[<untagged>") == std::string::npos);
+    CHECK((blocked.error().message.find("connection_pool_catch2_test.cpp") != std::string::npos));
+    CHECK((blocked.error().message.find("holders=[<untagged>") == std::string::npos));
 
     release.set_value();
     holder.join();
-    CHECK(holderSucceeded.load(std::memory_order_relaxed));
+    CHECK((holderSucceeded.load(std::memory_order_relaxed)));
     pool.shutdown();
 }
 
@@ -249,8 +287,8 @@ TEST_CASE("Read-only connection pool opens SQLite read-only",
         REQUIRE(conn.has_value());
         auto pooled = std::move(conn).value();
         auto& db = **pooled;
-        REQUIRE(db.rawHandle() != nullptr);
-        CHECK(sqlite3_db_readonly(db.rawHandle(), "main") == 1);
+        REQUIRE((db.rawHandle() != nullptr));
+        CHECK((sqlite3_db_readonly(db.rawHandle(), "main") == 1));
 
         auto write = db.execute("CREATE TABLE should_not_write(id INTEGER)");
         CHECK_FALSE(write.has_value());
@@ -273,17 +311,17 @@ TEST_CASE("Connection pool shutdown while connection is leased does not crash",
     REQUIRE(conn.has_value());
 
     auto statsBefore = pool.getStats();
-    CHECK(statsBefore.activeConnections == 1u);
+    CHECK((statsBefore.activeConnections == 1u));
 
     pool.shutdown();
 
     auto statsAfter = pool.getStats();
-    CHECK(statsAfter.activeConnections == 0u);
-    CHECK(statsAfter.totalConnections == 0u);
+    CHECK((statsAfter.activeConnections == 0u));
+    CHECK((statsAfter.totalConnections == 0u));
 
     auto afterShutdown = pool.acquire(std::chrono::milliseconds(0));
     REQUIRE_FALSE(afterShutdown.has_value());
-    CHECK(afterShutdown.error().code == yams::ErrorCode::InvalidState);
+    CHECK((afterShutdown.error().code == yams::ErrorCode::InvalidState));
 }
 
 // ============================================================================
@@ -339,8 +377,8 @@ TEST_CASE("Connection pool WAL mode creates WAL and SHM files",
     // After the final close, SQLite may checkpoint and remove them immediately.
     fs::path walPath(dbPath.string() + "-wal");
     fs::path shmPath(dbPath.string() + "-shm");
-    CHECK(fs::exists(walPath));
-    CHECK(fs::exists(shmPath));
+    CHECK((fs::exists(walPath)));
+    CHECK((fs::exists(shmPath)));
 
     pool.shutdown();
 
@@ -385,11 +423,11 @@ TEST_CASE("Connection pool handles concurrent acquire/release",
     t2.join();
     t3.join();
 
-    CHECK(successes.load() == 15);
-    CHECK(errors.load() == 0);
+    CHECK((successes.load() == 15));
+    CHECK((errors.load() == 0));
 
     auto stats = pool.getStats();
-    CHECK(stats.totalConnections <= cfg.maxConnections);
+    CHECK((stats.totalConnections <= cfg.maxConnections));
 
     pool.shutdown();
 }
@@ -411,7 +449,7 @@ TEST_CASE("Connection pool fails acquire on exhaustion with zero timeout",
     // Second acquire with zero timeout should fail
     auto blocked = pool.acquire(std::chrono::milliseconds(0));
     REQUIRE_FALSE(blocked.has_value());
-    CHECK(blocked.error().code == yams::ErrorCode::Timeout);
+    CHECK((blocked.error().code == yams::ErrorCode::Timeout));
 
     // Release and re-acquire should succeed
     held = {}; // return to pool
@@ -433,22 +471,22 @@ TEST_CASE("Connection pool stats reflect active and available counts",
 
     // After init, minConnections should be available
     auto s0 = pool.getStats();
-    CHECK(s0.availableConnections >= cfg.minConnections);
-    CHECK(s0.activeConnections == 0u);
+    CHECK((s0.availableConnections >= cfg.minConnections));
+    CHECK((s0.activeConnections == 0u));
 
     // Acquire one: available down by 1, active up by 1
     auto conn = pool.acquire();
     REQUIRE(conn.has_value());
     auto s1 = pool.getStats();
-    CHECK(s1.availableConnections == s0.availableConnections - 1);
-    CHECK(s1.activeConnections == 1u);
+    CHECK((s1.availableConnections == s0.availableConnections - 1));
+    CHECK((s1.activeConnections == 1u));
 
     // Return it: stats recover
     conn = {}; // triggers PooledConnection destructor -> returnConnection
     std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let return settle
     auto s2 = pool.getStats();
-    CHECK(s2.availableConnections >= s1.availableConnections);
-    CHECK(s2.activeConnections == 0u);
+    CHECK((s2.availableConnections >= s1.availableConnections));
+    CHECK((s2.activeConnections == 0u));
 
     pool.shutdown();
 }
@@ -473,12 +511,12 @@ TEST_CASE("Connection pool shutdown invalidates all connections",
 
     // Stats should show zero after shutdown
     auto stats = pool.getStats();
-    CHECK(stats.totalConnections == 0u);
+    CHECK((stats.totalConnections == 0u));
 
     // Re-acquire should fail with InvalidState
     auto retry = pool.acquire(std::chrono::milliseconds(100));
     REQUIRE_FALSE(retry.has_value());
-    CHECK(retry.error().code == yams::ErrorCode::InvalidState);
+    CHECK((retry.error().code == yams::ErrorCode::InvalidState));
 
     // Cleanup
     std::error_code ec;
@@ -614,7 +652,7 @@ TEST_CASE("Connection pool respects busy timeout on contention",
 
     REQUIRE_FALSE(blocked.has_value());
     // Should have waited at least the busyTimeout before failing
-    CHECK(elapsed >= cfg.busyTimeout);
+    CHECK((elapsed >= cfg.busyTimeout));
 
     pool.shutdown();
 }

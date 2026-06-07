@@ -1119,6 +1119,10 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
+    if (databaseManager_) {
+        databaseManager_->interruptPendingConnectionAcquiresForShutdown();
+        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted");
+    }
     if (workCoordinator_) {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
