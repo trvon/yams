@@ -29,6 +29,8 @@ using repository::rollbackIgnoringErrors;
 using repository::scope_exit;
 
 namespace {
+constexpr std::size_t kMaxMetadataBatchQueryIds = 900;
+
 void applyMetadataTagDelta(std::atomic<uint64_t>& cachedTagCount,
                            std::atomic<uint64_t>& cachedDocsWithTags,
                            const std::atomic<uint64_t>& cachedDocumentCount,
@@ -169,37 +171,46 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
         [&](Database& db)
             -> Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>> {
             using yams::metadata::sql::QuerySpec;
-            std::string inList;
-            inList.reserve(documentIds.size() * 2);
-            inList += '(';
-            for (size_t i = 0; i < documentIds.size(); ++i) {
-                if (i > 0)
-                    inList += ',';
-                inList += '?';
-            }
-            inList += ')';
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"document_id", "key", "value", "value_type"};
-            spec.conditions = {"document_id IN " + inList};
-
-            YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
-            int index = 1;
-            for (auto id : documentIds) {
-                YAMS_TRY(stmt.bind(index++, id));
-            }
-
             std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>> result;
-            while (true) {
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                if (!hasRow)
-                    break;
 
-                int64_t docId = stmt.getInt64(0);
-                MetadataValue value;
-                value.value = stmt.getString(2);
-                value.type = MetadataValueTypeUtils::fromString(stmt.getString(3));
-                result[docId][stmt.getString(1)] = value;
+            for (std::size_t offset = 0; offset < documentIds.size();
+                 offset += kMaxMetadataBatchQueryIds) {
+                const auto chunkSize =
+                    std::min(kMaxMetadataBatchQueryIds, documentIds.size() - offset);
+                const auto chunkIds = documentIds.subspan(offset, chunkSize);
+
+                std::string inList;
+                inList.reserve(chunkIds.size() * 2);
+                inList += '(';
+                for (std::size_t i = 0; i < chunkIds.size(); ++i) {
+                    if (i > 0)
+                        inList += ',';
+                    inList += '?';
+                }
+                inList += ')';
+
+                QuerySpec spec{};
+                spec.table = "metadata";
+                spec.columns = {"document_id", "key", "value", "value_type"};
+                spec.conditions = {"document_id IN " + inList};
+
+                YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
+                int index = 1;
+                for (auto id : chunkIds) {
+                    YAMS_TRY(stmt.bind(index++, id));
+                }
+
+                while (true) {
+                    YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                    if (!hasRow)
+                        break;
+
+                    const int64_t docId = stmt.getInt64(0);
+                    MetadataValue value;
+                    value.value = stmt.getString(2);
+                    value.type = MetadataValueTypeUtils::fromString(stmt.getString(3));
+                    result[docId][stmt.getString(1)] = value;
+                }
             }
 
             return result;

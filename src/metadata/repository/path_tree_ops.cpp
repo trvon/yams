@@ -20,6 +20,7 @@
 namespace yams::metadata {
 
 using repository::beginTransactionWithRetry;
+using repository::commitOrRollback;
 using repository::rollbackIgnoringErrors;
 using repository::scope_exit;
 
@@ -102,6 +103,30 @@ Result<std::optional<PathTreeNode>> findPathTreeNodeInDb(Database& db, int64_t p
     if (!stepResult)
         return stepResult.error();
     if (!stepResult.value())
+        return std::optional<PathTreeNode>{};
+
+    return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
+}
+
+Result<std::optional<PathTreeNode>> findPathTreeNodeByFullPathInDb(Database& db,
+                                                                   std::string_view fullPath) {
+    if (fullPath.empty())
+        return std::optional<PathTreeNode>{};
+
+    auto stmtResult = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
+                                 "doc_count, centroid_weight, centroid "
+                                 "FROM path_tree_nodes WHERE full_path = ?");
+    if (!stmtResult)
+        return stmtResult.error();
+
+    auto stmt = std::move(stmtResult).value();
+    if (auto bindRes = stmt.bind(1, fullPath); !bindRes)
+        return bindRes.error();
+
+    auto stepRes = stmt.step();
+    if (!stepRes)
+        return stepRes.error();
+    if (!stepRes.value())
         return std::optional<PathTreeNode>{};
 
     return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
@@ -264,38 +289,9 @@ MetadataRepository::accumulatePathTreeCentroid(int64_t nodeId,
 
 Result<std::optional<PathTreeNode>>
 MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
-    if (fullPath.empty())
-        return std::optional<PathTreeNode>{};
-
     return executeReadQuery<std::optional<PathTreeNode>>(
         [&](Database& db) -> Result<std::optional<PathTreeNode>> {
-            auto stmtResult = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
-                                         "doc_count, centroid_weight, centroid "
-                                         "FROM path_tree_nodes WHERE full_path = ?");
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            if (auto bindRes = stmt.bind(1, fullPath); !bindRes)
-                return bindRes.error();
-
-            auto stepRes = stmt.step();
-            if (!stepRes)
-                return stepRes.error();
-            if (!stepRes.value())
-                return std::optional<PathTreeNode>{};
-
-            PathTreeNode node;
-            node.id = stmt.getInt64(0);
-            node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
-            node.pathSegment = stmt.getString(2);
-            node.fullPath = stmt.getString(3);
-            node.docCount = stmt.getInt64(4);
-            node.centroidWeight = stmt.getInt64(5);
-            if (!stmt.isNull(6)) {
-                node.centroid = blobToFloatVector(stmt.getBlob(6));
-            }
-            return std::optional<PathTreeNode>{std::move(node)};
+            return findPathTreeNodeByFullPathInDb(db, fullPath);
         });
 }
 
@@ -365,7 +361,7 @@ MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t 
             int64_t parentId = kPathTreeNullParent;
 
             if (!isRoot) {
-                auto parentRes = findPathTreeNodeByFullPath(fullPath);
+                auto parentRes = findPathTreeNodeByFullPathInDb(db, fullPath);
                 if (!parentRes)
                     return parentRes.error();
                 const auto& parentOpt = parentRes.value();
@@ -425,6 +421,18 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
         return Result<void>();
 
     return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
         const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
 
         auto findStmtRes =
@@ -484,7 +492,6 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
                 currentPath.push_back('/');
             currentPath += part;
 
-            // --- findPathTreeNode (inlined) ---
             findStmt.reset();
             if (parentNodeId == kPathTreeNullParent) {
                 if (auto b = findStmt.bind(1, nullptr); !b)
@@ -505,7 +512,6 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
             if (found) {
                 nodeId = findStmt.getInt64(0);
             } else {
-                // --- insertPathTreeNode (inlined) ---
                 insertStmt.reset();
                 if (auto b = bindParentId(insertStmt, 1, parentNodeId); !b)
                     return b.error();
@@ -528,7 +534,6 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
             }
 
             if (isNewDocument) {
-                // --- incrementPathTreeDocCount (inlined) ---
                 assocStmt.reset();
                 if (auto b = assocStmt.bind(1, nodeId); !b)
                     return b.error();
@@ -547,7 +552,6 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
             }
 
             if (!embeddingValues.empty()) {
-                // --- accumulatePathTreeCentroid (inlined) ---
                 centroidSelStmt.reset();
                 if (auto b = centroidSelStmt.bind(1, nodeId); !b)
                     return b.error();
@@ -604,6 +608,8 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
             parentNodeId = nodeId;
         }
 
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
         return Result<void>();
     });
 }

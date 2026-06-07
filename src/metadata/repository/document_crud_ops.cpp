@@ -88,6 +88,39 @@ void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
     }
 }
 
+void updateCachedPathDepthMax(std::atomic<uint64_t>& cachedPathDepthMax, uint64_t nextDepth) {
+    auto currentDepthMax = cachedPathDepthMax.load(std::memory_order_relaxed);
+    while (nextDepth > currentDepthMax &&
+           !cachedPathDepthMax.compare_exchange_weak(
+               currentDepthMax, nextDepth, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    }
+}
+
+void reconcileCachedPathDepthMax(std::atomic<uint64_t>& cachedPathDepthMax,
+                                 uint64_t expectedBeforeMutation, uint64_t recomputedPathDepthMax) {
+    auto currentDepthMax = cachedPathDepthMax.load(std::memory_order_relaxed);
+    while (true) {
+        if (currentDepthMax == expectedBeforeMutation || currentDepthMax < recomputedPathDepthMax) {
+            if (cachedPathDepthMax.compare_exchange_weak(currentDepthMax, recomputedPathDepthMax,
+                                                         std::memory_order_acq_rel,
+                                                         std::memory_order_relaxed)) {
+                return;
+            }
+            continue;
+        }
+        return;
+    }
+}
+
+Result<uint64_t> queryCurrentPathDepthMaxInDb(Database& db) {
+    YAMS_TRY_UNWRAP(stmt, db.prepare("SELECT COALESCE(MAX(path_depth), 0) FROM documents"));
+    YAMS_TRY_UNWRAP(hasRow, stmt.step());
+    if (!hasRow) {
+        return uint64_t{0};
+    }
+    return static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(0), 0));
+}
+
 void applyMetadataTagDelta(std::atomic<uint64_t>& cachedTagCount,
                            std::atomic<uint64_t>& cachedDocsWithTags,
                            const std::atomic<uint64_t>& cachedDocumentCount,
@@ -238,13 +271,8 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
                                      cachedBinaryDocCount_, info.fileExtension, 1);
             cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
                                           std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
-            }
+            updateCachedPathDepthMax(cachedPathDepthMax_,
+                                     static_cast<uint64_t>(std::max(info.pathDepth, 0)));
             {
                 std::lock_guard<std::mutex> lock(extensionStatsMutex_);
                 updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
@@ -476,13 +504,8 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                                  info.fileExtension, 1);
         cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
                                       std::memory_order_relaxed);
-        auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-        const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-        while (nextDepth > currentDepthMax &&
-               !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                          std::memory_order_acq_rel,
-                                                          std::memory_order_relaxed)) {
-        }
+        updateCachedPathDepthMax(cachedPathDepthMax_,
+                                 static_cast<uint64_t>(std::max(info.pathDepth, 0)));
         {
             std::lock_guard<std::mutex> lock(extensionStatsMutex_);
             updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
@@ -567,6 +590,11 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 }
 
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
+    const auto cachedPathDepthMaxBeforeMutation =
+        cachedPathDepthMax_.load(std::memory_order_relaxed);
+    bool shouldRefreshPathDepthMax = false;
+    uint64_t recomputedPathDepthMax = 0;
+
     return executeQuery<void>([&](Database& db) -> Result<void> {
         int64_t priorFileSize = info.fileSize;
         std::string priorExtension = info.fileExtension;
@@ -620,17 +648,16 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                                      cachedBinaryDocCount_, priorExtension, -1);
             applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
                                      cachedBinaryDocCount_, info.fileExtension, 1);
-            saturatingSubBytes(cachedPathDepthSum_,
-                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
-                                          std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+            const auto priorDepth = static_cast<uint64_t>(std::max(priorPathDepth, 0));
             const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
+            if (priorDepth == cachedPathDepthMaxBeforeMutation && nextDepth < priorDepth) {
+                YAMS_TRY_UNWRAP(recomputedMax, queryCurrentPathDepthMaxInDb(db));
+                recomputedPathDepthMax = recomputedMax;
+                shouldRefreshPathDepthMax = true;
             }
+            saturatingSubBytes(cachedPathDepthSum_, priorDepth);
+            cachedPathDepthSum_.fetch_add(nextDepth, std::memory_order_relaxed);
+            updateCachedPathDepthMax(cachedPathDepthMax_, nextDepth);
             {
                 std::lock_guard<std::mutex> lock(extensionStatsMutex_);
                 updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
@@ -645,6 +672,10 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
             YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
                         "metadata: extracted count must not exceed total document count after "
                         "update");
+            if (shouldRefreshPathDepthMax) {
+                reconcileCachedPathDepthMax(cachedPathDepthMax_, cachedPathDepthMaxBeforeMutation,
+                                            recomputedPathDepthMax);
+            }
             signalCorpusStatsStale();
         }
         return Result<void>();
@@ -652,28 +683,34 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
 }
 
 Result<void> MetadataRepository::deleteDocument(int64_t id) {
-    auto result = executeQuery<DeleteDocumentResult>([&](Database& db) -> Result<DeleteDocumentResult> {
-        YAMS_TRY(beginTransactionWithRetry(db));
-        bool committed = false;
-        auto rollback = scope_exit([&] {
-            if (!committed) {
-                repository::rollbackIgnoringErrors(db);
-            }
-        });
+    const auto cachedPathDepthMaxBeforeMutation =
+        cachedPathDepthMax_.load(std::memory_order_relaxed);
+    bool shouldRefreshPathDepthMax = false;
+    uint64_t recomputedPathDepthMax = 0;
 
-        // Query document flags before deletion to update counters
-        bool wasExtracted = false;
-        bool wasIndexed = false;
-        bool wasEmbedded = false;
-        uint64_t priorFileSize = 0;
-        std::string priorExtension;
-        int priorPathDepth = 0;
-        YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
-        {
-            // Use prepareCached for better performance on repeated deletes.
-            // wasIndexed checks actual FTS row presence; wasEmbedded checks
-            // document_embeddings_status.has_embedding.
-            auto checkStmt = db.prepareCached(R"(
+    auto result =
+        executeQuery<DeleteDocumentResult>([&](Database& db) -> Result<DeleteDocumentResult> {
+            YAMS_TRY(beginTransactionWithRetry(db));
+            bool committed = false;
+            auto rollback = scope_exit([&] {
+                if (!committed) {
+                    repository::rollbackIgnoringErrors(db);
+                }
+            });
+
+            // Query document flags before deletion to update counters
+            bool wasExtracted = false;
+            bool wasIndexed = false;
+            bool wasEmbedded = false;
+            uint64_t priorFileSize = 0;
+            std::string priorExtension;
+            int priorPathDepth = 0;
+            YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
+            {
+                // Use prepareCached for better performance on repeated deletes.
+                // wasIndexed checks actual FTS row presence; wasEmbedded checks
+                // document_embeddings_status.has_embedding.
+                auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted,
                        d.file_size,
                        d.file_extension,
@@ -686,51 +723,58 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 LEFT JOIN document_embeddings_status des ON des.document_id = d.id
                 WHERE d.id = ?
             )");
-            if (checkStmt) {
-                auto& stmt = *checkStmt.value();
-                stmt.bind(1, id);
-                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                    wasExtracted = stmt.getInt(0) != 0;
-                    priorFileSize = static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(1), 0));
-                    priorExtension = stmt.getString(2);
-                    priorPathDepth = stmt.getInt(3);
-                    wasIndexed = stmt.getInt(4) != 0;
-                    wasEmbedded = stmt.getInt(5) != 0;
+                if (checkStmt) {
+                    auto& stmt = *checkStmt.value();
+                    stmt.bind(1, id);
+                    if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
+                        wasExtracted = stmt.getInt(0) != 0;
+                        priorFileSize =
+                            static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(1), 0));
+                        priorExtension = stmt.getString(2);
+                        priorPathDepth = stmt.getInt(3);
+                        wasIndexed = stmt.getInt(4) != 0;
+                        wasEmbedded = stmt.getInt(5) != 0;
+                    }
                 }
             }
-        }
 
-        // Foreign key constraints will handle cascading deletes
-        // Use prepareCached for better performance
-        auto stmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
-        if (!stmtResult)
-            return stmtResult.error();
+            // Foreign key constraints will handle cascading deletes
+            // Use prepareCached for better performance
+            auto stmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
+            if (!stmtResult)
+                return stmtResult.error();
 
-        auto& stmt = *stmtResult.value();
-        auto bindResult = stmt.bind(1, id);
-        if (!bindResult)
-            return bindResult.error();
+            auto& stmt = *stmtResult.value();
+            auto bindResult = stmt.bind(1, id);
+            if (!bindResult)
+                return bindResult.error();
 
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
+            auto execResult = stmt.execute();
+            if (!execResult)
+                return execResult.error();
 
-        DeleteDocumentResult deleteResult;
-        if (db.changes() > 0) {
-            deleteResult.deleted = true;
-            deleteResult.totalSizeBytesRemoved = priorFileSize;
-            deleteResult.pathDepthSumRemoved = static_cast<uint64_t>(std::max(priorPathDepth, 0));
-            deleteResult.extractedRemoved = wasExtracted;
-            deleteResult.indexedRemoved = wasIndexed;
-            deleteResult.embeddedRemoved = wasEmbedded;
-            deleteResult.removedExtension = std::move(priorExtension);
-            deleteResult.metadataTagDelta = metadataTagDelta;
-        }
+            DeleteDocumentResult deleteResult;
+            if (db.changes() > 0) {
+                const auto priorDepth = static_cast<uint64_t>(std::max(priorPathDepth, 0));
+                deleteResult.deleted = true;
+                deleteResult.totalSizeBytesRemoved = priorFileSize;
+                deleteResult.pathDepthSumRemoved = priorDepth;
+                deleteResult.extractedRemoved = wasExtracted;
+                deleteResult.indexedRemoved = wasIndexed;
+                deleteResult.embeddedRemoved = wasEmbedded;
+                deleteResult.removedExtension = std::move(priorExtension);
+                deleteResult.metadataTagDelta = metadataTagDelta;
+                if (priorDepth == cachedPathDepthMaxBeforeMutation) {
+                    YAMS_TRY_UNWRAP(recomputedMax, queryCurrentPathDepthMaxInDb(db));
+                    recomputedPathDepthMax = recomputedMax;
+                    shouldRefreshPathDepthMax = true;
+                }
+            }
 
-        YAMS_TRY(repository::commitOrRollback(db));
-        committed = true;
-        return deleteResult;
-    });
+            YAMS_TRY(repository::commitOrRollback(db));
+            committed = true;
+            return deleteResult;
+        });
 
     if (!result) {
         return result.error();
@@ -746,6 +790,10 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
     applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_, cachedBinaryDocCount_,
                              deleteResult.removedExtension, -1);
     saturatingSubBytes(cachedPathDepthSum_, deleteResult.pathDepthSumRemoved);
+    if (shouldRefreshPathDepthMax) {
+        reconcileCachedPathDepthMax(cachedPathDepthMax_, cachedPathDepthMaxBeforeMutation,
+                                    recomputedPathDepthMax);
+    }
     {
         std::lock_guard<std::mutex> lock(extensionStatsMutex_);
         updateExtensionCountMap(cachedExtensionCounts_, deleteResult.removedExtension, -1);
@@ -778,6 +826,11 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
     if (ids.empty()) {
         return size_t{0};
     }
+
+    const auto cachedPathDepthMaxBeforeMutation =
+        cachedPathDepthMax_.load(std::memory_order_relaxed);
+    bool shouldRefreshPathDepthMax = false;
+    uint64_t recomputedPathDepthMax = 0;
 
     auto result = executeQuery<DeleteDocumentsBatchResult>(
         [&](Database& db) -> Result<DeleteDocumentsBatchResult> {
@@ -866,10 +919,10 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
 
                 // Update metrics
                 if (db.changes() > 0) {
+                    const auto priorDepth = static_cast<uint64_t>(std::max(priorPathDepth, 0));
                     batchResult.deletedCount++;
                     batchResult.totalSizeBytesRemoved += priorFileSize;
-                    batchResult.pathDepthSumRemoved +=
-                        static_cast<uint64_t>(std::max(priorPathDepth, 0));
+                    batchResult.pathDepthSumRemoved += priorDepth;
                     batchResult.metadataTagDelta.tagCountDelta += metadataTagDelta.tagCountDelta;
                     batchResult.metadataTagDelta.docsWithTagsDelta +=
                         metadataTagDelta.docsWithTagsDelta;
@@ -885,7 +938,15 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                     if (wasEmbedded) {
                         batchResult.embeddedRemoved += 1;
                     }
+                    if (priorDepth == cachedPathDepthMaxBeforeMutation) {
+                        shouldRefreshPathDepthMax = true;
+                    }
                 }
+            }
+
+            if (shouldRefreshPathDepthMax) {
+                YAMS_TRY_UNWRAP(recomputedMax, queryCurrentPathDepthMaxInDb(db));
+                recomputedPathDepthMax = recomputedMax;
             }
 
             // Commit transaction
@@ -903,6 +964,10 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         core::saturating_sub(cachedDocumentCount_, static_cast<uint64_t>(batchResult.deletedCount));
         saturatingSubBytes(cachedTotalSizeBytes_, batchResult.totalSizeBytesRemoved);
         saturatingSubBytes(cachedPathDepthSum_, batchResult.pathDepthSumRemoved);
+        if (shouldRefreshPathDepthMax) {
+            reconcileCachedPathDepthMax(cachedPathDepthMax_, cachedPathDepthMaxBeforeMutation,
+                                        recomputedPathDepthMax);
+        }
         for (const auto& [extension, count] : batchResult.removedExtensionCounts) {
             applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
                                      cachedBinaryDocCount_, extension, -count);

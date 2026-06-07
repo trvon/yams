@@ -3,8 +3,8 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h> // for DocumentQueryOptions
+#include <yams/metadata/path_utils.h>
 
 namespace yams::metadata::sql {
 

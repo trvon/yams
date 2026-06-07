@@ -25,6 +25,7 @@ struct RepoContext {
     std::unique_ptr<MetadataRepository> repo;
     std::vector<int64_t> docIds;
     std::vector<std::string> hashes;
+    std::vector<DocumentInfo> docs;
 };
 
 DocumentInfo makeDocWithPath(const std::string& path, const std::string& hash) {
@@ -49,6 +50,54 @@ DocumentInfo makeDocWithPath(const std::string& path, const std::string& hash) {
     info.parentHash = derived.parentHash;
     info.pathDepth = derived.pathDepth;
     return info;
+}
+
+std::string makeBenchHash(std::size_t seed) {
+    std::string hash = "BENCH" + std::to_string(seed);
+    if (hash.size() < 64) {
+        hash.append(64 - hash.size(), static_cast<char>('A' + (seed % 16)));
+    } else if (hash.size() > 64) {
+        hash.resize(64);
+    }
+    return hash;
+}
+
+DocumentInfo makeNestedDocWithDepth(std::size_t depth, std::size_t seed,
+                                    const std::string& extension = ".txt") {
+    std::string path = "/bench";
+    for (std::size_t i = 0; i < depth; ++i) {
+        path += "/level_" + std::to_string(i) + "_" + std::to_string(seed % 17);
+    }
+    path += "/file_" + std::to_string(seed) + extension;
+    return makeDocWithPath(path, makeBenchHash(seed));
+}
+
+DocumentInfo insertDocumentOrThrow(MetadataRepository& repo, DocumentInfo info) {
+    auto inserted = repo.insertDocument(info);
+    if (!inserted) {
+        throw std::runtime_error("insertDocument failed: " + inserted.error().message);
+    }
+    info.id = inserted.value();
+    return info;
+}
+
+std::vector<float> makeEmbeddingValues(std::size_t dimensions, float seed = 0.25F) {
+    std::vector<float> values(dimensions);
+    for (std::size_t i = 0; i < dimensions; ++i) {
+        values[i] = seed + static_cast<float>(i) * 0.01F;
+    }
+    return values;
+}
+
+void destroyRepository(RepoContext& ctx) {
+    ctx.repo.reset();
+    if (ctx.pool) {
+        ctx.pool->shutdown();
+    }
+    ctx.pool.reset();
+    std::error_code ec;
+    std::filesystem::remove(ctx.dbPath, ec);
+    ctx = RepoContext{};
 }
 
 RepoContext makeRepositoryWithDocs(std::size_t count) {
@@ -78,8 +127,10 @@ RepoContext makeRepositoryWithDocs(std::size_t count) {
             throw std::runtime_error("insertDocument failed: " + inserted.error().message);
 
         const int64_t docId = inserted.value();
+        doc.id = docId;
         ctx.docIds.push_back(docId);
         ctx.hashes.push_back(doc.sha256Hash);
+        ctx.docs.push_back(doc);
 
         auto tag =
             ctx.repo->setMetadata(docId, "tag:bench", MetadataValue(i % 2 == 0 ? "even" : "odd"));
@@ -101,17 +152,60 @@ public:
         ctx_ = makeRepositoryWithDocs(count);
     }
 
-    void TearDown(const ::benchmark::State&) override {
-        ctx_.repo.reset();
-        if (ctx_.pool)
-            ctx_.pool->shutdown();
-        ctx_.pool.reset();
-        std::error_code ec;
-        std::filesystem::remove(ctx_.dbPath, ec);
-    }
+    void TearDown(const ::benchmark::State&) override { destroyRepository(ctx_); }
 
 protected:
     RepoContext ctx_;
+};
+
+class MetadataPathTreeFixture : public benchmark::Fixture {
+public:
+    void SetUp(const ::benchmark::State& state) override {
+        ctx_ = makeRepositoryWithDocs(0);
+        embeddingValues_ =
+            makeEmbeddingValues(static_cast<std::size_t>(std::max<int64_t>(state.range(1), 1)));
+    }
+
+    void TearDown(const ::benchmark::State&) override { destroyRepository(ctx_); }
+
+protected:
+    RepoContext ctx_;
+    std::vector<float> embeddingValues_;
+    std::size_t nextDocSeed_{0};
+};
+
+class MetadataPathDepthFixture : public benchmark::Fixture {
+public:
+    void SetUp(const ::benchmark::State& state) override {
+        ctx_ = makeRepositoryWithDocs(0);
+
+        const auto backgroundCount = static_cast<std::size_t>(std::max<int64_t>(state.range(0), 1));
+        for (std::size_t i = 0; i < backgroundCount; ++i) {
+            ctx_.docs.push_back(
+                insertDocumentOrThrow(*ctx_.repo, makeNestedDocWithDepth(2 + (i % 8), i + 1)));
+        }
+
+        deepTemplate_ = makeNestedDocWithDepth(12, backgroundCount + 1000);
+        shallowTemplate_ = makeDocWithPath("/bench/shallow/file.txt", deepTemplate_.sha256Hash);
+        currentDeepDoc_ = insertDocumentOrThrow(*ctx_.repo, deepTemplate_);
+        shallowCurrent_ = shallowTemplate_;
+        shallowCurrent_.id = currentDeepDoc_.id;
+    }
+
+    void TearDown(const ::benchmark::State&) override { destroyRepository(ctx_); }
+
+protected:
+    void reinsertDeepDocument() {
+        currentDeepDoc_ = insertDocumentOrThrow(*ctx_.repo, deepTemplate_);
+        shallowCurrent_ = shallowTemplate_;
+        shallowCurrent_.id = currentDeepDoc_.id;
+    }
+
+    RepoContext ctx_;
+    DocumentInfo deepTemplate_;
+    DocumentInfo shallowTemplate_;
+    DocumentInfo currentDeepDoc_;
+    DocumentInfo shallowCurrent_;
 };
 
 BENCHMARK_DEFINE_F(MetadataQueryFixture, QueryExactPath)(benchmark::State& state) {
@@ -221,6 +315,128 @@ BENCHMARK_DEFINE_F(MetadataQueryFixture, BatchUpdateExtractionStatus)(benchmark:
     state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(batchSize));
 }
 
+BENCHMARK_DEFINE_F(MetadataQueryFixture, BatchGetMetadataChunked)(benchmark::State& state) {
+    const auto batchSize =
+        std::min<std::size_t>(static_cast<std::size_t>(state.range(1)), ctx_.docIds.size());
+    std::vector<int64_t> ids(ctx_.docIds.begin(), ctx_.docIds.begin() + batchSize);
+
+    for (auto _ : state) {
+        auto res = ctx_.repo->getMetadataForDocuments(ids);
+        benchmark::DoNotOptimize(res);
+        if (!res) {
+            state.SkipWithError("getMetadataForDocuments failed");
+            return;
+        }
+        if (res.value().size() != batchSize) {
+            state.SkipWithError("getMetadataForDocuments returned wrong result count");
+            return;
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(batchSize));
+}
+
+BENCHMARK_DEFINE_F(MetadataPathTreeFixture, UpsertPathTreeForDocument)(benchmark::State& state) {
+    const auto depth = static_cast<std::size_t>(std::max<int64_t>(state.range(0), 1));
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        auto doc = insertDocumentOrThrow(*ctx_.repo,
+                                         makeNestedDocWithDepth(depth, nextDocSeed_++ + 10000));
+        state.ResumeTiming();
+
+        auto res = ctx_.repo->upsertPathTreeForDocument(doc, doc.id, true, embeddingValues_);
+        benchmark::DoNotOptimize(res);
+        if (!res) {
+            state.SkipWithError("upsertPathTreeForDocument failed");
+            return;
+        }
+
+        state.PauseTiming();
+        auto cleanup = ctx_.repo->removePathTreeForDocument(doc, doc.id, embeddingValues_);
+        if (!cleanup) {
+            state.SkipWithError("removePathTreeForDocument cleanup failed");
+            return;
+        }
+        auto deleted = ctx_.repo->deleteDocument(doc.id);
+        if (!deleted) {
+            state.SkipWithError("deleteDocument cleanup failed");
+            return;
+        }
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(depth));
+}
+
+BENCHMARK_DEFINE_F(MetadataPathTreeFixture, RemovePathTreeForDocument)(benchmark::State& state) {
+    const auto depth = static_cast<std::size_t>(std::max<int64_t>(state.range(0), 1));
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        auto doc = insertDocumentOrThrow(*ctx_.repo,
+                                         makeNestedDocWithDepth(depth, nextDocSeed_++ + 20000));
+        auto seeded = ctx_.repo->upsertPathTreeForDocument(doc, doc.id, true, embeddingValues_);
+        if (!seeded) {
+            state.SkipWithError("upsertPathTreeForDocument setup failed");
+            return;
+        }
+        state.ResumeTiming();
+
+        auto res = ctx_.repo->removePathTreeForDocument(doc, doc.id, embeddingValues_);
+        benchmark::DoNotOptimize(res);
+        if (!res) {
+            state.SkipWithError("removePathTreeForDocument failed");
+            return;
+        }
+
+        state.PauseTiming();
+        auto deleted = ctx_.repo->deleteDocument(doc.id);
+        if (!deleted) {
+            state.SkipWithError("deleteDocument cleanup failed");
+            return;
+        }
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(depth));
+}
+
+BENCHMARK_DEFINE_F(MetadataPathDepthFixture,
+                   UpdateDocumentPathDepthShrink)(benchmark::State& state) {
+    for (auto _ : state) {
+        auto res = ctx_.repo->updateDocument(shallowCurrent_);
+        benchmark::DoNotOptimize(res);
+        if (!res) {
+            state.SkipWithError("updateDocument shrink failed");
+            return;
+        }
+
+        state.PauseTiming();
+        auto restore = ctx_.repo->updateDocument(currentDeepDoc_);
+        if (!restore) {
+            state.SkipWithError("updateDocument restore failed");
+            return;
+        }
+        state.ResumeTiming();
+    }
+}
+
+BENCHMARK_DEFINE_F(MetadataPathDepthFixture,
+                   DeleteDocumentPathDepthShrink)(benchmark::State& state) {
+    for (auto _ : state) {
+        auto res = ctx_.repo->deleteDocument(currentDeepDoc_.id);
+        benchmark::DoNotOptimize(res);
+        if (!res) {
+            state.SkipWithError("deleteDocument failed");
+            return;
+        }
+
+        state.PauseTiming();
+        reinsertDeepDocument();
+        state.ResumeTiming();
+    }
+}
+
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QueryExactPath)->Arg(128)->Arg(1024);
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QueryDirectoryPrefix)->Arg(128)->Arg(1024);
 BENCHMARK_REGISTER_F(MetadataQueryFixture, QuerySuffixFts)->Arg(128)->Arg(1024);
@@ -232,6 +448,17 @@ BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchSetMetadata)->Args({128, 16})->A
 BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchUpdateExtractionStatus)
     ->Args({128, 16})
     ->Args({1024, 64});
+BENCHMARK_REGISTER_F(MetadataQueryFixture, BatchGetMetadataChunked)
+    ->Args({1024, 1024})
+    ->Args({4096, 2048});
+BENCHMARK_REGISTER_F(MetadataPathTreeFixture, UpsertPathTreeForDocument)
+    ->Args({4, 16})
+    ->Args({12, 16});
+BENCHMARK_REGISTER_F(MetadataPathTreeFixture, RemovePathTreeForDocument)
+    ->Args({4, 16})
+    ->Args({12, 16});
+BENCHMARK_REGISTER_F(MetadataPathDepthFixture, UpdateDocumentPathDepthShrink)->Arg(128)->Arg(1024);
+BENCHMARK_REGISTER_F(MetadataPathDepthFixture, DeleteDocumentPathDepthShrink)->Arg(128)->Arg(1024);
 
 } // namespace
 

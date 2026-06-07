@@ -2306,6 +2306,7 @@ public:
                     FROM kg_nodes n
                     WHERE n.type = 'path'
                       AND json_extract(n.properties, '$.path') = ?
+                      AND json_extract(n.properties, '$.snapshot_id') IS NOT NULL
                     
                     UNION ALL
                     
@@ -2324,7 +2325,7 @@ public:
                 SELECT DISTINCT
                     rc.snapshot_id,
                     rc.path,
-                    json_extract(blob_node.node_key, '$') AS blob_hash,
+                    blob_node.node_key AS blob_hash,
                     CAST(json_extract(ver_edge.properties, '$.diff_id') AS INTEGER) AS diff_id
                 FROM rename_chain rc
                 LEFT JOIN kg_edges ver_edge ON rc.id = ver_edge.src_node_id 
