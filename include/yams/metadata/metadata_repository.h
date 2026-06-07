@@ -1205,9 +1205,10 @@ private:
             detail::metadata_op_tag = "best_effort_write";
         }
 
+        constexpr auto kBestEffortAcquireTimeout = std::chrono::milliseconds(5);
         const auto start = std::chrono::steady_clock::now();
-        auto connResult = pool_.acquire(std::chrono::milliseconds(30000),
-                                        ConnectionPriority::Normal, current_metadata_op());
+        auto connResult = pool_.acquire(kBestEffortAcquireTimeout, ConnectionPriority::Normal,
+                                        current_metadata_op());
         if (!connResult) {
             if (metadata_trace_enabled()) {
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -64,6 +64,7 @@ using json = nlohmann::json;
 using namespace std::chrono_literals;
 using yams::metadata::BatchContentEntry;
 using yams::metadata::ConnectionPool;
+using yams::metadata::FeedbackEvent;
 using yams::metadata::ConnectionPoolConfig;
 using yams::metadata::ConnectionPriority;
 using yams::metadata::Database;
@@ -108,6 +109,7 @@ struct WorkerStats {
     OpStats insertWrites;
     OpStats metadataBatchWrites;
     OpStats batchContentWrites;
+    OpStats feedbackWrites;
     OpStats repairWrites;
     OpStats extractionWrites;
     OpStats reads;
@@ -266,6 +268,7 @@ void mergeWorkerStats(WorkerStats& dst, const WorkerStats& src) {
     mergeOpStats(dst.insertWrites, src.insertWrites);
     mergeOpStats(dst.metadataBatchWrites, src.metadataBatchWrites);
     mergeOpStats(dst.batchContentWrites, src.batchContentWrites);
+    mergeOpStats(dst.feedbackWrites, src.feedbackWrites);
     mergeOpStats(dst.repairWrites, src.repairWrites);
     mergeOpStats(dst.extractionWrites, src.extractionWrites);
     mergeOpStats(dst.reads, src.reads);
@@ -441,7 +444,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     const auto t0 = std::chrono::steady_clock::now();
-                    const auto mode = seq % 5;
+                    const auto mode = seq % 6;
                     if (mode == 0) {
                         MetadataOpScope op("bench_insert_document_with_metadata");
                         auto doc = makeDocument(root, writerId, seq);
@@ -497,16 +500,14 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                             entry.documentId = docIds[idx];
                             entry.title = "bench title " + std::to_string(writerId) + "_" +
                                           std::to_string(seq) + "_" + std::to_string(j);
-                            entry.contentText =
-                                "bench content body " + std::to_string(writerId) + "_" +
-                                std::to_string(seq) + "_" + std::to_string(j);
+                            entry.contentText = "bench content body " + std::to_string(writerId) +
+                                                "_" + std::to_string(seq) + "_" + std::to_string(j);
                             entry.mimeType = "text/plain";
                             entry.extractionMethod = "bench";
                             entry.language = "en";
                             entry.priorStateKnown = true;
                             entry.priorContentExtracted = true;
-                            entry.priorExtractionStatus =
-                                yams::metadata::ExtractionStatus::Success;
+                            entry.priorExtractionStatus = yams::metadata::ExtractionStatus::Success;
                             entries.push_back(std::move(entry));
                         }
                         auto result = repo.batchInsertContentAndIndex(entries);
@@ -522,6 +523,31 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                                           : std::optional<std::string_view>(result.error().message),
                                    us);
                     } else if (mode == 3) {
+                        MetadataOpScope op("bench_insert_feedback_event");
+                        FeedbackEvent event;
+                        event.eventId = "bench_event_" + std::to_string(writerId) + "_" +
+                                        std::to_string(seq);
+                        event.traceId = "bench_trace_" + std::to_string(writerId % 3);
+                        event.createdAt = std::chrono::floor<std::chrono::seconds>(
+                            std::chrono::system_clock::now());
+                        event.source = "bench";
+                        event.eventType = "retrieval_served";
+                        event.payloadJson = std::string{"{\"writer\":"} +
+                                            std::to_string(writerId) + ",\"seq\":" +
+                                            std::to_string(seq) + "}";
+                        auto result = repo.insertFeedbackEvent(event);
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.feedbackWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                    } else if (mode == 4) {
                         MetadataOpScope op("bench_batch_update_repair_statuses");
                         std::vector<std::string> batchHashes;
                         batchHashes.reserve(static_cast<size_t>(cfg.statusBatchSize));
@@ -819,14 +845,15 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         INFO("write p95(us): " << latencyJson(aggregate.writes)["latency_p95_us"]);
         INFO("read p95(us): " << latencyJson(aggregate.reads)["latency_p95_us"]);
         INFO("content-index lock errors: " << aggregate.batchContentWrites.lockErrors);
+        INFO("feedback lock errors: " << aggregate.feedbackWrites.lockErrors);
         INFO("repair lock errors: " << aggregate.repairWrites.lockErrors);
         INFO("extraction lock errors: " << aggregate.extractionWrites.lockErrors);
         CHECK((aggregate.writes.success > 0));
         CHECK((aggregate.reads.success > 0));
         if (cfg.externalLocker) {
             CHECK((aggregate.externalLocks.success > 0));
-            CHECK((aggregate.writes.lockErrors > 0 ||
-                   aggregate.batchContentWrites.lockErrors > 0 ||
+            CHECK((aggregate.writes.lockErrors > 0 || aggregate.batchContentWrites.lockErrors > 0 ||
+                   aggregate.feedbackWrites.lockErrors > 0 ||
                    aggregate.repairWrites.lockErrors > 0 ||
                    aggregate.extractionWrites.lockErrors > 0));
         }
@@ -855,6 +882,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"insert_document_writes", latencyJson(aggregate.insertWrites)},
                     {"metadata_batch_writes", latencyJson(aggregate.metadataBatchWrites)},
                     {"batch_content_writes", latencyJson(aggregate.batchContentWrites)},
+                    {"feedback_event_writes", latencyJson(aggregate.feedbackWrites)},
                     {"repair_status_writes", latencyJson(aggregate.repairWrites)},
                     {"extraction_status_writes", latencyJson(aggregate.extractionWrites)},
                     {"reads", latencyJson(aggregate.reads)},
@@ -882,6 +910,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                   << " insert_lock_errors=" << aggregate.insertWrites.lockErrors
                   << " metadata_lock_errors=" << aggregate.metadataBatchWrites.lockErrors
                   << " batch_content_lock_errors=" << aggregate.batchContentWrites.lockErrors
+                  << " feedback_lock_errors=" << aggregate.feedbackWrites.lockErrors
                   << " repair_lock_errors=" << aggregate.repairWrites.lockErrors
                   << " extraction_lock_errors=" << aggregate.extractionWrites.lockErrors
                   << " read_p95_us=" << latencyJson(aggregate.reads)["latency_p95_us"].get<double>()

@@ -3705,6 +3705,50 @@ TEST_CASE("MetadataRepository: setMetadataBatch does not amplify lock retries",
     std::filesystem::remove(dbPath, ec);
 }
 
+TEST_CASE("MetadataRepository: feedback event write does not wait for a busy pool",
+          "[unit][metadata][repository][feedback][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_feedback_pool_busy_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    auto heldConnResult = repoPool->acquire();
+    REQUIRE((heldConnResult.has_value()));
+    auto heldConn = std::move(heldConnResult).value();
+
+    FeedbackEvent event;
+    event.eventId = "feedback-busy-pool-event";
+    event.traceId = "feedback-busy-pool-trace";
+    event.createdAt = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    event.source = "test";
+    event.eventType = "retrieval_served";
+    event.payloadJson = "{\"served\":1}";
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = repository->insertFeedbackEvent(event);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((elapsed < std::chrono::milliseconds(250)));
+    CHECK((result.error().code == ErrorCode::Timeout ||
+           result.error().code == ErrorCode::DatabaseError ||
+           result.error().message.find("Timeout acquiring connection") != std::string::npos));
+
+    heldConn.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 TEST_CASE("MetadataRepository: getMetadataForDocuments chunks large batches",
           "[unit][metadata][repository][batch][metadata]") {
     MetadataRepositoryFixture fix;
