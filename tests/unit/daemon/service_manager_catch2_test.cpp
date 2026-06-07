@@ -17,7 +17,9 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/database.h>
@@ -589,6 +591,117 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
 
     heldConnections.clear();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown cancels salvage auto-repair with full embed queue",
+                 "[daemon][service_manager][shutdown][auto_repair][cancellation][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar autoInitialDelay("YAMS_REPAIR_AUTO_INITIAL_DELAY_MIN",
+                                              std::optional<std::string>{"0"});
+    yams::test::ScopedEnvVar autoFastInterval("YAMS_REPAIR_AUTO_FAST_MIN",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar autoWarmInterval("YAMS_REPAIR_AUTO_WARM_HOURS",
+                                              std::optional<std::string>{"0"});
+    yams::test::ScopedEnvVar autoColdInterval("YAMS_REPAIR_AUTO_COLD_HOURS",
+                                              std::optional<std::string>{"0"});
+    yams::test::ScopedEnvVar embedChannelCapacity("YAMS_EMBED_CHANNEL_CAPACITY",
+                                                  std::optional<std::string>{"256"});
+
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.enableAutoRepair = true;
+    config_.autoRepairBatchSize = 1;
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto init = sm->initialize();
+    REQUIRE(init);
+    sm->startAsyncInit();
+    const auto readySnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((readySnap.state == ServiceManagerState::Ready));
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE((meta != nullptr));
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    metadata::DocumentInfo doc{};
+    doc.fileName = "salvaged-auto-repair.txt";
+    doc.filePath = (config_.dataDir / doc.fileName).string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 26;
+    doc.sha256Hash = std::string(64, 'a');
+    doc.mimeType = "text/plain";
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto docId = meta->insertDocument(doc);
+    REQUIRE(docId.has_value());
+
+    metadata::DocumentContent content{};
+    content.documentId = docId.value();
+    content.contentText = "salvage auto repair content";
+    content.contentLength = static_cast<int64_t>(content.contentText.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(meta->insertContent(content).has_value());
+    REQUIRE(meta->updateDocumentExtractionStatus(docId.value(), true,
+                                                 metadata::ExtractionStatus::Success)
+                .has_value());
+
+    {
+        std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+        state_.readiness.databaseRecoveredFrom = "salvaged-auto-repair";
+    }
+
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       256);
+    REQUIRE((embedChannel != nullptr));
+    InternalEventBus::EmbedJob drained;
+    while (embedChannel->try_pop(drained)) {
+    }
+
+    InternalEventBus::EmbedJob filler;
+    filler.hashes = {std::string(64, 'f')};
+    filler.batchSize = 1;
+    filler.skipExisting = true;
+    std::size_t filled = 0;
+    while (embedChannel->try_push(filler)) {
+        ++filled;
+    }
+    REQUIRE((filled > 0));
+
+    sm->startRepairService([]() -> size_t { return 0; });
+    auto repairService = sm->getRepairServiceShared();
+    REQUIRE((repairService != nullptr));
+    sm->startBackgroundTasks();
+
+    REQUIRE(yams::test::wait_for_condition(std::chrono::seconds(5), std::chrono::milliseconds(10),
+                                           [&]() { return repairService->isRepairInProgress(); }));
+
+    std::atomic<bool> shutdownReturned{false};
+    const auto shutdownStart = std::chrono::steady_clock::now();
+    std::thread shutdownThread([&]() {
+        sm->shutdown();
+        shutdownReturned.store(true, std::memory_order_release);
+    });
+
+    REQUIRE(yams::test::wait_for_condition(
+        std::chrono::seconds(3), std::chrono::milliseconds(10),
+        [&]() { return shutdownReturned.load(std::memory_order_acquire); }));
+
+    const auto shutdownElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - shutdownStart);
+    shutdownThread.join();
+
+    CHECK((shutdownElapsed < std::chrono::seconds(3)));
+    CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
+    CHECK_FALSE(state_.stats.repairInProgress.load(std::memory_order_acquire));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,

@@ -825,8 +825,8 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                             salvageRebuild.repairPathTree = true;
                             salvageRebuild.foreground = false;
                             if (repair::RepairPlanBuilder::hasWork(salvageRebuild)) {
-                                RepairResponse resp =
-                                    co_await rs->executeRepairAsync(salvageRebuild, nullptr);
+                                RepairResponse resp = co_await rs->executeRepairAsync(
+                                    salvageRebuild, nullptr, stopFlag.get());
                                 if (resp.success) {
                                     spdlog::info("[AutoRepair] Salvage sweep-up completed");
                                 } else {
@@ -876,9 +876,10 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                             co_return;
                         }
                         spdlog::info("[AutoRepair] tick {}: executing", tier);
-                        RepairResponse resp = !req.foreground
-                                                  ? co_await rs->executeRepairAsync(req, nullptr)
-                                                  : rs->executeRepair(req, nullptr);
+                        RepairResponse resp =
+                            !req.foreground
+                                ? co_await rs->executeRepairAsync(req, nullptr, stopFlag.get())
+                                : rs->executeRepair(req, nullptr, stopFlag.get());
                         if (!resp.success && !resp.errors.empty()) {
                             spdlog::warn("[AutoRepair] {} completed with errors: {}", tier,
                                          resp.errors.front());

@@ -298,12 +298,12 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     // Wait for async initialization to settle before reading optional subsystem pointers.
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     // Async init can race this test; wait briefly for repo availability.
     auto meta = sm->getMetadataRepo();
@@ -311,7 +311,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         meta = sm->getMetadataRepo();
     }
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     // PostIngestQueue is started asynchronously and can consume tasks quickly.
     // Pause it to make channel assertions deterministic.
@@ -320,11 +320,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         piq = sm->getPostIngestQueue();
     }
-    REQUIRE(piq != nullptr);
+    REQUIRE((piq != nullptr));
     for (int i = 0; i < 200 && !piq->started(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    REQUIRE(piq->started());
+    REQUIRE((piq->started()));
     piq->pauseAll();
 
     // Clear any background noise after pause.
@@ -370,9 +370,9 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     // Correct behavior: tasks land on the high-priority channel PostIngestQueue consumes first
     // ("post_ingest_rpc").
-    REQUIRE(postIngestRpc->size_approx() == 1);
-    REQUIRE(postIngest->size_approx() == 0);
-    REQUIRE(postIngestTasks->size_approx() == 0);
+    REQUIRE((postIngestRpc->size_approx() == 1));
+    REQUIRE((postIngest->size_approx() == 0));
+    REQUIRE((postIngestTasks->size_approx() == 0));
 
     drainQueue(postIngest);
     drainQueue(postIngestRpc);
@@ -397,18 +397,18 @@ TEST_CASE_METHOD(
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     for (int i = 0; i < 100 && meta == nullptr; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         meta = sm->getMetadataRepo();
     }
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     metadata::DocumentInfo canonical{};
     canonical.fileName = "canonical.txt";
@@ -477,7 +477,7 @@ TEST_CASE_METHOD(
     auto resp = repair.executeRepair(req, nullptr);
     auto dedupeResult = findOperationResult(resp, "dedupe");
     REQUIRE(dedupeResult.has_value());
-    CHECK(dedupeResult->succeeded >= 1);
+    CHECK((dedupeResult->succeeded >= 1));
 
     auto duplicateDoc = meta->getDocument(duplicateId.value());
     REQUIRE(duplicateDoc.has_value());
@@ -486,7 +486,7 @@ TEST_CASE_METHOD(
     auto updatedGroup = meta->getSemanticDuplicateGroupByKey("semantic:repair-test");
     REQUIRE(updatedGroup.has_value());
     REQUIRE(updatedGroup.value().has_value());
-    CHECK(updatedGroup.value()->status == "applied");
+    CHECK((updatedGroup.value()->status == "applied"));
 
     sm->shutdown();
 }
@@ -503,11 +503,11 @@ TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     RepairService::Config cfg;
     cfg.enable = true;
@@ -535,9 +535,9 @@ TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight
                 progressCv.wait(lk, [&] { return allowProgress; });
             }
         });
-        CHECK(resp.totalOperations == 1);
-        CHECK(resp.operationResults.size() == 1);
-        CHECK(resp.operationResults.front().operation == "orphans");
+        CHECK((resp.totalOperations == 1));
+        CHECK((resp.operationResults.size() == 1));
+        CHECK((resp.operationResults.front().operation == "orphans"));
         repairCompleted.store(true, std::memory_order_release);
     });
 
@@ -587,33 +587,33 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto store = sm->getContentStore();
-    REQUIRE(meta != nullptr);
-    REQUIRE(store != nullptr);
+    REQUIRE((meta != nullptr));
+    REQUIRE((store != nullptr));
 
     auto piq = sm->getPostIngestQueue();
     for (int i = 0; i < 200 && piq == nullptr; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         piq = sm->getPostIngestQueue();
     }
-    REQUIRE(piq != nullptr);
+    REQUIRE((piq != nullptr));
     for (int i = 0; i < 200 && !piq->started(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    REQUIRE(piq->started());
+    REQUIRE((piq->started()));
     piq->resumeAll();
 
     auto postIngestRpc =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest_rpc", 64);
-    REQUIRE(postIngestRpc != nullptr);
+    REQUIRE((postIngestRpc != nullptr));
     drainQueue(postIngestRpc);
 
     const std::string text = "repair service regression test content";
@@ -647,7 +647,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     InternalEventBus::PostIngestTask task;
     task.hash = hash;
     task.mime = "text/plain";
-    REQUIRE(postIngestRpc->try_push(task));
+    REQUIRE((postIngestRpc->try_push(task)));
 
     const bool completed = waitForCondition(std::chrono::seconds(15), [&]() {
         auto docRes = meta->getDocument(docId);
@@ -663,13 +663,13 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto finalDocRes = meta->getDocument(docId);
     REQUIRE(finalDocRes.has_value());
     REQUIRE(finalDocRes.value().has_value());
-    CHECK(finalDocRes.value()->contentExtracted);
-    CHECK(finalDocRes.value()->extractionStatus == metadata::ExtractionStatus::Success);
+    CHECK((finalDocRes.value()->contentExtracted));
+    CHECK((finalDocRes.value()->extractionStatus == metadata::ExtractionStatus::Success));
 
     auto contentRes = meta->getContent(docId);
     REQUIRE(contentRes.has_value());
     REQUIRE(contentRes.value().has_value());
-    CHECK_FALSE(contentRes.value()->contentText.empty());
+    CHECK_FALSE((contentRes.value()->contentText.empty()));
 
     sm->shutdown();
 }
@@ -686,7 +686,7 @@ TEST_CASE_METHOD(
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
                                                                                        256);
-    REQUIRE(embedChannel != nullptr);
+    REQUIRE((embedChannel != nullptr));
     drainQueue(embedChannel);
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
@@ -694,7 +694,7 @@ TEST_CASE_METHOD(
     auto repoPath = testDir_ / "auto_repair_list_responsive.db";
     metadata::ConnectionPoolConfig poolCfg{};
     auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
-    REQUIRE(pool->initialize().has_value());
+    REQUIRE((pool->initialize().has_value()));
     auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
     sm->__test_setMetadataRepo(repo);
     state_.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
@@ -724,7 +724,7 @@ TEST_CASE_METHOD(
     content.contentLength = static_cast<int64_t>(content.contentText.size());
     content.extractionMethod = "test";
     content.language = "en";
-    REQUIRE(repo->insertContent(content).has_value());
+    REQUIRE((repo->insertContent(content).has_value()));
     REQUIRE(repo->updateDocumentExtractionStatus(idRes.value(), true,
                                                  metadata::ExtractionStatus::Success)
                 .has_value());
@@ -746,7 +746,7 @@ TEST_CASE_METHOD(
     while (embedChannel->try_push(filler)) {
         ++filled;
     }
-    REQUIRE(filled > 0);
+    REQUIRE((filled > 0));
 
     std::atomic<bool> repairStarted{false};
     RepairRequest req;
@@ -786,13 +786,13 @@ TEST_CASE_METHOD(
                             std::chrono::steady_clock::now() - listStart)
                             .count();
 
-    REQUIRE(std::holds_alternative<ListResponse>(listResp));
+    REQUIRE((std::holds_alternative<ListResponse>(listResp)));
     const auto& response = std::get<ListResponse>(listResp);
-    REQUIRE(response.items.size() == 1);
-    CHECK(response.items.front().path == path);
-    CHECK(listMs < 200);
+    REQUIRE((response.items.size() == 1));
+    CHECK((response.items.front().path == path));
+    CHECK((listMs < 200));
 
-    REQUIRE(repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE((repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
     const auto repairResp = repairFuture.get();
     if (releaseSlot.joinable()) {
         releaseSlot.join();
@@ -800,8 +800,8 @@ TEST_CASE_METHOD(
     REQUIRE(repairResp.success);
     const auto op = findOperationResult(repairResp, "embeddings");
     REQUIRE(op.has_value());
-    CHECK(op->succeeded == 1);
-    CHECK(op->failed == 0);
+    CHECK((op->succeeded == 1));
+    CHECK((op->failed == 0));
 
     repair.stop();
     drainQueue(embedChannel);
@@ -826,31 +826,31 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     TuneAdvisor::setPostIngestRpcQueueMax(256);
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     auto piq = sm->getPostIngestQueue();
     for (int i = 0; i < 200 && piq == nullptr; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         piq = sm->getPostIngestQueue();
     }
-    REQUIRE(piq != nullptr);
+    REQUIRE((piq != nullptr));
     for (int i = 0; i < 200 && !piq->started(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    REQUIRE(piq->started());
+    REQUIRE((piq->started()));
     piq->pauseAll();
 
     auto postIngestRpc =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest_rpc", 256);
-    REQUIRE(postIngestRpc != nullptr);
+    REQUIRE((postIngestRpc != nullptr));
     drainQueue(postIngestRpc);
 
     RepairService::Config cfg;
@@ -887,7 +887,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     while (postIngestRpc->try_push(filler)) {
         ++filled;
     }
-    REQUIRE(filled > 0);
+    REQUIRE((filled > 0));
 
     RepairRequest req;
     req.repairStuckDocs = true;
@@ -921,13 +921,13 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                             std::chrono::steady_clock::now() - listStart)
                             .count();
 
-    REQUIRE(std::holds_alternative<ListResponse>(listResp));
+    REQUIRE((std::holds_alternative<ListResponse>(listResp)));
     const auto& response = std::get<ListResponse>(listResp);
-    REQUIRE(response.items.size() == 1);
-    CHECK(response.items.front().path == doc.filePath);
-    CHECK(listMs < 200);
+    REQUIRE((response.items.size() == 1));
+    CHECK((response.items.front().path == doc.filePath));
+    CHECK((listMs < 200));
 
-    REQUIRE(repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE((repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
     const auto repairResp = repairFuture.get();
     if (releaseSlot.joinable()) {
         releaseSlot.join();
@@ -939,7 +939,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     // The background loop may have already recovered the document, so
     // succeeded==0 is legitimate (the repair is a no-op on already-recovered docs).
     // Regardless of who recovered it, assert the document is no longer in Failed state.
-    CHECK(op->succeeded >= 0);
+    CHECK((op->succeeded >= 0));
     {
         // Give the WriteCoordinator time to process the MetadataWriteFacade flush.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -947,8 +947,132 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         REQUIRE(docQuery.has_value());
         auto docOpt = docQuery.value();
         REQUIRE(docOpt.has_value());
-        CHECK(docOpt->extractionStatus != metadata::ExtractionStatus::Failed);
+        CHECK((docOpt->extractionStatus != metadata::ExtractionStatus::Failed));
     }
+
+    repair.stop();
+    drainQueue(postIngestRpc);
+    piq->resumeAll();
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(
+    ServiceManagerFixture,
+    "RepairService: async stuck-doc repair cancels while post-ingest RPC queue is full",
+    "[daemon][repair][shutdown][cancellation][stuck-docs]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    TuneAdvisorRepairGuard tuneGuard;
+    TuneAdvisor::setWorkCoordinatorThreads(1);
+    TuneAdvisor::setPostIngestRpcQueueMax(256);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE((sm->initialize()));
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE((meta != nullptr));
+
+    auto piq = sm->getPostIngestQueue();
+    for (int i = 0; i < 200 && piq == nullptr; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        piq = sm->getPostIngestQueue();
+    }
+    REQUIRE((piq != nullptr));
+    for (int i = 0; i < 200 && !piq->started(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE((piq->started()));
+    piq->pauseAll();
+
+    auto postIngestRpc =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest_rpc", 256);
+    REQUIRE((postIngestRpc != nullptr));
+    drainQueue(postIngestRpc);
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxRetries = 3;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 1; }, cfg);
+    repair.start();
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "stuck-cancel.txt";
+    doc.filePath = (config_.dataDir / "stuck-cancel.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 20;
+    doc.sha256Hash = std::string(64, 'c');
+    doc.mimeType = "text/plain";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    REQUIRE(meta->updateDocumentExtractionStatus(
+                    idRes.value(), false, metadata::ExtractionStatus::Failed, "stuck cancel test")
+                .has_value());
+    REQUIRE(
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Pending)
+            .has_value());
+
+    InternalEventBus::PostIngestTask filler;
+    filler.hash = std::string(64, 'f');
+    filler.mime = "text/plain";
+    std::size_t filled = 0;
+    while (postIngestRpc->try_push(filler)) {
+        ++filled;
+    }
+    REQUIRE((filled > 0));
+
+    std::atomic<bool> cancelRequested{false};
+    std::atomic<bool> repairStarted{false};
+
+    RepairRequest req;
+    req.repairStuckDocs = true;
+    req.foreground = false;
+    req.maxRetries = 3;
+
+    auto repairFuture = boost::asio::co_spawn(
+        sm->getWorkerExecutor(),
+        repair.executeRepairAsync(
+            req,
+            [&](const RepairEvent& event) {
+                if (event.phase == "repairing" && event.operation == "stuck_docs") {
+                    repairStarted.store(true, std::memory_order_release);
+                }
+            },
+            &cancelRequested),
+        boost::asio::use_future);
+
+    REQUIRE(waitForCondition(std::chrono::seconds(2),
+                             [&]() { return repairStarted.load(std::memory_order_acquire); }));
+
+    cancelRequested.store(true, std::memory_order_release);
+
+    REQUIRE((repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
+    const auto repairResp = repairFuture.get();
+    REQUIRE_FALSE(repairResp.success);
+    CHECK(std::any_of(repairResp.errors.begin(), repairResp.errors.end(),
+                      [](const std::string& error) {
+                          return error.find("Repair canceled") != std::string::npos;
+                      }));
+
+    const auto op = findOperationResult(repairResp, "stuck_docs");
+    REQUIRE(op.has_value());
+    CHECK((op->failed >= 1));
+    CHECK((op->message.find("Repair canceled") != std::string::npos));
 
     repair.stop();
     drainQueue(postIngestRpc);
@@ -974,15 +1098,15 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     config_.autoLoadPlugins = false;
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
     skipIfVectorDbUnavailable(sm, vectorDb);
 
     const std::string kModelName = "test-model";
@@ -1016,7 +1140,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         content.contentLength = static_cast<int64_t>(text.size());
         content.extractionMethod = "test";
         content.language = "en";
-        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE((meta->insertContent(content).has_value()));
         REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
                                                      metadata::ExtractionStatus::Success)
                     .has_value());
@@ -1029,7 +1153,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     existing.embedding.assign(vectorDb->getConfig().embedding_dim, 0.2f);
     existing.content = "already embedded";
     existing.level = yams::vector::EmbeddingLevel::DOCUMENT;
-    REQUIRE(vectorDb->insertVector(existing));
+    REQUIRE((vectorDb->insertVector(existing)));
     REQUIRE(
         meta->updateDocumentEmbeddingStatusByHash(hashes.front(), true, kModelName).has_value());
     REQUIRE(meta->updateDocumentRepairStatus(hashes.front(), metadata::RepairStatus::Completed)
@@ -1056,11 +1180,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(response.success);
     const auto op = findOperationResult(response, "embeddings");
     REQUIRE(op.has_value());
-    CHECK(op->failed == 0);
-    CHECK(op->processed == 1);
-    CHECK(op->succeeded == 1);
-    CHECK(provider->loadCalls() >= 1);
-    CHECK(provider->batchCalls() >= 2);
+    CHECK((op->failed == 0));
+    CHECK((op->processed == 1));
+    CHECK((op->succeeded == 1));
+    CHECK((provider->loadCalls() >= 1));
+    CHECK((provider->batchCalls() >= 2));
     CHECK_FALSE(events.empty());
     CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& ev) {
         return ev.phase == "repairing" && ev.total > 0;
@@ -1072,7 +1196,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(hash);
         REQUIRE(hasEmbedRes.has_value());
         CHECK(hasEmbedRes.value());
-        CHECK_FALSE(vectorDb->getVectorsByDocument(hash).empty());
+        CHECK_FALSE((vectorDb->getVectorsByDocument(hash).empty()));
     }
 
     sm->shutdown();
@@ -1096,21 +1220,21 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     config_.autoLoadPlugins = false;
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
     skipIfVectorDbUnavailable(sm, vectorDb);
 
     const std::string kModelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
-    REQUIRE(provider->loadModel(kModelName).has_value());
+    REQUIRE((provider->loadModel(kModelName).has_value()));
     sm->__test_setModelProvider(provider);
 
     const std::string hash = std::string(64, 'e');
@@ -1136,16 +1260,17 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     content.contentLength = 0;
     content.extractionMethod = "test";
     content.language = "en";
-    REQUIRE(meta->insertContent(content).has_value());
+    REQUIRE((meta->insertContent(content).has_value()));
     REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
                                                  metadata::ExtractionStatus::Success)
                 .has_value());
-    REQUIRE(meta->updateDocumentRepairStatus(hash, metadata::RepairStatus::Processing).has_value());
+    REQUIRE(
+        (meta->updateDocumentRepairStatus(hash, metadata::RepairStatus::Processing).has_value()));
 
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
                                                                                        128);
-    REQUIRE(embedChannel != nullptr);
+    REQUIRE((embedChannel != nullptr));
     InternalEventBus::EmbedJob drained;
     while (embedChannel->try_pop(drained)) {
     }
@@ -1155,7 +1280,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     job.batchSize = 1;
     job.skipExisting = false;
     job.modelName = kModelName;
-    REQUIRE(embedChannel->try_push(std::move(job)));
+    REQUIRE((embedChannel->try_push(std::move(job))));
 
     const bool settled = waitForCondition(std::chrono::seconds(10), [&]() {
         auto docRes = meta->getDocumentByHash(hash);
@@ -1167,7 +1292,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(hash);
     REQUIRE(hasEmbedRes.has_value());
     CHECK_FALSE(hasEmbedRes.value());
-    CHECK(vectorDb->getVectorsByDocument(hash).empty());
+    CHECK((vectorDb->getVectorsByDocument(hash).empty()));
 
     sm->shutdown();
 }
@@ -1190,27 +1315,27 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     config_.autoLoadPlugins = false;
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
     skipIfVectorDbUnavailable(sm, vectorDb);
 
     const std::string kModelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "poison-pill");
-    REQUIRE(provider->loadModel(kModelName).has_value());
+    REQUIRE((provider->loadModel(kModelName).has_value()));
     sm->__test_setModelProvider(provider);
 
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
                                                                                        128);
-    REQUIRE(embedChannel != nullptr);
+    REQUIRE((embedChannel != nullptr));
     InternalEventBus::EmbedJob drained;
     while (embedChannel->try_pop(drained)) {
     }
@@ -1252,7 +1377,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         content.contentLength = static_cast<int64_t>(docs[i].text.size());
         content.extractionMethod = "test";
         content.language = "en";
-        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE((meta->insertContent(content).has_value()));
         REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
                                                      metadata::ExtractionStatus::Success)
                     .has_value());
@@ -1266,7 +1391,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     job.batchSize = static_cast<uint32_t>(hashes.size());
     job.skipExisting = false;
     job.modelName = kModelName;
-    REQUIRE(embedChannel->try_push(std::move(job)));
+    REQUIRE((embedChannel->try_push(std::move(job))));
 
     const bool settled = waitForCondition(std::chrono::seconds(10), [&]() {
         return provider->batchCalls() >= 4 && provider->singleCalls() >= 1;
@@ -1302,7 +1427,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
             CHECK((status == metadata::RepairStatus::Completed ||
                    status == metadata::RepairStatus::Processing));
         } else {
-            CHECK(docRes.value()->repairStatus == metadata::RepairStatus::Failed);
+            CHECK((docRes.value()->repairStatus == metadata::RepairStatus::Failed));
         }
 
         const auto vectors = vectorDb->getVectorsByDocument(seeded.hash);
@@ -1313,8 +1438,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         }
     }
 
-    CHECK(provider->batchCalls() >= 2);
-    CHECK(provider->singleCalls() >= 1);
+    CHECK((provider->batchCalls() >= 2));
+    CHECK((provider->singleCalls() >= 1));
 
     sm->shutdown();
 }
@@ -1342,17 +1467,17 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     config_.autoLoadPlugins = false;
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto kgStore = sm->getKgStore();
     auto vectorDb = sm->getVectorDatabase();
-    REQUIRE(meta != nullptr);
-    REQUIRE(kgStore != nullptr);
+    REQUIRE((meta != nullptr));
+    REQUIRE((kgStore != nullptr));
     skipIfVectorDbUnavailable(sm, vectorDb);
 
     const auto now =
@@ -1377,7 +1502,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         node.nodeKey = "doc:" + hashes[i];
         node.label = doc.filePath;
         node.type = "document";
-        REQUIRE(kgStore->upsertNode(node).has_value());
+        REQUIRE((kgStore->upsertNode(node).has_value()));
 
         yams::vector::VectorRecord vec;
         vec.document_hash = hashes[i];
@@ -1386,7 +1511,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         vec.embedding[i % vec.embedding.size()] = 1.0f;
         vec.content = "topology seed";
         vec.level = yams::vector::EmbeddingLevel::DOCUMENT;
-        REQUIRE(vectorDb->insertVector(vec));
+        REQUIRE((vectorDb->insertVector(vec)));
     }
 
     auto aNode = kgStore->getNodeByKey("doc:" + hashes[0]);
@@ -1405,7 +1530,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                      .dstNodeId = aNode.value()->id,
                                      .relation = "semantic_neighbor",
                                      .weight = 0.91F});
-    REQUIRE(kgStore->addEdgesUnique(edges).has_value());
+    REQUIRE((kgStore->addEdgesUnique(edges).has_value()));
 
     yams::topology::MetadataKgTopologyArtifactStore store(
         std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
@@ -1420,15 +1545,15 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto latest = store.loadLatest();
     REQUIRE(latest.has_value());
     REQUIRE(latest.value().has_value());
-    CHECK(latest.value()->clusters.size() == 2);
+    CHECK((latest.value()->clusters.size() == 2));
 
     auto memberships = store.loadMemberships(hashes);
     REQUIRE(memberships.has_value());
-    REQUIRE(memberships.value().size() == 3);
-    CHECK(std::count_if(memberships.value().begin(), memberships.value().end(),
-                        [](const auto& membership) {
-                            return membership.role == yams::topology::DocumentTopologyRole::Outlier;
-                        }) == 1);
+    REQUIRE((memberships.value().size() == 3));
+    CHECK((std::count_if(
+               memberships.value().begin(), memberships.value().end(), [](const auto& membership) {
+                   return membership.role == yams::topology::DocumentTopologyRole::Outlier;
+               }) == 1));
 
     auto cNode = kgStore->getNodeByKey("doc:" + hashes[2]);
     REQUIRE(cNode.has_value());
@@ -1443,41 +1568,41 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                         .dstNodeId = bNode.value()->id,
                                         .relation = "semantic_neighbor",
                                         .weight = 0.88F});
-    REQUIRE(kgStore->addEdgesUnique(newEdges).has_value());
+    REQUIRE((kgStore->addEdgesUnique(newEdges).has_value()));
 
     auto incremental =
         sm->rebuildTopologyArtifacts("unit_test_incremental_topology", false, {hashes[2]});
     REQUIRE(incremental.has_value());
     CHECK_FALSE(incremental.value().fullRebuild);
-    CHECK(incremental.value().documentsProcessed == 3);
+    CHECK((incremental.value().documentsProcessed == 3));
 
     latest = store.loadLatest();
     REQUIRE(latest.has_value());
     REQUIRE(latest.value().has_value());
-    CHECK(latest.value()->clusters.size() == 1);
+    CHECK((latest.value()->clusters.size() == 1));
 
     {
         DaemonMetrics metrics(&lifecycleFsm_, &state_, sm.get(), sm->getWorkCoordinator());
         auto snap = metrics.getSnapshot(true);
-        REQUIRE(snap != nullptr);
-        CHECK(snap->topologyArtifactsFresh);
-        CHECK_FALSE(snap->topologyRebuildRunning);
-        CHECK(snap->topologyDirtyDocuments == 0);
-        CHECK(snap->topologyRebuildLagMs == 0);
-        CHECK(snap->topologyRebuildsTotal >= 2);
-        CHECK(snap->topologyLastDocumentsProcessed == 3);
-        CHECK(snap->topologyLastClustersBuilt == 1);
-        CHECK(snap->topologyLastMembershipsBuilt == 3);
-        CHECK(snap->topologyLastDirtySeedCount >= 1);
-        CHECK(snap->topologyLastDirtyRegionDocs >= 1);
-        CHECK(snap->topologyLastRunSucceeded);
-        CHECK(snap->topologyLastRunStored);
+        REQUIRE((snap != nullptr));
+        CHECK((snap->topologyArtifactsFresh));
+        CHECK_FALSE((snap->topologyRebuildRunning));
+        CHECK((snap->topologyDirtyDocuments == 0));
+        CHECK((snap->topologyRebuildLagMs == 0));
+        CHECK((snap->topologyRebuildsTotal >= 2));
+        CHECK((snap->topologyLastDocumentsProcessed == 3));
+        CHECK((snap->topologyLastClustersBuilt == 1));
+        CHECK((snap->topologyLastMembershipsBuilt == 3));
+        CHECK((snap->topologyLastDirtySeedCount >= 1));
+        CHECK((snap->topologyLastDirtyRegionDocs >= 1));
+        CHECK((snap->topologyLastRunSucceeded));
+        CHECK((snap->topologyLastRunStored));
     }
 
     memberships = store.loadMemberships(hashes);
     REQUIRE(memberships.has_value());
     auto mergedMemberships = memberships.value();
-    REQUIRE(mergedMemberships.size() == 3);
+    REQUIRE((mergedMemberships.size() == 3));
     const auto mergedClusterId = mergedMemberships.front().clusterId;
     std::size_t mergedCount = 0;
     for (const auto& membership : mergedMemberships) {
@@ -1485,7 +1610,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
             ++mergedCount;
         }
     }
-    CHECK(mergedCount == 3);
+    CHECK((mergedCount == 3));
 
     sm->shutdown();
 }
@@ -1508,23 +1633,23 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     config_.autoLoadPlugins = false;
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto kgStore = sm->getKgStore();
     auto vectorDb = sm->getVectorDatabase();
-    REQUIRE(meta != nullptr);
-    REQUIRE(kgStore != nullptr);
+    REQUIRE((meta != nullptr));
+    REQUIRE((kgStore != nullptr));
     skipIfVectorDbUnavailable(sm, vectorDb);
 
     const std::string modelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
-    REQUIRE(provider->loadModel(modelName).has_value());
+    REQUIRE((provider->loadModel(modelName).has_value()));
     sm->__test_setModelProvider(provider);
 
     const auto now =
@@ -1550,7 +1675,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         content.contentLength = static_cast<int64_t>(docs[i].second.size());
         content.extractionMethod = "test";
         content.language = "en";
-        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE((meta->insertContent(content).has_value()));
         REQUIRE(meta->updateDocumentExtractionStatus(idRes.value(), true,
                                                      metadata::ExtractionStatus::Success)
                     .has_value());
@@ -1559,7 +1684,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         node.nodeKey = "doc:" + docs[i].first;
         node.label = doc.filePath;
         node.type = "document";
-        REQUIRE(kgStore->upsertNode(node).has_value());
+        REQUIRE((kgStore->upsertNode(node).has_value()));
     }
 
     RepairService::Config cfg;
@@ -1580,16 +1705,16 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto topologyResult = findOperationResult(response, "topology");
     REQUIRE(embeddingResult.has_value());
     REQUIRE(topologyResult.has_value());
-    CHECK(embeddingResult->failed == 0);
-    CHECK(topologyResult->failed == 0);
-    CHECK(topologyResult->succeeded == docs.size());
+    CHECK((embeddingResult->failed == 0));
+    CHECK((topologyResult->failed == 0));
+    CHECK((topologyResult->succeeded == docs.size()));
 
     yams::topology::MetadataKgTopologyArtifactStore store(
         std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
     auto latest = store.loadLatest();
     REQUIRE(latest.has_value());
     REQUIRE(latest.value().has_value());
-    CHECK(latest.value()->clusters.size() == 1);
+    CHECK((latest.value()->clusters.size() == 1));
 
     std::vector<std::string> hashes;
     for (const auto& [hash, _text] : docs) {
@@ -1597,8 +1722,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     }
     auto memberships = store.loadMemberships(hashes);
     REQUIRE(memberships.has_value());
-    REQUIRE(memberships.value().size() == docs.size());
-    CHECK(memberships.value()[0].clusterId == memberships.value()[1].clusterId);
+    REQUIRE((memberships.value().size() == docs.size()));
+    CHECK((memberships.value()[0].clusterId == memberships.value()[1].clusterId));
 
     auto aNode = kgStore->getNodeByKey("doc:" + docs[0].first);
     REQUIRE(aNode.has_value());
@@ -1623,14 +1748,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     metadata::DocumentInfo doc{};
     doc.fileName = "binary.jpg";
@@ -1666,7 +1791,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     repair.stop();
 
-    CHECK(state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) == 0u);
+    CHECK((state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) == 0u));
 
     sm->shutdown();
 }
@@ -1684,14 +1809,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     metadata::DocumentInfo doc{};
     doc.fileName = "pending.txt";
@@ -1729,7 +1854,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto resp = repair.executeRepair(req, nullptr);
     auto stuckDocsResult = findOperationResult(resp, "stuck_docs");
     REQUIRE(stuckDocsResult.has_value());
-    CHECK(stuckDocsResult->processed == 0u);
+    CHECK((stuckDocsResult->processed == 0u));
 
     sm->shutdown();
 }
@@ -1756,16 +1881,16 @@ TEST_CASE_METHOD(
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto store = sm->getContentStore();
-    REQUIRE(meta != nullptr);
-    REQUIRE(store != nullptr);
+    REQUIRE((meta != nullptr));
+    REQUIRE((store != nullptr));
 
     // Store real content so the extractor can find it.
     const std::string text = "hello world searchable content for fts5 repair test";
@@ -1824,7 +1949,7 @@ TEST_CASE_METHOD(
     // The document should have been rebuilt, not skipped.
     auto ftsResult = findOperationResult(resp, "fts5");
     REQUIRE(ftsResult.has_value());
-    CHECK(ftsResult->succeeded >= 1u);
+    CHECK((ftsResult->succeeded >= 1u));
 
     // Verify an FTS5 entry now exists.
     auto hasFtsAfter = meta->hasFtsEntry(docId);
@@ -1847,14 +1972,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
-    REQUIRE(meta != nullptr);
+    REQUIRE((meta != nullptr));
 
     // Insert document marked as successfully extracted but with no FTS5 entry.
     metadata::DocumentInfo doc{};
@@ -1924,16 +2049,16 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                                                 std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE(sm->initialize());
+    REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
     auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     auto meta = sm->getMetadataRepo();
     auto store = sm->getContentStore();
-    REQUIRE(meta != nullptr);
-    REQUIRE(store != nullptr);
+    REQUIRE((meta != nullptr));
+    REQUIRE((store != nullptr));
 
     auto fts5Q = InternalEventBus::instance().get_or_create_channel<InternalEventBus::Fts5Job>(
         "fts5_jobs", 512);
