@@ -991,6 +991,55 @@ TEST_CASE("MetadataRepository: batch repair status update skips missing hashes a
     CHECK((afterB.value()->repairAttemptedAt.time_since_epoch().count() > 0));
 }
 
+TEST_CASE("MetadataRepository: batch repair status update does not stack retry loops under lock",
+          "[unit][metadata][repository][repair][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_repair_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/repair-lock.txt", "repair-lock-hash");
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result =
+        repository->batchUpdateDocumentRepairStatuses({"repair-lock-hash"}, RepairStatus::Failed);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((result.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
           "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
@@ -1886,6 +1935,57 @@ TEST_CASE("MetadataRepository: batch extraction status updates share one transac
     CHECK((fix.repository_->getCachedExtractedCount() == 1));
 }
 
+TEST_CASE("MetadataRepository: batch extraction status updates use the last update per document",
+          "[unit][metadata][repository][extraction]") {
+    MetadataRepositoryFixture fix;
+
+    auto pendingDoc =
+        makeDocumentWithPath("/tmp/yams/extraction-duplicate-pending.txt", "extract-dup-pending");
+    pendingDoc.contentExtracted = false;
+    pendingDoc.extractionStatus = ExtractionStatus::Pending;
+
+    auto successDoc =
+        makeDocumentWithPath("/tmp/yams/extraction-duplicate-success.txt", "extract-dup-success");
+    successDoc.contentExtracted = true;
+    successDoc.extractionStatus = ExtractionStatus::Success;
+
+    auto pendingId = fix.repository_->insertDocument(pendingDoc);
+    auto successId = fix.repository_->insertDocument(successDoc);
+    REQUIRE((pendingId.has_value()));
+    REQUIRE((successId.has_value()));
+
+    fix.repository_->initializeCounters();
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
+
+    std::vector<ExtractionStatusUpdate> updates;
+    updates.push_back(
+        ExtractionStatusUpdate{pendingId.value(), true, ExtractionStatus::Success, std::string{}});
+    updates.push_back(ExtractionStatusUpdate{pendingId.value(), false, ExtractionStatus::Failed,
+                                             "duplicate failure wins"});
+    updates.push_back(
+        ExtractionStatusUpdate{successId.value(), false, ExtractionStatus::Failed, "transient"});
+    updates.push_back(
+        ExtractionStatusUpdate{successId.value(), true, ExtractionStatus::Success, std::string{}});
+
+    REQUIRE((fix.repository_->batchUpdateDocumentExtractionStatuses(updates).has_value()));
+
+    auto pendingAfter = fix.repository_->getDocument(pendingId.value());
+    auto successAfter = fix.repository_->getDocument(successId.value());
+    REQUIRE((pendingAfter.has_value()));
+    REQUIRE((successAfter.has_value()));
+    REQUIRE((pendingAfter.value().has_value()));
+    REQUIRE((successAfter.value().has_value()));
+
+    CHECK_FALSE(pendingAfter.value()->contentExtracted);
+    CHECK((pendingAfter.value()->extractionStatus == ExtractionStatus::Failed));
+    CHECK((pendingAfter.value()->extractionError == "duplicate failure wins"));
+
+    CHECK((successAfter.value()->contentExtracted));
+    CHECK((successAfter.value()->extractionStatus == ExtractionStatus::Success));
+    CHECK((successAfter.value()->extractionError.empty()));
+    CHECK((fix.repository_->getCachedExtractedCount() == 1));
+}
+
 TEST_CASE(
     "MetadataRepository: extraction status counters handle empty, negative, and missing updates",
     "[unit][metadata][repository][extraction]") {
@@ -1982,6 +2082,57 @@ TEST_CASE(
     auto stats = fix.repository_->getCorpusStats();
     REQUIRE((stats.has_value()));
     CHECK((stats.value().contentExtractedCount == 2));
+}
+
+TEST_CASE("MetadataRepository: batch extraction status update does not amplify lock retries",
+          "[unit][metadata][repository][extraction][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_extraction_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/extraction-lock.txt", "extraction-lock-hash");
+    doc.contentExtracted = false;
+    doc.extractionStatus = ExtractionStatus::Pending;
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = repository->batchUpdateDocumentExtractionStatuses(
+        {{insert.value(), true, ExtractionStatus::Success, std::string{}}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((result.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("MetadataRepository: initializeCounters keeps extracted and indexed counts distinct",
@@ -3444,6 +3595,55 @@ TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and lates
     REQUIRE((batch.value().contains(docId)));
     CHECK((batch.value().at(docId).at("author").asString() == "new"));
     CHECK_FALSE(batch.value().contains(999999));
+}
+
+TEST_CASE("MetadataRepository: setMetadataBatch does not amplify lock retries",
+          "[unit][metadata][repository][batch][metadata][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_set_metadata_batch_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/metadata-lock.txt", "metadata-lock-hash");
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = repository->setMetadataBatch(
+        {{insert.value(), "title", MetadataValue("locked metadata write")}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((result.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("MetadataRepository: getMetadataForDocuments chunks large batches",

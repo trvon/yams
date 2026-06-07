@@ -13,6 +13,17 @@ namespace yams::metadata::repository {
 
 // Transaction begin helper with backend-appropriate semantics.
 // - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
+// - SQLite: Uses BEGIN IMMEDIATE to reserve the single-writer slot eagerly.
+inline Result<void> beginTransaction(Database& db) {
+#if YAMS_LIBSQL_BACKEND
+    return db.execute("BEGIN");
+#else
+    return db.execute("BEGIN IMMEDIATE");
+#endif
+}
+
+// Transaction begin helper with backend-appropriate semantics.
+// - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
 // - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.
 inline Result<void>
 beginTransactionWithRetry(Database& db, int maxRetries = 5,

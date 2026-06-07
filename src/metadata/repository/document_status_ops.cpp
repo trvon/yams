@@ -8,6 +8,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <yams/core/assert.hpp>
@@ -549,109 +550,150 @@ Result<void> MetadataRepository::batchUpdateDocumentExtractionStatuses(
     if (updates.empty())
         return Result<void>();
 
+    struct EffectiveExtractionStatusUpdate {
+        std::int64_t documentId = 0;
+        bool contentExtracted = false;
+        std::string status;
+        std::string error;
+    };
     struct ExtractionDelta {
         std::uint64_t newlyExtracted = 0;
         std::uint64_t newlyUnextracted = 0;
         std::uint64_t rowsUpdated = 0;
     };
 
+    std::vector<EffectiveExtractionStatusUpdate> effectiveUpdates;
+    effectiveUpdates.reserve(updates.size());
+    std::unordered_map<std::int64_t, std::size_t> updateIndexByDocumentId;
+    updateIndexByDocumentId.reserve(updates.size());
+
+    for (const auto& item : updates) {
+        YAMS_DCHECK(item.documentId != 0,
+                    "extraction status batch should not contain document id 0");
+        if (item.documentId < 0) {
+            continue;
+        }
+
+        const auto it = updateIndexByDocumentId.find(item.documentId);
+        if (it == updateIndexByDocumentId.end()) {
+            updateIndexByDocumentId.emplace(item.documentId, effectiveUpdates.size());
+            effectiveUpdates.push_back(EffectiveExtractionStatusUpdate{
+                .documentId = item.documentId,
+                .contentExtracted = item.contentExtracted,
+                .status = ExtractionStatusUtils::toString(item.status),
+                .error = item.error,
+            });
+            continue;
+        }
+
+        auto& effective = effectiveUpdates[it->second];
+        effective.contentExtracted = item.contentExtracted;
+        effective.status = ExtractionStatusUtils::toString(item.status);
+        effective.error = item.error;
+    }
+
+    if (effectiveUpdates.empty()) {
+        return Result<void>();
+    }
+
+    constexpr std::size_t kMaxBatchRows = 200;
+    auto makeBatchValuesSql = [](std::size_t rowCount) {
+        std::string sql;
+        sql.reserve(rowCount * 18);
+        for (std::size_t i = 0; i < rowCount; ++i) {
+            if (i > 0) {
+                sql += ',';
+            }
+            sql += "(?, ?, ?, ?)";
+        }
+        return sql;
+    };
+    auto bindBatchParams =
+        [](Statement& stmt,
+           std::span<const EffectiveExtractionStatusUpdate> chunk) -> Result<void> {
+        int bindIndex = 1;
+        for (const auto& item : chunk) {
+            YAMS_TRY(stmt.bind(bindIndex++, item.documentId));
+            YAMS_TRY(stmt.bind(bindIndex++, item.contentExtracted ? 1 : 0));
+            YAMS_TRY(stmt.bind(bindIndex++, item.status));
+            if (item.error.empty()) {
+                YAMS_TRY(stmt.bind(bindIndex++, nullptr));
+            } else {
+                YAMS_TRY(stmt.bind(bindIndex++, item.error));
+            }
+        }
+        return Result<void>();
+    };
+
     auto result = executeQuery<ExtractionDelta>([&](Database& db) -> Result<ExtractionDelta> {
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
 
-        auto checkStmt = db.prepareCached(R"(
-            SELECT COALESCE(content_extracted, 0)
-            FROM documents WHERE id = ?
-        )");
-        if (!checkStmt) {
-            db.execute("ROLLBACK");
-            return checkStmt.error();
-        }
-
-        auto updateStmt = db.prepareCached(R"(
-            UPDATE documents
-            SET content_extracted = ?, extraction_status = ?, extraction_error = ?
-            WHERE id = ?
-        )");
-        if (!updateStmt) {
-            db.execute("ROLLBACK");
-            return updateStmt.error();
-        }
-
-        auto& check = *checkStmt.value();
-        auto& update = *updateStmt.value();
         ExtractionDelta delta;
+        for (std::size_t offset = 0; offset < effectiveUpdates.size(); offset += kMaxBatchRows) {
+            const auto remaining = effectiveUpdates.size() - offset;
+            const auto chunkSize = std::min(kMaxBatchRows, remaining);
+            std::span<const EffectiveExtractionStatusUpdate> chunk{effectiveUpdates.data() + offset,
+                                                                   chunkSize};
+            const std::string valuesSql = makeBatchValuesSql(chunk.size());
 
-        for (const auto& item : updates) {
-            if (item.documentId < 0) {
-                continue;
+            auto deltaStmtResult =
+                db.prepare("WITH batch(document_id, content_extracted, extraction_status, "
+                           "extraction_error) AS "
+                           "(VALUES " +
+                           valuesSql +
+                           ") "
+                           "SELECT "
+                           "COALESCE(SUM(CASE WHEN COALESCE(d.content_extracted, 0) = 0 AND "
+                           "b.content_extracted = 1 THEN 1 ELSE 0 END), 0), "
+                           "COALESCE(SUM(CASE WHEN COALESCE(d.content_extracted, 0) = 1 AND "
+                           "b.content_extracted = 0 THEN 1 ELSE 0 END), 0), "
+                           "COUNT(*) "
+                           "FROM documents d "
+                           "JOIN batch b ON d.id = b.document_id");
+            if (!deltaStmtResult) {
+                return deltaStmtResult.error();
             }
-
-            if (auto r = check.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
+            Statement deltaStmt = std::move(deltaStmtResult).value();
+            YAMS_TRY(bindBatchParams(deltaStmt, chunk));
+            auto deltaStep = deltaStmt.step();
+            if (!deltaStep) {
+                return deltaStep.error();
             }
-            if (auto r = check.bind(1, item.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-
-            auto stepResult = check.step();
-            if (!stepResult) {
-                db.execute("ROLLBACK");
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                continue;
-            }
-
-            const bool extractedBefore = check.getInt(0) != 0;
-
-            if (auto r = update.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = update.bind(1, item.contentExtracted ? 1 : 0); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = update.bind(2, ExtractionStatusUtils::toString(item.status)); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = update.bind(3, item.error.empty() ? nullptr : item.error.c_str()); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = update.bind(4, item.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
+            YAMS_DCHECK(deltaStep.value(),
+                        "extraction status aggregate query should always return one row");
+            if (deltaStep.value()) {
+                delta.newlyExtracted += static_cast<std::uint64_t>(deltaStmt.getInt64(0));
+                delta.newlyUnextracted += static_cast<std::uint64_t>(deltaStmt.getInt64(1));
+                delta.rowsUpdated += static_cast<std::uint64_t>(deltaStmt.getInt64(2));
             }
 
-            auto execResult = update.execute();
-            if (!execResult) {
-                db.execute("ROLLBACK");
-                return execResult.error();
+            auto updateStmtResult = db.prepare("WITH batch(document_id, content_extracted, "
+                                               "extraction_status, extraction_error) AS "
+                                               "(VALUES " +
+                                               valuesSql +
+                                               ") "
+                                               "UPDATE documents "
+                                               "SET content_extracted = batch.content_extracted, "
+                                               "extraction_status = batch.extraction_status, "
+                                               "extraction_error = batch.extraction_error "
+                                               "FROM batch "
+                                               "WHERE documents.id = batch.document_id");
+            if (!updateStmtResult) {
+                return updateStmtResult.error();
             }
-
-            if (db.changes() > 0) {
-                ++delta.rowsUpdated;
-                if (!extractedBefore && item.contentExtracted) {
-                    ++delta.newlyExtracted;
-                } else if (extractedBefore && !item.contentExtracted) {
-                    ++delta.newlyUnextracted;
-                }
-            }
+            Statement updateStmt = std::move(updateStmtResult).value();
+            YAMS_TRY(bindBatchParams(updateStmt, chunk));
+            YAMS_TRY(updateStmt.execute());
         }
 
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
-
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
         return delta;
     });
 
@@ -666,6 +708,10 @@ Result<void> MetadataRepository::batchUpdateDocumentExtractionStatuses(
     if (delta.newlyUnextracted > 0) {
         core::saturating_sub(cachedExtractedCount_, delta.newlyUnextracted);
     }
+    YAMS_DCHECK(cachedExtractedCount_.load(std::memory_order_relaxed) <=
+                    cachedDocumentCount_.load(std::memory_order_relaxed),
+                "metadata: extracted count must not exceed total document count after "
+                "extraction status update");
     if (delta.rowsUpdated > 0) {
         signalCorpusStatsStale();
     }
@@ -704,66 +750,55 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
     if (hashes.empty())
         return Result<void>();
 
-    constexpr int kMaxRetries = 7; // Increased for heavy concurrent load
-    constexpr int kBaseDelayMs = 50;
-
-    // Thread-local RNG for jitter to avoid thundering herd
-    thread_local std::mt19937 rng(std::random_device{}());
-
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-            YAMS_TRY(beginTransactionWithRetry(db));
-            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
-
-            auto updateStmt = db.prepare(R"(
-                UPDATE documents
-                SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
-                WHERE sha256_hash = ?
-            )");
-            if (!updateStmt) {
-                return updateStmt.error();
+    const std::string statusStr = RepairStatusUtils::toString(status);
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
             }
-
-            auto& stmt = updateStmt.value();
-            std::string statusStr = RepairStatusUtils::toString(status);
-
-            for (const auto& hash : hashes) {
-                stmt.reset();
-                if (auto r = stmt.bind(1, statusStr.c_str()); !r) {
-                    return r.error();
-                }
-                if (auto r = stmt.bind(2, hash); !r) {
-                    return r.error();
-                }
-
-                auto execResult = stmt.execute();
-                if (!execResult) {
-                    return execResult.error();
-                }
-            }
-
-            YAMS_TRY(commitOrRollback(db));
-            rollback.dismiss();
-            return Result<void>();
         });
 
-        if (result)
-            return result;
+        auto updateStmt = db.prepareCached(R"(
+            UPDATE documents
+            SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
+            WHERE sha256_hash = ?
+        )");
+        if (!updateStmt) {
+            return updateStmt.error();
+        }
 
-        if (!storage::sqlite_retry::isBusyOrLockedMessage(result.error().message))
-            return result;
+        auto& stmt = *updateStmt.value();
+        for (const auto& hash : hashes) {
+            YAMS_DCHECK(!hash.empty(), "repair status batch should not contain empty hashes");
+            if (hash.empty()) {
+                continue;
+            }
+            YAMS_TRY(stmt.reset());
+            if (auto r = stmt.bind(1, statusStr); !r) {
+                return r.error();
+            }
+            if (auto r = stmt.bind(2, hash); !r) {
+                return r.error();
+            }
 
-        // Exponential backoff with jitter (±25%) to prevent thundering herd
-        int baseDelayMs = kBaseDelayMs * (1 << attempt);
-        int jitter = static_cast<int>(baseDelayMs * 0.25);
-        std::uniform_int_distribution<int> dist(-jitter, jitter);
-        int delayMs = baseDelayMs + dist(rng);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            auto execResult = stmt.execute();
+            if (!execResult) {
+                return execResult.error();
+            }
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        rollback.dismiss();
+        return Result<void>();
+    });
+
+    if (!result && storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
+        daemon::TuneAdvisor::reportDbLockError();
     }
-
-    daemon::TuneAdvisor::reportDbLockError();
-    return Error{ErrorCode::DatabaseError,
-                 "batchUpdateDocumentRepairStatuses: max retries exceeded"};
+    return result;
 }
 
 } // namespace yams::metadata

@@ -99,7 +99,7 @@ Result<void> MetadataRepository::setMetadataBatch(
 
     const auto dedupedEntries = repository::deduplicateMetadataWrites(entries);
     auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
-        YAMS_TRY(beginTransactionWithRetry(db));
+        YAMS_TRY(repository::beginTransaction(db));
         bool committed = false;
         auto rollback = scope_exit([&] {
             if (!committed) {

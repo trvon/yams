@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <unordered_map>
 
 #include <catch2/catch_approx.hpp>
@@ -1180,6 +1181,51 @@ TEST_CASE("KG Store: maintenance helpers summarize graph state and search labels
 
     REQUIRE((fix.store_->optimize().has_value()));
     REQUIRE((fix.store_->healthCheck().has_value()));
+}
+
+TEST_CASE("KG Store: healthCheck uses read pool instead of the write pool",
+          "[unit][metadata][kg][contention]") {
+    const auto dbPath = tempDbPath("kg_store_health_read_pool_");
+
+    auto bootstrap = makeSqliteKnowledgeGraphStore(dbPath.string(), KnowledgeGraphStoreConfig{});
+    REQUIRE((bootstrap.has_value()));
+    bootstrap.value().reset();
+
+    ConnectionPoolConfig writeCfg;
+    writeCfg.minConnections = 1;
+    writeCfg.maxConnections = 1;
+    auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
+    REQUIRE((writePool->initialize().has_value()));
+
+    ConnectionPoolConfig readCfg;
+    readCfg.minConnections = 1;
+    readCfg.maxConnections = 1;
+    readCfg.readOnly = true;
+    auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
+    REQUIRE((readPool->initialize().has_value()));
+
+    auto storeResult = makeSqliteKnowledgeGraphStore(*writePool, KnowledgeGraphStoreConfig{});
+    REQUIRE((storeResult.has_value()));
+    auto store = std::move(storeResult.value());
+    store->setReadPool(readPool.get());
+
+    auto heldWriteConnResult = writePool->acquire();
+    REQUIRE((heldWriteConnResult.has_value()));
+    auto heldWriteConn = std::move(heldWriteConnResult.value());
+
+    auto future = std::async(std::launch::async, [&]() { return store->healthCheck(); });
+    CHECK((future.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready));
+    auto healthResult = future.get();
+    REQUIRE((healthResult.has_value()));
+
+    heldWriteConn.reset();
+    store.reset();
+    readPool->shutdown();
+    writePool->shutdown();
+    readPool.reset();
+    writePool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("KG Store: write batch cleanup helpers commit scoped deletions", "[unit][metadata][kg]") {
