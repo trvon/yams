@@ -62,6 +62,7 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 using namespace std::chrono_literals;
+using yams::metadata::BatchContentEntry;
 using yams::metadata::ConnectionPool;
 using yams::metadata::ConnectionPoolConfig;
 using yams::metadata::ConnectionPriority;
@@ -106,6 +107,7 @@ struct WorkerStats {
     OpStats writes;
     OpStats insertWrites;
     OpStats metadataBatchWrites;
+    OpStats batchContentWrites;
     OpStats repairWrites;
     OpStats extractionWrites;
     OpStats reads;
@@ -263,6 +265,7 @@ void mergeWorkerStats(WorkerStats& dst, const WorkerStats& src) {
     mergeOpStats(dst.writes, src.writes);
     mergeOpStats(dst.insertWrites, src.insertWrites);
     mergeOpStats(dst.metadataBatchWrites, src.metadataBatchWrites);
+    mergeOpStats(dst.batchContentWrites, src.batchContentWrites);
     mergeOpStats(dst.repairWrites, src.repairWrites);
     mergeOpStats(dst.extractionWrites, src.extractionWrites);
     mergeOpStats(dst.reads, src.reads);
@@ -438,7 +441,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     const auto t0 = std::chrono::steady_clock::now();
-                    const auto mode = seq % 4;
+                    const auto mode = seq % 5;
                     if (mode == 0) {
                         MetadataOpScope op("bench_insert_document_with_metadata");
                         auto doc = makeDocument(root, writerId, seq);
@@ -482,6 +485,43 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                                           : std::optional<std::string_view>(result.error().message),
                                    us);
                     } else if (mode == 2) {
+                        MetadataOpScope op("bench_batch_insert_content_and_index");
+                        std::vector<BatchContentEntry> entries;
+                        entries.reserve(static_cast<size_t>(cfg.metadataBatchSize));
+                        for (int j = 0; j < cfg.metadataBatchSize; ++j) {
+                            const auto idx =
+                                static_cast<size_t>((seq + static_cast<uint64_t>(j) * 13 +
+                                                     static_cast<uint64_t>(writerId) * 23) %
+                                                    docIds.size());
+                            BatchContentEntry entry;
+                            entry.documentId = docIds[idx];
+                            entry.title = "bench title " + std::to_string(writerId) + "_" +
+                                          std::to_string(seq) + "_" + std::to_string(j);
+                            entry.contentText =
+                                "bench content body " + std::to_string(writerId) + "_" +
+                                std::to_string(seq) + "_" + std::to_string(j);
+                            entry.mimeType = "text/plain";
+                            entry.extractionMethod = "bench";
+                            entry.language = "en";
+                            entry.priorStateKnown = true;
+                            entry.priorContentExtracted = true;
+                            entry.priorExtractionStatus =
+                                yams::metadata::ExtractionStatus::Success;
+                            entries.push_back(std::move(entry));
+                        }
+                        auto result = repo.batchInsertContentAndIndex(entries);
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.batchContentWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                    } else if (mode == 3) {
                         MetadataOpScope op("bench_batch_update_repair_statuses");
                         std::vector<std::string> batchHashes;
                         batchHashes.reserve(static_cast<size_t>(cfg.statusBatchSize));
@@ -778,13 +818,16 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
 
         INFO("write p95(us): " << latencyJson(aggregate.writes)["latency_p95_us"]);
         INFO("read p95(us): " << latencyJson(aggregate.reads)["latency_p95_us"]);
+        INFO("content-index lock errors: " << aggregate.batchContentWrites.lockErrors);
         INFO("repair lock errors: " << aggregate.repairWrites.lockErrors);
         INFO("extraction lock errors: " << aggregate.extractionWrites.lockErrors);
         CHECK((aggregate.writes.success > 0));
         CHECK((aggregate.reads.success > 0));
         if (cfg.externalLocker) {
             CHECK((aggregate.externalLocks.success > 0));
-            CHECK((aggregate.writes.lockErrors > 0 || aggregate.repairWrites.lockErrors > 0 ||
+            CHECK((aggregate.writes.lockErrors > 0 ||
+                   aggregate.batchContentWrites.lockErrors > 0 ||
+                   aggregate.repairWrites.lockErrors > 0 ||
                    aggregate.extractionWrites.lockErrors > 0));
         }
 
@@ -811,6 +854,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"writes", latencyJson(aggregate.writes)},
                     {"insert_document_writes", latencyJson(aggregate.insertWrites)},
                     {"metadata_batch_writes", latencyJson(aggregate.metadataBatchWrites)},
+                    {"batch_content_writes", latencyJson(aggregate.batchContentWrites)},
                     {"repair_status_writes", latencyJson(aggregate.repairWrites)},
                     {"extraction_status_writes", latencyJson(aggregate.extractionWrites)},
                     {"reads", latencyJson(aggregate.reads)},
@@ -837,6 +881,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                   << latencyJson(aggregate.writes)["latency_p95_us"].get<double>()
                   << " insert_lock_errors=" << aggregate.insertWrites.lockErrors
                   << " metadata_lock_errors=" << aggregate.metadataBatchWrites.lockErrors
+                  << " batch_content_lock_errors=" << aggregate.batchContentWrites.lockErrors
                   << " repair_lock_errors=" << aggregate.repairWrites.lockErrors
                   << " extraction_lock_errors=" << aggregate.extractionWrites.lockErrors
                   << " read_p95_us=" << latencyJson(aggregate.reads)["latency_p95_us"].get<double>()

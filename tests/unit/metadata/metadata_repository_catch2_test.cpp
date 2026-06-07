@@ -3380,6 +3380,65 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
     });
 }
 
+TEST_CASE("batchInsertContentAndIndex: does not amplify lock retries",
+          "[unit][metadata-repo][batch-content][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_batch_content_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/batch-content-lock.txt", "batch-content-lock-hash");
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    BatchContentEntry entry;
+    entry.documentId = insert.value();
+    entry.title = "Title";
+    entry.contentText = "Locked content write";
+    entry.mimeType = "text/plain";
+    entry.extractionMethod = "test";
+    entry.language = "en";
+    entry.priorStateKnown = true;
+    entry.priorContentExtracted = false;
+    entry.priorExtractionStatus = ExtractionStatus::Pending;
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = repository->batchInsertContentAndIndex({entry});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((result.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 // --- batchGetDocumentsWithContentPreview tests ---
 
 TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",

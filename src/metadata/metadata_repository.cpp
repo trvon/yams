@@ -50,6 +50,7 @@ namespace yams::metadata {
 using repository::addIntParam;
 using repository::appendDocumentQueryFilters;
 using repository::applyCorpusStatsOnlineOverlay;
+using repository::beginTransaction;
 using repository::beginTransactionWithRetry;
 using repository::BindParam;
 using repository::calculateExtensionBucketCounts;
@@ -647,22 +648,20 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         // the final cache update.
         BatchContentDelta delta;
         delta.indexedDocIds.reserve(entries.size());
-        // Begin transaction for batch operation
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
+        YAMS_TRY(beginTransaction(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
 
         // Check if FTS5 is available once
-        auto fts5Result = db.hasFTS5();
-        if (!fts5Result) {
-            db.execute("ROLLBACK");
-            return fts5Result.error();
-        }
-        const bool hasFts5 = fts5Result.value();
+        YAMS_TRY_UNWRAP(hasFts5, db.hasFTS5());
 
         // Prepare cached statements for reuse
-        auto contentStmtResult = db.prepareCached(R"(
+        YAMS_TRY_UNWRAP(contentStmtResult,
+                        db.prepareCached(R"(
             INSERT INTO document_content (
                 document_id, content_text, content_length,
                 extraction_method, language
@@ -672,47 +671,37 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 content_length = excluded.content_length,
                 extraction_method = excluded.extraction_method,
                 language = excluded.language
-        )");
-        if (!contentStmtResult) {
-            db.execute("ROLLBACK");
-            return contentStmtResult.error();
-        }
-        auto& contentStmt = *contentStmtResult.value();
+        )"));
+        auto& contentStmt = *contentStmtResult;
 
         std::optional<CachedStatement> ftsStmtOpt;
         if (hasFts5) {
-            auto ftsStmtResult = db.prepareCached(R"(
+            YAMS_TRY_UNWRAP(ftsStmtResult,
+                            db.prepareCached(R"(
                 INSERT OR REPLACE INTO documents_fts (rowid, content, title)
                 VALUES (?, ?, ?)
-            )");
-            if (!ftsStmtResult) {
-                db.execute("ROLLBACK");
-                return ftsStmtResult.error();
-            }
-            ftsStmtOpt = std::move(ftsStmtResult.value());
+            )"));
+            ftsStmtOpt = std::move(ftsStmtResult);
         }
 
         // Pre-check statement to determine counter increments before the combined UPDATE.
-        auto checkStmtResult = db.prepareCached(hasFts5 ? R"(
+        YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
             SELECT COALESCE(content_extracted, 0),
                    CASE WHEN EXISTS(
                        SELECT 1 FROM documents_fts WHERE rowid = documents.id
                    ) THEN 1 ELSE 0 END
             FROM documents WHERE id = ?
         )"
-                                                        : R"(
+                                                           : R"(
             SELECT COALESCE(content_extracted, 0), 0
             FROM documents WHERE id = ?
-        )");
-        if (!checkStmtResult) {
-            db.execute("ROLLBACK");
-            return checkStmtResult.error();
-        }
-        auto& checkStmt = *checkStmtResult.value();
+        )"));
+        auto& checkStmt = *checkStmtResult;
 
         // Combined UPDATE: sets all extraction fields in a single statement
         // (replaces 3 separate conditional UPDATEs per document).
-        auto combinedStmtResult = db.prepareCached(R"(
+        YAMS_TRY_UNWRAP(combinedStmtResult,
+                        db.prepareCached(R"(
             UPDATE documents
             SET content_extracted = 1,
                 extraction_status = 'Success',
@@ -721,12 +710,8 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 repair_attempted_at = unixepoch(),
                 repair_attempts = repair_attempts + 1
             WHERE id = ?
-        )");
-        if (!combinedStmtResult) {
-            db.execute("ROLLBACK");
-            return combinedStmtResult.error();
-        }
-        auto& combinedStmt = *combinedStmtResult.value();
+        )"));
+        auto& combinedStmt = *combinedStmtResult;
 
         // Process each entry
         constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
@@ -746,21 +731,11 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
             if (!entry.priorStateKnown || hasFts5) {
-                if (auto r = checkStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
+                YAMS_TRY(checkStmt.reset());
+                YAMS_TRY(checkStmt.clearBindings());
+                YAMS_TRY(checkStmt.bind(1, entry.documentId));
                 auto checkStep = checkStmt.step();
                 if (!checkStep) {
-                    db.execute("ROLLBACK");
                     return checkStep.error();
                 }
                 if (checkStep.value()) {
@@ -778,40 +753,20 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             }
 
             // 1. Insert content
-            if (auto r = contentStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = contentStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto bindResult = contentStmt.bindAll(entry.documentId, sanitizedContent,
-                                                  static_cast<int64_t>(sanitizedContent.length()),
-                                                  entry.extractionMethod, entry.language);
-            if (!bindResult) {
-                db.execute("ROLLBACK");
-                return bindResult.error();
-            }
-            auto execResult = contentStmt.execute();
-            if (!execResult) {
-                db.execute("ROLLBACK");
-                return execResult.error();
-            }
+            YAMS_TRY(contentStmt.reset());
+            YAMS_TRY(contentStmt.clearBindings());
+            YAMS_TRY(contentStmt.bindAll(entry.documentId, sanitizedContent,
+                                         static_cast<int64_t>(sanitizedContent.length()),
+                                         entry.extractionMethod, entry.language));
+            YAMS_TRY(contentStmt.execute());
 
             // 2. Insert FTS index with field-weighted content
             // Title tokens repeated 3x, abstract tokens 2x, body tokens 1x.
             // This gives BM25 natural field weighting without schema changes.
             if (hasFts5 && ftsStmtOpt) {
                 auto& ftsStmt = **ftsStmtOpt;
-                if (auto r = ftsStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = ftsStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
+                YAMS_TRY(ftsStmt.reset());
+                YAMS_TRY(ftsStmt.clearBindings());
 
                 // Build boosted content: title (3x) + abstract (2x) + body
                 std::string boosted;
@@ -849,36 +804,15 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 boosted.append(
                     sanitizedContent.substr(0, std::min(bodySpace, sanitizedContent.size())));
 
-                auto ftsBind = ftsStmt.bindAll(entry.documentId, boosted, sanitizedTitle);
-                if (!ftsBind) {
-                    db.execute("ROLLBACK");
-                    return ftsBind.error();
-                }
-                auto ftsExec = ftsStmt.execute();
-                if (!ftsExec) {
-                    db.execute("ROLLBACK");
-                    return ftsExec.error();
-                }
+                YAMS_TRY(ftsStmt.bindAll(entry.documentId, boosted, sanitizedTitle));
+                YAMS_TRY(ftsStmt.execute());
                 delta.indexedDocIds.push_back(entry.documentId);
             }
 
-            if (auto r = combinedStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = combinedStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = combinedStmt.bind(1, entry.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto combExec = combinedStmt.execute();
-            if (!combExec) {
-                db.execute("ROLLBACK");
-                return combExec.error();
-            }
+            YAMS_TRY(combinedStmt.reset());
+            YAMS_TRY(combinedStmt.clearBindings());
+            YAMS_TRY(combinedStmt.bind(1, entry.documentId));
+            YAMS_TRY(combinedStmt.execute());
             if (!wasExtracted) {
                 delta.newlyExtracted++;
             }
@@ -887,12 +821,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             }
         }
 
-        // Commit transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        rollback.dismiss();
 
         return delta;
     });
