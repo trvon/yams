@@ -1,3 +1,4 @@
+#include "repository/search_query_helpers.hpp"
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -49,6 +50,129 @@ std::int64_t countNerEntitiesFromDocEntities(const std::vector<DocEntity>& entit
         }
     }
     return count;
+}
+
+constexpr auto kKgNodeSelectProjection =
+    "id, node_key, label, type, created_time, updated_time, properties";
+
+constexpr auto kKgNodeUpsertSql = R"(
+    INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, properties)
+    VALUES (?, ?, ?, COALESCE(?, unixepoch()), COALESCE(?, unixepoch()), ?)
+    ON CONFLICT(node_key) DO UPDATE SET
+      label = COALESCE(excluded.label, kg_nodes.label),
+      type = COALESCE(excluded.type, kg_nodes.type),
+      updated_time = COALESCE(excluded.updated_time, unixepoch()),
+      properties = COALESCE(excluded.properties, kg_nodes.properties)
+)";
+
+constexpr auto kKgAliasUpsertSql = R"(
+    INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)
+    ON CONFLICT(node_id, alias) DO UPDATE SET
+      source = COALESCE(excluded.source, kg_aliases.source),
+      confidence = MAX(excluded.confidence, kg_aliases.confidence)
+)";
+
+std::string buildSqlPlaceholders(std::size_t count) {
+    std::string placeholders;
+    placeholders.reserve(count * 3);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            placeholders += ", ";
+        }
+        placeholders += "?";
+    }
+    return placeholders;
+}
+
+Result<void> bindOptionalText(Statement& stmt, int index, const std::optional<std::string>& value) {
+    return value.has_value() ? stmt.bind(index, value.value()) : stmt.bind(index, nullptr);
+}
+
+Result<void> bindOptionalInt64(Statement& stmt, int index,
+                               const std::optional<std::int64_t>& value) {
+    return value.has_value() ? stmt.bind(index, value.value()) : stmt.bind(index, nullptr);
+}
+
+Result<void> bindKgNodeUpsertParameters(Statement& stmt, const KGNode& node) {
+    auto bindResult = stmt.bind(1, node.nodeKey);
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = bindOptionalText(stmt, 2, node.label);
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = bindOptionalText(stmt, 3, node.type);
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = bindOptionalInt64(stmt, 4, node.createdTime);
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = bindOptionalInt64(stmt, 5, node.updatedTime);
+    if (!bindResult) {
+        return bindResult;
+    }
+    return bindOptionalText(stmt, 6, node.properties);
+}
+
+Result<void> bindKGAliasUpsertParameters(Statement& stmt, const KGAlias& alias) {
+    auto bindResult = stmt.bind(1, static_cast<std::int64_t>(alias.nodeId));
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = stmt.bind(2, alias.alias);
+    if (!bindResult) {
+        return bindResult;
+    }
+    bindResult = bindOptionalText(stmt, 3, alias.source);
+    if (!bindResult) {
+        return bindResult;
+    }
+    return stmt.bind(4, static_cast<double>(alias.confidence));
+}
+
+KGNode hydrateKgNodeRow(const Statement& stmt) {
+    KGNode node;
+    node.id = stmt.getInt64(0);
+    node.nodeKey = stmt.getString(1);
+    if (!stmt.isNull(2)) {
+        node.label = stmt.getString(2);
+    }
+    if (!stmt.isNull(3)) {
+        node.type = stmt.getString(3);
+    }
+    if (!stmt.isNull(4)) {
+        node.createdTime = stmt.getInt64(4);
+    }
+    if (!stmt.isNull(5)) {
+        node.updatedTime = stmt.getInt64(5);
+    }
+    if (!stmt.isNull(6)) {
+        node.properties = stmt.getString(6);
+    }
+    return node;
+}
+
+Result<std::int64_t> selectKgNodeIdByKey(Database& db, std::string_view nodeKey) {
+    auto stmtResult = db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+    auto stmt = std::move(stmtResult).value();
+    auto bindResult = stmt.bind(1, nodeKey);
+    if (!bindResult) {
+        return bindResult.error();
+    }
+    auto stepResult = stmt.step();
+    if (!stepResult) {
+        return stepResult.error();
+    }
+    if (!stepResult.value()) {
+        return Error{ErrorCode::NotFound, "node not found after upsert"};
+    }
+    return stmt.getInt64(0);
 }
 
 } // namespace
@@ -145,77 +269,26 @@ public:
     Result<std::int64_t> upsertNode(const KGNode& node) override {
         // Perform an INSERT ... ON CONFLICT(node_key) DO UPDATE to ensure presence
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            // Use a transaction to make the upsert + select atomic
             auto trx = db.transaction([&]() -> Result<void> {
-                auto stmtR = db.prepare(
-                    "INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, "
-                    "properties) "
-                    "VALUES (?, ?, ?, COALESCE(?, unixepoch()), COALESCE(?, unixepoch()), ?) "
-                    "ON CONFLICT(node_key) DO UPDATE SET "
-                    "  label = COALESCE(excluded.label, kg_nodes.label), "
-                    "  type = COALESCE(excluded.type, kg_nodes.type), "
-                    "  updated_time = COALESCE(excluded.updated_time, unixepoch()), "
-                    "  properties = COALESCE(excluded.properties, kg_nodes.properties)");
-                if (!stmtR)
-                    return stmtR.error();
-                auto stmt = std::move(stmtR).value();
-
-                auto br = stmt.bind(1, node.nodeKey);
-                if (!br)
-                    return br.error();
-                if (node.label.has_value())
-                    br = stmt.bind(2, node.label.value());
-                else
-                    br = stmt.bind(2, nullptr);
-                if (!br)
-                    return br.error();
-                if (node.type.has_value())
-                    br = stmt.bind(3, node.type.value());
-                else
-                    br = stmt.bind(3, nullptr);
-                if (!br)
-                    return br.error();
-                if (node.createdTime.has_value())
-                    br = stmt.bind(4, node.createdTime.value());
-                else
-                    br = stmt.bind(4, nullptr);
-                if (!br)
-                    return br.error();
-                if (node.updatedTime.has_value())
-                    br = stmt.bind(5, node.updatedTime.value());
-                else
-                    br = stmt.bind(5, nullptr);
-                if (!br)
-                    return br.error();
-                if (node.properties.has_value())
-                    br = stmt.bind(6, node.properties.value());
-                else
-                    br = stmt.bind(6, nullptr);
-                if (!br)
-                    return br.error();
-
-                auto er = stmt.execute();
-                if (!er)
-                    return er.error();
+                auto stmtResult = db.prepare(kKgNodeUpsertSql);
+                if (!stmtResult) {
+                    return stmtResult.error();
+                }
+                auto stmt = std::move(stmtResult).value();
+                auto bindResult = bindKgNodeUpsertParameters(stmt, node);
+                if (!bindResult) {
+                    return bindResult.error();
+                }
+                auto execResult = stmt.execute();
+                if (!execResult) {
+                    return execResult.error();
+                }
                 return Result<void>();
             });
-            if (!trx)
+            if (!trx) {
                 return trx.error();
-
-            // Retrieve id
-            auto idStmtR = db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
-            if (!idStmtR)
-                return idStmtR.error();
-            auto idStmt = std::move(idStmtR).value();
-            auto br = idStmt.bind(1, node.nodeKey);
-            if (!br)
-                return br.error();
-            auto step = idStmt.step();
-            if (!step)
-                return step.error();
-            if (!step.value())
-                return Error{ErrorCode::NotFound, "node not found after upsert"};
-            return idStmt.getInt64(0);
+            }
+            return selectKgNodeIdByKey(db, node.nodeKey);
         });
     }
 
@@ -233,67 +306,47 @@ public:
 
     Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
-            auto stmtR = db.prepare(
-                "SELECT id, node_key, label, type, created_time, updated_time, properties "
-                "FROM kg_nodes WHERE id = ? LIMIT 1");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto br = stmt.bind(1, nodeId);
-            if (!br)
-                return br.error();
-            auto step = stmt.step();
-            if (!step)
-                return step.error();
-            if (!step.value())
+            auto stmtResult = db.prepare(std::string("SELECT ") + kKgNodeSelectProjection +
+                                         " FROM kg_nodes WHERE id = ? LIMIT 1");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, nodeId);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
                 return std::optional<KGNode>{};
-            KGNode n;
-            n.id = stmt.getInt64(0);
-            n.nodeKey = stmt.getString(1);
-            if (!stmt.isNull(2))
-                n.label = stmt.getString(2);
-            if (!stmt.isNull(3))
-                n.type = stmt.getString(3);
-            if (!stmt.isNull(4))
-                n.createdTime = stmt.getInt64(4);
-            if (!stmt.isNull(5))
-                n.updatedTime = stmt.getInt64(5);
-            if (!stmt.isNull(6))
-                n.properties = stmt.getString(6);
-            return std::optional<KGNode>{std::move(n)};
+            }
+            return std::optional<KGNode>{hydrateKgNodeRow(stmt)};
         });
     }
 
     Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
-            auto stmtR = db.prepare(
-                "SELECT id, node_key, label, type, created_time, updated_time, properties "
-                "FROM kg_nodes WHERE node_key = ? LIMIT 1");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto br = stmt.bind(1, nodeKey);
-            if (!br)
-                return br.error();
-            auto step = stmt.step();
-            if (!step)
-                return step.error();
-            if (!step.value())
+            auto stmtResult = db.prepare(std::string("SELECT ") + kKgNodeSelectProjection +
+                                         " FROM kg_nodes WHERE node_key = ? LIMIT 1");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, nodeKey);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
                 return std::optional<KGNode>{};
-            KGNode n;
-            n.id = stmt.getInt64(0);
-            n.nodeKey = stmt.getString(1);
-            if (!stmt.isNull(2))
-                n.label = stmt.getString(2);
-            if (!stmt.isNull(3))
-                n.type = stmt.getString(3);
-            if (!stmt.isNull(4))
-                n.createdTime = stmt.getInt64(4);
-            if (!stmt.isNull(5))
-                n.updatedTime = stmt.getInt64(5);
-            if (!stmt.isNull(6))
-                n.properties = stmt.getString(6);
-            return std::optional<KGNode>{std::move(n)};
+            }
+            return std::optional<KGNode>{hydrateKgNodeRow(stmt)};
         });
     }
 
@@ -302,50 +355,34 @@ public:
             return std::vector<KGNode>{};
         }
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
-            std::string placeholders;
-            for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
-                if (i > 0)
-                    placeholders += ", ";
-                placeholders += "?";
+            std::string sql = std::string("SELECT ") + kKgNodeSelectProjection +
+                              " FROM kg_nodes WHERE node_key IN (" +
+                              buildSqlPlaceholders(nodeKeys.size()) + ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
             }
-            std::string sql =
-                "SELECT id, node_key, label, type, created_time, updated_time, properties "
-                "FROM kg_nodes WHERE node_key IN (" +
-                placeholders + ")";
-
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
+            auto stmt = std::move(stmtResult).value();
 
             for (std::size_t i = 0; i < nodeKeys.size(); ++i) {
-                auto br = stmt.bind(static_cast<int>(i + 1), nodeKeys[i]);
-                if (!br)
-                    return br.error();
+                auto bindResult = stmt.bind(static_cast<int>(i + 1), nodeKeys[i]);
+                if (!bindResult) {
+                    return bindResult.error();
+                }
             }
 
             std::vector<KGNode> out;
             out.reserve(nodeKeys.size());
             while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
                     break;
-                KGNode n;
-                n.id = stmt.getInt64(0);
-                n.nodeKey = stmt.getString(1);
-                if (!stmt.isNull(2))
-                    n.label = stmt.getString(2);
-                if (!stmt.isNull(3))
-                    n.type = stmt.getString(3);
-                if (!stmt.isNull(4))
-                    n.createdTime = stmt.getInt64(4);
-                if (!stmt.isNull(5))
-                    n.updatedTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    n.properties = stmt.getString(6);
-                out.push_back(std::move(n));
+                }
+                out.push_back(hydrateKgNodeRow(stmt));
             }
             return out;
         });
@@ -356,52 +393,34 @@ public:
             return std::vector<KGNode>{};
         }
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
-            // Build IN clause with placeholders: WHERE id IN (?, ?, ...)
-            std::string placeholders;
-            for (std::size_t i = 0; i < nodeIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ", ";
-                placeholders += "?";
+            std::string sql = std::string("SELECT ") + kKgNodeSelectProjection +
+                              " FROM kg_nodes WHERE id IN (" +
+                              buildSqlPlaceholders(nodeIds.size()) + ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
             }
-            std::string sql =
-                "SELECT id, node_key, label, type, created_time, updated_time, properties "
-                "FROM kg_nodes WHERE id IN (" +
-                placeholders + ")";
+            auto stmt = std::move(stmtResult).value();
 
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            // Bind all node IDs
             for (std::size_t i = 0; i < nodeIds.size(); ++i) {
-                auto br = stmt.bind(static_cast<int>(i + 1), nodeIds[i]);
-                if (!br)
-                    return br.error();
+                auto bindResult = stmt.bind(static_cast<int>(i + 1), nodeIds[i]);
+                if (!bindResult) {
+                    return bindResult.error();
+                }
             }
 
             std::vector<KGNode> out;
             out.reserve(nodeIds.size());
             while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
                     break;
-                KGNode n;
-                n.id = stmt.getInt64(0);
-                n.nodeKey = stmt.getString(1);
-                if (!stmt.isNull(2))
-                    n.label = stmt.getString(2);
-                if (!stmt.isNull(3))
-                    n.type = stmt.getString(3);
-                if (!stmt.isNull(4))
-                    n.createdTime = stmt.getInt64(4);
-                if (!stmt.isNull(5))
-                    n.updatedTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    n.properties = stmt.getString(6);
-                out.push_back(std::move(n));
+                }
+                out.push_back(hydrateKgNodeRow(stmt));
             }
             return out;
         });
@@ -485,36 +504,21 @@ public:
     // Aliases
     Result<std::int64_t> addAlias(const KGAlias& alias) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            auto stmtR = db.prepare(
-                "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(node_id, alias) DO UPDATE SET "
-                "  source = COALESCE(excluded.source, kg_aliases.source), "
-                "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            // Bind parameters
-            auto br = stmt.bind(1, static_cast<int64_t>(alias.nodeId));
-            if (!br)
-                return br.error();
-            br = stmt.bind(2, alias.alias);
-            if (!br)
-                return br.error();
-            if (alias.source.has_value()) {
-                br = stmt.bind(3, alias.source.value());
-            } else {
-                br = stmt.bind(3, nullptr);
+            auto stmtResult = db.prepare(kKgAliasUpsertSql);
+            if (!stmtResult) {
+                return stmtResult.error();
             }
-            if (!br)
-                return br.error();
-            br = stmt.bind(4, static_cast<double>(alias.confidence));
-            if (!br)
-                return br.error();
+            auto stmt = std::move(stmtResult).value();
 
-            auto er = stmt.execute();
-            if (!er)
-                return er.error();
+            auto bindResult = bindKGAliasUpsertParameters(stmt, alias);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+
+            auto execResult = stmt.execute();
+            if (!execResult) {
+                return execResult.error();
+            }
 
             return db.lastInsertRowId();
         });
@@ -525,42 +529,29 @@ public:
             return Result<void>();
         return pool_->withConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
-                auto stmtR =
-                    db.prepare("INSERT INTO kg_aliases (node_id, alias, source, "
-                               "confidence) VALUES (?, ?, ?, ?) "
-                               "ON CONFLICT(node_id, alias) DO UPDATE SET "
-                               "  source = COALESCE(excluded.source, kg_aliases.source), "
-                               "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
-                if (!stmtR)
-                    return stmtR.error();
-                auto stmt = std::move(stmtR).value();
+                auto stmtResult = db.prepare(kKgAliasUpsertSql);
+                if (!stmtResult) {
+                    return stmtResult.error();
+                }
+                auto stmt = std::move(stmtResult).value();
 
-                for (const auto& a : aliases) {
-                    auto br = stmt.clearBindings();
-                    if (!br)
-                        return br.error();
-                    br = stmt.bind(1, static_cast<int64_t>(a.nodeId));
-                    if (!br)
-                        return br.error();
-                    br = stmt.bind(2, a.alias);
-                    if (!br)
-                        return br.error();
-                    if (a.source.has_value()) {
-                        br = stmt.bind(3, a.source.value());
-                    } else {
-                        br = stmt.bind(3, nullptr);
+                for (const auto& alias : aliases) {
+                    auto clearResult = stmt.clearBindings();
+                    if (!clearResult) {
+                        return clearResult.error();
                     }
-                    if (!br)
-                        return br.error();
-                    br = stmt.bind(4, static_cast<double>(a.confidence));
-                    if (!br)
-                        return br;
-                    auto er = stmt.execute();
-                    if (!er)
-                        return er.error();
-                    auto rr = stmt.reset();
-                    if (!rr)
-                        return rr;
+                    auto bindResult = bindKGAliasUpsertParameters(stmt, alias);
+                    if (!bindResult) {
+                        return bindResult.error();
+                    }
+                    auto execResult = stmt.execute();
+                    if (!execResult) {
+                        return execResult.error();
+                    }
+                    auto resetResult = stmt.reset();
+                    if (!resetResult) {
+                        return resetResult;
+                    }
                 }
                 return Result<void>();
             });
@@ -663,7 +654,8 @@ public:
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
 
-                auto br = stmt.bind(1, aliasQuery);
+                auto sanitizedQuery = sanitizeFts5UserQuery(std::string(aliasQuery));
+                auto br = stmt.bind(1, sanitizedQuery);
                 if (!br)
                     return br.error();
                 br = stmt.bind(2, static_cast<int64_t>(limit));
@@ -2766,58 +2758,20 @@ public:
         }
         Database& db = **conn_;
 
-        auto stmtR = db.prepareCached(
-            "INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, properties) "
-            "VALUES (?, ?, ?, COALESCE(?, unixepoch()), COALESCE(?, unixepoch()), ?) "
-            "ON CONFLICT(node_key) DO UPDATE SET "
-            "  label = COALESCE(excluded.label, kg_nodes.label), "
-            "  type = COALESCE(excluded.type, kg_nodes.type), "
-            "  updated_time = COALESCE(excluded.updated_time, unixepoch()), "
-            "  properties = COALESCE(excluded.properties, kg_nodes.properties)");
+        auto stmtR = db.prepareCached(kKgNodeUpsertSql);
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
-        auto br = stmt.bind(1, node.nodeKey);
-        if (!br)
-            return br.error();
-        br = node.label.has_value() ? stmt.bind(2, node.label.value()) : stmt.bind(2, nullptr);
-        if (!br)
-            return br.error();
-        br = node.type.has_value() ? stmt.bind(3, node.type.value()) : stmt.bind(3, nullptr);
-        if (!br)
-            return br.error();
-        br = node.createdTime.has_value() ? stmt.bind(4, node.createdTime.value())
-                                          : stmt.bind(4, nullptr);
-        if (!br)
-            return br.error();
-        br = node.updatedTime.has_value() ? stmt.bind(5, node.updatedTime.value())
-                                          : stmt.bind(5, nullptr);
-        if (!br)
-            return br.error();
-        br = node.properties.has_value() ? stmt.bind(6, node.properties.value())
-                                         : stmt.bind(6, nullptr);
-        if (!br)
-            return br.error();
+        auto bindResult = bindKgNodeUpsertParameters(stmt, node);
+        if (!bindResult)
+            return bindResult.error();
 
-        auto er = stmt.execute();
-        if (!er)
-            return er.error();
+        auto execResult = stmt.execute();
+        if (!execResult)
+            return execResult.error();
 
-        // Retrieve id
-        auto idStmtR = db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
-        if (!idStmtR)
-            return idStmtR.error();
-        auto& idStmt = *idStmtR.value();
-        br = idStmt.bind(1, node.nodeKey);
-        if (!br)
-            return br.error();
-        auto step = idStmt.step();
-        if (!step)
-            return step.error();
-        if (!step.value())
-            return Error{ErrorCode::NotFound, "node not found after upsert"};
-        return idStmt.getInt64(0);
+        return selectKgNodeIdByKey(db, node.nodeKey);
     }
 
     Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) override {
@@ -2940,38 +2894,25 @@ public:
         }
         Database& db = **conn_;
 
-        auto stmtR = db.prepareCached(
-            "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(node_id, alias) DO UPDATE SET "
-            "  source = COALESCE(excluded.source, kg_aliases.source), "
-            "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
+        auto stmtR = db.prepareCached(kKgAliasUpsertSql);
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
         std::int64_t before = db.changes();
-        for (const auto& a : aliases) {
-            auto br = stmt.clearBindings();
-            if (!br)
-                return br.error();
-            br = stmt.bind(1, static_cast<int64_t>(a.nodeId));
-            if (!br)
-                return br.error();
-            br = stmt.bind(2, a.alias);
-            if (!br)
-                return br.error();
-            br = a.source.has_value() ? stmt.bind(3, a.source.value()) : stmt.bind(3, nullptr);
-            if (!br)
-                return br.error();
-            br = stmt.bind(4, static_cast<double>(a.confidence));
-            if (!br)
-                return br;
-            auto er = stmt.execute();
-            if (!er)
-                return er.error();
-            auto rr = stmt.reset();
-            if (!rr)
-                return rr;
+        for (const auto& alias : aliases) {
+            auto clearResult = stmt.clearBindings();
+            if (!clearResult)
+                return clearResult.error();
+            auto bindResult = bindKGAliasUpsertParameters(stmt, alias);
+            if (!bindResult)
+                return bindResult.error();
+            auto execResult = stmt.execute();
+            if (!execResult)
+                return execResult.error();
+            auto resetResult = stmt.reset();
+            if (!resetResult)
+                return resetResult;
         }
         aliasCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
         return Result<void>();

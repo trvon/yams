@@ -34,7 +34,7 @@ struct GraphContextServiceFixture {
         poolConfig.maxConnections = 2;
         pool = std::make_shared<ConnectionPool>(dbPath.string(), poolConfig);
         auto poolInitRes = pool->initialize();
-        REQUIRE(poolInitRes.has_value());
+        REQUIRE((poolInitRes.has_value()));
 
         metadataRepo = std::make_shared<MetadataRepository>(*pool);
 
@@ -42,7 +42,7 @@ struct GraphContextServiceFixture {
         kgConfig.enable_alias_fts = true;
         kgConfig.enable_wal = false;
         auto kgResult = makeSqliteKnowledgeGraphStore(*pool, kgConfig);
-        REQUIRE(kgResult.has_value());
+        REQUIRE((kgResult.has_value()));
         kgStore = std::shared_ptr<KnowledgeGraphStore>(std::move(kgResult).value());
         metadataRepo->setKnowledgeGraphStore(kgStore);
     }
@@ -59,7 +59,7 @@ struct GraphContextServiceFixture {
         auto path = testDir / relativePath;
         std::filesystem::create_directories(path.parent_path());
         std::ofstream out(path);
-        REQUIRE(out.good());
+        REQUIRE((out.good()));
         for (const auto& line : lines) {
             out << line << '\n';
         }
@@ -101,14 +101,14 @@ struct GraphContextServiceFixture {
         doc.modifiedTime = now;
         doc.indexedTime = now;
         auto inserted = metadataRepo->insertDocument(doc);
-        REQUIRE(inserted.has_value());
+        REQUIRE((inserted.has_value()));
     }
 
     void upsertSymbols(const std::vector<SymbolMetadata>& symbols) {
         for (const auto& sym : symbols) {
             insertDocumentFor(sym);
         }
-        REQUIRE(kgStore->upsertSymbolMetadata(symbols).has_value());
+        REQUIRE((kgStore->upsertSymbolMetadata(symbols).has_value()));
     }
 
     std::int64_t upsertNodeFor(const SymbolMetadata& sym) {
@@ -117,7 +117,7 @@ struct GraphContextServiceFixture {
         node.label = sym.symbolName;
         node.type = sym.kind;
         auto nodeId = kgStore->upsertNode(node);
-        REQUIRE(nodeId.has_value());
+        REQUIRE((nodeId.has_value()));
         return nodeId.value();
     }
 
@@ -154,7 +154,7 @@ TEST_CASE("GraphContextService explore ranks source symbols before tests by defa
     fixture.upsertSymbols({sourceSym, testSym});
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "processTask";
@@ -162,15 +162,15 @@ TEST_CASE("GraphContextService explore ranks source symbols before tests by defa
     req.budget.maxSymbols = 4;
 
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
     const auto& response = result.value();
 
-    REQUIRE(response.entrySymbols.size() == 1);
-    CHECK(response.entrySymbols.front().filePath == sourcePath.string());
-    REQUIRE(response.files.size() == 1);
-    CHECK(response.files.front().filePath == sourcePath.string());
-    CHECK(response.files.front().content.find("3\tint processTask()") != std::string::npos);
-    CHECK(response.files.front().content.find("5\t}") != std::string::npos);
+    REQUIRE((response.entrySymbols.size() == 1));
+    CHECK((response.entrySymbols.front().filePath == sourcePath.string()));
+    REQUIRE((response.files.size() == 1));
+    CHECK((response.files.front().filePath == sourcePath.string()));
+    CHECK((response.files.front().content.find("3\tint processTask()") != std::string::npos));
+    CHECK((response.files.front().content.find("5\t}") != std::string::npos));
 }
 
 TEST_CASE("GraphContextService explore can include tests when requested",
@@ -186,7 +186,7 @@ TEST_CASE("GraphContextService explore can include tests when requested",
     fixture.upsertSymbols({sourceSym, testSym});
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "processTask";
@@ -195,14 +195,14 @@ TEST_CASE("GraphContextService explore can include tests when requested",
     req.budget.maxSymbols = 4;
 
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
     const auto& response = result.value();
 
-    REQUIRE(response.entrySymbols.size() == 2);
-    CHECK(response.totalFilesConsidered == 2);
-    REQUIRE(response.files.size() == 2);
-    CHECK(response.files[0].filePath == sourcePath.string());
-    CHECK(response.files[1].filePath == testPath.string());
+    REQUIRE((response.entrySymbols.size() == 2));
+    CHECK((response.totalFilesConsidered == 2));
+    REQUIRE((response.files.size() == 2));
+    CHECK((response.files[0].filePath == sourcePath.string()));
+    CHECK((response.files[1].filePath == testPath.string()));
 }
 
 TEST_CASE("GraphContextService explore applies snippet budgets and omits code when requested",
@@ -220,7 +220,7 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     fixture.upsertSymbols({sourceSym});
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest limitedReq;
     limitedReq.query = "budgetedSymbol";
@@ -229,20 +229,20 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     limitedReq.budget.maxTotalChars = 10;
 
     auto limited = service->explore(limitedReq);
-    REQUIRE(limited.has_value());
-    REQUIRE(limited.value().files.size() == 1);
+    REQUIRE((limited.has_value()));
+    REQUIRE((limited.value().files.size() == 1));
     CHECK(limited.value().truncated);
     CHECK(limited.value().files.front().truncated);
-    CHECK(limited.value().files.front().content.size() <= 10);
+    CHECK((limited.value().files.front().content.size() <= 10));
 
     GraphExploreRequest omittedReq;
     omittedReq.query = "budgetedSymbol";
     omittedReq.includeCode = false;
 
     auto omitted = service->explore(omittedReq);
-    REQUIRE(omitted.has_value());
-    REQUIRE(omitted.value().files.size() == 1);
-    CHECK(omitted.value().files.front().mode == GraphContextSnippetMode::Omitted);
+    REQUIRE((omitted.has_value()));
+    REQUIRE((omitted.value().files.size() == 1));
+    CHECK((omitted.value().files.front().mode == GraphContextSnippetMode::Omitted));
     CHECK(omitted.value().files.front().content.empty());
 }
 
@@ -255,17 +255,47 @@ TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
     fixture.upsertSymbols({zeroLineSym});
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "zeroBased";
 
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
-    REQUIRE(result.value().files.size() == 1);
-    CHECK(result.value().files.front().startLine == 1);
-    CHECK(result.value().files.front().endLine == 3);
-    CHECK(result.value().files.front().content.find("1\tint zeroBased() {") != std::string::npos);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().files.size() == 1));
+    CHECK((result.value().files.front().startLine == 1));
+    CHECK((result.value().files.front().endLine == 3));
+    CHECK((result.value().files.front().content.find("1\tint zeroBased() {") != std::string::npos));
+}
+
+TEST_CASE("GraphContextService explore supports file path queries", "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto sourcePath =
+        fixture.writeSource("src/path_query.cpp", {"int firstSymbol() {", "    return 1;", "}",
+                                                   "int secondSymbol() {", "    return 2;", "}"});
+    auto firstSym = fixture.symbol(sourcePath, "firstSymbol", "demo::firstSymbol", 1, 3);
+    auto secondSym = fixture.symbol(sourcePath, "secondSymbol", "demo::secondSymbol", 4, 6);
+    fixture.upsertSymbols({firstSym, secondSym});
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphExploreRequest req;
+    req.query = sourcePath.string();
+    req.budget.maxFiles = 2;
+    req.budget.maxSymbols = 4;
+
+    auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    const auto& response = result.value();
+
+    REQUIRE((response.entrySymbols.size() == 2));
+    CHECK((response.entrySymbols.front().filePath == sourcePath.string()));
+    CHECK((response.entrySymbols.back().filePath == sourcePath.string()));
+    REQUIRE((response.files.size() == 1));
+    CHECK((response.files.front().filePath == sourcePath.string()));
+    CHECK((response.files.front().content.find("1\tint firstSymbol() {") != std::string::npos));
+    CHECK((response.files.front().content.find("4\tint secondSymbol() {") != std::string::npos));
 }
 
 TEST_CASE("GraphContextService explore falls back to graph nodes without symbol metadata",
@@ -291,32 +321,32 @@ TEST_CASE("GraphContextService explore falls back to graph nodes without symbol 
     doc.createdTime = now;
     doc.modifiedTime = now;
     doc.indexedTime = now;
-    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+    REQUIRE((fixture.metadataRepo->insertDocument(doc).has_value()));
 
     KGNode node;
     node.nodeKey = "function:demo::fallbackEntry@" + sourcePath.string();
     node.label = "fallbackEntry";
     node.type = "function";
-    REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+    REQUIRE((fixture.kgStore->upsertNode(node).has_value()));
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "fallbackEntry";
 
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
-    REQUIRE(result.value().entrySymbols.size() == 1);
-    CHECK(result.value().entrySymbols.front().label == "fallbackEntry");
-    CHECK(result.value().entrySymbols.front().filePath == sourcePath.string());
-    REQUIRE(result.value().files.size() == 1);
-    CHECK(result.value().files.front().filePath == sourcePath.string());
-    CHECK(result.value().files.front().content.find("1\tint fallbackEntry() {") !=
-          std::string::npos);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().entrySymbols.size() == 1));
+    CHECK((result.value().entrySymbols.front().label == "fallbackEntry"));
+    CHECK((result.value().entrySymbols.front().filePath == sourcePath.string()));
+    REQUIRE((result.value().files.size() == 1));
+    CHECK((result.value().files.front().filePath == sourcePath.string()));
+    CHECK((result.value().files.front().content.find("1\tint fallbackEntry() {") !=
+           std::string::npos));
     CHECK_FALSE(result.value().warnings.empty());
-    CHECK(result.value().warnings.front().find("falling back to graph node labels") !=
-          std::string::npos);
+    CHECK((result.value().warnings.front().find("falling back to graph node labels") !=
+           std::string::npos));
 }
 
 TEST_CASE("GraphContextService explore returns canonical relationship context",
@@ -336,21 +366,21 @@ TEST_CASE("GraphContextService explore returns canonical relationship context",
     edge.dstNodeId = calleeId;
     edge.relation = "call";
     edge.weight = 0.75F;
-    REQUIRE(fixture.kgStore->addEdge(edge).has_value());
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "caller";
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     const auto& response = result.value();
-    REQUIRE(response.relationships.size() == 1);
-    CHECK(response.relationships.front().relation == "calls");
-    CHECK(response.relationships.front().sourceLabel == "caller");
-    CHECK(response.relationships.front().targetLabel == "callee");
+    REQUIRE((response.relationships.size() == 1));
+    CHECK((response.relationships.front().relation == "calls"));
+    CHECK((response.relationships.front().sourceLabel == "caller"));
+    CHECK((response.relationships.front().targetLabel == "callee"));
 }
 
 TEST_CASE("GraphContextService explore relationship budget is not capped by symbol budget",
@@ -375,17 +405,17 @@ TEST_CASE("GraphContextService explore relationship budget is not capped by symb
     leftEdge.dstNodeId = leftId;
     leftEdge.relation = "call";
     leftEdge.weight = 0.8F;
-    REQUIRE(fixture.kgStore->addEdge(leftEdge).has_value());
+    REQUIRE((fixture.kgStore->addEdge(leftEdge).has_value()));
 
     KGEdge rightEdge;
     rightEdge.srcNodeId = rootId;
     rightEdge.dstNodeId = rightId;
     rightEdge.relation = "call";
     rightEdge.weight = 0.7F;
-    REQUIRE(fixture.kgStore->addEdge(rightEdge).has_value());
+    REQUIRE((fixture.kgStore->addEdge(rightEdge).has_value()));
 
     auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE(service != nullptr);
+    REQUIRE((service != nullptr));
 
     GraphExploreRequest req;
     req.query = "root";
@@ -393,14 +423,14 @@ TEST_CASE("GraphContextService explore relationship budget is not capped by symb
     req.budget.maxSymbols = 1;
 
     auto result = service->explore(req);
-    REQUIRE(result.has_value());
+    REQUIRE((result.has_value()));
 
     const auto& response = result.value();
-    REQUIRE(response.entrySymbols.size() == 1);
-    REQUIRE(response.relationships.size() == 2);
-    CHECK(response.relationships[0].sourceLabel == "root");
-    CHECK(response.relationships[0].targetLabel == "left");
-    CHECK(response.relationships[1].sourceLabel == "root");
-    CHECK(response.relationships[1].targetLabel == "right");
+    REQUIRE((response.entrySymbols.size() == 1));
+    REQUIRE((response.relationships.size() == 2));
+    CHECK((response.relationships[0].sourceLabel == "root"));
+    CHECK((response.relationships[0].targetLabel == "left"));
+    CHECK((response.relationships[1].sourceLabel == "root"));
+    CHECK((response.relationships[1].targetLabel == "right"));
     CHECK_FALSE(response.truncated);
 }

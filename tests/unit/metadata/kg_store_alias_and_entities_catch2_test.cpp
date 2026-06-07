@@ -33,14 +33,14 @@ struct KGStoreAliasAndEntitiesFixture {
 
         KnowledgeGraphStoreConfig kgCfg{};
         auto sres = makeSqliteKnowledgeGraphStore(dbPath_.string(), kgCfg);
-        REQUIRE(sres.has_value());
+        REQUIRE((sres.has_value()));
         store_ = std::move(sres.value());
-        REQUIRE(store_ != nullptr);
+        REQUIRE((store_ != nullptr));
 
         ConnectionPoolConfig pcfg;
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), pcfg);
         auto init = pool_->initialize();
-        REQUIRE(init.has_value());
+        REQUIRE((init.has_value()));
         repo_ = std::make_unique<MetadataRepository>(*pool_);
     }
 
@@ -73,7 +73,7 @@ TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal
     n.label = std::string("Alpha");
     n.type = std::string("entity");
     auto nid = fix.store_->upsertNode(n);
-    REQUIRE(nid.has_value());
+    REQUIRE((nid.has_value()));
 
     KGAlias a1;
     a1.nodeId = nid.value();
@@ -81,27 +81,42 @@ TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal
     a1.source = std::string("test");
     a1.confidence = 0.9f;
     auto aid1 = fix.store_->addAlias(a1);
-    REQUIRE(aid1.has_value());
+    REQUIRE((aid1.has_value()));
 
     SECTION("Exact resolution finds alias") {
         auto exact = fix.store_->resolveAliasExact("alpha", 10);
-        REQUIRE(exact.has_value());
+        REQUIRE((exact.has_value()));
         REQUIRE_FALSE(exact.value().empty());
-        CHECK(exact.value().front().nodeId == nid.value());
+        CHECK((exact.value().front().nodeId == nid.value()));
     }
 
     SECTION("Fuzzy resolution finds alias") {
         auto fuzzy = fix.store_->resolveAliasFuzzy("alpha", 10);
-        REQUIRE(fuzzy.has_value());
+        REQUIRE((fuzzy.has_value()));
         REQUIRE_FALSE(fuzzy.value().empty());
-        CHECK(fuzzy.value().front().nodeId == nid.value());
+        CHECK((fuzzy.value().front().nodeId == nid.value()));
+    }
+
+    SECTION("Fuzzy resolution sanitizes path-like alias queries") {
+        KGAlias pathAlias;
+        pathAlias.nodeId = nid.value();
+        pathAlias.alias = "include/yams/daemon/ipc/ipc_protocol.h";
+        pathAlias.source = std::string("test");
+        pathAlias.confidence = 0.8f;
+        auto pathAid = fix.store_->addAlias(pathAlias);
+        REQUIRE((pathAid.has_value()));
+
+        auto fuzzy = fix.store_->resolveAliasFuzzy("include/yams/daemon/ipc/ipc_protocol.h", 10);
+        REQUIRE((fuzzy.has_value()));
+        REQUIRE_FALSE(fuzzy.value().empty());
+        CHECK((fuzzy.value().front().nodeId == nid.value()));
     }
 
     SECTION("Remove aliases clears lookup") {
         auto rm = fix.store_->removeAliasesForNode(nid.value());
-        REQUIRE(rm.has_value());
+        REQUIRE((rm.has_value()));
         auto exactAfter = fix.store_->resolveAliasExact("alpha", 10);
-        REQUIRE(exactAfter.has_value());
+        REQUIRE((exactAfter.has_value()));
         CHECK(exactAfter.value().empty());
     }
 }
@@ -123,7 +138,7 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
         doc.setModifiedTime(1);
         doc.setIndexedTime(1);
         auto insDoc = fix.repo_->insertDocument(doc);
-        REQUIRE(insDoc.has_value());
+        REQUIRE((insDoc.has_value()));
         auto docId = insDoc.value();
 
         // Seed doc entities to represent completed extraction.
@@ -132,7 +147,7 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
         sym.label = std::string("F");
         sym.type = std::string("symbol");
         auto symIdRes = fix.store_->upsertNode(sym);
-        REQUIRE(symIdRes.has_value());
+        REQUIRE((symIdRes.has_value()));
 
         yams::metadata::DocEntity de;
         de.documentId = docId;
@@ -143,10 +158,10 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
         de.confidence = 1.0f;
         de.extractor = std::string("test");
         auto insRes = fix.store_->addDocEntities({de});
-        REQUIRE(insRes.has_value());
+        REQUIRE((insRes.has_value()));
 
         auto existsRes = fix.store_->getDocEntitiesForDocument(docId, 1, 0);
-        REQUIRE(existsRes.has_value());
+        REQUIRE((existsRes.has_value()));
         CHECK_FALSE(existsRes.value().empty());
     }
 
@@ -154,20 +169,20 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
     auto ids = fix.store_->upsertNodes(
         {KGNode{.nodeKey = "ent:a", .label = std::string("A"), .type = std::string("entity")},
          KGNode{.nodeKey = "ent:b", .label = std::string("B"), .type = std::string("entity")}});
-    REQUIRE(ids.has_value());
-    REQUIRE(ids.value().size() == 2);
+    REQUIRE((ids.has_value()));
+    REQUIRE((ids.value().size() == 2));
 
     KGEdge e;
     e.srcNodeId = ids.value()[0];
     e.dstNodeId = ids.value()[1];
     e.relation = "RELATED_TO";
     auto er = fix.store_->addEdge(e);
-    REQUIRE(er.has_value());
+    REQUIRE((er.has_value()));
 
     auto nb = fix.store_->neighbors(ids.value()[0], 16);
-    REQUIRE(nb.has_value());
-    REQUIRE(nb.value().size() == 1);
-    CHECK(nb.value().front() == ids.value()[1]);
+    REQUIRE((nb.has_value()));
+    REQUIRE((nb.value().size() == 1));
+    CHECK((nb.value().front() == ids.value()[1]));
 
     // Create a document and attach entities
     DocumentInfo d;
@@ -181,7 +196,7 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
     d.modifiedTime = d.createdTime;
     d.indexedTime = d.createdTime;
     auto did = fix.repo_->insertDocument(d);
-    REQUIRE(did.has_value());
+    REQUIRE((did.has_value()));
 
     // Add two entities for the document
     DocEntity de1{.documentId = did.value(),
@@ -199,39 +214,39 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
                   .confidence = 0.85f,
                   .extractor = std::string("test")};
     auto ar = fix.store_->addDocEntities({de1, de2});
-    REQUIRE(ar.has_value());
+    REQUIRE((ar.has_value()));
 
     // Retrieve
     auto got = fix.store_->getDocEntitiesForDocument(did.value(), 100, 0);
-    REQUIRE(got.has_value());
-    CHECK(got.value().size() == 2);
+    REQUIRE((got.has_value()));
+    CHECK((got.value().size() == 2));
 
     SECTION("Document ID lookup by hash") {
         auto byHash = fix.store_->getDocumentIdByHash("hash-alpha");
-        REQUIRE(byHash.has_value());
-        REQUIRE(byHash.value().has_value());
-        CHECK(byHash.value().value() == did.value());
+        REQUIRE((byHash.has_value()));
+        REQUIRE((byHash.value().has_value()));
+        CHECK((byHash.value().value() == did.value()));
     }
 
     SECTION("Document ID lookup by name") {
         auto byName = fix.store_->getDocumentIdByName("test-alpha.txt");
-        REQUIRE(byName.has_value());
-        REQUIRE(byName.value().has_value());
-        CHECK(byName.value().value() == did.value());
+        REQUIRE((byName.has_value()));
+        REQUIRE((byName.value().has_value()));
+        CHECK((byName.value().value() == did.value()));
     }
 
     SECTION("Document ID lookup by path") {
         auto byPath = fix.store_->getDocumentIdByPath("/tmp/test-alpha.txt");
-        REQUIRE(byPath.has_value());
-        REQUIRE(byPath.value().has_value());
-        CHECK(byPath.value().value() == did.value());
+        REQUIRE((byPath.has_value()));
+        REQUIRE((byPath.value().has_value()));
+        CHECK((byPath.value().value() == did.value()));
     }
 
     SECTION("Cleanup entities") {
         auto del = fix.store_->deleteDocEntitiesForDocument(did.value());
-        REQUIRE(del.has_value());
+        REQUIRE((del.has_value()));
         auto after = fix.store_->getDocEntitiesForDocument(did.value(), 10, 0);
-        REQUIRE(after.has_value());
+        REQUIRE((after.has_value()));
         CHECK(after.value().empty());
     }
 }
