@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -58,6 +59,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -136,16 +138,33 @@ inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
-inline void setOnnxShutdownMarker(bool enabled) {
-#ifdef _WIN32
-    _putenv_s("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", enabled ? "1" : "");
-#else
-    if (enabled) {
-        ::setenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", "1", 1);
-    } else {
-        ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+std::string getenvCopy(std::string_view name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    const std::string key(name);
+    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
+    if (!env || !*env) {
+        return {};
     }
-#endif
+    return std::string(env);
+}
+
+bool envTruthyCopy(std::string_view name) {
+    const std::string env = getenvCopy(name);
+    return !env.empty() && yams::daemon::ConfigResolver::envTruthy(env.c_str());
+}
+
+bool envPresentCopy(std::string_view name) {
+    return !getenvCopy(name).empty();
+}
+
+std::atomic<bool>& onnxShutdownMarker() {
+    static std::atomic<bool> marker{false};
+    return marker;
+}
+
+inline void setOnnxShutdownMarker(bool enabled) {
+    onnxShutdownMarker().store(enabled, std::memory_order_release);
 }
 
 // Template-based plugin adoption helper to reduce code duplication
@@ -294,7 +313,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
             addPluginRecords(externalLoaded, "external");
         }
     } catch (...) {
-        // leave snapshot empty on failure
+        spdlog::debug("Failed to refresh plugin status snapshot: unknown error");
     }
     auto shared = std::make_shared<PluginStatusSnapshot>(std::move(snapshot));
     std::atomic_store_explicit(&pluginStatusSnapshot_, std::move(shared),
@@ -350,12 +369,17 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     // disable. Env knob `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
     {
         std::int64_t throttleMs = 60'000; // 60s default
-        if (const char* raw = std::getenv("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
-            raw != nullptr && *raw != '\0') {
+        if (const std::string raw = getenvCopy("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
+            !raw.empty()) {
             try {
                 throttleMs = std::max<std::int64_t>(0, std::stoll(raw));
+            } catch (const std::exception& e) {
+                spdlog::debug("Invalid YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS '{}': {}", raw,
+                              e.what());
             } catch (...) {
-                // ignore bad input, keep default
+                spdlog::debug("Invalid YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS '{}': unknown "
+                              "error",
+                              raw);
             }
         }
         topologyManager_.setRebuildMinIntervalMs(throttleMs);
@@ -445,7 +469,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 spdlog::info("Auto-adjusting post-ingest max threads to {}", rec);
             }
         } catch (...) {
-            // Ignore errors and proceed with default.
+            spdlog::debug("Failed to auto-adjust post-ingest max threads; keeping default");
         }
     }
 
@@ -504,12 +528,15 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                 return v == "0" || v == "false" || v == "off" || v == "no";
             };
-            if (!falsy(std::getenv("YAMS_EMBED_ON_ADD"))) {
+            const std::string embedOnAdd = getenvCopy("YAMS_EMBED_ON_ADD");
+            if (!falsy(embedOnAdd.c_str())) {
                 embeddingLifecycle_.setAutoOnAdd(true);
                 spdlog::debug("YAMS_TESTING: defaulting embeddingsAutoOnAdd_=true");
             }
+        } catch (const std::exception& e) {
+            spdlog::debug("Ignoring invalid YAMS_EMBED_ON_ADD override: {}", e.what());
         } catch (...) {
-            // Intentionally ignored - test-only environment variable parsing
+            spdlog::debug("Ignoring invalid YAMS_EMBED_ON_ADD override: unknown error");
         }
 #endif
 
@@ -537,12 +564,13 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
         if (abiHost_) {
             bool strictPluginDirMode = config_.pluginDirStrict;
-            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-                strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+            if (const std::string envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
+                !envStrict.empty()) {
+                strictPluginDirMode = ConfigResolver::envTruthy(envStrict.c_str());
             }
 
             // Trust from env
-            if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
+            if (const std::string env = getenvCopy("YAMS_PLUGIN_DIR"); !env.empty()) {
                 try {
                     std::string raw(env);
                     std::vector<std::string> parts;
@@ -730,6 +758,7 @@ ServiceManager::~ServiceManager() {
         try {
             ingestService_->stop();
         } catch (...) {
+            spdlog::debug("ServiceManager destructor: ingest service stop failed");
         }
         ingestService_.reset();
     }
@@ -743,9 +772,9 @@ yams::Result<void> ServiceManager::initialize() {
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
     if (dataDir.empty()) {
-        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+        if (const std::string xdgDataHome = getenvCopy("XDG_DATA_HOME"); !xdgDataHome.empty()) {
             dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
+        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
             dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
         } else {
             dataDir = fs::path(".") / "yams_data";
@@ -796,18 +825,20 @@ yams::Result<void> ServiceManager::initialize() {
         std::string dirs;
         std::vector<std::filesystem::path> pluginDirs;
         bool strictPluginDirMode = config_.pluginDirStrict;
-        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-            strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+        if (const std::string envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
+            !envStrict.empty()) {
+            strictPluginDirMode = ConfigResolver::envTruthy(envStrict.c_str());
         }
 #ifdef _WIN32
         // Windows: use LOCALAPPDATA for user plugins
-        if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+        if (const std::string localAppData = getenvCopy("LOCALAPPDATA"); !localAppData.empty())
             pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
-        else if (const char* userProfile = std::getenv("USERPROFILE"))
-            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" /
-                                 "plugins");
+        else if (const std::string userProfile = getenvCopy("USERPROFILE");
+                 !userProfile.empty())
+            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" /
+                                 "yams" / "plugins");
 #else
-        if (const char* home = std::getenv("HOME"))
+        if (const std::string home = getenvCopy("HOME"); !home.empty())
             pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
                                  "plugins");
         pluginDirs.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
@@ -939,6 +970,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                         localBarrierPromise->set_value();
                         spdlog::debug("ServiceManager: Async init barrier signaled");
                     } catch (...) {
+                        spdlog::debug("ServiceManager: async init barrier signal failed");
                     }
                 }
 
@@ -1039,7 +1071,7 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
     spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
     if (checkpointManager_) {
         checkpointManager_->stop();
-        checkpointManagerHold = std::move(checkpointManager_);
+        checkpointManagerHold.swap(checkpointManager_);
         spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
     }
 
@@ -1131,14 +1163,14 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
     if (workCoordinator_) {
         try {
-            constexpr auto kShutdownTimeout = std::chrono::seconds(5);
-            const bool benchmarkFastShutdown = std::getenv("YAMS_BENCH_OPT_LOOP") != nullptr ||
-                                               std::getenv("YAMS_BENCH_DATASET") != nullptr;
-            if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
+            const bool benchmarkFastShutdown = envPresentCopy("YAMS_BENCH_OPT_LOOP") ||
+                                               envPresentCopy("YAMS_BENCH_DATASET");
+            if (!workCoordinator_->joinWithTimeout(
+                    shutdown_budget::kWorkCoordinatorJoinTimeout)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
-                constexpr auto kExtendedShutdownTimeout = std::chrono::seconds(30);
-                if (!workCoordinator_->joinWithTimeout(kExtendedShutdownTimeout)) {
+                if (!workCoordinator_->joinWithTimeout(
+                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
                     if (benchmarkFastShutdown) {
                         spdlog::info("[ServiceManager] Phase 5: Extended timeout expired during "
                                      "benchmark shutdown; detaching remaining workers to avoid "
@@ -1525,7 +1557,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 j["search_engine_lexical_enhancement_state"] = "skipped";
             }
         }
-        j["readiness"] = std::move(rd);
+        j["readiness"] = rd;
         {
             std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
             if (!state.readiness.databaseRecoveredAt.empty()) {
@@ -1564,7 +1596,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
         pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
         pr[std::string(readiness::kModelProvider)] = state.readiness.modelLoadProgress.load();
-        j["progress"] = std::move(pr);
+        j["progress"] = pr;
         auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - state.stats.startTime)
                                    .count();
@@ -1585,6 +1617,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                         exp = hist;
                 }
             } catch (...) {
+                spdlog::debug("[ServiceManager] ETA history lookup failed for {}", key);
             }
             int remain_by_pct = ServiceManager::computeEtaRemaining(exp, progress);
             int remain_by_elapsed = std::max(0, exp - static_cast<int>(sec_since_start));
@@ -1632,7 +1665,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
         if (out)
             out << j.dump(2);
     } catch (...) {
-        // ignore
+        spdlog::debug("[ServiceManager] Failed to write bootstrap status file");
     }
 }
 
@@ -1641,9 +1674,9 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
 
     fs::path dataDir = config_.dataDir;
     if (dataDir.empty()) {
-        if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+        if (const std::string xdgDataHome = getenvCopy("XDG_DATA_HOME"); !xdgDataHome.empty()) {
             dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
+        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
             dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
         } else {
             dataDir = fs::path(".") / "yams_data";
@@ -1704,6 +1737,8 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
                 databaseManager_->setContentStoreError(storeRes.error().message);
             }
         } catch (...) {
+            spdlog::debug("[ServiceManager] Failed to record content store error on "
+                          "DatabaseManager");
         }
         return Error{ErrorCode::IOError, std::string("ContentStore initialization failed: ") +
                                              storeRes.error().message};
@@ -1748,6 +1783,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         try {
             serviceFsm_.dispatch(DatabaseOpenedEvent{});
         } catch (...) {
+            spdlog::debug("[ServiceManager] DatabaseOpenedEvent dispatch failed");
         }
     }
 
@@ -1756,6 +1792,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         try {
             serviceFsm_.dispatch(MigrationStartedEvent{});
         } catch (...) {
+            spdlog::debug("[ServiceManager] MigrationStartedEvent dispatch failed");
         }
         const bool migrationOk = co_await init::await_record_duration(
             "migrations",
@@ -1767,6 +1804,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
             try {
                 serviceFsm_.dispatch(MigrationCompletedEvent{});
             } catch (...) {
+                spdlog::debug("[ServiceManager] MigrationCompletedEvent dispatch failed");
             }
         }
     }
@@ -1987,6 +2025,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                          : modelProvider->getEmbeddingGenerator(
                                                embeddingLifecycle_.modelName());
                         } catch (...) {
+                            spdlog::debug("[ServiceManager] Failed to acquire embedding "
+                                          "generator for rebuild");
                         }
                     }
 
@@ -2001,6 +2041,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         try {
                             lifecycleFsm_.setSubsystemDegraded("search", false);
                         } catch (...) {
+                            spdlog::debug("[ServiceManager] Failed clearing search degradation "
+                                          "state");
                         }
                         if (auto metadataRepo = getMetadataRepo()) {
                             auto countRes = metadataRepo->getDocumentCount();
@@ -2021,6 +2063,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                             lifecycleFsm_.setSubsystemDegraded("search", true,
                                                                result.error().message);
                         } catch (...) {
+                            spdlog::debug("[ServiceManager] Failed marking search degraded "
+                                          "after rebuild failure");
                         }
                         writeBootstrapStatusFile(config_, state_, this);
                         spdlog::error("[ServiceManager] FSM-triggered rebuild failed: {}",
@@ -2081,7 +2125,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Session watcher is opt-in: it should not run by default in daemon mode.
     // Enable explicitly via `YAMS_ENABLE_SESSION_WATCHER=1`.
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-    const bool enableSessionWatcher = isTruthy(std::getenv("YAMS_ENABLE_SESSION_WATCHER"));
+    const bool enableSessionWatcher =
+        isTruthy(getenvCopy("YAMS_ENABLE_SESSION_WATCHER").c_str());
     if (!enableSessionWatcher) {
         spdlog::info("[ServiceManager] Session watcher disabled (default); set "
                      "YAMS_ENABLE_SESSION_WATCHER=1 to enable");
@@ -2188,11 +2233,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (piq) {
                 piq->setDrainCallback([this]() {
                     const bool disableDrainTopologyRebuild = []() {
-                        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-                        if (const char* env = std::getenv("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD")) {
-                            return std::string_view(env) == "1";
-                        }
-                        return false;
+                        const std::string env = getenvCopy("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD");
+                        return env == "1";
                     }();
                     const bool repairActive =
                         state_.stats.repairInProgress.load(std::memory_order_relaxed);
@@ -2224,8 +2266,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
     // Skip EmbeddingService init when vectors are disabled (benchmark/compat mode)
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-    const bool vectorsDisabled = ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS"));
+    const bool vectorsDisabled = envTruthyCopy("YAMS_DISABLE_VECTORS");
     if (!vectorsDisabled) {
         // Initialize EmbeddingService for async embedding generation
         try {
@@ -2350,8 +2391,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // AUTOLOAD PLUGINS (MOVED UP)
     try {
         bool enableAutoload = config_.autoLoadPlugins;
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-        if (const char* env = std::getenv("YAMS_AUTOLOAD_PLUGINS")) {
+        if (const std::string env = getenvCopy("YAMS_AUTOLOAD_PLUGINS"); !env.empty()) {
             std::string v(env);
             for (auto& c : v)
                 c = static_cast<char>(std::tolower(c));
@@ -2458,6 +2498,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
     } catch (...) {
         state_.readiness.pluginsReady = true;
+        spdlog::debug("[ServiceManager] Falling back to pluginsReady=true after plugin host "
+                      "snapshot failure");
     }
     refreshPluginStatusSnapshot();
 
@@ -2685,11 +2727,8 @@ void ServiceManager::scheduleInitialSearchBuild() {
 
             try {
                 // Determine vector readiness: honor env disables and presence of vector infra.
-                const bool vectorsDisabled =
-                    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-                    ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTORS")) ||
-                    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-                    ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_VECTOR_DB"));
+                const bool vectorsDisabled = envTruthyCopy("YAMS_DISABLE_VECTORS") ||
+                                             envTruthyCopy("YAMS_DISABLE_VECTOR_DB");
                 bool vectorEnabled = false;
                 if (vectorsDisabled) {
                     spdlog::info("[SearchBuild] Vector search disabled via env flag; building "
@@ -2901,9 +2940,8 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
 
     auto read_ms = [](const char* env, int def) {
         try {
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only watcher tuning snapshot.
-            if (const char* v = std::getenv(env))
-                return std::max(100, std::stoi(v));
+            if (const std::string value = getenvCopy(env); !value.empty())
+                return std::max(100, std::stoi(value));
         } catch (const std::exception& e) {
             spdlog::debug("[ServiceManager] invalid session watcher env {}: {}", env, e.what());
         } catch (...) {
@@ -4122,9 +4160,8 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                         rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
                         freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
                     const bool forceImmediate = []() {
-                        // NOLINTNEXTLINE(concurrency-mt-unsafe): test-only read.
-                        const char* v = std::getenv("YAMS_TEST_FORCE_TOPOLOGY_REBUILD");
-                        return v != nullptr && v[0] != '\0' && v[0] != '0';
+                        const std::string value = getenvCopy("YAMS_TEST_FORCE_TOPOLOGY_REBUILD");
+                        return !value.empty() && value[0] != '0';
                     }();
                     if (!overlayHeavy && !overlayAged && !forceImmediate) {
                         self->topologyManager_.restoreDirtyHashes(rebuildHashes);

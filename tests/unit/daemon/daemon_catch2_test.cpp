@@ -373,6 +373,72 @@ TEST_CASE_METHOD(DaemonFixture,
     daemon_->reapCompletedShutdownThread();
 }
 
+TEST_CASE_METHOD(DaemonFixture,
+                 "Lifecycle shutdown timeout floor covers work coordinator join budget",
+                 "[daemon][lifecycle][shutdown-request][budget]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar shutdownBudget("YAMS_SHUTDOWN_FORCE_EXIT_MS",
+                                            std::string("1000"));
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+
+    startRunLoop();
+    REQUIRE(waitForCondition(
+        2s, [&] { return daemon_->runLoopStarted_.load(std::memory_order_acquire); }));
+
+    auto* serviceManager = daemon_->getServiceManager();
+    REQUIRE((serviceManager != nullptr));
+
+    std::mutex gateMutex;
+    std::condition_variable gateCv;
+    bool allowExit = false;
+    std::atomic<bool> workerEntered{false};
+
+    boost::asio::post(serviceManager->getWorkerExecutor(), [&]() {
+        {
+            std::lock_guard<std::mutex> lk(gateMutex);
+            workerEntered.store(true, std::memory_order_release);
+        }
+        gateCv.notify_all();
+
+        std::unique_lock<std::mutex> lk(gateMutex);
+        gateCv.wait(lk, [&] { return allowExit; });
+    });
+
+    REQUIRE(waitForCondition(2s, [&] { return workerEntered.load(std::memory_order_acquire); }));
+
+    DaemonLifecycleAdapter lifecycle(daemon_.get());
+    lifecycle.requestShutdown(true, true);
+
+    REQUIRE(waitForCondition(2s, [&] {
+        return daemon_->stopRequested_.load(std::memory_order_acquire) &&
+               daemon_->shutdownThreadActive_.load(std::memory_order_acquire);
+    }));
+
+    std::this_thread::sleep_for(1200ms);
+    CHECK(daemon_->shutdownThreadActive_.load(std::memory_order_acquire));
+    CHECK_FALSE(daemon_->waitForStopCompletion(100ms));
+
+    {
+        std::lock_guard<std::mutex> lk(gateMutex);
+        allowExit = true;
+    }
+    gateCv.notify_all();
+
+    stopRunLoop();
+    auto stopResult = daemon_->stop();
+    REQUIRE(stopResult);
+    REQUIRE(daemon_->waitForStopCompletion(2s));
+    daemon_->reapCompletedShutdownThread();
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown falls back to direct stop without run loop",
                  "[daemon][lifecycle][shutdown-request][fallback]") {
     SKIP_ON_WINDOWS();
