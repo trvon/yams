@@ -362,12 +362,11 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                                       info.extractionError, info.pathPrefix, info.reversePath,
                                       info.pathHash, info.parentHash, info.pathDepth));
             } else {
-                YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension,
-                                      info.fileSize, info.sha256Hash, info.mimeType,
-                                      info.createdTime, info.modifiedTime, info.indexedTime,
-                                      info.contentExtracted ? 1 : 0,
-                                      ExtractionStatusUtils::toString(info.extractionStatus),
-                                      info.extractionError));
+                YAMS_TRY(stmt.bindAll(
+                    info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                    info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
+                    info.indexedTime, info.contentExtracted ? 1 : 0,
+                    ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError));
             }
 
             YAMS_TRY(stmt.execute());

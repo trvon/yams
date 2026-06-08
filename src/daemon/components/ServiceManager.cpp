@@ -3988,7 +3988,7 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
     try {
         lifecycleFsm_.setSubsystemDegraded("embeddings", degraded, error);
         if (pluginManager_) {
-            pluginManager_->__test_setEmbeddingDegraded(degraded, error);
+            pluginManager_->testingSetEmbeddingDegraded(degraded, error);
         } else {
             if (degraded) {
                 embeddingLifecycle_.fsm().dispatch(

@@ -599,9 +599,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
         const auto stopStart = std::chrono::steady_clock::now();
         queue->stop();
-        const auto stopElapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                  stopStart);
+        const auto stopElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - stopStart);
 
         INFO("stopElapsedMs=" << stopElapsed.count());
         CHECK((stopElapsed < std::chrono::milliseconds(150)));
@@ -814,8 +813,8 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     REQUIRE((insertedDocIds.size() == docs.size()));
 
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE((std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-             insertedDocIds.end()));
+    REQUIRE(
+        (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
     for (int i = 0; i < kDocCount; ++i) {
         REQUIRE((insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i));
     }
@@ -881,8 +880,8 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
     REQUIRE((insertedDocIds.size() == static_cast<std::size_t>(kDocCount)));
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE((std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-             insertedDocIds.end()));
+    REQUIRE(
+        (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
 
     stopAndResetQueue(queue);
     coordinator.stop();

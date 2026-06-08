@@ -141,12 +141,10 @@ void BackgroundTaskManager::requestStopAndQuiesceTrackedCoroutines() {
     waitForTrackedCoroutines();
 }
 
-#ifdef YAMS_TESTING
 std::size_t BackgroundTaskManager::testingActiveCoroutineCount() const noexcept {
     std::lock_guard<std::mutex> lock(trackedCoroutineMutex_);
     return trackedCoroutineCount_;
 }
-#endif
 
 void BackgroundTaskManager::start() {
     // Idempotent check

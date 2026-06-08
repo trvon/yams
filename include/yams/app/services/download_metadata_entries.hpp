@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -48,10 +49,15 @@ inline DownloadMetadataEntries buildDownloadMetadataEntries(int64_t documentId,
                              metadata::MetadataValue(*result.checksumOk ? "true" : "false"));
     }
 
-    for (const auto& tag : req.tags) {
-        if (!tag.empty()) {
-            entries.emplace_back(documentId, "tag", metadata::MetadataValue(tag));
+    std::optional<std::string> winningTag;
+    auto setWinningTag = [&](std::string value) {
+        if (!value.empty()) {
+            winningTag = std::move(value);
         }
+    };
+
+    for (const auto& tag : req.tags) {
+        setWinningTag(tag);
     }
     for (const auto& [key, value] : req.metadata) {
         if (!key.empty()) {
@@ -59,7 +65,7 @@ inline DownloadMetadataEntries buildDownloadMetadataEntries(int64_t documentId,
         }
     }
 
-    entries.emplace_back(documentId, "tag", metadata::MetadataValue("downloaded"));
+    setWinningTag("downloaded");
 
     std::string scheme;
     std::string host;
@@ -71,16 +77,19 @@ inline DownloadMetadataEntries buildDownloadMetadataEntries(int64_t documentId,
         host = slash == std::string::npos ? rest : rest.substr(0, slash);
     }
     if (!host.empty()) {
-        entries.emplace_back(documentId, "tag", metadata::MetadataValue("host:" + host));
+        setWinningTag("host:" + host);
     }
     if (!scheme.empty()) {
-        entries.emplace_back(documentId, "tag", metadata::MetadataValue("scheme:" + scheme));
+        setWinningTag("scheme:" + scheme);
     }
     if (result.httpStatus) {
         const int code = *result.httpStatus;
         const std::string bucket =
             (code >= 200 && code < 300) ? "2xx" : ((code >= 400 && code < 500) ? "4xx" : "5xx");
-        entries.emplace_back(documentId, "tag", metadata::MetadataValue("status:" + bucket));
+        setWinningTag("status:" + bucket);
+    }
+    if (winningTag.has_value()) {
+        entries.emplace_back(documentId, "tag", metadata::MetadataValue(*winningTag));
     }
 
     return entries;

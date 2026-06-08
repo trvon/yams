@@ -532,14 +532,14 @@ void PostIngestQueue::start() {
     bool allStarted = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        allStarted = lifecycleCv_.wait_until(lock, startupDeadline, [this, startKg, startSymbol,
-                                                                     startEntity, startTitle]() {
-            return stageStarted_[0].load(std::memory_order_acquire) &&
-                   (!startKg || stageStarted_[1].load(std::memory_order_acquire)) &&
-                   (!startSymbol || stageStarted_[2].load(std::memory_order_acquire)) &&
-                   (!startEntity || stageStarted_[3].load(std::memory_order_acquire)) &&
-                   (!startTitle || stageStarted_[4].load(std::memory_order_acquire));
-        });
+        allStarted = lifecycleCv_.wait_until(
+            lock, startupDeadline, [this, startKg, startSymbol, startEntity, startTitle]() {
+                return stageStarted_[0].load(std::memory_order_acquire) &&
+                       (!startKg || stageStarted_[1].load(std::memory_order_acquire)) &&
+                       (!startSymbol || stageStarted_[2].load(std::memory_order_acquire)) &&
+                       (!startEntity || stageStarted_[3].load(std::memory_order_acquire)) &&
+                       (!startTitle || stageStarted_[4].load(std::memory_order_acquire));
+            });
     }
 
     if (!allStarted) {

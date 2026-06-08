@@ -346,7 +346,7 @@ public:
     }
 
     // --- Test Helpers ---
-    void __test_setEmbeddingDegraded(bool degraded, const std::string& error);
+    void testingSetEmbeddingDegraded(bool degraded, const std::string& error);
 #ifdef YAMS_TESTING
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         modelProvider_ = std::move(provider);
@@ -355,9 +355,11 @@ public:
         externalHost_ = std::move(host);
     }
     void __test_setSharedPluginHost(AbiPluginHost* host) { sharedPluginHost_ = host; }
-    void __test_pluginLoadFailed(const std::string& error);
-    void __test_pluginScanComplete(std::size_t count);
 #endif
+    // Out-of-line test hooks stay declared in all builds so production daemon
+    // libraries can satisfy test callers compiled with -DYAMS_TESTING=1.
+    void testingPluginLoadFailed(const std::string& error);
+    void testingPluginScanComplete(std::size_t count);
 
 private:
     static void ignoreFsmDispatchFailure() noexcept {}

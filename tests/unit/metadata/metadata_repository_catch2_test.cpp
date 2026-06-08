@@ -3405,6 +3405,71 @@ TEST_CASE(
     CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore + 1));
 }
 
+TEST_CASE("batchInsertContentAndIndex: mixed repaired and stale entries stay accurate",
+          "[unit][metadata-repo][batch-content][counters][fts]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo doc;
+    doc.sha256Hash = "counter_hash_mixed_repair_stale";
+    doc.fileName = "mixed_repair_stale.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE((insertResult.has_value()));
+    auto docId = insertResult.value();
+
+    BatchContentEntry initialEntry;
+    initialEntry.documentId = docId;
+    initialEntry.title = "Title";
+    initialEntry.contentText = "Content";
+    initialEntry.mimeType = "text/plain";
+    initialEntry.extractionMethod = "test";
+    initialEntry.language = "en";
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({initialEntry}).has_value()));
+
+    REQUIRE(fix.pool_
+                ->withConnection([&](Database& db) -> Result<void> {
+                    auto stmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
+                    REQUIRE((stmtResult.has_value()));
+                    auto& stmt = stmtResult.value();
+                    REQUIRE((stmt.bind(1, docId).has_value()));
+                    REQUIRE((stmt.execute().has_value()));
+                    return {};
+                })
+                .has_value());
+
+    fix.repository_->initializeCounters();
+    auto indexedBefore = fix.repository_->getCachedIndexedCount();
+    REQUIRE((indexedBefore == 0));
+
+    BatchContentEntry repairEntry;
+    repairEntry.documentId = docId;
+    repairEntry.title = "Title repaired";
+    repairEntry.contentText = "Content repaired";
+    repairEntry.mimeType = "text/plain";
+    repairEntry.extractionMethod = "test";
+    repairEntry.language = "en";
+    repairEntry.priorStateKnown = true;
+    repairEntry.priorContentExtracted = true;
+    repairEntry.priorExtractionStatus = ExtractionStatus::Success;
+
+    BatchContentEntry staleEntry = repairEntry;
+    staleEntry.documentId = docId + 999999;
+    staleEntry.title = "Stale";
+    staleEntry.contentText = "Stale content";
+
+    auto batchResult = fix.repository_->batchInsertContentAndIndex({repairEntry, staleEntry});
+    REQUIRE((batchResult.has_value()));
+
+    auto indexedIds = fix.repository_->getAllFts5IndexedDocumentIds();
+    REQUIRE((indexedIds.has_value()));
+    REQUIRE(std::find(indexedIds.value().begin(), indexedIds.value().end(), docId) !=
+            indexedIds.value().end());
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedBefore + 1));
+}
+
 TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
           "[unit][metadata-repo][batch-content][counters]") {
     MetadataRepositoryFixture fix;

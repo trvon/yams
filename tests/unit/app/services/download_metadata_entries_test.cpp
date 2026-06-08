@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -80,6 +81,9 @@ TEST_CASE("Download metadata entries preserve current last-write-wins tag semant
 
     auto entries = buildDownloadMetadataEntries(insert.value(), request, result);
     REQUIRE_FALSE(entries.empty());
+    CHECK((std::count_if(entries.begin(), entries.end(),
+                         [](const auto& entry) { return std::get<1>(entry) == "tag"; }) == 1));
+    CHECK((std::get<2>(entries.back()).asString() == "status:2xx"));
     REQUIRE(repository.setMetadataBatch(entries).has_value());
 
     CHECK((getStringMetadata(repository, insert.value(), "source_url") == result.url));
@@ -112,6 +116,8 @@ TEST_CASE("Download metadata entries keep downloaded tag when URL has no scheme"
 
     auto entries = buildDownloadMetadataEntries(7, request, result);
     REQUIRE_FALSE(entries.empty());
+    CHECK((std::count_if(entries.begin(), entries.end(),
+                         [](const auto& entry) { return std::get<1>(entry) == "tag"; }) == 1));
 
     const auto& last = entries.back();
     CHECK((std::get<0>(last) == 7));
