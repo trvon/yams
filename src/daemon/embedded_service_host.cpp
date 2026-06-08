@@ -1,4 +1,4 @@
-#include <yams/daemon/embedded_service_host.h>
+#include "yams/daemon/embedded_service_host.h"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +17,7 @@
 #include <boost/asio/system_executor.hpp>
 
 #include <yams/config/config_helpers.h>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
@@ -145,11 +146,21 @@ public:
             spdlog::warn("EmbeddedServiceHost background tasks failed to start: {}", e.what());
         }
 
-        serviceManager_->startAsyncInit();
+        std::promise<void> asyncInitCompletedPromise;
+        auto asyncInitCompletedFuture = asyncInitCompletedPromise.get_future();
+        serviceManager_->startAsyncInit(&asyncInitCompletedPromise, nullptr);
 
-        auto snap = serviceManager_->waitForServiceManagerTerminalState(
-            std::max(5, options_.initTimeoutSeconds));
+        const auto initTimeoutSeconds = std::max(5, options_.initTimeoutSeconds);
+        auto snap = serviceManager_->waitForServiceManagerTerminalState(initTimeoutSeconds);
         if (snap.state == ServiceManagerState::Ready) {
+            if (asyncInitCompletedFuture.valid() &&
+                asyncInitCompletedFuture.wait_for(std::chrono::seconds(initTimeoutSeconds)) ==
+                    std::future_status::timeout) {
+                lifecycleFsm_.dispatch(
+                    FailureEvent{"Embedded ServiceManager async initialization timed out"});
+                return Error{ErrorCode::Timeout,
+                             "Embedded ServiceManager async initialization timed out"};
+            }
             lifecycleFsm_.dispatch(HealthyEvent{});
         } else if (snap.state == ServiceManagerState::Failed) {
             lifecycleFsm_.dispatch(FailureEvent{snap.lastError});
@@ -175,6 +186,40 @@ public:
             lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
         }
 
+        if (workGuard_) {
+            workGuard_->reset();
+            workGuard_.reset();
+        }
+        if (ioContext_) {
+            ioContext_->stop();
+        }
+
+#ifdef YAMS_TESTING
+        emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase::BeforeThreadJoin);
+#endif
+
+        for (auto& t : ioThreads_) {
+            if (t.joinable()) {
+                YAMS_ASSERT(t.get_id() != std::this_thread::get_id(),
+                            "EmbeddedServiceHost shutdown must not join the current IO thread");
+                t.join();
+            }
+        }
+
+#ifdef YAMS_TESTING
+        emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin);
+#endif
+
+        const bool hostThreadsJoined =
+            std::none_of(ioThreads_.begin(), ioThreads_.end(),
+                         [](const std::thread& thread) { return thread.joinable(); });
+        YAMS_ASSERT(hostThreadsJoined,
+                    "EmbeddedServiceHost must drain host IO threads before releasing request "
+                    "dispatcher state");
+
+        ioThreads_.clear();
+        ioContext_.reset();
+
         if (dispatcher_) {
             dispatcher_.reset();
         }
@@ -184,21 +229,6 @@ public:
         }
         lifecycle_.reset();
         lifecycleFsm_.dispatch(StoppedEvent{});
-
-        if (workGuard_) {
-            workGuard_->reset();
-            workGuard_.reset();
-        }
-        if (ioContext_) {
-            ioContext_->stop();
-        }
-        for (auto& t : ioThreads_) {
-            if (t.joinable()) {
-                t.join();
-            }
-        }
-        ioThreads_.clear();
-        ioContext_.reset();
 
         started_ = false;
         stopped_ = true;
@@ -216,8 +246,37 @@ public:
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
     StateComponent* getState() { return &state_; }
     IDaemonLifecycle* getLifecycle() const { return lifecycle_.get(); }
+#ifdef YAMS_TESTING
+    void setTestingShutdownHook(EmbeddedServiceHost::TestingShutdownHook hook) {
+        testingShutdownHook_ = std::move(hook);
+    }
+#endif
 
 private:
+#ifdef YAMS_TESTING
+    void emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase phase) {
+        EmbeddedServiceHost::TestingShutdownSnapshot snapshot{
+            .phase = phase,
+            .dispatcherAlive = static_cast<bool>(dispatcher_),
+            .serviceManagerAlive = static_cast<bool>(serviceManager_),
+            .lifecycleAlive = static_cast<bool>(lifecycle_),
+            .ioContextAlive = static_cast<bool>(ioContext_),
+            .ioThreadCount = ioThreads_.size(),
+        };
+        switch (phase) {
+            case EmbeddedServiceHost::TestingShutdownPhase::BeforeThreadJoin:
+                beforeThreadJoinSnapshot_ = snapshot;
+                break;
+            case EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin:
+                afterThreadJoinSnapshot_ = snapshot;
+                break;
+        }
+        if (testingShutdownHook_) {
+            testingShutdownHook_(snapshot);
+        }
+    }
+#endif
+
     Options options_;
     DaemonConfig config_{};
     StateComponent state_{};
@@ -235,6 +294,11 @@ private:
     bool started_{false};
     bool stopped_{false};
     mutable std::mutex mutex_;
+#ifdef YAMS_TESTING
+    EmbeddedServiceHost::TestingShutdownHook testingShutdownHook_;
+    std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> beforeThreadJoinSnapshot_;
+    std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> afterThreadJoinSnapshot_;
+#endif
 };
 
 EmbeddedServiceHost::EmbeddedServiceHost(const Options& options)
@@ -303,5 +367,22 @@ IDaemonLifecycle* EmbeddedServiceHost::getLifecycle() const {
 Result<void> EmbeddedServiceHost::shutdown() {
     return impl_->shutdown();
 }
+
+#ifdef YAMS_TESTING
+void EmbeddedServiceHost::testing_setShutdownHook(TestingShutdownHook hook) {
+    impl_->setTestingShutdownHook(std::move(hook));
+}
+
+std::optional<EmbeddedServiceHost::TestingShutdownSnapshot>
+EmbeddedServiceHost::testing_getShutdownSnapshot(TestingShutdownPhase phase) const {
+    switch (phase) {
+        case TestingShutdownPhase::BeforeThreadJoin:
+            return impl_->beforeThreadJoinSnapshot_;
+        case TestingShutdownPhase::AfterThreadJoin:
+            return impl_->afterThreadJoinSnapshot_;
+    }
+    return std::nullopt;
+}
+#endif
 
 } // namespace yams::daemon

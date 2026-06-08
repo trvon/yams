@@ -919,6 +919,7 @@ yams::Result<void> ServiceManager::initialize() {
 
 void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
                                     std::atomic<bool>* barrierSet) {
+    const bool signalBarrierOnStart = (barrierPromise != nullptr) && (barrierSet != nullptr);
     if (!asyncInit_.tryStart()) {
         spdlog::warn("ServiceManager::startAsyncInit() called more than once, ignoring");
         return;
@@ -953,50 +954,63 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         return;
     }
 
-    boost::asio::post(workCoordinator_->getExecutor(), [self, barrierPromise]() {
-        spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
+    boost::asio::post(
+        workCoordinator_->getExecutor(), [self, barrierPromise, signalBarrierOnStart]() {
+            spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
 
-        self->asyncInit_.setFuture(boost::asio::co_spawn(
-            self->workCoordinator_->getExecutor(),
-            [self, barrierPromise]() -> boost::asio::awaitable<void> {
-                auto localSelf = self;
-                auto localBarrierPromise = barrierPromise;
-
-                spdlog::info("Starting async resource initialization (coroutine)...");
-
-                if (localBarrierPromise) {
-                    try {
-                        localBarrierPromise->set_value();
-                        spdlog::debug("ServiceManager: Async init barrier signaled");
-                    } catch (...) {
-                        spdlog::debug("ServiceManager: async init barrier signal failed");
-                    }
-                }
-
-                auto token = localSelf->asyncInit_.getStopToken();
-
-                try {
-                    auto result = co_await localSelf->initializeAsyncAwaitable(token);
-
-                    if (!result) {
-                        spdlog::error("Async resource initialization failed: {}",
-                                      result.error().message);
-                        if (!token.stop_requested()) {
-                            localSelf->serviceFsm_.dispatch(
-                                InitializationFailedEvent{result.error().message});
+            self->asyncInit_.setFuture(boost::asio::co_spawn(
+                self->workCoordinator_->getExecutor(),
+                [self, barrierPromise, signalBarrierOnStart]() -> boost::asio::awaitable<void> {
+                    auto localSelf = self;
+                    auto localBarrierPromise = barrierPromise;
+                    const auto signalCompletion = [&]() {
+                        if (signalBarrierOnStart || !localBarrierPromise) {
+                            return;
                         }
-                    } else {
-                        spdlog::info("All daemon services initialized successfully");
+                        try {
+                            localBarrierPromise->set_value();
+                        } catch (...) {
+                            spdlog::debug("ServiceManager: async init completion signal failed");
+                        }
+                    };
+
+                    spdlog::info("Starting async resource initialization (coroutine)...");
+
+                    if (signalBarrierOnStart && localBarrierPromise) {
+                        try {
+                            localBarrierPromise->set_value();
+                            spdlog::debug("ServiceManager: Async init barrier signaled");
+                        } catch (...) {
+                            spdlog::debug("ServiceManager: async init barrier signal failed");
+                        }
                     }
-                } catch (const std::exception& e) {
-                    spdlog::error("Async resource initialization exception: {}", e.what());
-                    if (!token.stop_requested()) {
-                        localSelf->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+
+                    auto token = localSelf->asyncInit_.getStopToken();
+
+                    try {
+                        auto result = co_await localSelf->initializeAsyncAwaitable(token);
+
+                        if (!result) {
+                            spdlog::error("Async resource initialization failed: {}",
+                                          result.error().message);
+                            if (!token.stop_requested()) {
+                                localSelf->serviceFsm_.dispatch(
+                                    InitializationFailedEvent{result.error().message});
+                            }
+                        } else {
+                            spdlog::info("All daemon services initialized successfully");
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::error("Async resource initialization exception: {}", e.what());
+                        if (!token.stop_requested()) {
+                            localSelf->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                        }
                     }
-                }
-            },
-            boost::asio::use_future));
-    });
+
+                    signalCompletion();
+                },
+                boost::asio::use_future));
+        });
 }
 
 void ServiceManager::stopBackgroundTaskManagerForShutdown() {
