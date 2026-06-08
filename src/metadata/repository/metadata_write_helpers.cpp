@@ -213,17 +213,19 @@ Result<void> upsertMetadataWrites(Database& db, const std::vector<MetadataWriteE
             YAMS_TRY(stmt->execute());
         } else {
             const std::string tailSql = buildMetadataUpsertSql(rows);
-            YAMS_TRY_UNWRAP(stmt, db.prepare(tailSql));
+            // Common metadata bursts usually reuse the same small row count; cache those
+            // statements too so we spend less time preparing SQL while the writer tx is open.
+            YAMS_TRY_UNWRAP(stmt, db.prepareCached(tailSql));
             int bindIndex = 1;
             for (int i = 0; i < rows; ++i) {
                 const auto& [documentId, key, value] =
                     entries[offset + static_cast<std::size_t>(i)];
-                YAMS_TRY(stmt.bind(bindIndex++, documentId));
-                YAMS_TRY(stmt.bind(bindIndex++, key));
-                YAMS_TRY(stmt.bind(bindIndex++, value.value));
-                YAMS_TRY(stmt.bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
+                YAMS_TRY(stmt->bind(bindIndex++, documentId));
+                YAMS_TRY(stmt->bind(bindIndex++, key));
+                YAMS_TRY(stmt->bind(bindIndex++, value.value));
+                YAMS_TRY(stmt->bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
             }
-            YAMS_TRY(stmt.execute());
+            YAMS_TRY(stmt->execute());
         }
     }
 
