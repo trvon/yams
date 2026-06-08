@@ -7,7 +7,17 @@
 #include <string>
 #include <vector>
 
+#if __has_include(<spdlog/spdlog.h>)
 #include <spdlog/spdlog.h>
+#elif __has_include("spdlog/spdlog.h")
+#include "spdlog/spdlog.h"
+#else
+namespace spdlog {
+template <typename... Args> inline void info(const char*, Args&&...) {}
+template <typename... Args> inline void warn(const char*, Args&&...) {}
+template <typename... Args> inline void error(const char*, Args&&...) {}
+} // namespace spdlog
+#endif
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -255,8 +265,33 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
         try {
             // Capability check (e.g., titlePoller requires titleExtractor_)
             if (cfg.isCapableFn && !cfg.isCapableFn()) {
-                timer.expires_after(std::chrono::milliseconds(250));
-                co_await timer.async_wait(boost::asio::use_awaitable);
+                if (cfg.wakeTimer) {
+                    if (cfg.wakeTimerMutex) {
+                        std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
+                        cfg.wakeTimer->expires_after(std::chrono::milliseconds(250));
+                    } else {
+                        cfg.wakeTimer->expires_after(std::chrono::milliseconds(250));
+                    }
+                    try {
+                        if (cfg.wakeTimerMutex) {
+                            auto waitOp = [&]() {
+                                std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
+                                return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+                            }();
+                            co_await std::move(waitOp);
+                        } else {
+                            co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+                        }
+                    } catch (const boost::system::system_error& e) {
+                        if (e.code() != boost::asio::error::operation_aborted) {
+                            spdlog::warn("[PostIngestQueue] {} capability wait error: {}",
+                                         cfg.stageName, e.what());
+                        }
+                    }
+                } else {
+                    timer.expires_after(std::chrono::milliseconds(250));
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
                 continue;
             }
 

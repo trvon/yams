@@ -584,6 +584,32 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         stopAndResetQueue(queue);
     }
 
+    SECTION("Stop wakes title-inactive poller promptly") {
+        auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                       nullptr, &coordinator, nullptr, 32);
+        queue->start();
+
+        auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        REQUIRE(queue->started());
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+        const auto stopStart = std::chrono::steady_clock::now();
+        queue->stop();
+        const auto stopElapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                  stopStart);
+
+        INFO("stopElapsedMs=" << stopElapsed.count());
+        CHECK((stopElapsed < std::chrono::milliseconds(150)));
+        CHECK_FALSE(queue->started());
+
+        queue.reset();
+    }
+
     SECTION("Queue shutdown drains pending tasks") {
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                        nullptr, &coordinator, nullptr, 32);
@@ -781,17 +807,17 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == docs.size());
-    REQUIRE(queue->failed() == 0);
+    REQUIRE((queue->processed() == docs.size()));
+    REQUIRE((queue->failed() == 0));
 
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
-    REQUIRE(insertedDocIds.size() == docs.size());
+    REQUIRE((insertedDocIds.size() == docs.size()));
 
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-            insertedDocIds.end());
+    REQUIRE((std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
+             insertedDocIds.end()));
     for (int i = 0; i < kDocCount; ++i) {
-        REQUIRE(insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i);
+        REQUIRE((insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i));
     }
 
     stopAndResetQueue(queue);
@@ -849,14 +875,14 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == kDocCount);
-    REQUIRE(queue->failed() == 0);
+    REQUIRE((queue->processed() == kDocCount));
+    REQUIRE((queue->failed() == 0));
 
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
-    REQUIRE(insertedDocIds.size() == static_cast<std::size_t>(kDocCount));
+    REQUIRE((insertedDocIds.size() == static_cast<std::size_t>(kDocCount)));
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-            insertedDocIds.end());
+    REQUIRE((std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
+             insertedDocIds.end()));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -912,9 +938,9 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == kDocCount);
-    REQUIRE(queue->failed() == 0);
-    REQUIRE(metadataRepo->maxBatchWriteSize() > 1);
+    REQUIRE((queue->processed() == kDocCount));
+    REQUIRE((queue->failed() == 0));
+    REQUIRE((metadataRepo->maxBatchWriteSize() > 1));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -944,7 +970,7 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
     queue->stop();
     producer.join();
 
-    CHECK(logs.str().find("enqueueBatch waiting on full channel") == std::string::npos);
+    CHECK((logs.str().find("enqueueBatch waiting on full channel") == std::string::npos));
 }
 
 // =============================================================================
@@ -1019,9 +1045,9 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        REQUIRE(static_cast<int>(pq->processed()) == expected);
-        REQUIRE(pq->failed() == 0);
-        REQUIRE(pq->entityInFlight() == 0);
+        REQUIRE((static_cast<int>(pq->processed()) == expected));
+        REQUIRE((pq->failed() == 0));
+        REQUIRE((pq->entityInFlight() == 0));
 
         stopAndResetQueue(pq);
     }
@@ -1091,7 +1117,7 @@ TEST_CASE("InternalEventBus: MPMC queue correctness under concurrent load",
             t.join();
         }
 
-        REQUIRE(produced.load() == kProducers * kPerProducer);
-        REQUIRE(consumed.load() == kProducers * kPerProducer);
+        REQUIRE((produced.load() == kProducers * kPerProducer));
+        REQUIRE((consumed.load() == kProducers * kPerProducer));
     }
 }
