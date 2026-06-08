@@ -138,6 +138,16 @@ Graph guidance:
 - For blast-radius review, start with `--explore` on changed files, then raw `--name`/`--node-key` traversal with relation filters for precise caller/include context.
 - If graph exploration fails or returns stale/noisy context, say so and fall back to local reads or LSP navigation.
 
+### 1b) Engineering Quality Gate
+
+For C++ / systems implementation, do not jump straight from discovery to edits:
+
+- identify the smallest observable behavior and seam to test
+- write a failing behavior or characterization test before production changes
+- use assertions for invariants only, not recoverable runtime failures
+- refactor only while tests stay green
+- profile before optimizing: define workload/KPI, baseline, change one thing, re-measure
+
 ### 2) Start Work (Index Baseline + Claim)
 
 ```bash

@@ -60,9 +60,8 @@ void drainPostIngestChannel() {
 }
 
 void drainEmbedJobsChannel() {
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-            "embed_jobs", 2048);
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+        "embed_jobs", 2048);
     InternalEventBus::EmbedJob drain;
     while (channel->try_pop(drain)) {
     }
@@ -939,8 +938,7 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
     tasks.push_back(PostIngestQueue::Task{"log-test-hash-1", "text/plain"});
     tasks.push_back(PostIngestQueue::Task{"log-test-hash-2", "text/plain"});
 
-    std::thread producer(
-        [&queue, tasks]() mutable { queue->enqueueBatch(tasks); });
+    std::thread producer([&queue, tasks]() mutable { queue->enqueueBatch(tasks); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(350));
     queue->stop();

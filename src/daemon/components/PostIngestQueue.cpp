@@ -3356,8 +3356,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
         auto result = prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                           stageCfg.symbolExtensionMap,
-                                           stageCfg.entityProviders);
+                                           stageCfg.symbolExtensionMap, stageCfg.entityProviders);
         if (task.noEmbeddings && std::holds_alternative<PreparedMetadataEntry>(result)) {
             auto& prepared = std::get<PreparedMetadataEntry>(result);
             prepared.shouldDispatchEmbed = false;

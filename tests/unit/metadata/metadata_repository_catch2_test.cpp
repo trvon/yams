@@ -3766,12 +3766,11 @@ TEST_CASE("MetadataWriteFacade: fallback path batches writes until flush",
     auto insert = repository->insertDocument(doc);
     REQUIRE((insert.has_value()));
     const auto docId = insert.value();
-    REQUIRE((repository
-                 ->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
+    REQUIRE((repository->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
                  .has_value()));
-    REQUIRE((repository
-                 ->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, RepairStatus::Completed)
-                 .has_value()));
+    REQUIRE(
+        (repository->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, RepairStatus::Completed)
+             .has_value()));
 
     yams::daemon::MetadataWriteFacade facade(nullptr, repository.get());
     facade.setMetadata(docId, "title", MetadataValue(std::string("title-1")));

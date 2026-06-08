@@ -84,8 +84,7 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
         try {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-            if (const std::string env = getenvCopy("YAMS_SHUTDOWN_FORCE_EXIT_MS");
-                !env.empty()) {
+            if (const std::string env = getenvCopy("YAMS_SHUTDOWN_FORCE_EXIT_MS"); !env.empty()) {
                 try {
                     int parsed = std::stoi(env);
                     if (parsed <= 0) {
@@ -116,31 +115,30 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
 
             if (!inTestMode) {
                 if (timeoutMs > 0) {
-                    watchdog =
-                        std::thread([timeoutMs, &shutdownComplete, &watchdogMutex, &watchdogCv]() {
-                            auto deadline = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(timeoutMs);
-                            std::unique_lock<std::mutex> lock(watchdogMutex);
-                            watchdogCv.wait_until(lock, deadline, [&]() {
-                                return shutdownComplete.load(std::memory_order_acquire);
-                            });
-                            if (shutdownComplete.load(std::memory_order_acquire)) {
-                                return;
-                            }
-                            try {
-                                spdlog::error("Shutdown exceeded {}ms; forcing process exit",
-                                              timeoutMs);
-                            } catch (...) {
-                                std::fprintf(stderr,
-                                             "Shutdown exceeded %dms; forcing process exit\n",
-                                             timeoutMs);
-                                std::fflush(stderr);
-                            }
-#if !defined(_WIN32)
-                            raise(SIGKILL);
-#endif
-                            std::_Exit(1);
+                    watchdog = std::thread([timeoutMs, &shutdownComplete, &watchdogMutex,
+                                            &watchdogCv]() {
+                        auto deadline =
+                            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+                        std::unique_lock<std::mutex> lock(watchdogMutex);
+                        watchdogCv.wait_until(lock, deadline, [&]() {
+                            return shutdownComplete.load(std::memory_order_acquire);
                         });
+                        if (shutdownComplete.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                        try {
+                            spdlog::error("Shutdown exceeded {}ms; forcing process exit",
+                                          timeoutMs);
+                        } catch (...) {
+                            std::fprintf(stderr, "Shutdown exceeded %dms; forcing process exit\n",
+                                         timeoutMs);
+                            std::fflush(stderr);
+                        }
+#if !defined(_WIN32)
+                        raise(SIGKILL);
+#endif
+                        std::_Exit(1);
+                    });
                 }
             }
 

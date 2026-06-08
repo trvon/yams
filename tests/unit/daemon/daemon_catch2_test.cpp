@@ -378,8 +378,7 @@ TEST_CASE_METHOD(DaemonFixture,
                  "[daemon][lifecycle][shutdown-request][budget]") {
     SKIP_ON_WINDOWS();
 
-    yams::test::ScopedEnvVar shutdownBudget("YAMS_SHUTDOWN_FORCE_EXIT_MS",
-                                            std::string("1000"));
+    yams::test::ScopedEnvVar shutdownBudget("YAMS_SHUTDOWN_FORCE_EXIT_MS", std::string("1000"));
 
     daemon_ = std::make_unique<YamsDaemon>(config_);
 

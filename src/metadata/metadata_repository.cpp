@@ -717,26 +717,25 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             0, std::min(bodySpace, prepared.sanitizedContent.size())));
     }
 
-    auto result =
-        executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
-            // Track counter deltas per attempt. executeQueryOnPool may retry the lambda
-            // after lock/constraint races; deltas from failed attempts must not leak into
-            // the final cache update.
-            BatchContentDelta delta;
-            delta.indexedDocIds.reserve(preparedEntries.size());
-            YAMS_TRY(beginTransaction(db));
-            bool committed = false;
-            auto rollback = scope_exit([&] {
-                if (!committed) {
-                    rollbackIgnoringErrors(db);
-                }
-            });
+    auto result = executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
+        // Track counter deltas per attempt. executeQueryOnPool may retry the lambda
+        // after lock/constraint races; deltas from failed attempts must not leak into
+        // the final cache update.
+        BatchContentDelta delta;
+        delta.indexedDocIds.reserve(preparedEntries.size());
+        YAMS_TRY(beginTransaction(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
 
-            // Check if FTS5 is available once
-            YAMS_TRY_UNWRAP(hasFts5, db.hasFTS5());
+        // Check if FTS5 is available once
+        YAMS_TRY_UNWRAP(hasFts5, db.hasFTS5());
 
-            // Prepare cached statements for reuse
-            YAMS_TRY_UNWRAP(contentStmtResult, db.prepareCached(R"(
+        // Prepare cached statements for reuse
+        YAMS_TRY_UNWRAP(contentStmtResult, db.prepareCached(R"(
                 INSERT INTO document_content (
                     document_id, content_text, content_length,
                     extraction_method, language
@@ -747,34 +746,34 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     extraction_method = excluded.extraction_method,
                     language = excluded.language
             )"));
-            auto& contentStmt = *contentStmtResult;
+        auto& contentStmt = *contentStmtResult;
 
-            std::optional<CachedStatement> ftsStmtOpt;
-            if (hasFts5) {
-                YAMS_TRY_UNWRAP(ftsStmtResult, db.prepareCached(R"(
+        std::optional<CachedStatement> ftsStmtOpt;
+        if (hasFts5) {
+            YAMS_TRY_UNWRAP(ftsStmtResult, db.prepareCached(R"(
                     INSERT OR REPLACE INTO documents_fts (rowid, content, title)
                     VALUES (?, ?, ?)
                 )"));
-                ftsStmtOpt = std::move(ftsStmtResult);
-            }
+            ftsStmtOpt = std::move(ftsStmtResult);
+        }
 
-            // Pre-check statement to determine counter increments before the combined UPDATE.
-            YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
+        // Pre-check statement to determine counter increments before the combined UPDATE.
+        YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
                 SELECT COALESCE(content_extracted, 0),
                        CASE WHEN EXISTS(
                            SELECT 1 FROM documents_fts WHERE rowid = documents.id
                        ) THEN 1 ELSE 0 END
                 FROM documents WHERE id = ?
             )"
-                                                                      : R"(
+                                                                  : R"(
                 SELECT COALESCE(content_extracted, 0), 0
                 FROM documents WHERE id = ?
             )"));
-            auto& checkStmt = *checkStmtResult;
+        auto& checkStmt = *checkStmtResult;
 
-            // Combined UPDATE: sets all extraction fields in a single statement
-            // (replaces 3 separate conditional UPDATEs per document).
-            YAMS_TRY_UNWRAP(combinedStmtResult, db.prepareCached(R"(
+        // Combined UPDATE: sets all extraction fields in a single statement
+        // (replaces 3 separate conditional UPDATEs per document).
+        YAMS_TRY_UNWRAP(combinedStmtResult, db.prepareCached(R"(
                 UPDATE documents
                 SET content_extracted = 1,
                     extraction_status = 'Success',
@@ -784,70 +783,70 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     repair_attempts = repair_attempts + 1
                 WHERE id = ?
             )"));
-            auto& combinedStmt = *combinedStmtResult;
+        auto& combinedStmt = *combinedStmtResult;
 
-            for (const auto& entry : preparedEntries) {
-                bool wasExtracted = entry.priorContentExtracted;
-                // Without FTS5 there is no documents_fts state to reconcile, so avoid
-                // double-counting "indexed" documents in non-FTS builds.
-                bool wasIndexed = !hasFts5;
-                if (!entry.priorStateKnown || hasFts5) {
-                    YAMS_TRY(checkStmt.reset());
-                    YAMS_TRY(checkStmt.clearBindings());
-                    YAMS_TRY(checkStmt.bind(1, entry.documentId));
-                    auto checkStep = checkStmt.step();
-                    if (!checkStep) {
-                        return checkStep.error();
-                    }
-                    if (checkStep.value()) {
-                        wasExtracted = checkStmt.getInt(0) == 1;
-                        wasIndexed = checkStmt.getInt(1) == 1;
-                    } else {
-                        // Post-ingest work can race with document deletion or duplicate-content
-                        // resolution. Do not create orphan content/FTS rows or advance counters
-                        // for a document row that no longer exists.
-                        spdlog::debug("MetadataRepository: skipping stale batch content entry for "
-                                      "missing document id {}",
-                                      entry.documentId);
-                        continue;
-                    }
+        for (const auto& entry : preparedEntries) {
+            bool wasExtracted = entry.priorContentExtracted;
+            // Without FTS5 there is no documents_fts state to reconcile, so avoid
+            // double-counting "indexed" documents in non-FTS builds.
+            bool wasIndexed = !hasFts5;
+            if (!entry.priorStateKnown || hasFts5) {
+                YAMS_TRY(checkStmt.reset());
+                YAMS_TRY(checkStmt.clearBindings());
+                YAMS_TRY(checkStmt.bind(1, entry.documentId));
+                auto checkStep = checkStmt.step();
+                if (!checkStep) {
+                    return checkStep.error();
                 }
-
-                YAMS_TRY(contentStmt.reset());
-                YAMS_TRY(contentStmt.clearBindings());
-                YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
-                                             static_cast<int64_t>(entry.sanitizedContent.length()),
-                                             entry.extractionMethod, entry.language));
-                YAMS_TRY(contentStmt.execute());
-
-                if (hasFts5 && ftsStmtOpt) {
-                    auto& ftsStmt = **ftsStmtOpt;
-                    YAMS_TRY(ftsStmt.reset());
-                    YAMS_TRY(ftsStmt.clearBindings());
-                    YAMS_TRY(ftsStmt.bindAll(entry.documentId, entry.boostedContent,
-                                             entry.sanitizedTitle));
-                    YAMS_TRY(ftsStmt.execute());
-                    delta.indexedDocIds.push_back(entry.documentId);
-                }
-
-                YAMS_TRY(combinedStmt.reset());
-                YAMS_TRY(combinedStmt.clearBindings());
-                YAMS_TRY(combinedStmt.bind(1, entry.documentId));
-                YAMS_TRY(combinedStmt.execute());
-                if (!wasExtracted) {
-                    delta.newlyExtracted++;
-                }
-                if (!wasIndexed) {
-                    delta.newlyIndexed++;
+                if (checkStep.value()) {
+                    wasExtracted = checkStmt.getInt(0) == 1;
+                    wasIndexed = checkStmt.getInt(1) == 1;
+                } else {
+                    // Post-ingest work can race with document deletion or duplicate-content
+                    // resolution. Do not create orphan content/FTS rows or advance counters
+                    // for a document row that no longer exists.
+                    spdlog::debug("MetadataRepository: skipping stale batch content entry for "
+                                  "missing document id {}",
+                                  entry.documentId);
+                    continue;
                 }
             }
 
-            YAMS_TRY(commitOrRollback(db));
-            committed = true;
-            rollback.dismiss();
+            YAMS_TRY(contentStmt.reset());
+            YAMS_TRY(contentStmt.clearBindings());
+            YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
+                                         static_cast<int64_t>(entry.sanitizedContent.length()),
+                                         entry.extractionMethod, entry.language));
+            YAMS_TRY(contentStmt.execute());
 
-            return delta;
-        });
+            if (hasFts5 && ftsStmtOpt) {
+                auto& ftsStmt = **ftsStmtOpt;
+                YAMS_TRY(ftsStmt.reset());
+                YAMS_TRY(ftsStmt.clearBindings());
+                YAMS_TRY(
+                    ftsStmt.bindAll(entry.documentId, entry.boostedContent, entry.sanitizedTitle));
+                YAMS_TRY(ftsStmt.execute());
+                delta.indexedDocIds.push_back(entry.documentId);
+            }
+
+            YAMS_TRY(combinedStmt.reset());
+            YAMS_TRY(combinedStmt.clearBindings());
+            YAMS_TRY(combinedStmt.bind(1, entry.documentId));
+            YAMS_TRY(combinedStmt.execute());
+            if (!wasExtracted) {
+                delta.newlyExtracted++;
+            }
+            if (!wasIndexed) {
+                delta.newlyIndexed++;
+            }
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        rollback.dismiss();
+
+        return delta;
+    });
 
     if (result) {
         invalidateQueryCache();

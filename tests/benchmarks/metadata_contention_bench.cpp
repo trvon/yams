@@ -64,11 +64,11 @@ using json = nlohmann::json;
 using namespace std::chrono_literals;
 using yams::metadata::BatchContentEntry;
 using yams::metadata::ConnectionPool;
-using yams::metadata::FeedbackEvent;
 using yams::metadata::ConnectionPoolConfig;
 using yams::metadata::ConnectionPriority;
 using yams::metadata::Database;
 using yams::metadata::DocumentInfo;
+using yams::metadata::FeedbackEvent;
 using yams::metadata::MetadataOpScope;
 using yams::metadata::MetadataRepository;
 using yams::metadata::MetadataValue;
@@ -525,16 +525,15 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     } else if (mode == 3) {
                         MetadataOpScope op("bench_insert_feedback_event");
                         FeedbackEvent event;
-                        event.eventId = "bench_event_" + std::to_string(writerId) + "_" +
-                                        std::to_string(seq);
+                        event.eventId =
+                            "bench_event_" + std::to_string(writerId) + "_" + std::to_string(seq);
                         event.traceId = "bench_trace_" + std::to_string(writerId % 3);
                         event.createdAt = std::chrono::floor<std::chrono::seconds>(
                             std::chrono::system_clock::now());
                         event.source = "bench";
                         event.eventType = "retrieval_served";
-                        event.payloadJson = std::string{"{\"writer\":"} +
-                                            std::to_string(writerId) + ",\"seq\":" +
-                                            std::to_string(seq) + "}";
+                        event.payloadJson = std::string{"{\"writer\":"} + std::to_string(writerId) +
+                                            ",\"seq\":" + std::to_string(seq) + "}";
                         auto result = repo.insertFeedbackEvent(event);
                         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                                             std::chrono::steady_clock::now() - t0)

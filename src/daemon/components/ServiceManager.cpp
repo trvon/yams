@@ -59,7 +59,6 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
-#include <yams/daemon/shutdown_budget.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -86,6 +85,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/topology/topology_factory.h>
 
 #include <yams/daemon/components/RepairService.h>
@@ -833,10 +833,9 @@ yams::Result<void> ServiceManager::initialize() {
         // Windows: use LOCALAPPDATA for user plugins
         if (const std::string localAppData = getenvCopy("LOCALAPPDATA"); !localAppData.empty())
             pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
-        else if (const std::string userProfile = getenvCopy("USERPROFILE");
-                 !userProfile.empty())
-            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" /
-                                 "yams" / "plugins");
+        else if (const std::string userProfile = getenvCopy("USERPROFILE"); !userProfile.empty())
+            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" /
+                                 "plugins");
 #else
         if (const std::string home = getenvCopy("HOME"); !home.empty())
             pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
@@ -1163,10 +1162,9 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
     if (workCoordinator_) {
         try {
-            const bool benchmarkFastShutdown = envPresentCopy("YAMS_BENCH_OPT_LOOP") ||
-                                               envPresentCopy("YAMS_BENCH_DATASET");
-            if (!workCoordinator_->joinWithTimeout(
-                    shutdown_budget::kWorkCoordinatorJoinTimeout)) {
+            const bool benchmarkFastShutdown =
+                envPresentCopy("YAMS_BENCH_OPT_LOOP") || envPresentCopy("YAMS_BENCH_DATASET");
+            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
@@ -2125,8 +2123,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Session watcher is opt-in: it should not run by default in daemon mode.
     // Enable explicitly via `YAMS_ENABLE_SESSION_WATCHER=1`.
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-    const bool enableSessionWatcher =
-        isTruthy(getenvCopy("YAMS_ENABLE_SESSION_WATCHER").c_str());
+    const bool enableSessionWatcher = isTruthy(getenvCopy("YAMS_ENABLE_SESSION_WATCHER").c_str());
     if (!enableSessionWatcher) {
         spdlog::info("[ServiceManager] Session watcher disabled (default); set "
                      "YAMS_ENABLE_SESSION_WATCHER=1 to enable");
