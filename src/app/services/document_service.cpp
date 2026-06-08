@@ -2409,6 +2409,7 @@ public:
             }
 
             if (!metadataEntries.empty()) {
+                metadata::MetadataOpScope metadataScope("app_document_update_metadata");
                 auto metadataResult = ctx_.metadataRepo->setMetadataBatch(metadataEntries);
                 if (!metadataResult) {
                     return Error{ErrorCode::InternalError, "Failed to apply metadata batch: " +

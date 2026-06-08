@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <functional>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1041,21 +1040,18 @@ private:
         // IMPORTANT: std::this_thread::sleep_for() blocks the calling worker thread,
         // so aggressive retries cause system-wide starvation when all WorkCoordinator
         // threads are sleeping in retry loops simultaneously.
-        // Read path: rarely encounters locks (WAL + read_uncommitted), so few retries.
-        // Write path: moderate retries for genuine contention.
-        const int kMaxRetries = (route == "read") ? 3 : 5;
-        constexpr int kBaseDelayMs = 25;
-        constexpr int kMaxDelayMs = 500;
 
         // Thread-local RNG for jitter to avoid thundering herd
         thread_local std::mt19937 rng(std::random_device{}());
 
         const std::string_view opTag = current_metadata_op();
+        const auto retryPolicy =
+            storage::sqlite_retry::metadataRepositoryQueryRetryPolicy(route, opTag);
         const ConnectionPriority priority = (route == "read" && opTag.starts_with("client_"))
                                                 ? ConnectionPriority::High
                                                 : ConnectionPriority::Normal;
 
-        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
             const auto attemptStart = std::chrono::steady_clock::now();
             const auto acquireStart = attemptStart;
             auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority, opTag);
@@ -1144,7 +1140,7 @@ private:
             bool isRetryable = isLockError || result.error().message.find("constraint failed") !=
                                                   std::string::npos;
 
-            if (!isRetryable || attempt == kMaxRetries - 1) {
+            if (!isRetryable || attempt == retryPolicy.maxRetries - 1) {
                 // Non-retryable error or final attempt - report and return error
                 if (isLockError) {
                     daemon::TuneAdvisor::reportDbLockError();
@@ -1163,8 +1159,9 @@ private:
                 return Error{result.error()};
             }
 
-            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
-            int baseDelayMs = std::min(kBaseDelayMs * (1 << attempt), kMaxDelayMs);
+            // Exponential backoff with jitter (±25%), capped per operation.
+            int baseDelayMs =
+                std::min(retryPolicy.baseDelayMs * (1 << attempt), retryPolicy.maxDelayMs);
             int jitter = static_cast<int>(baseDelayMs * 0.25);
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);
