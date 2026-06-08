@@ -263,6 +263,58 @@ TEST_CASE("MetadataRepository insertDocumentWithMetadata preserves cached counte
     CHECK_FALSE(persisted.value().has_value());
 }
 
+TEST_CASE("MetadataRepository insertDocumentWithMetadata does not amplify lock retries",
+          "[unit][metadata][repository][metadata][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_insert_with_metadata_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto heldConnResult = lockerPool->acquire();
+    REQUIRE((heldConnResult.has_value()));
+    auto heldConn = std::move(heldConnResult.value());
+    REQUIRE(((*heldConn)->execute("BEGIN IMMEDIATE").has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/corpus/locked-insert-note.md",
+                                    "locked-insert-with-metadata-hash");
+    std::vector<std::pair<std::string, MetadataValue>> metadata = {
+        {"tag:topic", MetadataValue("locked")},
+        {"title", MetadataValue("Locked insert")},
+        {"title", MetadataValue("Locked insert newest")}};
+
+    const auto start = std::chrono::steady_clock::now();
+    auto insert = repository->insertDocumentWithMetadata(doc, metadata, nullptr);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE(insert.has_value());
+    CHECK((insert.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn)->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 TEST_CASE("MetadataRepository deleteDocumentsBatch keeps cached counters and tag stats aligned",
           "[unit][metadata][repository][metadata][corpus-stats][crud]") {
     MetadataRepositoryFixture fix;
