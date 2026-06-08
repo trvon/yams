@@ -21,6 +21,13 @@
 - [ ] Docs updated (README/docs/*)
 - [ ] Stability note updated (if interfaces change)
 
+## AI usage
+- [ ] No AI used
+- [ ] AI used in an assistive role only, and I manually reviewed the full change
+- [ ] If AI was used, I disclosed the use and can explain every part of this PR
+
+> Please do not submit fully or predominantly AI-generated changes.
+
 ## Links
 - Related tickets:
 
