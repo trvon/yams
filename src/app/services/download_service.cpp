@@ -13,7 +13,16 @@ namespace fs = std::filesystem;
 namespace yams::app::services {
 
 namespace {
-constexpr size_t kMaxIndexedDownloadTextBytes = 16 * 1024 * 1024;
+constexpr std::size_t kMaxIndexedDownloadTextBytes = std::size_t{16} * 1024 * 1024;
+
+std::string getenvCopy(std::string_view key) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(std::string(key).c_str())) { // NOLINT(concurrency-mt-unsafe)
+        return value;
+    }
+    return {};
+}
 }
 
 class DownloadServiceImpl : public IDownloadService {
@@ -34,9 +43,9 @@ public:
         // Initialize download manager once with proper config
         // Get storage path from content store or environment
         fs::path storagePath;
-        if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
+        if (const std::string storageEnv = getenvCopy("YAMS_STORAGE"); !storageEnv.empty()) {
             storagePath = fs::path(storageEnv);
-        } else if (const char* homeEnv = std::getenv("HOME")) {
+        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
             storagePath = fs::path(homeEnv) / "yams";
         } else {
             storagePath = fs::current_path() / "yams";
@@ -55,7 +64,7 @@ public:
         spdlog::debug("Staging directory: {}", storageCfg_.stagingDir.string());
 
         dlCfg_.defaultConcurrency = 4;
-        dlCfg_.defaultChunkSizeBytes = 8 * 1024 * 1024;
+        dlCfg_.defaultChunkSizeBytes = std::size_t{8} * 1024 * 1024;
         dlCfg_.defaultTimeout = std::chrono::milliseconds(60000);
         dlCfg_.followRedirects = true;
         dlCfg_.resume = true;
@@ -173,7 +182,10 @@ public:
                                     detection::FileTypeDetector::getMimeTypeFromExtension(
                                         docInfo.fileExtension);
                             }
+                        } catch (const std::exception& ex) {
+                            spdlog::debug("DownloadService: MIME sniff failed: {}", ex.what());
                         } catch (...) {
+                            spdlog::debug("DownloadService: MIME sniff failed with unknown error");
                         }
                         if (docInfo.mimeType.empty()) {
                             docInfo.mimeType = "application/octet-stream";
@@ -196,6 +208,8 @@ public:
                             const auto metadataEntries =
                                 buildDownloadMetadataEntries(docId, req, finalResult);
                             if (!metadataEntries.empty()) {
+                                metadata::MetadataOpScope metadataScope(
+                                    "app_download_metadata_burst");
                                 auto metadataResult =
                                     ctx_.metadataRepo->setMetadataBatch(metadataEntries);
                                 if (!metadataResult) {
@@ -231,7 +245,12 @@ public:
                                     textLike =
                                         detection::FileTypeDetector::instance().isTextMimeType(
                                             docInfo.mimeType);
+                                } catch (const std::exception& ex) {
+                                    spdlog::debug("DownloadService: text MIME probe failed: {}",
+                                                  ex.what());
                                 } catch (...) {
+                                    spdlog::debug(
+                                        "DownloadService: text MIME probe failed with unknown error");
                                 }
 
                                 (void)ctx_.metadataRepo->updateDocumentExtractionStatus(

@@ -38,8 +38,7 @@ TEST_CASE("SQLite retry policy bounds exponential retry attempts", "[storage][sq
 #endif
 }
 
-TEST_CASE("SQLite retry policy tunes document update metadata bursts",
-          "[storage][sqlite][retry]") {
+TEST_CASE("SQLite retry policy tunes document update metadata bursts", "[storage][sqlite][retry]") {
     using namespace yams::storage::sqlite_retry;
 
     const auto readPolicy = metadataRepositoryQueryRetryPolicy("read", "client_search");
@@ -58,4 +57,10 @@ TEST_CASE("SQLite retry policy tunes document update metadata bursts",
     CHECK((documentUpdatePolicy.maxRetries == 7));
     CHECK((documentUpdatePolicy.baseDelayMs == 10));
     CHECK((documentUpdatePolicy.maxDelayMs == 200));
+
+    const auto downloadMetadataPolicy =
+        metadataRepositoryQueryRetryPolicy("write", "app_download_metadata_burst");
+    CHECK((downloadMetadataPolicy.maxRetries == 1));
+    CHECK((downloadMetadataPolicy.baseDelayMs == 10));
+    CHECK((downloadMetadataPolicy.maxDelayMs == 10));
 }
