@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <filesystem>
+#include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/detection/file_type_detector.h>
@@ -188,89 +189,20 @@ public:
                         auto ins = ctx_.metadataRepo->insertDocument(docInfo);
                         if (ins) {
                             const int64_t docId = ins.value();
+                            YAMS_DCHECK(docId > 0,
+                                        "download ingest should only batch metadata for persisted "
+                                        "documents");
 
-                            // Core provenance metadata
-                            ctx_.metadataRepo->setMetadata(
-                                docId, "source_url", metadata::MetadataValue(finalResult.url));
-                            if (finalResult.etag) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "etag", metadata::MetadataValue(*finalResult.etag));
-                            }
-                            if (finalResult.lastModified) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "last_modified",
-                                    metadata::MetadataValue(*finalResult.lastModified));
-                            }
-                            // Surface content type and suggested filename when available
-                            if (finalResult.contentType) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "content_type",
-                                    metadata::MetadataValue(*finalResult.contentType));
-                            }
-                            if (finalResult.suggestedName) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "suggested_name",
-                                    metadata::MetadataValue(*finalResult.suggestedName));
-                            }
-                            if (finalResult.httpStatus) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "http_status",
-                                    metadata::MetadataValue(
-                                        std::to_string(*finalResult.httpStatus)));
-                            }
-                            if (finalResult.checksumOk) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "checksum_ok",
-                                    metadata::MetadataValue(*finalResult.checksumOk ? "true"
-                                                                                    : "false"));
-                            }
-
-                            // Apply user-provided tags and metadata first
-                            for (const auto& t : req.tags) {
-                                if (!t.empty())
-                                    ctx_.metadataRepo->setMetadata(docId, "tag",
-                                                                   metadata::MetadataValue(t));
-                            }
-                            for (const auto& [k, v] : req.metadata) {
-                                if (!k.empty())
-                                    ctx_.metadataRepo->setMetadata(docId, k,
-                                                                   metadata::MetadataValue(v));
-                            }
-
-                            // Derive and index helper tags for discoverability
-                            // downloaded, host:..., scheme:...
-                            ctx_.metadataRepo->setMetadata(docId, "tag",
-                                                           metadata::MetadataValue("downloaded"));
-                            // parse host/scheme from URL
-                            try {
-                                std::string scheme, host;
-                                const std::string& u = finalResult.url;
-                                auto pos = u.find("://");
-                                if (pos != std::string::npos) {
-                                    scheme = u.substr(0, pos);
-                                    auto rest = u.substr(pos + 3);
-                                    auto slash = rest.find('/');
-                                    host =
-                                        (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                            const auto metadataEntries =
+                                buildDownloadMetadataEntries(docId, req, finalResult);
+                            if (!metadataEntries.empty()) {
+                                auto metadataResult =
+                                    ctx_.metadataRepo->setMetadataBatch(metadataEntries);
+                                if (!metadataResult) {
+                                    spdlog::warn("DownloadService: Failed to batch downloaded "
+                                                 "document metadata: {}",
+                                                 metadataResult.error().message);
                                 }
-                                if (!host.empty()) {
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("host:" + host));
-                                }
-                                if (!scheme.empty()) {
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("scheme:" + scheme));
-                                }
-                                if (finalResult.httpStatus) {
-                                    int code = *finalResult.httpStatus;
-                                    std::string bucket = (code >= 200 && code < 300)   ? "2xx"
-                                                         : (code >= 400 && code < 500) ? "4xx"
-                                                                                       : "5xx";
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("status:" + bucket));
-                                }
-                            } catch (...) {
-                                // best-effort tag derivation
                             }
 
                             auto extractedText = extraction::util::extractDocumentText(

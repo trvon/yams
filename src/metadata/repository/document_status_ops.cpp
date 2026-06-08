@@ -21,6 +21,7 @@
 
 namespace yams::metadata {
 
+using repository::beginTransaction;
 using repository::beginTransactionWithRetry;
 using repository::commitOrRollback;
 using repository::rollbackIgnoringErrors;
@@ -541,8 +542,100 @@ Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t document
                                                                 bool contentExtracted,
                                                                 ExtractionStatus status,
                                                                 const std::string& error) {
-    return batchUpdateDocumentExtractionStatuses(
-        {ExtractionStatusUpdate{documentId, contentExtracted, status, error}});
+    YAMS_DCHECK(documentId != 0, "extraction status update should not target document id 0");
+    if (documentId < 0) {
+        return Result<void>();
+    }
+
+    struct ExtractionDelta {
+        std::uint64_t newlyExtracted = 0;
+        std::uint64_t newlyUnextracted = 0;
+        std::uint64_t rowsUpdated = 0;
+    };
+
+    const std::string statusStr = ExtractionStatusUtils::toString(status);
+    auto result = executeQuery<ExtractionDelta>([&](Database& db) -> Result<ExtractionDelta> {
+        // Keep retry ownership at executeQueryOnPool so singleton extraction updates do not
+        // stack inner BEGIN retry/backoff with the outer write retry loop.
+        YAMS_TRY(beginTransaction(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        ExtractionDelta delta;
+
+        YAMS_TRY_UNWRAP(deltaStmtResult, db.prepareCached(R"(
+            SELECT
+                COALESCE(SUM(CASE WHEN COALESCE(content_extracted, 0) = 0 AND ? = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN COALESCE(content_extracted, 0) = 1 AND ? = 0 THEN 1 ELSE 0 END), 0),
+                COUNT(*)
+            FROM documents
+            WHERE id = ?
+        )"));
+        auto& deltaStmt = *deltaStmtResult;
+        YAMS_TRY(deltaStmt.reset());
+        YAMS_TRY(deltaStmt.clearBindings());
+        YAMS_TRY(deltaStmt.bind(1, contentExtracted ? 1 : 0));
+        YAMS_TRY(deltaStmt.bind(2, contentExtracted ? 1 : 0));
+        YAMS_TRY(deltaStmt.bind(3, documentId));
+        YAMS_TRY_UNWRAP(deltaStep, deltaStmt.step());
+        YAMS_DCHECK(deltaStep, "singleton extraction delta query should always return one row");
+        if (deltaStep) {
+            delta.newlyExtracted = static_cast<std::uint64_t>(deltaStmt.getInt64(0));
+            delta.newlyUnextracted = static_cast<std::uint64_t>(deltaStmt.getInt64(1));
+            delta.rowsUpdated = static_cast<std::uint64_t>(deltaStmt.getInt64(2));
+        }
+
+        if (delta.rowsUpdated > 0) {
+            YAMS_TRY_UNWRAP(updateStmtResult, db.prepareCached(R"(
+                UPDATE documents
+                SET content_extracted = ?,
+                    extraction_status = ?,
+                    extraction_error = ?
+                WHERE id = ?
+            )"));
+            auto& updateStmt = *updateStmtResult;
+            YAMS_TRY(updateStmt.reset());
+            YAMS_TRY(updateStmt.clearBindings());
+            YAMS_TRY(updateStmt.bind(1, contentExtracted ? 1 : 0));
+            YAMS_TRY(updateStmt.bind(2, statusStr));
+            if (error.empty()) {
+                YAMS_TRY(updateStmt.bind(3, nullptr));
+            } else {
+                YAMS_TRY(updateStmt.bind(3, error));
+            }
+            YAMS_TRY(updateStmt.bind(4, documentId));
+            YAMS_TRY(updateStmt.execute());
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return delta;
+    });
+
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& delta = result.value();
+    if (delta.newlyExtracted > 0) {
+        cachedExtractedCount_.fetch_add(delta.newlyExtracted, std::memory_order_relaxed);
+    }
+    if (delta.newlyUnextracted > 0) {
+        core::saturating_sub(cachedExtractedCount_, delta.newlyUnextracted);
+    }
+    YAMS_DCHECK(cachedExtractedCount_.load(std::memory_order_relaxed) <=
+                    cachedDocumentCount_.load(std::memory_order_relaxed),
+                "metadata: extracted count must not exceed total document count after "
+                "extraction status update");
+    if (delta.rowsUpdated > 0) {
+        signalCorpusStatsStale();
+    }
+
+    return Result<void>();
 }
 
 Result<void> MetadataRepository::batchUpdateDocumentExtractionStatuses(
@@ -752,7 +845,9 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
 
     const std::string statusStr = RepairStatusUtils::toString(status);
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        YAMS_TRY(beginTransactionWithRetry(db));
+        // Keep retry ownership at executeQueryOnPool so one repair batch does not
+        // sleep both inside BEGIN retry/backoff and again in the outer write retry loop.
+        YAMS_TRY(beginTransaction(db));
         bool committed = false;
         auto rollback = scope_exit([&] {
             if (!committed) {

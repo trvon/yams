@@ -2332,6 +2332,11 @@ public:
             }
         }
 
+        YAMS_DCHECK(target.id > 0,
+                    "document metadata updates should target a persisted document id");
+
+        std::optional<std::string> pendingContentHash;
+
         // Handle content update if requested
         if (!req.newContent.empty() && ctx_.store) {
             std::istringstream contentStream(req.newContent);
@@ -2346,13 +2351,14 @@ public:
                     return Error{ErrorCode::InternalError,
                                  "Failed to update content: " + stored.error().message};
                 }
+            } else if (req.atomic) {
+                pendingContentHash = stored.value().contentHash;
             } else {
-                // Update the document's hash in metadata
                 auto updateHash = ctx_.metadataRepo->setMetadata(
                     target.id, "content_hash", metadata::MetadataValue(stored.value().contentHash));
                 if (updateHash) {
                     resp.contentUpdated = true;
-                    resp.hash = stored.value().contentHash; // Update to new hash
+                    resp.hash = stored.value().contentHash;
                 }
             }
         }
@@ -2360,74 +2366,103 @@ public:
         std::size_t count = 0;
         std::vector<std::string> errors;
 
-        // Apply metadata updates
-        for (const auto& [k, v] : req.keyValues) {
-            auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
-            if (!u) {
-                errors.push_back("Failed to update metadata: " + k);
-                if (req.atomic) {
-                    return Error{ErrorCode::InternalError, errors.back()};
-                }
-            } else {
-                count++;
-            }
-        }
-
-        // Apply pairs "k=v"
-        for (const auto& p : req.pairs) {
-            auto pos = p.find('=');
-            if (pos == std::string::npos)
-                continue;
-            std::string k = p.substr(0, pos);
-            std::string v = p.substr(pos + 1);
-            auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
-            if (!u) {
-                errors.push_back("Failed to update metadata: " + k);
-                if (req.atomic) {
-                    return Error{ErrorCode::InternalError, errors.back()};
-                }
-            } else {
-                count++;
-            }
-        }
-
-        // Handle tag additions (store tag name as value for consistent extraction/filtering)
-        for (const auto& tag : req.addTags) {
-            auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
-                                                    metadata::MetadataValue(tag));
-            if (!u) {
-                errors.push_back("Failed to add tag: " + tag);
-                if (req.atomic) {
-                    return Error{ErrorCode::InternalError, errors.back()};
-                }
-            } else {
-                resp.tagsAdded++;
-            }
-        }
-
-        // Handle tag removals (remove metadata entries with "tag:" prefix)
-        for (const auto& tag : req.removeTags) {
-            // Get current tags to verify it exists
+        std::unordered_set<std::string> currentTagSet;
+        if (!req.removeTags.empty()) {
             auto currentTags = ctx_.metadataRepo->getDocumentTags(target.id);
-            bool tagExists = false;
             if (currentTags) {
-                for (const auto& existingTag : currentTags.value()) {
-                    if (existingTag == tag) {
-                        tagExists = true;
-                        break;
-                    }
+                currentTagSet.insert(currentTags.value().begin(), currentTags.value().end());
+            }
+        }
+
+        if (req.atomic) {
+            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
+            metadataEntries.reserve(static_cast<std::size_t>(
+                req.keyValues.size() + req.pairs.size() + req.addTags.size() +
+                req.removeTags.size() + (pendingContentHash ? 1 : 0)));
+
+            if (pendingContentHash.has_value()) {
+                metadataEntries.emplace_back(target.id, "content_hash",
+                                             metadata::MetadataValue(*pendingContentHash));
+            }
+            for (const auto& [k, v] : req.keyValues) {
+                metadataEntries.emplace_back(target.id, k, metadata::MetadataValue(v));
+            }
+            for (const auto& p : req.pairs) {
+                auto pos = p.find('=');
+                if (pos == std::string::npos) {
+                    continue;
+                }
+                metadataEntries.emplace_back(target.id, p.substr(0, pos),
+                                             metadata::MetadataValue(p.substr(pos + 1)));
+                count++;
+            }
+            count += req.keyValues.size();
+            for (const auto& tag : req.addTags) {
+                metadataEntries.emplace_back(target.id, "tag:" + tag, metadata::MetadataValue(tag));
+            }
+            for (const auto& tag : req.removeTags) {
+                if (!currentTagSet.contains(tag)) {
+                    continue;
+                }
+                metadataEntries.emplace_back(target.id, "tag:" + tag, metadata::MetadataValue(""));
+                resp.tagsRemoved++;
+            }
+
+            if (!metadataEntries.empty()) {
+                auto metadataResult = ctx_.metadataRepo->setMetadataBatch(metadataEntries);
+                if (!metadataResult) {
+                    return Error{ErrorCode::InternalError, "Failed to apply metadata batch: " +
+                                                               metadataResult.error().message};
                 }
             }
 
-            if (tagExists) {
-                // Remove by setting to empty/null value (this typically removes the metadata entry)
+            resp.tagsAdded = req.addTags.size();
+            if (pendingContentHash.has_value()) {
+                resp.contentUpdated = true;
+                resp.hash = *pendingContentHash;
+            }
+        } else {
+            for (const auto& [k, v] : req.keyValues) {
+                auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
+                if (!u) {
+                    errors.push_back("Failed to update metadata: " + k);
+                } else {
+                    count++;
+                }
+            }
+
+            for (const auto& p : req.pairs) {
+                auto pos = p.find('=');
+                if (pos == std::string::npos)
+                    continue;
+                std::string k = p.substr(0, pos);
+                std::string v = p.substr(pos + 1);
+                auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
+                if (!u) {
+                    errors.push_back("Failed to update metadata: " + k);
+                } else {
+                    count++;
+                }
+            }
+
+            for (const auto& tag : req.addTags) {
+                auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
+                                                        metadata::MetadataValue(tag));
+                if (!u) {
+                    errors.push_back("Failed to add tag: " + tag);
+                } else {
+                    resp.tagsAdded++;
+                }
+            }
+
+            for (const auto& tag : req.removeTags) {
+                if (!currentTagSet.contains(tag)) {
+                    continue;
+                }
                 auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
                                                         metadata::MetadataValue(""));
                 if (!u) {
                     errors.push_back("Failed to remove tag: " + tag);
-                    if (req.atomic) {
-                        return Error{ErrorCode::InternalError, errors.back()};
-                    }
                 } else {
                     resp.tagsRemoved++;
                 }

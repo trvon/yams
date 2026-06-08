@@ -992,6 +992,28 @@ TEST_CASE("MetadataRepository: batch repair status update skips missing hashes a
     CHECK((afterB.value()->repairAttemptedAt.time_since_epoch().count() > 0));
 }
 
+TEST_CASE("MetadataRepository: batch repair status update preserves duplicate hash attempt counts",
+          "[unit][metadata][repository][repair]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/repair-duplicate.txt", "repair-duplicate-hash");
+    auto insert = fix.repository_->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    REQUIRE((fix.repository_
+                 ->batchUpdateDocumentRepairStatuses(
+                     {"repair-duplicate-hash", "repair-duplicate-hash", "repair-duplicate-hash"},
+                     RepairStatus::Processing)
+                 .has_value()));
+
+    auto after = fix.repository_->getDocument(insert.value());
+    REQUIRE((after.has_value()));
+    REQUIRE((after.value().has_value()));
+    CHECK((after.value()->repairStatus == RepairStatus::Processing));
+    CHECK((after.value()->repairAttempts == 3));
+    CHECK((after.value()->repairAttemptedAt.time_since_epoch().count() > 0));
+}
+
 TEST_CASE("MetadataRepository: batch repair status update does not stack retry loops under lock",
           "[unit][metadata][repository][repair][contention]") {
     const auto dbPath = tempDbPath("metadata_repo_repair_lock_");
@@ -2083,6 +2105,58 @@ TEST_CASE(
     auto stats = fix.repository_->getCorpusStats();
     REQUIRE((stats.has_value()));
     CHECK((stats.value().contentExtractedCount == 2));
+}
+
+TEST_CASE("MetadataRepository: single extraction status update does not amplify lock retries",
+          "[unit][metadata][repository][extraction][contention]") {
+    const auto dbPath = tempDbPath("metadata_repo_single_extraction_lock_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc =
+        makeDocumentWithPath("/tmp/single-extraction-lock.txt", "single-extraction-lock-hash");
+    doc.contentExtracted = false;
+    doc.extractionStatus = ExtractionStatus::Pending;
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = repository->updateDocumentExtractionStatus(
+        insert.value(), true, ExtractionStatus::Success, std::string{});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    REQUIRE_FALSE((result.has_value()));
+    CHECK((result.error().message.find("locked") != std::string::npos));
+    CHECK((elapsed < std::chrono::milliseconds(3000)));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("MetadataRepository: batch extraction status update does not amplify lock retries",
@@ -3804,6 +3878,84 @@ TEST_CASE("MetadataWriteFacade: fallback path batches writes until flush",
     CHECK((docAfterFlush.value()->repairStatus == RepairStatus::Pending));
     CHECK_FALSE((docAfterFlush.value()->contentExtracted));
 
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataWriteFacade: fallback flush retains pending writes after a transient lock",
+          "[unit][daemon][metadata-write-facade][fallback][contention]") {
+    const auto dbPath = tempDbPath("metadata_write_facade_retry_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+
+    ConnectionPoolConfig lockerCfg;
+    lockerCfg.minConnections = 1;
+    lockerCfg.maxConnections = 1;
+    lockerCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto lockerPool = std::make_unique<ConnectionPool>(dbPath.string(), lockerCfg);
+    REQUIRE((lockerPool->initialize().has_value()));
+
+    auto doc = makeDocumentWithPath("/tmp/facade-fallback-retry.txt", "facade-fallback-retry-hash");
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+    const auto docId = insert.value();
+    REQUIRE((repository->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
+                 .has_value()));
+    REQUIRE(
+        (repository->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, RepairStatus::Completed)
+             .has_value()));
+
+    yams::daemon::MetadataWriteFacade facade(nullptr, repository.get());
+    facade.setMetadata(docId, "title", MetadataValue(std::string("title-after-retry")));
+    facade.updateExtractionStatus(docId, false, ExtractionStatus::Pending,
+                                  "retry after lock clears");
+    facade.updateRepairStatus({doc.sha256Hash}, RepairStatus::Pending);
+
+    auto heldConn = lockerPool->acquire();
+    REQUIRE((heldConn.has_value()));
+    REQUIRE(((*heldConn.value())->execute("BEGIN IMMEDIATE").has_value()));
+
+    facade.flush();
+
+    auto metadataDuringLock = repository->getMetadata(docId, "title");
+    REQUIRE((metadataDuringLock.has_value()));
+    CHECK_FALSE((metadataDuringLock.value().has_value()));
+
+    auto docDuringLock = repository->getDocument(docId);
+    REQUIRE((docDuringLock.has_value()));
+    REQUIRE((docDuringLock.value().has_value()));
+    CHECK((docDuringLock.value()->extractionStatus == ExtractionStatus::Success));
+    CHECK((docDuringLock.value()->repairStatus == RepairStatus::Completed));
+    CHECK((docDuringLock.value()->contentExtracted));
+
+    REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
+
+    facade.flush();
+
+    auto metadataAfterRetry = repository->getMetadata(docId, "title");
+    REQUIRE((metadataAfterRetry.has_value()));
+    REQUIRE((metadataAfterRetry.value().has_value()));
+    CHECK((metadataAfterRetry.value()->asString() == "title-after-retry"));
+
+    auto docAfterRetry = repository->getDocument(docId);
+    REQUIRE((docAfterRetry.has_value()));
+    REQUIRE((docAfterRetry.value().has_value()));
+    CHECK((docAfterRetry.value()->extractionStatus == ExtractionStatus::Pending));
+    CHECK((docAfterRetry.value()->repairStatus == RepairStatus::Pending));
+    CHECK_FALSE((docAfterRetry.value()->contentExtracted));
+
+    lockerPool->shutdown();
+    lockerPool.reset();
     repository.reset();
     repoPool->shutdown();
     repoPool.reset();

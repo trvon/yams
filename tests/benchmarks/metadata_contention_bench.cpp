@@ -28,6 +28,10 @@
 //   YAMS_BENCH_EXTERNAL_LOCK_EVERY_MS- Period between injected lock attempts (default: 250)
 //   YAMS_BENCH_OUTPUT                - JSONL output path (default:
 //                                      bench_results/metadata_contention.jsonl)
+//   YAMS_BENCH_WRITE_MODE            - mixed|insert_document|metadata_single|metadata_batch|
+//                                      batch_content|feedback_event|repair_status|
+//                                      extraction_status|download_metadata_burst|
+//                                      document_update_burst (default: mixed)
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -53,6 +57,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include "../common/test_helpers_catch2.h"
+#include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -94,6 +99,8 @@ struct BenchConfig {
     int externalLockHoldMs{2500};
     int externalLockEveryMs{250};
     std::string outputPath{"bench_results/metadata_contention.jsonl"};
+    int writeMode{-1};
+    std::string writeModeName{"mixed"};
 };
 
 struct OpStats {
@@ -107,7 +114,10 @@ struct OpStats {
 struct WorkerStats {
     OpStats writes;
     OpStats insertWrites;
+    OpStats metadataSingleWrites;
     OpStats metadataBatchWrites;
+    OpStats downloadMetadataWrites;
+    OpStats documentUpdateWrites;
     OpStats batchContentWrites;
     OpStats feedbackWrites;
     OpStats repairWrites;
@@ -157,6 +167,37 @@ bool readBoolEnv(const char* name, bool fallback) {
     return fallback;
 }
 
+std::pair<int, std::string> readWriteModeEnv() {
+    const char* val = std::getenv("YAMS_BENCH_WRITE_MODE");
+    if (!val || !*val) {
+        return {-1, "mixed"};
+    }
+    std::string s(val);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (s == "mixed")
+        return {-1, "mixed"};
+    if (s == "insert_document")
+        return {0, s};
+    if (s == "metadata_batch")
+        return {1, s};
+    if (s == "batch_content")
+        return {2, s};
+    if (s == "feedback_event")
+        return {3, s};
+    if (s == "repair_status")
+        return {4, s};
+    if (s == "extraction_status")
+        return {5, s};
+    if (s == "metadata_single")
+        return {6, s};
+    if (s == "download_metadata_burst")
+        return {7, s};
+    if (s == "document_update_burst")
+        return {8, s};
+    return {-1, "mixed"};
+}
+
 BenchConfig loadConfig() {
     BenchConfig cfg;
     cfg.seedDocs = readIntEnv("YAMS_BENCH_SEED_DOCS", 2000, 100, 200000);
@@ -178,6 +219,9 @@ BenchConfig loadConfig() {
     if (const char* out = std::getenv("YAMS_BENCH_OUTPUT"); out && *out) {
         cfg.outputPath = out;
     }
+    auto [writeMode, writeModeName] = readWriteModeEnv();
+    cfg.writeMode = writeMode;
+    cfg.writeModeName = std::move(writeModeName);
     return cfg;
 }
 
@@ -266,7 +310,10 @@ void mergeOpStats(OpStats& dst, const OpStats& src) {
 void mergeWorkerStats(WorkerStats& dst, const WorkerStats& src) {
     mergeOpStats(dst.writes, src.writes);
     mergeOpStats(dst.insertWrites, src.insertWrites);
+    mergeOpStats(dst.metadataSingleWrites, src.metadataSingleWrites);
     mergeOpStats(dst.metadataBatchWrites, src.metadataBatchWrites);
+    mergeOpStats(dst.downloadMetadataWrites, src.downloadMetadataWrites);
+    mergeOpStats(dst.documentUpdateWrites, src.documentUpdateWrites);
     mergeOpStats(dst.batchContentWrites, src.batchContentWrites);
     mergeOpStats(dst.feedbackWrites, src.feedbackWrites);
     mergeOpStats(dst.repairWrites, src.repairWrites);
@@ -351,6 +398,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
     spdlog::info("  externalLocker:     {}", cfg.externalLocker);
     spdlog::info("  externalLockHoldMs: {}", cfg.externalLockHoldMs);
     spdlog::info("  externalLockEveryMs:{}", cfg.externalLockEveryMs);
+    spdlog::info("  writeMode:          {}", cfg.writeModeName);
     spdlog::info("  output:             {}", cfg.outputPath);
 
     for (int rep = 0; rep < cfg.repeat; ++rep) {
@@ -424,9 +472,11 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         }
 
         const auto walBefore = walBytes(dbPath);
-        const auto start = std::chrono::steady_clock::now();
-        const auto deadline = start + std::chrono::seconds(cfg.runtimeSeconds);
+        std::chrono::steady_clock::time_point start;
+        std::chrono::steady_clock::time_point deadline;
         std::atomic<bool> stop{false};
+        std::atomic<bool> runStarted{false};
+        std::atomic<int> readyWorkers{0};
 
         WorkerStats aggregate;
         std::mutex aggregateMutex;
@@ -436,15 +486,24 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
             static_cast<size_t>(cfg.longReaders) + (cfg.checkpointEveryMs > 0 ? 1U : 0U) +
             (cfg.externalLocker ? 1U : 0U);
         threads.reserve(reservedThreads);
+        const int expectedWorkers = static_cast<int>(reservedThreads);
+        auto waitForRunStart = [&]() {
+            readyWorkers.fetch_add(1, std::memory_order_release);
+            while (!runStarted.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(1ms);
+            }
+        };
 
         for (int writerId = 0; writerId < cfg.writerThreads; ++writerId) {
             threads.emplace_back([&, writerId]() {
                 WorkerStats local;
                 uint64_t seq = 0;
+                waitForRunStart();
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     const auto t0 = std::chrono::steady_clock::now();
-                    const auto mode = seq % 6;
+                    const auto mode =
+                        cfg.writeMode >= 0 ? cfg.writeMode : static_cast<int>(seq % 6);
                     if (mode == 0) {
                         MetadataOpScope op("bench_insert_document_with_metadata");
                         auto doc = makeDocument(root, writerId, seq);
@@ -570,6 +629,87 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                                    result ? std::nullopt
                                           : std::optional<std::string_view>(result.error().message),
                                    us);
+                    } else if (mode == 6) {
+                        MetadataOpScope op("bench_set_metadata_single");
+                        const auto idx = static_cast<size_t>(
+                            (seq + static_cast<uint64_t>(writerId) * 37) % docIds.size());
+                        auto result =
+                            repo.setMetadata(docIds[idx], "hot_single_" + std::to_string(seq % 4),
+                                             MetadataValue("single_" + std::to_string(writerId) +
+                                                           "_" + std::to_string(seq)));
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.metadataSingleWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                    } else if (mode == 7) {
+                        MetadataOpScope op("bench_download_metadata_burst");
+                        const auto idx = static_cast<size_t>(
+                            (seq + static_cast<uint64_t>(writerId) * 41) % docIds.size());
+
+                        yams::app::services::DownloadServiceRequest request;
+                        request.tags = {"bench-user-tag", "bench-user-tag-2"};
+                        request.metadata = {{"custom_key", "bench_value_" + std::to_string(seq)}};
+
+                        yams::downloader::FinalResult downloadResult;
+                        downloadResult.url = "https://bench.example.test/files/" +
+                                             std::to_string(writerId) + "/" + std::to_string(seq) +
+                                             ".txt";
+                        downloadResult.httpStatus = 200;
+                        downloadResult.etag =
+                            "etag_" + std::to_string(writerId) + "_" + std::to_string(seq);
+                        downloadResult.lastModified = "Mon, 01 Jan 2024 00:00:00 GMT";
+                        downloadResult.checksumOk = true;
+                        downloadResult.contentType = "text/plain";
+                        downloadResult.suggestedName = "bench-file.txt";
+
+                        auto result = repo.setMetadataBatch(
+                            buildDownloadMetadataEntries(docIds[idx], request, downloadResult));
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.downloadMetadataWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                    } else if (mode == 8) {
+                        MetadataOpScope op("bench_document_update_burst");
+                        const auto idx = static_cast<size_t>(
+                            (seq + static_cast<uint64_t>(writerId) * 43) % docIds.size());
+                        std::vector<std::tuple<int64_t, std::string, MetadataValue>> entries;
+                        entries.reserve(5);
+                        entries.emplace_back(docIds[idx], "author",
+                                             MetadataValue("author_" + std::to_string(writerId)));
+                        entries.emplace_back(docIds[idx], "topic",
+                                             MetadataValue("topic_" + std::to_string(seq)));
+                        entries.emplace_back(docIds[idx], "topic",
+                                             MetadataValue("topic_final_" + std::to_string(seq)));
+                        entries.emplace_back(docIds[idx], "tag:bench-tag-a",
+                                             MetadataValue("bench-tag-a"));
+                        entries.emplace_back(docIds[idx], "tag:bench-tag-b",
+                                             MetadataValue("bench-tag-b"));
+                        auto result = repo.setMetadataBatch(entries);
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.documentUpdateWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
                     } else {
                         MetadataOpScope op("bench_update_extraction_status");
                         const auto idx = static_cast<size_t>(
@@ -603,6 +743,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
             threads.emplace_back([&, readerId]() {
                 WorkerStats local;
                 uint64_t seq = static_cast<uint64_t>(readerId) * 101;
+                waitForRunStart();
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     const auto t0 = std::chrono::steady_clock::now();
@@ -659,6 +800,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         for (int longReaderId = 0; longReaderId < cfg.longReaders; ++longReaderId) {
             threads.emplace_back([&, longReaderId]() {
                 WorkerStats local;
+                waitForRunStart();
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     const auto t0 = std::chrono::steady_clock::now();
@@ -740,11 +882,13 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         if (cfg.externalLocker) {
             threads.emplace_back([&]() {
                 WorkerStats local;
+                waitForRunStart();
+                auto nextLockAttempt = start + std::chrono::milliseconds(cfg.externalLockEveryMs);
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
                     if (cfg.externalLockEveryMs > 0) {
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(cfg.externalLockEveryMs));
+                        std::this_thread::sleep_until(nextLockAttempt);
+                        nextLockAttempt += std::chrono::milliseconds(cfg.externalLockEveryMs);
                     }
                     if (stop.load(std::memory_order_relaxed) ||
                         std::chrono::steady_clock::now() >= deadline) {
@@ -806,9 +950,12 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         if (cfg.checkpointEveryMs > 0) {
             threads.emplace_back([&]() {
                 WorkerStats local;
+                waitForRunStart();
+                auto nextCheckpoint = start + std::chrono::milliseconds(cfg.checkpointEveryMs);
                 while (!stop.load(std::memory_order_relaxed) &&
                        std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(cfg.checkpointEveryMs));
+                    std::this_thread::sleep_until(nextCheckpoint);
+                    nextCheckpoint += std::chrono::milliseconds(cfg.checkpointEveryMs);
                     if (stop.load(std::memory_order_relaxed) ||
                         std::chrono::steady_clock::now() >= deadline) {
                         break;
@@ -829,13 +976,22 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
             });
         }
 
+        while (readyWorkers.load(std::memory_order_acquire) < expectedWorkers) {
+            std::this_thread::sleep_for(1ms);
+        }
+        start = std::chrono::steady_clock::now();
+        deadline = start + std::chrono::seconds(cfg.runtimeSeconds);
+        runStarted.store(true, std::memory_order_release);
+
         for (auto& thread : threads) {
             thread.join();
         }
         stop.store(true, std::memory_order_relaxed);
 
-        const auto elapsedSeconds =
+        const auto totalWallSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const auto activeElapsedSeconds = std::chrono::duration<double>(deadline - start).count();
+        const auto cleanupTailSeconds = std::max(0.0, totalWallSeconds - activeElapsedSeconds);
         const auto walAfter = walBytes(dbPath);
         const auto writePoolStats = writePool.getStats();
         const auto readPoolStats =
@@ -843,6 +999,10 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
 
         INFO("write p95(us): " << latencyJson(aggregate.writes)["latency_p95_us"]);
         INFO("read p95(us): " << latencyJson(aggregate.reads)["latency_p95_us"]);
+        INFO("metadata-single lock errors: " << aggregate.metadataSingleWrites.lockErrors);
+        INFO("metadata-batch lock errors: " << aggregate.metadataBatchWrites.lockErrors);
+        INFO("download-metadata lock errors: " << aggregate.downloadMetadataWrites.lockErrors);
+        INFO("document-update lock errors: " << aggregate.documentUpdateWrites.lockErrors);
         INFO("content-index lock errors: " << aggregate.batchContentWrites.lockErrors);
         INFO("feedback lock errors: " << aggregate.feedbackWrites.lockErrors);
         INFO("repair lock errors: " << aggregate.repairWrites.lockErrors);
@@ -851,15 +1011,21 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         CHECK((aggregate.reads.success > 0));
         if (cfg.externalLocker) {
             CHECK((aggregate.externalLocks.success > 0));
-            CHECK((aggregate.writes.lockErrors > 0 || aggregate.batchContentWrites.lockErrors > 0 ||
-                   aggregate.feedbackWrites.lockErrors > 0 ||
-                   aggregate.repairWrites.lockErrors > 0 ||
-                   aggregate.extractionWrites.lockErrors > 0));
+            CHECK(
+                (aggregate.writes.lockErrors > 0 || aggregate.metadataSingleWrites.lockErrors > 0 ||
+                 aggregate.metadataBatchWrites.lockErrors > 0 ||
+                 aggregate.downloadMetadataWrites.lockErrors > 0 ||
+                 aggregate.documentUpdateWrites.lockErrors > 0 ||
+                 aggregate.batchContentWrites.lockErrors > 0 ||
+                 aggregate.feedbackWrites.lockErrors > 0 || aggregate.repairWrites.lockErrors > 0 ||
+                 aggregate.extractionWrites.lockErrors > 0));
         }
 
         json record{{"timestamp", isoTimestamp()},
                     {"repeat", rep + 1},
-                    {"duration_seconds", elapsedSeconds},
+                    {"duration_seconds", activeElapsedSeconds},
+                    {"total_wall_seconds", totalWallSeconds},
+                    {"cleanup_tail_seconds", cleanupTailSeconds},
                     {"db_path", dbPath.string()},
                     {"dual_pool", cfg.dualPool},
                     {"seed_docs", cfg.seedDocs},
@@ -875,11 +1041,16 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"external_locker", cfg.externalLocker},
                     {"external_lock_hold_ms", cfg.externalLockHoldMs},
                     {"external_lock_every_ms", cfg.externalLockEveryMs},
+                    {"worker_start_barrier", true},
+                    {"write_mode", cfg.writeModeName},
                     {"wal_bytes_before", walBefore},
                     {"wal_bytes_after", walAfter},
                     {"writes", latencyJson(aggregate.writes)},
                     {"insert_document_writes", latencyJson(aggregate.insertWrites)},
+                    {"metadata_single_writes", latencyJson(aggregate.metadataSingleWrites)},
                     {"metadata_batch_writes", latencyJson(aggregate.metadataBatchWrites)},
+                    {"download_metadata_writes", latencyJson(aggregate.downloadMetadataWrites)},
+                    {"document_update_writes", latencyJson(aggregate.documentUpdateWrites)},
                     {"batch_content_writes", latencyJson(aggregate.batchContentWrites)},
                     {"feedback_event_writes", latencyJson(aggregate.feedbackWrites)},
                     {"repair_status_writes", latencyJson(aggregate.repairWrites)},
@@ -897,17 +1068,21 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
         appendJsonLine(cfg.outputPath, record);
 
         std::cout << "[metadata-contention] repeat=" << (rep + 1) << " writes/s="
-                  << (elapsedSeconds > 0.0
-                          ? static_cast<double>(aggregate.writes.success) / elapsedSeconds
+                  << (activeElapsedSeconds > 0.0
+                          ? static_cast<double>(aggregate.writes.success) / activeElapsedSeconds
                           : 0.0)
                   << " reads/s="
-                  << (elapsedSeconds > 0.0
-                          ? static_cast<double>(aggregate.reads.success) / elapsedSeconds
+                  << (activeElapsedSeconds > 0.0
+                          ? static_cast<double>(aggregate.reads.success) / activeElapsedSeconds
                           : 0.0)
                   << " write_p95_us="
                   << latencyJson(aggregate.writes)["latency_p95_us"].get<double>()
                   << " insert_lock_errors=" << aggregate.insertWrites.lockErrors
+                  << " metadata_single_lock_errors=" << aggregate.metadataSingleWrites.lockErrors
                   << " metadata_lock_errors=" << aggregate.metadataBatchWrites.lockErrors
+                  << " download_metadata_lock_errors="
+                  << aggregate.downloadMetadataWrites.lockErrors
+                  << " document_update_lock_errors=" << aggregate.documentUpdateWrites.lockErrors
                   << " batch_content_lock_errors=" << aggregate.batchContentWrites.lockErrors
                   << " feedback_lock_errors=" << aggregate.feedbackWrites.lockErrors
                   << " repair_lock_errors=" << aggregate.repairWrites.lockErrors
@@ -915,7 +1090,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                   << " read_p95_us=" << latencyJson(aggregate.reads)["latency_p95_us"].get<double>()
                   << " checkpoint_p95_us="
                   << latencyJson(aggregate.checkpoints)["latency_p95_us"].get<double>()
-                  << std::endl;
+                  << " cleanup_tail_s=" << cleanupTailSeconds << std::endl;
 
         if (externalLockPool) {
             externalLockPool->shutdown();

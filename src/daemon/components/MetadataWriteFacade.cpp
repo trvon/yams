@@ -19,6 +19,7 @@ MetadataWriteFacade::~MetadataWriteFacade() {
 
 void MetadataWriteFacade::setMetadata(int64_t docId, const std::string& key,
                                       metadata::MetadataValue value) {
+    YAMS_DCHECK(docId > 0, "metadata facade writes should target a persisted document id");
     if (wc_) {
         coalescer_.addOp(SetMetadataBatchOp{{{docId, key, std::move(value)}}}, wc_);
     } else {
@@ -29,6 +30,8 @@ void MetadataWriteFacade::setMetadata(int64_t docId, const std::string& key,
 void MetadataWriteFacade::updateExtractionStatus(int64_t docId, bool contentExtracted,
                                                  metadata::ExtractionStatus status,
                                                  const std::string& error) {
+    YAMS_DCHECK(docId > 0,
+                "metadata facade extraction updates should target a persisted document id");
     if (wc_) {
         coalescer_.addOp(UpdateExtractionStatusOp{docId, contentExtracted, status, error}, wc_);
     } else {
@@ -43,6 +46,10 @@ void MetadataWriteFacade::updateExtractionStatus(int64_t docId, bool contentExtr
 
 void MetadataWriteFacade::updateRepairStatus(const std::vector<std::string>& hashes,
                                              metadata::RepairStatus status) {
+    for (const auto& hash : hashes) {
+        YAMS_DCHECK(!hash.empty(),
+                    "metadata facade repair updates should target non-empty document hashes");
+    }
     if (wc_) {
         coalescer_.addOp(UpdateRepairStatusOp{hashes, status}, wc_);
         return;
@@ -63,17 +70,17 @@ void MetadataWriteFacade::flush() {
         coalescer_.flush(wc_);
         return;
     }
-    if (!repo_) {
-        return;
-    }
+
+    YAMS_ASSERT(repo_ != nullptr, "fallback metadata flush requires a repository");
 
     if (!pendingMetadata_.empty()) {
         auto result = repo_->setMetadataBatch(pendingMetadata_);
         if (!result) {
             spdlog::warn("[MetadataWriteFacade] fallback metadata batch flush failed: {}",
                          result.error().message);
+        } else {
+            pendingMetadata_.clear();
         }
-        pendingMetadata_.clear();
     }
 
     if (!pendingExtractionUpdates_.empty()) {
@@ -81,10 +88,13 @@ void MetadataWriteFacade::flush() {
         if (!result) {
             spdlog::warn("[MetadataWriteFacade] fallback extraction-status flush failed: {}",
                          result.error().message);
+        } else {
+            pendingExtractionUpdates_.clear();
         }
-        pendingExtractionUpdates_.clear();
     }
 
+    std::vector<UpdateRepairStatusOp> failedRepairStatusOps;
+    failedRepairStatusOps.reserve(pendingRepairStatusOps_.size());
     for (auto& op : pendingRepairStatusOps_) {
         if (op.hashes.empty()) {
             continue;
@@ -93,9 +103,10 @@ void MetadataWriteFacade::flush() {
         if (!result) {
             spdlog::warn("[MetadataWriteFacade] fallback repair-status flush failed: {}",
                          result.error().message);
+            failedRepairStatusOps.push_back(std::move(op));
         }
     }
-    pendingRepairStatusOps_.clear();
+    pendingRepairStatusOps_ = std::move(failedRepairStatusOps);
 }
 
 } // namespace yams::daemon

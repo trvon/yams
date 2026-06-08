@@ -2083,6 +2083,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  document_service_update_metadata_exe = executable('document_service_update_metadata',
+    files('unit/app/services/document_service_update_metadata_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   document_ingestion_batch_exe = executable('document_ingestion_batch',
     files('unit/app/services/document_ingestion_batch_catch2_test.cpp'),
     include_directories: incs,
@@ -2095,6 +2104,7 @@ if catch2_dep.found()
   service_utilities_exe = executable('service_utilities',
     files(
       'unit/app/services/service_utilities_test.cpp',
+      'unit/app/services/download_metadata_entries_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     include_directories: incs,
