@@ -1,10 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdlib>
-#include <optional>
 #include <string>
 #include <vector>
 
+#include "../../common/test_helpers_catch2.h"
 #include "src/metadata/repository/search_query_helpers.hpp"
 
 namespace yams::metadata {
@@ -14,33 +13,6 @@ void testingResetSearchQueryHelperCaches();
 } // namespace yams::metadata
 
 namespace {
-struct ScopedEnvVar {
-    explicit ScopedEnvVar(const char* key) : key_(key) {
-        if (const char* value = std::getenv(key_); value != nullptr) {
-            original_ = std::string(value);
-        }
-    }
-
-    ~ScopedEnvVar() {
-        if (original_.has_value()) {
-            setenv(key_, original_->c_str(), 1);
-        } else {
-            unsetenv(key_);
-        }
-    }
-
-    void set(const char* value) const {
-        REQUIRE((value != nullptr));
-        setenv(key_, value, 1);
-    }
-
-    void unset() const { unsetenv(key_); }
-
-private:
-    const char* key_;
-    std::optional<std::string> original_;
-};
-
 void resetSearchQueryHelperCaches() {
 #ifdef YAMS_TESTING
     yams::metadata::testingResetSearchQueryHelperCaches();
@@ -53,7 +25,7 @@ TEST_CASE("Search query helpers: parseFts5ModeEnv honors supported values",
     using yams::metadata::Fts5QueryMode;
     using yams::metadata::parseFts5ModeEnv;
 
-    ScopedEnvVar env("YAMS_FTS_MODE");
+    yams::test::ScopedEnvVar env("YAMS_FTS_MODE");
 
     SECTION("unset defaults to smart") {
         env.unset();
@@ -85,7 +57,7 @@ TEST_CASE("Search query helpers: includeSearchSnippets caches env-derived behavi
           "[unit][metadata][fts5][search-query-helpers]") {
     using yams::metadata::includeSearchSnippets;
 
-    ScopedEnvVar env("YAMS_SEARCH_INCLUDE_SNIPPET");
+    yams::test::ScopedEnvVar env("YAMS_SEARCH_INCLUDE_SNIPPET");
 
     SECTION("unset defaults to disabled") {
         env.unset();

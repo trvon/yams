@@ -105,8 +105,8 @@ TEST_CASE("Database: prepared statements", "[unit][metadata][database]") {
         auto execResult = insertStmt.execute();
         REQUIRE(execResult.has_value());
 
-        CHECK(db.lastInsertRowId() == 1);
-        CHECK(db.changes() == 1);
+        CHECK((db.lastInsertRowId() == 1));
+        CHECK((db.changes() == 1));
 
         SECTION("Query the inserted data") {
             auto selectStmtResult = db.prepare("SELECT * FROM test WHERE id = ?");
@@ -119,10 +119,34 @@ TEST_CASE("Database: prepared statements", "[unit][metadata][database]") {
             REQUIRE(stepResult.has_value());
             CHECK(stepResult.value());
 
-            CHECK(selectStmt.getInt(0) == 1);
-            CHECK(selectStmt.getString(1) == "Test1");
-            CHECK(selectStmt.getInt(2) == 42);
+            CHECK((selectStmt.getInt(0) == 1));
+            CHECK((selectStmt.getString(1) == "Test1"));
+            CHECK((selectStmt.getInt(2) == 42));
         }
+    }
+
+    SECTION("bindAll normalizes long long integers through the SQLite int64 path") {
+        auto insertStmtResult = db.prepare("INSERT INTO test (id, name, value) VALUES (?, ?, ?)");
+        REQUIRE(insertStmtResult.has_value());
+        Statement insertStmt = std::move(insertStmtResult).value();
+
+        const long long rowId = 922337203685477000LL;
+        const long long value = 922337203685477111LL;
+        auto bindResult = insertStmt.bindAll(rowId, "LongLong", value);
+        REQUIRE(bindResult.has_value());
+        REQUIRE(insertStmt.execute().has_value());
+
+        auto selectStmtResult = db.prepare("SELECT id, name, value FROM test WHERE id = ?");
+        REQUIRE(selectStmtResult.has_value());
+        Statement selectStmt = std::move(selectStmtResult).value();
+        REQUIRE(selectStmt.bindAll(rowId).has_value());
+
+        auto stepResult = selectStmt.step();
+        REQUIRE(stepResult.has_value());
+        REQUIRE(stepResult.value());
+        CHECK((selectStmt.getInt64(0) == static_cast<std::int64_t>(rowId)));
+        CHECK((selectStmt.getString(1) == "LongLong"));
+        CHECK((selectStmt.getInt64(2) == static_cast<std::int64_t>(value)));
     }
 }
 
@@ -148,7 +172,7 @@ TEST_CASE("Database: transactions", "[unit][metadata][database]") {
         REQUIRE(stmtResult.has_value());
         Statement stmt = std::move(stmtResult).value();
         stmt.step();
-        CHECK(stmt.getInt(0) == 2);
+        CHECK((stmt.getInt(0) == 2));
     }
 
     SECTION("Rollback transaction") {
@@ -168,7 +192,7 @@ TEST_CASE("Database: transactions", "[unit][metadata][database]") {
         REQUIRE(stmtResult.has_value());
         Statement stmt = std::move(stmtResult).value();
         stmt.step();
-        CHECK(stmt.getInt(0) == 2); // Still 2, not 3
+        CHECK((stmt.getInt(0) == 2)); // Still 2, not 3
     }
 }
 
@@ -185,7 +209,7 @@ TEST_CASE("Database: open enables WAL automatically for writable modes",
     auto stepResult = stmt.step();
     REQUIRE(stepResult.has_value());
     REQUIRE(stepResult.value());
-    CHECK(stmt.getString(0) == "wal");
+    CHECK((stmt.getString(0) == "wal"));
 }
 
 TEST_CASE("Database: WAL mode", "[unit][metadata][database]") {
@@ -206,7 +230,7 @@ TEST_CASE("Database: WAL mode", "[unit][metadata][database]") {
     REQUIRE(stepResult.has_value());
     CHECK(stepResult.value());
 
-    CHECK(stmt.getString(0) == "wal");
+    CHECK((stmt.getString(0) == "wal"));
 }
 
 TEST_CASE("Database: QueryBuilder", "[unit][metadata][database]") {
@@ -221,15 +245,15 @@ TEST_CASE("Database: QueryBuilder", "[unit][metadata][database]") {
                        .limit(10)
                        .build();
 
-        CHECK(sql == "SELECT id, name, value FROM users WHERE active = 1 AND age > ? ORDER BY "
-                     "name ASC LIMIT 10");
+        CHECK((sql == "SELECT id, name, value FROM users WHERE active = 1 AND age > ? ORDER BY "
+                      "name ASC LIMIT 10"));
     }
 
     SECTION("INSERT query") {
         qb.reset();
         auto sql = qb.insertInto("users").values({"name", "email", "age"}).build();
 
-        CHECK(sql == "INSERT INTO users (name, email, age) VALUES (?, ?, ?)");
+        CHECK((sql == "INSERT INTO users (name, email, age) VALUES (?, ?, ?)"));
     }
 
     SECTION("UPDATE query") {
@@ -240,7 +264,8 @@ TEST_CASE("Database: QueryBuilder", "[unit][metadata][database]") {
                        .where("id = ?")
                        .build();
 
-        CHECK(sql == "UPDATE users SET name = ?, updated_at = strftime('%s', 'now') WHERE id = ?");
+        CHECK(
+            (sql == "UPDATE users SET name = ?, updated_at = strftime('%s', 'now') WHERE id = ?"));
     }
 }
 
@@ -259,9 +284,9 @@ TEST_CASE("Database: ConnectionPool", "[unit][metadata][database]") {
 
     SECTION("Initial stats") {
         auto stats = pool.getStats();
-        CHECK(stats.totalConnections == 2);
-        CHECK(stats.availableConnections == 2);
-        CHECK(stats.activeConnections == 0);
+        CHECK((stats.totalConnections == 2));
+        CHECK((stats.availableConnections == 2));
+        CHECK((stats.activeConnections == 0));
     }
 
     SECTION("Acquire and release connection") {
@@ -277,16 +302,16 @@ TEST_CASE("Database: ConnectionPool", "[unit][metadata][database]") {
             REQUIRE(result.has_value());
 
             auto stats = pool.getStats();
-            CHECK(stats.activeConnections == 1);
+            CHECK((stats.activeConnections == 1));
             // Note: availableConnections may be >= 1 due to background maintenance thread
-            CHECK(stats.availableConnections >= 1);
+            CHECK((stats.availableConnections >= 1));
         }
 
         // Connection returned to pool
         auto stats = pool.getStats();
-        CHECK(stats.activeConnections == 0);
+        CHECK((stats.activeConnections == 0));
         // Note: availableConnections may be >= 2 due to background maintenance thread
-        CHECK(stats.availableConnections >= 2);
+        CHECK((stats.availableConnections >= 2));
     }
 
     pool.shutdown();
@@ -309,7 +334,7 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
     SECTION("Check current version before migration") {
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
-        CHECK(currentVersion.value() == 0);
+        CHECK((currentVersion.value() == 0));
     }
 
     SECTION("Check if migration needed") {
@@ -325,7 +350,7 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         const int latestAvailable = mm.getLatestVersion();
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
-        CHECK(currentVersion.value() == latestAvailable);
+        CHECK((currentVersion.value() == latestAvailable));
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");
@@ -375,7 +400,7 @@ TEST_CASE("Database: failed migration reports error", "[unit][metadata][database
 
     auto version = mm.getCurrentVersion();
     REQUIRE(version.has_value());
-    CHECK(version.value() == 0);
+    CHECK((version.value() == 0));
 }
 
 TEST_CASE("Database: migration rollback restores previous version", "[unit][metadata][database]") {
@@ -456,7 +481,7 @@ TEST_CASE("Database: Concurrent access", "[unit][metadata][database][.slow]") {
     });
 
     REQUIRE(result.has_value());
-    CHECK(result.value() == numThreads * incrementsPerThread);
+    CHECK((result.value() == numThreads * incrementsPerThread));
 }
 
 TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
@@ -492,9 +517,9 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         } // Statement returned to cache
 
         auto stats1 = db.getStatementCacheStats();
-        CHECK(stats1.misses == 1);
-        CHECK(stats1.hits == 0);
-        CHECK(stats1.currentSize == 1);
+        CHECK((stats1.misses == 1));
+        CHECK((stats1.hits == 0));
+        CHECK((stats1.currentSize == 1));
 
         // Second call - cache hit
         {
@@ -503,9 +528,9 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         }
 
         auto stats2 = db.getStatementCacheStats();
-        CHECK(stats2.misses == 1);
-        CHECK(stats2.hits == 1);
-        CHECK(stats2.currentSize == 1);
+        CHECK((stats2.misses == 1));
+        CHECK((stats2.hits == 1));
+        CHECK((stats2.currentSize == 1));
 
         // Third call - another cache hit
         {
@@ -514,7 +539,7 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         }
 
         auto stats3 = db.getStatementCacheStats();
-        CHECK(stats3.hits == 2);
+        CHECK((stats3.hits == 2));
     }
 
     SECTION("clearStatementCache clears cache and stats") {
@@ -529,9 +554,9 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         db.clearStatementCache();
 
         auto stats = db.getStatementCacheStats();
-        CHECK(stats.hits == 0);
-        CHECK(stats.misses == 0);
-        CHECK(stats.currentSize == 0);
+        CHECK((stats.hits == 0));
+        CHECK((stats.misses == 0));
+        CHECK((stats.currentSize == 0));
     }
 
     SECTION("CachedStatement can be released") {
@@ -541,8 +566,8 @@ TEST_CASE("Database: Statement cache", "[unit][metadata][database]") {
         Statement stmt = stmtResult.value().release();
         auto stepResult = stmt.step();
         REQUIRE(stepResult.has_value());
-        CHECK(stepResult.value() == true);
-        CHECK(stmt.getInt(0) == 1);
+        CHECK((stepResult.value() == true));
+        CHECK((stmt.getInt(0) == 1));
 
         // Statement won't be returned to cache since it was released
     }
@@ -599,12 +624,12 @@ TEST_CASE("Database: close clears statement cache", "[unit][metadata][database]"
     }
 
     auto stats = db.getStatementCacheStats();
-    CHECK(stats.currentSize > 0);
+    CHECK((stats.currentSize > 0));
 
     db.close();
 
     auto statsAfter = db.getStatementCacheStats();
-    CHECK(statsAfter.currentSize == 0);
+    CHECK((statsAfter.currentSize == 0));
 }
 
 TEST_CASE("Database: FTS5 integrity errors are not transient lock errors",
