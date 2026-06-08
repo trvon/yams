@@ -975,6 +975,9 @@ void PostIngestQueue::enqueue(Task t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     uint32_t waits = 0;
@@ -1005,20 +1008,25 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         InternalEventBus::PostIngestTask task;
         task.hash = std::move(t.hash);
         task.mime = std::move(t.mime);
+        task.documentId = t.documentId;
+        task.filePath = std::move(t.filePath);
+        task.noEmbeddings = t.noEmbeddings;
         busTasks.push_back(std::move(task));
     }
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     std::size_t next = 0;
     uint32_t waits = 0;
+    bool queuedAny = false;
     while (!stop_.load(std::memory_order_acquire) && next < busTasks.size()) {
         const std::size_t pushed = channel->try_push_many(busTasks, next);
         next += pushed;
+        queuedAny = queuedAny || (pushed > 0);
         if (next >= busTasks.size()) {
             break;
         }
         if (channel->push_wait(busTasks[next], kEnqueueTimeout)) {
-            TuningManager::notifyWakeup();
+            queuedAny = true;
             ++next;
             continue;
         }
@@ -1028,6 +1036,10 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
                 "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
                 busTasks.size() - next, waits);
         }
+    }
+    if (queuedAny) {
+        TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
 }
 
@@ -1051,10 +1063,14 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
     task.mime = t.mime;
+    task.documentId = t.documentId;
+    task.filePath = t.filePath;
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(task);
     if (pushed) {
         TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
     return pushed;
 }
@@ -1077,10 +1093,14 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(std::move(task));
     if (pushed) {
         TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
     return pushed;
 }
@@ -3335,8 +3355,14 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         const std::vector<std::string> emptyTags;
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
-        return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                    stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+        auto result = prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                           stageCfg.symbolExtensionMap,
+                                           stageCfg.entityProviders);
+        if (task.noEmbeddings && std::holds_alternative<PreparedMetadataEntry>(result)) {
+            auto& prepared = std::get<PreparedMetadataEntry>(result);
+            prepared.shouldDispatchEmbed = false;
+        }
+        return result;
     };
 
     // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
