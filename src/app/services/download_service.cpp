@@ -1,6 +1,9 @@
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
+#include <mutex>
+#include <string_view>
 #include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
