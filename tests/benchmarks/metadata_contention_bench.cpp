@@ -31,7 +31,8 @@
 //   YAMS_BENCH_WRITE_MODE            - mixed|insert_document|metadata_single|metadata_batch|
 //                                      batch_content|feedback_event|repair_status|
 //                                      extraction_status|download_metadata_burst|
-//                                      document_update_burst (default: mixed)
+//                                      document_update_burst|post_ingest_batch_content
+//                                      (default: mixed)
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -195,6 +196,8 @@ std::pair<int, std::string> readWriteModeEnv() {
         return {7, s};
     if (s == "document_update_burst")
         return {8, s};
+    if (s == "post_ingest_batch_content")
+        return {9, s};
     return {-1, "mixed"};
 }
 
@@ -707,6 +710,41 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                                           : std::optional<std::string_view>(result.error().message),
                                    us);
                         noteResult(local.documentUpdateWrites, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                    } else if (mode == 9) {
+                        MetadataOpScope op("daemon_post_ingest_batch_content");
+                        std::vector<BatchContentEntry> entries;
+                        entries.reserve(static_cast<size_t>(cfg.metadataBatchSize));
+                        for (int j = 0; j < cfg.metadataBatchSize; ++j) {
+                            const auto idx =
+                                static_cast<size_t>((seq + static_cast<uint64_t>(j) * 13 +
+                                                     static_cast<uint64_t>(writerId) * 23) %
+                                                    docIds.size());
+                            BatchContentEntry entry;
+                            entry.documentId = docIds[idx];
+                            entry.title = "bench title " + std::to_string(writerId) + "_" +
+                                          std::to_string(seq) + "_" + std::to_string(j);
+                            entry.contentText = "bench content body " + std::to_string(writerId) +
+                                                "_" + std::to_string(seq) + "_" + std::to_string(j);
+                            entry.mimeType = "text/plain";
+                            entry.extractionMethod = "bench";
+                            entry.language = "en";
+                            entry.priorStateKnown = true;
+                            entry.priorContentExtracted = true;
+                            entry.priorExtractionStatus = yams::metadata::ExtractionStatus::Success;
+                            entries.push_back(std::move(entry));
+                        }
+                        auto result = repo.batchInsertContentAndIndex(entries);
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                        noteResult(local.writes, result.has_value(),
+                                   result ? std::nullopt
+                                          : std::optional<std::string_view>(result.error().message),
+                                   us);
+                        noteResult(local.batchContentWrites, result.has_value(),
                                    result ? std::nullopt
                                           : std::optional<std::string_view>(result.error().message),
                                    us);

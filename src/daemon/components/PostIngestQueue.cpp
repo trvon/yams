@@ -3066,6 +3066,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
 
         const auto contentWriteStart = std::chrono::steady_clock::now();
+        metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
         recordTiming("commit_content_index", contentWriteStart);
         if (!batchResult) {
