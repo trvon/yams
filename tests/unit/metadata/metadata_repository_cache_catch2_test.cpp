@@ -3,8 +3,11 @@
 
 // Smoke test for path cache snapshot behavior via findDocumentByExactPath
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -61,17 +64,58 @@ TEST_CASE("MetadataRepositoryCache: repeated exact path hits cache", "[unit][met
     REQUIRE(first.has_value());
     REQUIRE(first.value().has_value());
     auto d1 = first.value().value();
-    CHECK(d1.filePath == "/cache/hit.md");
+    CHECK((d1.filePath == "/cache/hit.md"));
 
     // Second call should return same doc (served from cache path in repo)
     auto second = repo.findDocumentByExactPath("/cache/hit.md");
     REQUIRE(second.has_value());
     REQUIRE(second.value().has_value());
     auto d2 = second.value().value();
-    CHECK(d2.filePath == d1.filePath);
-    CHECK(d2.sha256Hash == d1.sha256Hash);
+    CHECK((d2.filePath == d1.filePath));
+    CHECK((d2.sha256Hash == d1.sha256Hash));
 
     // Cleanup
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepositoryCache: concurrent exact path lookups stay coherent",
+          "[unit][metadata][cache][concurrency]") {
+    auto dbPath = tempDbPath("repo_cache_concurrent_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+    MetadataRepository repo(pool);
+
+    auto id = repo.insertDocument(mk("/cache/concurrent.md", "HC"));
+    REQUIRE(id.has_value());
+
+    std::atomic<bool> start{false};
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+    threads.reserve(8);
+
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&]() {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int iter = 0; iter < 200; ++iter) {
+                auto result = repo.findDocumentByExactPath("/cache/concurrent.md");
+                if (!result || !result.value().has_value() || result.value()->sha256Hash != "HC") {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    CHECK((failures.load(std::memory_order_relaxed) == 0));
+
     pool.shutdown();
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);

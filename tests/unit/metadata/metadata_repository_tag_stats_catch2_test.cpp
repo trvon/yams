@@ -125,6 +125,63 @@ TEST_CASE("MetadataRepository tag writes refresh cached corpus stats",
     CHECK((removedStats.value().docsWithTags == 0));
 }
 
+TEST_CASE("MetadataRepository batch tag writes refresh cached corpus stats",
+          "[unit][metadata][repository][metadata][corpus-stats][batch]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/tag-batch-stats.txt", "tag-batch-stats-hash");
+    auto insert = fix.repository->insertDocument(doc);
+    REQUIRE(insert.has_value());
+    const int64_t docId = insert.value();
+
+    auto warmStats = fix.repository->getCorpusStats();
+    REQUIRE(warmStats.has_value());
+    CHECK((warmStats.value().tagCount == 0));
+    CHECK((warmStats.value().docsWithTags == 0));
+
+    std::vector<std::tuple<int64_t, std::string, MetadataValue>> entries = {
+        {docId, "tag:genre", MetadataValue("jazz")},
+        {docId, "tag:source", MetadataValue("import")},
+        {docId, "title", MetadataValue("Batch tag stats")},
+    };
+    REQUIRE(fix.repository->setMetadataBatch(entries).has_value());
+
+    auto stats = fix.repository->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK((stats.value().tagCount == 2));
+    CHECK((stats.value().docsWithTags == 1));
+}
+
+TEST_CASE("MetadataRepository batch tag overwrites keep cached corpus stats stable",
+          "[unit][metadata][repository][metadata][corpus-stats][batch]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/tag-batch-overwrite-stats.txt",
+                                    "tag-batch-overwrite-stats-hash");
+    auto insert = fix.repository->insertDocument(doc);
+    REQUIRE(insert.has_value());
+    const int64_t docId = insert.value();
+
+    REQUIRE(fix.repository->setMetadata(docId, "tag:genre", MetadataValue("jazz")).has_value());
+
+    std::vector<std::tuple<int64_t, std::string, MetadataValue>> entries = {
+        {docId, "tag:genre", MetadataValue("fusion")},
+        {docId, "tag:genre", MetadataValue("fusion-live")},
+        {docId, "title", MetadataValue("Batch tag overwrite")},
+    };
+    REQUIRE(fix.repository->setMetadataBatch(entries).has_value());
+
+    auto stats = fix.repository->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK((stats.value().tagCount == 1));
+    CHECK((stats.value().docsWithTags == 1));
+
+    auto stored = fix.repository->getMetadata(docId, "tag:genre");
+    REQUIRE(stored.has_value());
+    REQUIRE(stored.value().has_value());
+    CHECK((stored.value()->asString() == "fusion-live"));
+}
+
 TEST_CASE(
     "MetadataRepository insertDocumentWithMetadata refreshes cached tag stats for existing doc",
     "[unit][metadata][repository][metadata][corpus-stats]") {

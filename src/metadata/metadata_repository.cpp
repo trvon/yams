@@ -360,9 +360,20 @@ void MetadataRepository::storePathCache(const DocumentInfo& info) const {
     }
 }
 
+void MetadataRepository::ensurePathHitRingInitialized() const {
+    std::call_once(hitRingInitOnce_, [this]() {
+        constexpr std::size_t ringSize = 4096; // power of two
+        hitRing_ = std::make_unique<std::atomic<uint64_t>[]>(ringSize);
+        hitRingSize_ = ringSize;
+        hitRingMask_ = ringSize - 1;
+        for (std::size_t i = 0; i < ringSize; ++i) {
+            hitRing_[i].store(0, std::memory_order_relaxed);
+        }
+    });
+}
+
 void MetadataRepository::recordPathHit(const std::string& normalizedPath) const {
-    if (!hitRing_)
-        return; // not initialized until first store
+    ensurePathHitRingInitialized();
     uint64_t h = std::hash<std::string>{}(normalizedPath);
     auto idx = hitSeq_.fetch_add(1, std::memory_order_relaxed) & hitRingMask_;
     hitRing_[idx].store(h, std::memory_order_relaxed);
@@ -380,15 +391,7 @@ void MetadataRepository::flushPathCacheBuffer() const {
         pathCacheWriteBuffer_.size.store(0, std::memory_order_relaxed);
     }
 
-    if (!hitRing_) {
-        const std::size_t ringSize = 4096; // power of two
-        hitRing_.reset(new std::atomic<uint64_t>[ringSize]);
-        hitRingSize_ = ringSize;
-        for (std::size_t i = 0; i < ringSize; ++i) {
-            hitRing_[i].store(0, std::memory_order_relaxed);
-        }
-        hitRingMask_ = ringSize - 1;
-    }
+    ensurePathHitRingInitialized();
 
     auto old = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
     auto updated = std::make_shared<PathCacheSnapshot>(*old);

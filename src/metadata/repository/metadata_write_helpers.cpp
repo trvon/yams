@@ -76,33 +76,49 @@ deduplicateMetadataWrites(const std::vector<MetadataWriteEntry>& entries) {
     return deduped;
 }
 
-Result<MetadataTagDelta>
-calculateMetadataTagDeltaForUpsert(Database& db, const std::vector<MetadataWriteEntry>& entries) {
-    std::unordered_map<int64_t, std::vector<std::string>> pendingTagKeysByDoc;
+PendingTagKeysByDoc collectPendingTagKeysByDoc(const std::vector<MetadataWriteEntry>& entries) {
+    PendingTagKeysByDoc pendingTagKeysByDoc;
     for (const auto& [documentId, key, _value] : entries) {
         if (isTagMetadataKey(key)) {
             pendingTagKeysByDoc[documentId].push_back(key);
         }
     }
+    return pendingTagKeysByDoc;
+}
 
+Result<MetadataTagDelta>
+calculateMetadataTagDeltaForUpsert(Database& db, const std::vector<MetadataWriteEntry>& entries) {
+    return calculateMetadataTagDeltaForUpsert(db, collectPendingTagKeysByDoc(entries));
+}
+
+Result<MetadataTagDelta>
+calculateMetadataTagDeltaForUpsert(Database& db, const PendingTagKeysByDoc& pendingTagKeysByDoc) {
     MetadataTagDelta delta;
     if (pendingTagKeysByDoc.empty()) {
         return delta;
     }
 
-    YAMS_TRY_UNWRAP(tagCountStmt, db.prepareCached("SELECT COUNT(*) FROM metadata WHERE "
-                                                   "document_id = ? AND (key = 'tag' OR key "
-                                                   "LIKE 'tag:%')"));
-    YAMS_TRY_UNWRAP(keyExistsStmt, db.prepareCached("SELECT COUNT(*) FROM metadata WHERE "
-                                                    "document_id = ? AND key = ?"));
+    YAMS_TRY_UNWRAP(existingTagKeysStmt,
+                    db.prepareCached("SELECT key FROM metadata WHERE document_id = ? AND "
+                                     "(key = 'tag' OR key LIKE 'tag:%')"));
 
-    for (auto& [documentId, keys] : pendingTagKeysByDoc) {
-        auto& tcStmt = *tagCountStmt;
-        YAMS_TRY(tcStmt.reset());
-        YAMS_TRY(tcStmt.bind(1, documentId));
-        YAMS_TRY_UNWRAP(tagRow, tcStmt.step());
-        const auto priorTagCount = tagRow ? tcStmt.getInt64(0) : 0;
-        bool docWillGainFirstTag = priorTagCount == 0;
+    for (const auto& [documentId, keys] : pendingTagKeysByDoc) {
+        auto& existingStmt = *existingTagKeysStmt;
+        YAMS_TRY(existingStmt.reset());
+        YAMS_TRY(existingStmt.bind(1, documentId));
+
+        std::unordered_set<std::string> existingKeys;
+        existingKeys.reserve(keys.size());
+        while (true) {
+            YAMS_TRY_UNWRAP(hasRow, existingStmt.step());
+            if (!hasRow) {
+                break;
+            }
+            existingKeys.insert(existingStmt.getString(0));
+        }
+
+        const bool hadTagsBefore = !existingKeys.empty();
+        bool docWillGainFirstTag = !hadTagsBefore;
 
         std::unordered_set<std::string> seenKeys;
         seenKeys.reserve(keys.size());
@@ -110,14 +126,7 @@ calculateMetadataTagDeltaForUpsert(Database& db, const std::vector<MetadataWrite
             if (!seenKeys.insert(tagKey).second) {
                 continue;
             }
-
-            auto& keStmt = *keyExistsStmt;
-            YAMS_TRY(keStmt.reset());
-            YAMS_TRY(keStmt.bind(1, documentId));
-            YAMS_TRY(keStmt.bind(2, tagKey));
-            YAMS_TRY_UNWRAP(keyRow, keStmt.step());
-            const auto priorKeyCount = keyRow ? keStmt.getInt64(0) : 0;
-            if (priorKeyCount == 0) {
+            if (existingKeys.insert(tagKey).second) {
                 ++delta.tagCountDelta;
                 if (docWillGainFirstTag) {
                     ++delta.docsWithTagsDelta;
@@ -223,7 +232,13 @@ Result<void> upsertMetadataWrites(Database& db, const std::vector<MetadataWriteE
 
 Result<MetadataTagDelta>
 upsertMetadataWritesWithTagDelta(Database& db, const std::vector<MetadataWriteEntry>& entries) {
-    YAMS_TRY_UNWRAP(delta, calculateMetadataTagDeltaForUpsert(db, entries));
+    return upsertMetadataWritesWithTagDelta(db, entries, collectPendingTagKeysByDoc(entries));
+}
+
+Result<MetadataTagDelta>
+upsertMetadataWritesWithTagDelta(Database& db, const std::vector<MetadataWriteEntry>& entries,
+                                 const PendingTagKeysByDoc& pendingTagKeysByDoc) {
+    YAMS_TRY_UNWRAP(delta, calculateMetadataTagDeltaForUpsert(db, pendingTagKeysByDoc));
     YAMS_TRY(upsertMetadataWrites(db, entries));
     return delta;
 }

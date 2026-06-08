@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace yams {
@@ -26,17 +27,24 @@ struct MetadataTagDelta {
 };
 
 using MetadataWriteEntry = std::tuple<int64_t, std::string, MetadataValue>;
+using PendingTagKeysByDoc = std::unordered_map<int64_t, std::vector<std::string>>;
 
 bool isTagMetadataKey(std::string_view key);
 std::vector<MetadataWriteEntry>
 deduplicateMetadataWrites(const std::vector<MetadataWriteEntry>& entries);
+PendingTagKeysByDoc collectPendingTagKeysByDoc(const std::vector<MetadataWriteEntry>& entries);
 Result<MetadataTagDelta>
 calculateMetadataTagDeltaForUpsert(Database& db, const std::vector<MetadataWriteEntry>& entries);
+Result<MetadataTagDelta>
+calculateMetadataTagDeltaForUpsert(Database& db, const PendingTagKeysByDoc& pendingTagKeysByDoc);
 Result<MetadataTagDelta> calculateMetadataTagDeltaForDelete(Database& db, int64_t documentId,
                                                             std::string_view key);
 Result<void> upsertMetadataWrites(Database& db, const std::vector<MetadataWriteEntry>& entries);
 Result<MetadataTagDelta>
 upsertMetadataWritesWithTagDelta(Database& db, const std::vector<MetadataWriteEntry>& entries);
+Result<MetadataTagDelta> upsertMetadataWritesWithTagDelta(
+    Database& db, const std::vector<MetadataWriteEntry>& entries,
+    const PendingTagKeysByDoc& pendingTagKeysByDoc);
 
 } // namespace repository
 } // namespace yams::metadata

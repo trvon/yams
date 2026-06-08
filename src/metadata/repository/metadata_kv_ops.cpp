@@ -64,6 +64,7 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
                                              const MetadataValue& value) {
     std::vector<repository::MetadataWriteEntry> entries;
     entries.emplace_back(documentId, key, value);
+    const auto pendingTagKeysByDoc = repository::collectPendingTagKeysByDoc(entries);
 
     auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
         YAMS_TRY(beginTransactionWithRetry(db));
@@ -74,7 +75,8 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
             }
         });
 
-        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(db, entries));
+        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(
+                                   db, entries, pendingTagKeysByDoc));
         YAMS_TRY(commitOrRollback(db));
         committed = true;
         return delta;
@@ -98,6 +100,7 @@ Result<void> MetadataRepository::setMetadataBatch(
     }
 
     const auto dedupedEntries = repository::deduplicateMetadataWrites(entries);
+    const auto pendingTagKeysByDoc = repository::collectPendingTagKeysByDoc(dedupedEntries);
     auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
         YAMS_TRY(repository::beginTransaction(db));
         bool committed = false;
@@ -107,7 +110,8 @@ Result<void> MetadataRepository::setMetadataBatch(
             }
         });
 
-        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(db, dedupedEntries));
+        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(
+                                   db, dedupedEntries, pendingTagKeysByDoc));
         YAMS_TRY(repository::commitOrRollback(db));
         committed = true;
         return delta;

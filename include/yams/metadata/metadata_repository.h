@@ -978,6 +978,7 @@ private:
 
     // Approximate LRU hit recording (lock-free ring of path hashes)
     mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;
+    mutable std::once_flag hitRingInitOnce_{};
     mutable std::size_t hitRingSize_{0};
     mutable std::atomic<uint64_t> hitSeq_{0};
     mutable std::size_t hitRingMask_{0};
@@ -1016,6 +1017,7 @@ private:
     void storePathCache(const DocumentInfo& info) const;
     void flushPathCacheBuffer() const;
     void recordPathHit(const std::string& normalizedPath) const;
+    void ensurePathHitRingInitialized() const;
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
