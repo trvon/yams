@@ -42,7 +42,7 @@ inline constexpr QueryRetryPolicy metadataRepositoryQueryRetryPolicy(std::string
     // Download metadata fan-out is already best-effort at the service layer: a lock should not
     // hold the whole request hostage when the download and content ingest already succeeded.
     if (opTag.find("download_metadata") != std::string_view::npos) {
-        return {1, 10, 10};
+        return {2, 5, 10};
     }
 
     return {5, 25, 500};

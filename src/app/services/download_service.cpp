@@ -18,12 +18,13 @@ constexpr std::size_t kMaxIndexedDownloadTextBytes = std::size_t{16} * 1024 * 10
 std::string getenvCopy(std::string_view key) {
     static std::mutex envMutex;
     std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(std::string(key).c_str())) { // NOLINT(concurrency-mt-unsafe)
+    if (const char* value =
+            std::getenv(std::string(key).c_str())) { // NOLINT(concurrency-mt-unsafe)
         return value;
     }
     return {};
 }
-}
+} // namespace
 
 class DownloadServiceImpl : public IDownloadService {
 public:
@@ -208,6 +209,9 @@ public:
                             const auto metadataEntries =
                                 buildDownloadMetadataEntries(docId, req, finalResult);
                             if (!metadataEntries.empty()) {
+                                // Download metadata enrichments are advisory: if the DB is under
+                                // write contention, keep the successful download/ingest moving and
+                                // let the scoped retry policy bound how long we wait here.
                                 metadata::MetadataOpScope metadataScope(
                                     "app_download_metadata_burst");
                                 auto metadataResult =
@@ -249,8 +253,8 @@ public:
                                     spdlog::debug("DownloadService: text MIME probe failed: {}",
                                                   ex.what());
                                 } catch (...) {
-                                    spdlog::debug(
-                                        "DownloadService: text MIME probe failed with unknown error");
+                                    spdlog::debug("DownloadService: text MIME probe failed with "
+                                                  "unknown error");
                                 }
 
                                 (void)ctx_.metadataRepo->updateDocumentExtractionStatus(

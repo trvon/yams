@@ -60,7 +60,7 @@ TEST_CASE("SQLite retry policy tunes document update metadata bursts", "[storage
 
     const auto downloadMetadataPolicy =
         metadataRepositoryQueryRetryPolicy("write", "app_download_metadata_burst");
-    CHECK((downloadMetadataPolicy.maxRetries == 1));
-    CHECK((downloadMetadataPolicy.baseDelayMs == 10));
+    CHECK((downloadMetadataPolicy.maxRetries == 2));
+    CHECK((downloadMetadataPolicy.baseDelayMs == 5));
     CHECK((downloadMetadataPolicy.maxDelayMs == 10));
 }
