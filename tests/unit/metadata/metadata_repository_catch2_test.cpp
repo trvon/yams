@@ -14,6 +14,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <yams/common/utf8_utils.h>
+#include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
@@ -2572,7 +2573,7 @@ TEST_CASE("MetadataRepository: path tree upsert rolls back partial changes on fa
             return stmtResult.error();
         }
 
-        auto stmt = std::move(stmtResult).value();
+        auto stmt = std::move(stmtResult.value());
         if (auto bindDoc = stmt.bind(1, docId); !bindDoc) {
             return bindDoc.error();
         }
@@ -3094,7 +3095,7 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
         entry.priorStateKnown = true;
         entry.priorContentExtracted = false;
         entry.priorExtractionStatus = ExtractionStatus::Pending;
-        entries.push_back(std::move(entry));
+        entries.push_back(entry);
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
@@ -3172,7 +3173,7 @@ TEST_CASE("batchInsertContentAndIndex: updates warmed FTS indexed ID cache",
         entry.mimeType = "text/plain";
         entry.extractionMethod = "test";
         entry.language = "en";
-        entries.push_back(std::move(entry));
+        entries.push_back(entry);
     }
 
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
@@ -3720,7 +3721,7 @@ TEST_CASE("MetadataRepository: feedback event write does not wait for a busy poo
 
     auto heldConnResult = repoPool->acquire();
     REQUIRE((heldConnResult.has_value()));
-    auto heldConn = std::move(heldConnResult).value();
+    auto heldConn = std::move(heldConnResult.value());
 
     FeedbackEvent event;
     event.eventId = "feedback-busy-pool-event";
@@ -3742,6 +3743,68 @@ TEST_CASE("MetadataRepository: feedback event write does not wait for a busy poo
            result.error().message.find("Timeout acquiring connection") != std::string::npos));
 
     heldConn.reset();
+    repository.reset();
+    repoPool->shutdown();
+    repoPool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataWriteFacade: fallback path batches writes until flush",
+          "[unit][daemon][metadata-write-facade][fallback]") {
+    const auto dbPath = tempDbPath("metadata_write_facade_fallback_");
+
+    ConnectionPoolConfig repoCfg;
+    repoCfg.minConnections = 1;
+    repoCfg.maxConnections = 1;
+    repoCfg.busyTimeout = std::chrono::milliseconds(10);
+    auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
+    REQUIRE((repoPool->initialize().has_value()));
+
+    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto doc = makeDocumentWithPath("/tmp/facade-fallback.txt", "facade-fallback-hash");
+    auto insert = repository->insertDocument(doc);
+    REQUIRE((insert.has_value()));
+    const auto docId = insert.value();
+    REQUIRE((repository
+                 ->updateDocumentExtractionStatus(docId, true, ExtractionStatus::Success)
+                 .has_value()));
+    REQUIRE((repository
+                 ->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, RepairStatus::Completed)
+                 .has_value()));
+
+    yams::daemon::MetadataWriteFacade facade(nullptr, repository.get());
+    facade.setMetadata(docId, "title", MetadataValue(std::string("title-1")));
+    facade.setMetadata(docId, "title", MetadataValue(std::string("title-2")));
+    facade.updateExtractionStatus(docId, false, ExtractionStatus::Pending,
+                                  "reset by fallback facade");
+    facade.updateRepairStatus({doc.sha256Hash}, RepairStatus::Processing);
+    facade.updateRepairStatus({doc.sha256Hash}, RepairStatus::Pending);
+
+    auto metadataBeforeFlush = repository->getMetadata(docId, "title");
+    REQUIRE((metadataBeforeFlush.has_value()));
+    CHECK_FALSE((metadataBeforeFlush.value().has_value()));
+
+    auto docBeforeFlush = repository->getDocument(docId);
+    REQUIRE((docBeforeFlush.has_value()));
+    REQUIRE((docBeforeFlush.value().has_value()));
+    CHECK((docBeforeFlush.value()->extractionStatus == ExtractionStatus::Success));
+    CHECK((docBeforeFlush.value()->repairStatus == RepairStatus::Completed));
+
+    facade.flush();
+
+    auto metadataAfterFlush = repository->getMetadata(docId, "title");
+    REQUIRE((metadataAfterFlush.has_value()));
+    REQUIRE((metadataAfterFlush.value().has_value()));
+    CHECK((metadataAfterFlush.value()->asString() == "title-2"));
+
+    auto docAfterFlush = repository->getDocument(docId);
+    REQUIRE((docAfterFlush.has_value()));
+    REQUIRE((docAfterFlush.value().has_value()));
+    CHECK((docAfterFlush.value()->extractionStatus == ExtractionStatus::Pending));
+    CHECK((docAfterFlush.value()->repairStatus == RepairStatus::Pending));
+    CHECK_FALSE((docAfterFlush.value()->contentExtracted));
+
     repository.reset();
     repoPool->shutdown();
     repoPool.reset();
