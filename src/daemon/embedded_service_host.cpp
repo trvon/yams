@@ -194,9 +194,7 @@ public:
             ioContext_->stop();
         }
 
-#ifdef YAMS_TESTING
         emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase::BeforeThreadJoin);
-#endif
 
         for (auto& t : ioThreads_) {
             if (t.joinable()) {
@@ -206,9 +204,7 @@ public:
             }
         }
 
-#ifdef YAMS_TESTING
         emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin);
-#endif
 
         const bool hostThreadsJoined =
             std::none_of(ioThreads_.begin(), ioThreads_.end(),
@@ -246,14 +242,21 @@ public:
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
     StateComponent* getState() { return &state_; }
     IDaemonLifecycle* getLifecycle() const { return lifecycle_.get(); }
-#ifdef YAMS_TESTING
     void setTestingShutdownHook(EmbeddedServiceHost::TestingShutdownHook hook) {
         testingShutdownHook_ = std::move(hook);
     }
-#endif
+    [[nodiscard]] std::optional<EmbeddedServiceHost::TestingShutdownSnapshot>
+    getTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase phase) const {
+        switch (phase) {
+            case EmbeddedServiceHost::TestingShutdownPhase::BeforeThreadJoin:
+                return beforeThreadJoinSnapshot_;
+            case EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin:
+                return afterThreadJoinSnapshot_;
+        }
+        return std::nullopt;
+    }
 
 private:
-#ifdef YAMS_TESTING
     void emitTestingShutdownSnapshot(EmbeddedServiceHost::TestingShutdownPhase phase) {
         EmbeddedServiceHost::TestingShutdownSnapshot snapshot{
             .phase = phase,
@@ -275,7 +278,6 @@ private:
             testingShutdownHook_(snapshot);
         }
     }
-#endif
 
     Options options_;
     DaemonConfig config_{};
@@ -294,11 +296,9 @@ private:
     bool started_{false};
     bool stopped_{false};
     mutable std::mutex mutex_;
-#ifdef YAMS_TESTING
     EmbeddedServiceHost::TestingShutdownHook testingShutdownHook_;
     std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> beforeThreadJoinSnapshot_;
     std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> afterThreadJoinSnapshot_;
-#endif
 };
 
 EmbeddedServiceHost::EmbeddedServiceHost(const Options& options)
@@ -368,21 +368,13 @@ Result<void> EmbeddedServiceHost::shutdown() {
     return impl_->shutdown();
 }
 
-#ifdef YAMS_TESTING
 void EmbeddedServiceHost::testing_setShutdownHook(TestingShutdownHook hook) {
     impl_->setTestingShutdownHook(std::move(hook));
 }
 
 std::optional<EmbeddedServiceHost::TestingShutdownSnapshot>
 EmbeddedServiceHost::testing_getShutdownSnapshot(TestingShutdownPhase phase) const {
-    switch (phase) {
-        case TestingShutdownPhase::BeforeThreadJoin:
-            return impl_->beforeThreadJoinSnapshot_;
-        case TestingShutdownPhase::AfterThreadJoin:
-            return impl_->afterThreadJoinSnapshot_;
-    }
-    return std::nullopt;
+    return impl_->getTestingShutdownSnapshot(phase);
 }
-#endif
 
 } // namespace yams::daemon

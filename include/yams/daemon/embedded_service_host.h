@@ -1,11 +1,9 @@
 #pragma once
 
 #include <filesystem>
-#include <memory>
-#ifdef YAMS_TESTING
 #include <functional>
+#include <memory>
 #include <optional>
-#endif
 
 #if __has_include(<boost/asio/any_io_executor.hpp>)
 #include <boost/asio/any_io_executor.hpp>
@@ -50,7 +48,9 @@ public:
 
     ~EmbeddedServiceHost();
 
-#ifdef YAMS_TESTING
+    // Testing-only shutdown probes are declared unconditionally so the production
+    // daemon library can still satisfy test-only callers that are compiled with
+    // -DYAMS_TESTING=1.
     enum class TestingShutdownPhase {
         BeforeThreadJoin,
         AfterThreadJoin,
@@ -70,7 +70,6 @@ public:
     void testing_setShutdownHook(TestingShutdownHook hook);
     [[nodiscard]] std::optional<TestingShutdownSnapshot>
     testing_getShutdownSnapshot(TestingShutdownPhase phase) const;
-#endif
 
     EmbeddedServiceHost(const EmbeddedServiceHost&) = delete;
     EmbeddedServiceHost& operator=(const EmbeddedServiceHost&) = delete;
