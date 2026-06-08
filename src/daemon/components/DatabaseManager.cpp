@@ -25,8 +25,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -36,6 +36,17 @@
 namespace yams::daemon {
 
 namespace {
+
+std::string getenvCopy(std::string_view name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    const std::string key(name);
+    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
+    if (!env || !*env) {
+        return {};
+    }
+    return std::string(env);
+}
 
 std::optional<size_t> parseSizeEnv(const char* raw) {
     if (!raw || !*raw || *raw == '-') {
@@ -51,8 +62,8 @@ std::optional<size_t> parseSizeEnv(const char* raw) {
 }
 
 size_t readPoolPrewarmTarget(size_t defaultTarget) {
-    if (const char* env = std::getenv("YAMS_DB_READ_POOL_PREWARM"); env && *env) {
-        if (auto parsed = parseSizeEnv(env)) {
+    if (const std::string env = getenvCopy("YAMS_DB_READ_POOL_PREWARM"); !env.empty()) {
+        if (auto parsed = parseSizeEnv(env.c_str())) {
             return *parsed;
         }
     }
@@ -93,8 +104,10 @@ void prewarmReadPool(const std::shared_ptr<metadata::ConnectionPool>& readPool,
                 (void)stmt->step();
             }
             ++warmed;
+        } catch (const std::exception& e) {
+            spdlog::debug("[DatabaseManager] Read-pool prewarm probe failed: {}", e.what());
         } catch (...) {
-            // Prewarm probes are best-effort; the pool remains usable if a probe fails.
+            spdlog::debug("[DatabaseManager] Read-pool prewarm probe failed: unknown exception");
         }
     }
 
@@ -205,6 +218,22 @@ void DatabaseManager::initializeWal(const std::filesystem::path& dataDir) {
     }
 }
 
+void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
+    std::shared_ptr<metadata::ConnectionPool> readPool;
+    std::shared_ptr<metadata::ConnectionPool> writePool;
+    {
+        std::lock_guard<std::mutex> lk(poolMutex_);
+        readPool = readConnectionPool_;
+        writePool = connectionPool_;
+    }
+    if (readPool) {
+        readPool->interruptPendingAcquires();
+    }
+    if (writePool) {
+        writePool->interruptPendingAcquires();
+    }
+}
+
 void DatabaseManager::shutdownWal() {
     if (!walManager_) {
         return;
@@ -251,13 +280,13 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     }();
     size_t readPoolMin = std::min<size_t>(std::max<size_t>(2, readRecommended), 8);
     size_t readPoolMax = 64;
-    if (const char* envMax = std::getenv("YAMS_DB_POOL_MAX"); envMax && *envMax) {
-        if (auto v = parseSizeEnv(envMax); v && *v >= readPoolMin) {
+    if (const std::string envMax = getenvCopy("YAMS_DB_POOL_MAX"); !envMax.empty()) {
+        if (auto v = parseSizeEnv(envMax.c_str()); v && *v >= readPoolMin) {
             readPoolMax = *v;
         }
     }
-    if (const char* envMin = std::getenv("YAMS_DB_POOL_MIN"); envMin && *envMin) {
-        if (auto v = parseSizeEnv(envMin); v && *v > 0) {
+    if (const std::string envMin = getenvCopy("YAMS_DB_POOL_MIN"); !envMin.empty()) {
+        if (auto v = parseSizeEnv(envMin.c_str()); v && *v > 0) {
             readPoolMin = *v;
         }
     }
@@ -290,8 +319,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     }
 
     bool dualPoolEnabled = true;
-    if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
-        std::string value(envDual);
+    if (std::string value = getenvCopy("YAMS_DB_DUAL_POOL"); !value.empty()) {
         std::transform(value.begin(), value.end(), value.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         dualPoolEnabled = (value != "0" && value != "false" && value != "off" && value != "no");
@@ -311,15 +339,15 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
                              kMaxReadConnections);
             }
         }
-        if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
-            envReadMax && *envReadMax) {
-            if (auto v = parseSizeEnv(envReadMax); v && *v >= readCfg.minConnections) {
+        if (const std::string envReadMax = getenvCopy("YAMS_DB_READ_POOL_MAX");
+            !envReadMax.empty()) {
+            if (auto v = parseSizeEnv(envReadMax.c_str()); v && *v >= readCfg.minConnections) {
                 readCfg.maxConnections = *v;
             }
         }
-        if (const char* envReadMin = std::getenv("YAMS_DB_READ_POOL_MIN");
-            envReadMin && *envReadMin) {
-            if (auto v = parseSizeEnv(envReadMin); v && *v > 0) {
+        if (const std::string envReadMin = getenvCopy("YAMS_DB_READ_POOL_MIN");
+            !envReadMin.empty()) {
+            if (auto v = parseSizeEnv(envReadMin.c_str()); v && *v > 0) {
                 readCfg.minConnections = *v;
             }
         }

@@ -354,6 +354,36 @@ if catch2_with_main_dep.found()
 
   alias_target('bench_write_coordinator', write_coordinator_bench)
 
+  metadata_contention_bench = executable('metadata_contention_bench',
+    files('metadata_contention_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  metadata_contention_bench_env = {
+    'YAMS_TESTING': '1',
+    'YAMS_DISABLE_VECTORS': '1',
+    'YAMS_DISABLE_SESSION_WATCHER': '1',
+    'YAMS_SKIP_MODEL_LOADING': '1',
+    'LD_LIBRARY_PATH': _test_env_ld_library_path,
+  }
+
+  test('metadata_contention_bench', metadata_contention_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'metadata-contention'],
+       is_parallel: false,
+       timeout: 600,
+       env: metadata_contention_bench_env)
+
+  alias_target('bench_metadata_contention', metadata_contention_bench)
+
   symbol_extraction_bench = executable('symbol_extraction_bench',
     files('symbol_extraction_bench.cpp'),
     include_directories: incs,

@@ -94,6 +94,8 @@ inline std::filesystem::path make_temp_dir(std::string_view prefix = "yams_test_
 inline std::filesystem::path write_file(const std::filesystem::path& path, std::string_view data) {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream stream(path, std::ios::binary);
+    // ofstream::write consumes the explicit byte length below; null termination is not required.
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     stream.write(data.data(), checked_streamsize(data.size(), "write_file payload"));
     stream.close();
     return path;
@@ -117,6 +119,10 @@ public:
 
     ScopedEnvVar(const ScopedEnvVar&) = delete;
     ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+    void set(std::string value) { set_env(key_, std::move(value)); }
+
+    void unset() { set_env(key_, std::nullopt); }
 
     ScopedEnvVar(ScopedEnvVar&& other) noexcept
         : key_(std::move(other.key_)), previous_(std::move(other.previous_)),

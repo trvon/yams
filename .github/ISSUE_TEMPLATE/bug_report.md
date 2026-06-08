@@ -1,30 +1,58 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: bug
+about: Help us reproduce and fix a problem
+title: "[bug]: "
 labels: ''
 assignees: trvon
 
 ---
 
-- Summary: One clear sentence of the problem
-- Version/Commit: output of `yams --version` and commit SHA (if built from source)
-- Platform: OS/distro, kernel, CPU, compiler (if relevant)
-- Environment:
-  - Data dir snapshot: paste `yams daemon status -d` (include SVC and WAIT lines)
-  - Env vars: relevant `YAMS_*` (e.g., `env | grep ^YAMS_`)
-- Steps to Reproduce:
-  1. exact commands
-  2. minimal repo/files if needed
-- Expected Result: what you expected to happen
-- Actual Result: what happened instead
-- Logs:
-  - Daemon log (last 200 lines): `tail -n 200 ~/.local/state/yams/daemon.log`
-  - CLI output (add `YAMS_CLIENT_DEBUG=1` if helpful)
-- Attachments: small samples, config snippets, backtrace (if crash)
-- Regression? yes/no; if yes, from which version
-- Severity/Priority: S1 Critical | S2 Major | S3 Minor | S4 Trivial (suggest)
-- Component: daemon | cli | search | vector | model | docs | ci | packaging
-- Workarounds tried: any temporary workaround you found
+Thanks for taking the time to report this. If you don't know every answer below, that's okay — fill in what you can.
 
-Security Note: Please report security issues privately (see SECURITY.md).
+> Please write reports from your own firsthand experience. AI-assisted editing is okay if you verify every detail, but don't submit generated reports you have not personally checked.
+
+## Summary
+A short description of the problem.
+
+## Version
+- `yams --version`:
+- commit SHA (if built from source):
+
+## Platform
+- OS / distro:
+- kernel:
+- CPU / architecture:
+- compiler (if relevant):
+
+## Environment
+- Relevant `YAMS_*` variables:
+- `yams daemon status -d` output (especially `SVC` / `WAIT` lines, if relevant):
+
+## Steps to reproduce
+1.
+2.
+3.
+
+## Expected behavior
+What did you expect to happen?
+
+## Actual behavior
+What happened instead?
+
+## Logs or output
+Include anything useful, for example:
+- CLI output
+- `YAMS_CLIENT_DEBUG=1` output
+- last ~200 lines of the daemon log
+- backtrace / crash report
+
+## Repro data or attachments
+If possible, attach a small sample, config snippet, or minimal repro.
+
+## Extra context
+- Regression? If yes, from which version?
+- Component: daemon | cli | search | vector | model | docs | ci | packaging
+- Workarounds tried:
+- Suggested severity: S1 Critical | S2 Major | S3 Minor | S4 Trivial
+
+> Security note: please report vulnerabilities privately — see `SECURITY.md`.

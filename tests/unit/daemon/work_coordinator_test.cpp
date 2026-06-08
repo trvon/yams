@@ -41,9 +41,9 @@ inline bool wait_for_condition(std::chrono::milliseconds timeout,
 TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") {
     SECTION("Construct without starting") {
         WorkCoordinator coordinator;
-        REQUIRE_FALSE(coordinator.isRunning());
-        REQUIRE(coordinator.getWorkerCount() == 0);
-        REQUIRE(coordinator.getIOContext() != nullptr);
+        REQUIRE_FALSE((coordinator.isRunning()));
+        REQUIRE((coordinator.getWorkerCount() == 0));
+        REQUIRE((coordinator.getIOContext() != nullptr));
     }
 
     SECTION("Stop and join without start are no-ops") {
@@ -51,23 +51,22 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE_FALSE(coordinator.isRunning());
-        REQUIRE(coordinator.getWorkerCount() == 0);
+        REQUIRE_FALSE((coordinator.isRunning()));
+        REQUIRE((coordinator.getWorkerCount() == 0));
     }
 
     SECTION("Start and stop basic lifecycle") {
         WorkCoordinator coordinator;
         coordinator.start(2);
 
-        REQUIRE(coordinator.isRunning());
-        REQUIRE(coordinator.getWorkerCount() == 2);
-        REQUIRE_FALSE(coordinator.getIOContext()->stopped());
-
+        REQUIRE((coordinator.isRunning()));
+        REQUIRE((coordinator.getWorkerCount() == 2));
+        REQUIRE_FALSE((coordinator.getIOContext()->stopped()));
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE_FALSE(coordinator.isRunning());
-        REQUIRE(coordinator.getWorkerCount() == 0);
+        REQUIRE_FALSE((coordinator.isRunning()));
+        REQUIRE((coordinator.getWorkerCount() == 0));
     }
 
     SECTION("Default thread count uses hardware_concurrency") {
@@ -75,8 +74,7 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         coordinator.start(); // No explicit thread count
 
         auto expected = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-        REQUIRE(coordinator.getWorkerCount() == expected);
-
+        REQUIRE((coordinator.getWorkerCount() == expected));
         coordinator.stop();
         coordinator.join();
     }
@@ -86,8 +84,7 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
         coordinator.start(2);
         // Double-start is a YAMS_PRECONDITION abort, covered by
         // catch2_assert_val's fork-based WorkCoordinator death test.
-        REQUIRE(coordinator.getWorkerCount() == 2);
-
+        REQUIRE((coordinator.getWorkerCount() == 2));
         coordinator.stop();
         coordinator.join();
     }
@@ -110,7 +107,7 @@ TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") 
             // Destructor should call stop() and join()
         }
         // Should not hang or crash
-        REQUIRE(true);
+        REQUIRE((true));
     }
 }
 
@@ -129,9 +126,8 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         bool completed =
             wait_for_condition(1000ms, 10ms, [&counter]() { return counter.load() == 10; });
 
-        REQUIRE(completed);
-        REQUIRE(counter.load() == 10);
-
+        REQUIRE((completed));
+        REQUIRE((counter.load() == 10));
         coordinator.stop();
         coordinator.join();
     }
@@ -153,10 +149,9 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         bool completed =
             wait_for_condition(1000ms, 10ms, [&work_executed]() { return work_executed.load(); });
 
-        REQUIRE(completed);
-        REQUIRE(work_executed);
-        REQUIRE(on_different_thread);
-
+        REQUIRE((completed));
+        REQUIRE((work_executed));
+        REQUIRE((on_different_thread));
         coordinator.stop();
         coordinator.join();
     }
@@ -180,8 +175,8 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE(all_done);
-        REQUIRE(completed.load() == total_work);
+        REQUIRE((all_done));
+        REQUIRE((completed.load() == total_work));
     }
 }
 
@@ -205,9 +200,8 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         bool completed =
             wait_for_condition(1000ms, 10ms, [&result]() { return result.load() == 42; });
 
-        REQUIRE(completed);
-        REQUIRE(result.load() == 42);
-
+        REQUIRE((completed));
+        REQUIRE((result.load() == 42));
         coordinator.stop();
         coordinator.join();
     }
@@ -232,9 +226,8 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         bool completed =
             wait_for_condition(2000ms, 10ms, [&counter]() { return counter.load() == num_coros; });
 
-        REQUIRE(completed);
-        REQUIRE(counter.load() == num_coros);
-
+        REQUIRE((completed));
+        REQUIRE((counter.load() == num_coros));
         coordinator.stop();
         coordinator.join();
     }
@@ -248,7 +241,7 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         std::atomic<int> counter{0};
         boost::asio::post(coordinator.getExecutor(), [&counter]() { counter.fetch_add(1); });
 
-        REQUIRE(counter.load() == 0);
+        REQUIRE((counter.load() == 0));
     }
 }
 
@@ -280,13 +273,13 @@ TEST_CASE("WorkCoordinator strand isolation", "[daemon][work_coordinator][strand
             return execution_order.size() == 10;
         });
 
-        REQUIRE(completed);
+        REQUIRE((completed));
         // Strand guarantees FIFO order
         {
             std::lock_guard<std::mutex> lk(order_mutex);
-            REQUIRE(execution_order.size() == 10);
+            REQUIRE((execution_order.size() == 10));
             for (size_t i = 0; i < execution_order.size(); ++i) {
-                REQUIRE(execution_order[i] == static_cast<int>(i));
+                REQUIRE((execution_order[i] == static_cast<int>(i)));
             }
         }
 
@@ -328,9 +321,9 @@ TEST_CASE("WorkCoordinator strand isolation", "[daemon][work_coordinator][strand
         bool completed = wait_for_condition(
             3000ms, 20ms, [&]() { return strand1_work.load() == 5 && strand2_work.load() == 5; });
 
-        REQUIRE(completed);
-        REQUIRE(strand1_work.load() == 5);
-        REQUIRE(strand2_work.load() == 5);
+        REQUIRE((completed));
+        REQUIRE((strand1_work.load() == 5));
+        REQUIRE((strand2_work.load() == 5));
         REQUIRE(concurrent_execution); // Strands ran in parallel
 
         coordinator.stop();
@@ -350,7 +343,7 @@ TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][prio
         bool completed =
             wait_for_condition(1000ms, 10ms, [&]() { return ran.load(std::memory_order_acquire); });
 
-        REQUIRE(completed);
+        REQUIRE((completed));
         coordinator.stop();
         coordinator.join();
     }
@@ -370,7 +363,7 @@ TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][prio
         bool completed = wait_for_condition(
             1000ms, 10ms, [&]() { return ran.load(std::memory_order_relaxed) == 3; });
 
-        REQUIRE(completed);
+        REQUIRE((completed));
         coordinator.stop();
         coordinator.join();
     }
@@ -404,8 +397,8 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE(drained);
-        REQUIRE(completed.load(std::memory_order_relaxed) == heavy_load);
+        REQUIRE((drained));
+        REQUIRE((completed.load(std::memory_order_relaxed) == heavy_load));
     }
 
     SECTION("Work stealing across threads") {
@@ -431,11 +424,11 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
             return thread_ids.size() >= 2 && completed_count.load(std::memory_order_relaxed) == 100;
         });
 
-        REQUIRE(completed);
+        REQUIRE((completed));
         // Work should be distributed across multiple threads
         {
             std::lock_guard<std::mutex> lk(ids_mutex);
-            REQUIRE(thread_ids.size() >= 2);
+            REQUIRE((thread_ids.size() >= 2));
         }
 
         coordinator.stop();
@@ -458,8 +451,10 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
             try {
                 co_await timer.async_wait(boost::asio::use_awaitable);
                 work_completed = true;
-            } catch (...) {
-                // Timer cancelled during shutdown
+            } catch (const boost::system::system_error& error) {
+                if (error.code() != boost::asio::error::operation_aborted) {
+                    throw;
+                }
             }
         };
 
@@ -469,7 +464,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         bool started =
             wait_for_condition(2000ms, 5ms, [&work_started]() { return work_started.load(); });
 
-        REQUIRE(started);
+        REQUIRE((started));
         coordinator.stop();
         coordinator.join();
 
@@ -499,10 +494,10 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE(all_done);
-        REQUIRE(completed.load() == 10);
+        REQUIRE((all_done));
+        REQUIRE((completed.load() == 10));
         // Should have taken at least ~100ms with 2 threads (10 tasks * 20ms / 2 threads)
-        REQUIRE(duration >= 100ms);
+        REQUIRE((duration >= 100ms));
     }
 
     SECTION("joinWithTimeout avoids timeout-length waits when workers exit quickly") {
@@ -523,8 +518,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
 
             bool postedDone = wait_for_condition(
                 1000ms, 2ms, [&]() { return posted.load(std::memory_order_acquire); });
-            REQUIRE(postedDone);
-
+            REQUIRE((postedDone));
             coordinator.stop();
 
             const auto joinStart = std::chrono::steady_clock::now();
@@ -532,7 +526,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - joinStart);
 
-            REQUIRE(joined);
+            REQUIRE((joined));
             if (elapsed > maxElapsed) {
                 maxElapsed = elapsed;
             }
@@ -543,10 +537,61 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
 
         INFO("max joinWithTimeout elapsed: " << maxElapsed.count() << "ms over " << kIterations
                                              << " iterations");
-        REQUIRE(slowJoinCount == 0);
+        REQUIRE((slowJoinCount == 0));
+    }
+
+    SECTION("joinWithTimeout leaves timed-out workers joinable for a later join") {
+        WorkCoordinator coordinator;
+        coordinator.start(1);
+
+        std::mutex gateMutex;
+        std::condition_variable gateCv;
+        bool allowExit = false;
+        std::atomic<bool> entered{false};
+        std::atomic<bool> finished{false};
+
+        boost::asio::post(coordinator.getExecutor(), [&]() {
+            {
+                std::lock_guard<std::mutex> lk(gateMutex);
+                entered.store(true, std::memory_order_release);
+            }
+            gateCv.notify_all();
+
+            std::unique_lock<std::mutex> lk(gateMutex);
+            gateCv.wait(lk, [&] { return allowExit; });
+            finished.store(true, std::memory_order_release);
+        });
+
+        bool started = wait_for_condition(
+            1000ms, 5ms, [&]() { return entered.load(std::memory_order_acquire); });
+        REQUIRE((started));
+
+        coordinator.stop();
+
+        constexpr auto kTimeout = 100ms;
+        const auto joinStart = std::chrono::steady_clock::now();
+        bool joined = coordinator.joinWithTimeout(kTimeout);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - joinStart);
+
+        CHECK_FALSE((joined));
+        CHECK((elapsed >= kTimeout));
+        CHECK((coordinator.getWorkerCount() == 1));
+        CHECK((coordinator.isRunning()));
+        CHECK_FALSE((finished.load(std::memory_order_acquire)));
+
+        {
+            std::lock_guard<std::mutex> lk(gateMutex);
+            allowExit = true;
+        }
+        gateCv.notify_all();
+
+        bool finishedAfterRelease = wait_for_condition(
+            1000ms, 5ms, [&]() { return finished.load(std::memory_order_acquire); });
+        REQUIRE((finishedAfterRelease));
+
+        coordinator.join();
+        CHECK_FALSE((coordinator.isRunning()));
+        CHECK((coordinator.getWorkerCount() == 0));
     }
 }
-
-// YAMS_PRECONDITION double-start enforcement is not asserted in this file because
-// it terminates the process (SIGABRT). Consider adding a fork()-based assertion
-// test (similar to tests/unit/core/assert_catch2_test.cpp) to cover this invariant.

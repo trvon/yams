@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
+#include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
 
@@ -349,7 +350,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSemanticDuplicateSchema(),
             createKgEdgesUniqueIndex(),
             createMetadataCompositeIndexes(),
-            createKgEdgesSemanticNeighborOrderIndex()};
+            createKgEdgesSemanticNeighborOrderIndex(),
+            optimizeDocumentsPathFtsUpdateTrigger()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -1475,7 +1477,8 @@ Migration YamsMetadataMigrations::addPathIndexingSchema() {
         )");
         (void)db.execute(R"(
             CREATE TRIGGER IF NOT EXISTS documents_au
-            AFTER UPDATE ON documents BEGIN
+            AFTER UPDATE ON documents
+            WHEN old.file_path IS NOT new.file_path BEGIN
                 INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
                 VALUES('delete', old.id, old.file_path);
                 INSERT INTO documents_path_fts(rowid, file_path)
@@ -1515,7 +1518,10 @@ Migration YamsMetadataMigrations::chunkedPathIndexingBackfill() {
             if (auto step = s.step(); step && step.value() && !s.isNull(0)) {
                 try {
                     lastId = std::stoll(s.getString(0));
-                } catch (...) {
+                } catch (const std::exception& ex) {
+                    spdlog::warn(
+                        "v14: failed to parse path backfill progress id ({}); resetting to 0",
+                        ex.what());
                     lastId = 0;
                 }
             }
@@ -1523,10 +1529,14 @@ Migration YamsMetadataMigrations::chunkedPathIndexingBackfill() {
 
         // Chunk size (default 1000); allow override via env.
         int chunk = 1000;
-        if (const char* env = std::getenv("YAMS_PATH_BACKFILL_CHUNK"); env && *env) {
+        if (const char* env =
+                std::getenv("YAMS_PATH_BACKFILL_CHUNK"); // NOLINT(concurrency-mt-unsafe)
+            env && *env) {
             try {
                 chunk = std::max(1, std::stoi(env));
-            } catch (...) {
+            } catch (const std::exception& ex) {
+                spdlog::warn("v14: ignoring invalid YAMS_PATH_BACKFILL_CHUNK='{}' ({})", env,
+                             ex.what());
             }
         }
 
@@ -2702,6 +2712,64 @@ Migration YamsMetadataMigrations::createKgEdgesSemanticNeighborOrderIndex() {
     m.downSQL = R"(
         DROP INDEX IF EXISTS idx_kg_edges_src_rel_weight_time;
     )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::optimizeDocumentsPathFtsUpdateTrigger() {
+    Migration m;
+    m.version = 35;
+    m.name = "Avoid path FTS churn on non-path document updates";
+    m.created = std::chrono::system_clock::now();
+
+    auto recreateTrigger = [](Database& db, bool restrictToPathChanges) -> Result<void> {
+        auto dropResult = db.execute("DROP TRIGGER IF EXISTS documents_au");
+        if (!dropResult) {
+            return dropResult.error();
+        }
+
+        auto ftsExistsResult = db.tableExists("documents_path_fts");
+        if (!ftsExistsResult) {
+            return ftsExistsResult.error();
+        }
+        if (!ftsExistsResult.value()) {
+            spdlog::info("v35: documents_path_fts absent; skipping documents_au recreation.");
+            return Result<void>();
+        }
+
+        const char* triggerSql = restrictToPathChanges ? R"(
+            CREATE TRIGGER IF NOT EXISTS documents_au
+            AFTER UPDATE ON documents
+            WHEN old.file_path IS NOT new.file_path BEGIN
+                INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
+                VALUES('delete', old.id, old.file_path);
+                INSERT INTO documents_path_fts(rowid, file_path)
+                VALUES(new.id, new.file_path);
+            END;
+        )"
+                                                       : R"(
+            CREATE TRIGGER IF NOT EXISTS documents_au
+            AFTER UPDATE ON documents BEGIN
+                INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
+                VALUES('delete', old.id, old.file_path);
+                INSERT INTO documents_path_fts(rowid, file_path)
+                VALUES(new.id, new.file_path);
+            END;
+        )";
+
+        auto createResult = db.execute(triggerSql);
+        if (!createResult) {
+            return createResult.error();
+        }
+        return Result<void>();
+    };
+
+    m.upFunc = [recreateTrigger](Database& db) -> Result<void> {
+        return recreateTrigger(db, true);
+    };
+    m.downFunc = [recreateTrigger](Database& db) -> Result<void> {
+        return recreateTrigger(db, false);
+    };
 
     return m;
 }

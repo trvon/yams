@@ -1,11 +1,29 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 
+#if __has_include(<boost/asio/any_io_executor.hpp>)
 #include <boost/asio/any_io_executor.hpp>
+#elif __has_include("boost/asio/any_io_executor.hpp")
+#include "boost/asio/any_io_executor.hpp"
+#else
+namespace boost {
+namespace asio {
+class any_io_executor;
+} // namespace asio
+} // namespace boost
+#endif
 
+#if __has_include(<yams/core/types.h>)
 #include <yams/core/types.h>
+#elif __has_include("yams/core/types.h")
+#include "yams/core/types.h"
+#else
+#include "../core/types.h"
+#endif
 
 namespace yams::daemon {
 
@@ -29,6 +47,29 @@ public:
     static Result<std::shared_ptr<EmbeddedServiceHost>> getOrCreate(const Options& options);
 
     ~EmbeddedServiceHost();
+
+    // Testing-only shutdown probes are declared unconditionally so the production
+    // daemon library can still satisfy test-only callers that are compiled with
+    // -DYAMS_TESTING=1.
+    enum class TestingShutdownPhase {
+        BeforeThreadJoin,
+        AfterThreadJoin,
+    };
+
+    struct TestingShutdownSnapshot {
+        TestingShutdownPhase phase;
+        bool dispatcherAlive{false};
+        bool serviceManagerAlive{false};
+        bool lifecycleAlive{false};
+        bool ioContextAlive{false};
+        std::size_t ioThreadCount{0};
+    };
+
+    using TestingShutdownHook = std::function<void(const TestingShutdownSnapshot&)>;
+
+    void testing_setShutdownHook(TestingShutdownHook hook);
+    [[nodiscard]] std::optional<TestingShutdownSnapshot>
+    testing_getShutdownSnapshot(TestingShutdownPhase phase) const;
 
     EmbeddedServiceHost(const EmbeddedServiceHost&) = delete;
     EmbeddedServiceHost& operator=(const EmbeddedServiceHost&) = delete;

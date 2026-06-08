@@ -38,89 +38,33 @@
 #include "repository/result_helpers.hpp"
 
 // Phase 5: CrudOps for generic CRUD operations (ADR-0004)
+#include "repository/corpus_stats_ops.hpp"
 #include "repository/crud_ops.hpp"
 #include "repository/document_query_filters.hpp"
 #include "repository/metadata_value_count_ops.hpp"
+#include "repository/transaction_helpers.hpp"
 
 namespace yams::metadata {
 
 // Import result helpers for cleaner error handling (ADR-0004 Phase 2)
 using repository::addIntParam;
 using repository::appendDocumentQueryFilters;
+using repository::applyCorpusStatsOnlineOverlay;
+using repository::beginTransaction;
+using repository::beginTransactionWithRetry;
 using repository::BindParam;
+using repository::calculateExtensionBucketCounts;
+using repository::classifyExtensionBucket;
+using repository::commitOrRollback;
+using repository::CorpusStatsOverlayInput;
+using repository::ExtensionBucket;
+using repository::rollbackIgnoringErrors;
 using repository::runMetadataValueCountQuery;
 using repository::scope_exit;
 
 namespace {
 std::chrono::sys_seconds nowSysSeconds() {
     return std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
-}
-
-bool isTagMetadataKey(std::string_view key) {
-    return key == "tag" || key.starts_with("tag:");
-}
-
-enum class ExtensionBucket { Other, Code, Prose, Binary };
-
-ExtensionBucket classifyExtensionBucket(std::string_view ext) {
-    const std::string normalized{ext};
-    if (storage::detail::kCodeExtensions.contains(normalized)) {
-        return ExtensionBucket::Code;
-    }
-    if (storage::detail::kProseExtensions.contains(normalized)) {
-        return ExtensionBucket::Prose;
-    }
-    if (storage::detail::kBinaryExtensions.contains(normalized)) {
-        return ExtensionBucket::Binary;
-    }
-    return ExtensionBucket::Other;
-}
-
-void applyExtensionStatsDelta(std::atomic<uint64_t>& codeCounter,
-                              std::atomic<uint64_t>& proseCounter,
-                              std::atomic<uint64_t>& binaryCounter, std::string_view ext,
-                              std::int64_t delta) {
-    auto apply = [&](std::atomic<uint64_t>& counter) {
-        if (delta >= 0) {
-            counter.fetch_add(static_cast<uint64_t>(delta), std::memory_order_relaxed);
-        } else {
-            auto current = counter.load(std::memory_order_relaxed);
-            const auto subtract = static_cast<uint64_t>(-delta);
-            while (true) {
-                const auto next = current > subtract ? current - subtract : 0;
-                if (counter.compare_exchange_weak(current, next, std::memory_order_acq_rel,
-                                                  std::memory_order_relaxed)) {
-                    return;
-                }
-            }
-        }
-    };
-    switch (classifyExtensionBucket(ext)) {
-        case ExtensionBucket::Code:
-            apply(codeCounter);
-            break;
-        case ExtensionBucket::Prose:
-            apply(proseCounter);
-            break;
-        case ExtensionBucket::Binary:
-            apply(binaryCounter);
-            break;
-        case ExtensionBucket::Other:
-            break;
-    }
-}
-
-void updateExtensionCountMap(std::unordered_map<std::string, int64_t>& counts, std::string_view ext,
-                             std::int64_t delta) {
-    if (ext.empty() || delta == 0) {
-        return;
-    }
-    auto key = std::string(ext);
-    auto& entry = counts[key];
-    entry += delta;
-    if (entry <= 0) {
-        counts.erase(key);
-    }
 }
 
 Result<int64_t> queryExactFtsIndexedDocumentCount(Database& db) {
@@ -144,17 +88,6 @@ Result<int64_t> queryExactFtsIndexedDocumentCount(Database& db) {
         return int64_t{0};
     }
     return stmt.getInt64(0);
-}
-
-void saturatingSubBytes(std::atomic<uint64_t>& counter, uint64_t bytes) {
-    auto current = counter.load(std::memory_order_relaxed);
-    while (true) {
-        const auto next = current > bytes ? current - bytes : 0;
-        if (counter.compare_exchange_weak(current, next, std::memory_order_acq_rel,
-                                          std::memory_order_relaxed)) {
-            return;
-        }
-    }
 }
 
 SemanticDuplicateGroup mapSemanticDuplicateGroupRow(const Statement& stmt) {
@@ -198,6 +131,43 @@ SemanticDuplicateGroupMember mapSemanticDuplicateGroupMemberRow(const Statement&
     return member;
 }
 
+Result<void> bindOptionalInt64(Statement& stmt, int index, const std::optional<int64_t>& value) {
+    if (value.has_value()) {
+        return stmt.bind(index, *value);
+    }
+    return stmt.bind(index, nullptr);
+}
+
+Result<void> bindOptionalDouble(Statement& stmt, int index, const std::optional<double>& value) {
+    if (value.has_value()) {
+        return stmt.bind(index, *value);
+    }
+    return stmt.bind(index, nullptr);
+}
+
+Result<void> bindNullableText(Statement& stmt, int index, std::string_view value) {
+    if (value.empty()) {
+        return stmt.bind(index, nullptr);
+    }
+    return stmt.bind(index, value);
+}
+
+Result<void> bindSemanticDuplicateGroupMemberInsert(Statement& stmt, int64_t groupId,
+                                                    const SemanticDuplicateGroupMember& member) {
+    YAMS_TRY(stmt.bind(1, groupId));
+    YAMS_TRY(stmt.bind(2, member.documentId));
+    YAMS_TRY(stmt.bind(3, member.role));
+    YAMS_TRY(bindOptionalDouble(stmt, 4, member.similarityToCanonical));
+    YAMS_TRY(bindOptionalDouble(stmt, 5, member.titleOverlap));
+    YAMS_TRY(bindOptionalDouble(stmt, 6, member.pathOverlap));
+    YAMS_TRY(bindOptionalDouble(stmt, 7, member.pairScore));
+    YAMS_TRY(stmt.bind(8, member.decision));
+    YAMS_TRY(bindNullableText(stmt, 9, member.reason));
+    YAMS_TRY(stmt.bind(10, member.createdAt));
+    YAMS_TRY(stmt.bind(11, member.updatedAt));
+    return Result<void>();
+}
+
 constexpr const char* kDocumentColumnListNew =
     "id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type, "
     "created_time, modified_time, indexed_time, content_extracted, extraction_status, "
@@ -233,8 +203,6 @@ constexpr const char* kDocumentColumnListAliasD =
     "d.mime_type, d.created_time, d.modified_time, d.indexed_time, d.content_extracted, "
     "d.extraction_status, d.extraction_error, d.path_prefix, d.reverse_path, d.path_hash, "
     "d.parent_hash, d.path_depth, d.repair_status, d.repair_attempted_at, d.repair_attempts";
-
-constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
 std::string buildInList(size_t count) {
     std::string list;
@@ -298,71 +266,14 @@ Result<std::vector<RowT>> executePreparedVectorQuery(Database& db, const std::st
                                             [](RowT&) {});
 }
 
-// Transaction begin helper with backend-appropriate semantics.
-// - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
-// - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.
-Result<void>
-beginTransactionWithRetry(Database& db, int maxRetries = 5,
-                          std::chrono::milliseconds initialBackoff = std::chrono::milliseconds(5)) {
-#if YAMS_LIBSQL_BACKEND
-    // libsql supports MVCC - concurrent writers don't block each other.
-    // Use regular BEGIN (deferred) for better concurrency.
-    (void)maxRetries;     // unused in libsql mode
-    (void)initialBackoff; // unused in libsql mode
-    return db.execute("BEGIN");
-#else
-    // Standard SQLite: single-writer model. BEGIN IMMEDIATE acquires write lock
-    // immediately but fails fast when another writer holds a lock.
-    // Retry with exponential backoff to handle transient lock contention.
-    const storage::sqlite_retry::BusyRetryPolicy retryPolicy{maxRetries, initialBackoff};
-    auto backoff = retryPolicy.initialBackoff;
-    for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
-        auto result = db.execute("BEGIN IMMEDIATE");
-        if (result) {
-            return result;
-        }
-        // Check if it's a lock error (worth retrying)
-        const auto& errMsg = result.error().message;
-        if (!storage::sqlite_retry::isBusyOrLockedMessage(errMsg)) {
-            // Not a lock error, don't retry.
-            return Error{result.error().code, result.error().message};
-        }
-        if (attempt + 1 < retryPolicy.maxRetries) {
-            storage::sqlite_retry::sleepAndBackoff(backoff);
-        }
-    }
-    return Error{ErrorCode::DatabaseError, "BEGIN IMMEDIATE failed after retries: database locked"};
-#endif
+uint64_t clampNonNegativeCount(int64_t value) {
+    return static_cast<uint64_t>(std::max<int64_t>(value, 0));
 }
 
-std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
-    if (blob.empty() || (blob.size() % sizeof(float)) != 0)
-        return {};
-    std::vector<float> out(blob.size() / sizeof(float));
-    std::memcpy(out.data(), blob.data(), blob.size());
-    return out;
+void storeNonNegativeCount(std::atomic<uint64_t>& target, int64_t value) {
+    target.store(clampNonNegativeCount(value), std::memory_order_release);
 }
 
-PathTreeNode mapPathTreeNodeRow(const Statement& stmt) {
-    PathTreeNode node;
-    node.id = stmt.getInt64(0);
-    node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
-    node.pathSegment = stmt.getString(2);
-    node.fullPath = stmt.getString(3);
-    node.docCount = stmt.getInt64(4);
-    node.centroidWeight = stmt.getInt64(5);
-    if (!stmt.isNull(6)) {
-        node.centroid = blobToFloatVector(stmt.getBlob(6));
-    }
-    return node;
-}
-
-Result<void> bindParentId(Statement& stmt, int index, int64_t parentId) {
-    if (parentId == kPathTreeNullParent) {
-        return stmt.bind(index, nullptr);
-    }
-    return stmt.bind(index, parentId);
-}
 } // namespace
 
 const char* MetadataRepository::documentColumnList(bool qualified) const {
@@ -449,9 +360,20 @@ void MetadataRepository::storePathCache(const DocumentInfo& info) const {
     }
 }
 
+void MetadataRepository::ensurePathHitRingInitialized() const {
+    std::call_once(hitRingInitOnce_, [this]() {
+        constexpr std::size_t ringSize = 4096; // power of two
+        hitRing_ = std::make_unique<std::atomic<uint64_t>[]>(ringSize);
+        hitRingSize_ = ringSize;
+        hitRingMask_ = ringSize - 1;
+        for (std::size_t i = 0; i < ringSize; ++i) {
+            hitRing_[i].store(0, std::memory_order_relaxed);
+        }
+    });
+}
+
 void MetadataRepository::recordPathHit(const std::string& normalizedPath) const {
-    if (!hitRing_)
-        return; // not initialized until first store
+    ensurePathHitRingInitialized();
     uint64_t h = std::hash<std::string>{}(normalizedPath);
     auto idx = hitSeq_.fetch_add(1, std::memory_order_relaxed) & hitRingMask_;
     hitRing_[idx].store(h, std::memory_order_relaxed);
@@ -469,15 +391,7 @@ void MetadataRepository::flushPathCacheBuffer() const {
         pathCacheWriteBuffer_.size.store(0, std::memory_order_relaxed);
     }
 
-    if (!hitRing_) {
-        const std::size_t ringSize = 4096; // power of two
-        hitRing_.reset(new std::atomic<uint64_t>[ringSize]);
-        hitRingSize_ = ringSize;
-        for (std::size_t i = 0; i < ringSize; ++i) {
-            hitRing_[i].store(0, std::memory_order_relaxed);
-        }
-        hitRingMask_ = ringSize - 1;
-    }
+    ensurePathHitRingInitialized();
 
     auto old = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
     auto updated = std::make_shared<PathCacheSnapshot>(*old);
@@ -717,787 +631,6 @@ void MetadataRepository::shutdown() {
 }
 
 // Document operations
-Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocument");
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        // Build INSERT OR IGNORE SQL based on whether path indexing columns exist
-        std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
-                          "file_size, sha256_hash, mime_type, created_time, modified_time, "
-                          "indexed_time, content_extracted, extraction_status, extraction_error";
-
-        if (hasPathIndexing_) {
-            sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
-        }
-
-        sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
-
-        if (hasPathIndexing_) {
-            sql += ", ?, ?, ?, ?, ?";
-        }
-
-        sql += ")";
-
-        auto stmtResult = db.prepare(sql);
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-
-        // Bind common columns first
-        if (hasPathIndexing_) {
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError,
-                info.pathPrefix, info.reversePath, info.pathHash, info.parentHash, info.pathDepth);
-
-            if (!bindResult)
-                return bindResult.error();
-        } else {
-            // Compat mode: only bind the 12 columns that exist
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
-
-            if (!bindResult)
-                return bindResult.error();
-        }
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        // Check if a row was actually inserted (changes() returns 0 if INSERT was ignored)
-        int changes = db.changes();
-        int64_t docId;
-
-        if (changes > 0) {
-            // New document inserted
-            docId = db.lastInsertRowId();
-
-            // Update component-owned metrics
-            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
-            cachedTotalSizeBytes_.fetch_add(
-                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
-                std::memory_order_relaxed);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, info.fileExtension, 1);
-            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
-                                          std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
-            }
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
-            }
-            if (info.contentExtracted) {
-                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            spdlog::debug("Inserted new document with hash {} (id={})", info.sha256Hash, docId);
-        } else {
-            // Document already exists (INSERT was ignored), retrieve existing ID
-            auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-            if (!checkStmt)
-                return checkStmt.error();
-
-            auto& stmt2 = checkStmt.value();
-            if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
-                return bindRes.error();
-
-            auto stepRes = stmt2.step();
-            if (!stepRes)
-                return stepRes.error();
-
-            if (!stepRes.value())
-                return Error{ErrorCode::DatabaseError,
-                             "Document insert was ignored but could not find existing document"};
-
-            docId = stmt2.getInt64(0);
-            spdlog::debug("Document with hash {} already exists (id={}), using existing",
-                          info.sha256Hash, docId);
-        }
-
-        return docId;
-    });
-}
-
-Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
-    const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
-    TreeSnapshotRecord* snapshot) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocumentWithMetadata");
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        // Wrap everything in a single BEGIN IMMEDIATE to reduce lock acquisitions
-        // from ~15-20 per document down to 1.
-        YAMS_TRY(beginTransactionWithRetry(db));
-        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
-
-        // --- 1. INSERT document ---
-        std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
-                          "file_size, sha256_hash, mime_type, created_time, modified_time, "
-                          "indexed_time, content_extracted, extraction_status, extraction_error";
-
-        if (hasPathIndexing_) {
-            sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
-        }
-
-        sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
-        if (hasPathIndexing_) {
-            sql += ", ?, ?, ?, ?, ?";
-        }
-        sql += ")";
-
-        auto stmtResult = db.prepare(sql);
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-
-        if (hasPathIndexing_) {
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError,
-                info.pathPrefix, info.reversePath, info.pathHash, info.parentHash, info.pathDepth);
-            if (!bindResult)
-                return bindResult.error();
-        } else {
-            auto bindResult = stmt.bindAll(
-                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-                info.contentExtracted ? 1 : 0,
-                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
-            if (!bindResult)
-                return bindResult.error();
-        }
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        int changes = db.changes();
-        int64_t docId;
-
-        if (changes > 0) {
-            docId = db.lastInsertRowId();
-            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
-            cachedTotalSizeBytes_.fetch_add(
-                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
-                std::memory_order_relaxed);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, info.fileExtension, 1);
-            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
-                                          std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
-            }
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
-            }
-            if (info.contentExtracted) {
-                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
-            }
-            spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash,
-                          docId);
-        } else {
-            auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-            if (!checkStmt)
-                return checkStmt.error();
-            auto& stmt2 = checkStmt.value();
-            if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
-                return bindRes.error();
-            auto stepRes = stmt2.step();
-            if (!stepRes)
-                return stepRes.error();
-            if (!stepRes.value())
-                return Error{ErrorCode::DatabaseError,
-                             "Document insert ignored but existing record not found"};
-            docId = stmt2.getInt64(0);
-            spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash,
-                          docId);
-        }
-
-        // --- 2. Batch upsert metadata (if any) ---
-        if (!tags.empty()) {
-            // Use ON CONFLICT upsert to avoid DELETE+INSERT write amplification.
-            // Prepare once, bind+execute+reset per tag pair.
-            static const std::string metaUpsertSql =
-                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-                "value_type = excluded.value_type";
-
-            YAMS_TRY_UNWRAP(metaStmt, db.prepareCached(metaUpsertSql));
-            for (const auto& [key, value] : tags) {
-                YAMS_TRY(metaStmt->bind(1, docId));
-                YAMS_TRY(metaStmt->bind(2, key));
-                YAMS_TRY(metaStmt->bind(3, value.value));
-                YAMS_TRY(metaStmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
-                YAMS_TRY(metaStmt->execute());
-                YAMS_TRY(metaStmt->reset()); // Reset for next iteration
-            }
-        }
-
-        // --- 3. Upsert tree snapshot (if provided) ---
-        if (snapshot) {
-            snapshot->ingestDocumentId = docId;
-
-            std::string directoryPath = snapshot->metadata.count("directory_path")
-                                            ? snapshot->metadata.at("directory_path")
-                                            : "";
-            std::string snapshotLabel = snapshot->metadata.count("snapshot_label")
-                                            ? snapshot->metadata.at("snapshot_label")
-                                            : "";
-            std::string gitCommit =
-                snapshot->metadata.count("git_commit") ? snapshot->metadata.at("git_commit") : "";
-            std::string gitBranch =
-                snapshot->metadata.count("git_branch") ? snapshot->metadata.at("git_branch") : "";
-            std::string gitRemote;
-            if (auto it = snapshot->metadata.find("git_remote"); it != snapshot->metadata.end()) {
-                gitRemote.append(it->second);
-            }
-
-            auto snapStmtResult = db.prepare(R"(
-                INSERT INTO tree_snapshots (
-                    snapshot_id, created_at, directory_path, tree_root_hash,
-                    snapshot_label, git_commit, git_branch, git_remote, files_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_id) DO UPDATE SET
-                    created_at = excluded.created_at,
-                    directory_path = excluded.directory_path,
-                    tree_root_hash = excluded.tree_root_hash,
-                    snapshot_label = excluded.snapshot_label,
-                    git_commit = excluded.git_commit,
-                    git_branch = excluded.git_branch,
-                    git_remote = excluded.git_remote,
-                    files_count = excluded.files_count
-            )");
-            if (!snapStmtResult)
-                return snapStmtResult.error();
-
-            Statement snapStmt = std::move(snapStmtResult).value();
-            snapStmt.bind(1, snapshot->snapshotId);
-            snapStmt.bind(2, static_cast<int64_t>(snapshot->createdTime));
-            snapStmt.bind(3, directoryPath);
-            if (snapshot->rootTreeHash.empty())
-                snapStmt.bind(4, nullptr);
-            else
-                snapStmt.bind(4, snapshot->rootTreeHash);
-            if (snapshotLabel.empty())
-                snapStmt.bind(5, nullptr);
-            else
-                snapStmt.bind(5, snapshotLabel);
-            if (gitCommit.empty())
-                snapStmt.bind(6, nullptr);
-            else
-                snapStmt.bind(6, gitCommit);
-            if (gitBranch.empty())
-                snapStmt.bind(7, nullptr);
-            else
-                snapStmt.bind(7, gitBranch);
-            if (gitRemote.empty())
-                snapStmt.bind(8, nullptr);
-            else
-                snapStmt.bind(8, gitRemote);
-            snapStmt.bind(9, static_cast<int64_t>(snapshot->fileCount));
-
-            auto snapExecResult = snapStmt.execute();
-            if (!snapExecResult)
-                return snapExecResult.error();
-        }
-
-        // --- COMMIT ---
-        YAMS_TRY(db.execute("COMMIT"));
-        rollback.dismiss();
-
-        return docId;
-    });
-}
-
-Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocument");
-    return executeReadQuery<std::optional<DocumentInfo>>(
-        [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            return getDocumentByCondition(db, "id = ?",
-                                          [&](Statement& stmt) { return stmt.bind(1, id); });
-        });
-}
-
-// Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
-Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Database& db,
-                                                                            int64_t id) {
-    return getDocumentByCondition(db, "id = ?", [&](Statement& stmt) { return stmt.bind(1, id); });
-}
-
-// Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
-Result<std::unordered_map<std::string, MetadataValue>>
-MetadataRepository::getAllMetadataInternal(Database& db, int64_t documentId) {
-    using yams::metadata::sql::QuerySpec;
-    QuerySpec spec{};
-    spec.table = "metadata";
-    spec.columns = {"key", "value", "value_type"};
-    spec.conditions = {"document_id = ?"};
-
-    YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
-    YAMS_TRY(stmt.bind(1, documentId));
-
-    std::unordered_map<std::string, MetadataValue> result;
-    while (true) {
-        YAMS_TRY_UNWRAP(hasRow, stmt.step());
-        if (!hasRow)
-            break;
-
-        std::string key = stmt.getString(0);
-        MetadataValue value;
-        value.value = stmt.getString(1);
-        value.type = MetadataValueTypeUtils::fromString(stmt.getString(2));
-        result[key] = value;
-    }
-
-    return result;
-}
-
-Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const std::string& hash) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentByHash");
-    return executeReadQuery<std::optional<DocumentInfo>>(
-        [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            return getDocumentByCondition(db, "sha256_hash = ?",
-                                          [&](Statement& stmt) { return stmt.bind(1, hash); });
-        });
-}
-
-Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        int64_t priorFileSize = info.fileSize;
-        std::string priorExtension = info.fileExtension;
-        int priorPathDepth = info.pathDepth;
-        auto priorStmt = db.prepareCached("SELECT file_size FROM documents WHERE id = ?");
-        if (priorStmt) {
-            auto& stmt = *priorStmt.value();
-            YAMS_TRY(stmt.bind(1, info.id));
-            if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                priorFileSize = stmt.getInt64(0);
-            }
-        }
-        auto priorAttrsStmt =
-            db.prepareCached("SELECT file_extension, path_depth FROM documents WHERE id = ?");
-        if (priorAttrsStmt) {
-            auto& stmt = *priorAttrsStmt.value();
-            YAMS_TRY(stmt.bind(1, info.id));
-            if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                priorExtension = stmt.getString(0);
-                priorPathDepth = stmt.getInt(1);
-            }
-        }
-
-        // Use prepareCached for better performance on repeated updates
-        YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(R"(
-            UPDATE documents SET
-                file_path = ?, file_name = ?, file_extension = ?,
-                file_size = ?, sha256_hash = ?, mime_type = ?,
-                created_time = ?, modified_time = ?, indexed_time = ?,
-                content_extracted = ?, extraction_status = ?,
-                extraction_error = ?, path_prefix = ?, reverse_path = ?,
-                path_hash = ?, parent_hash = ?, path_depth = ?
-            WHERE id = ?
-        )"));
-
-        auto& stmt = *cachedStmt;
-        YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
-                              info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
-                              info.indexedTime, info.contentExtracted ? 1 : 0,
-                              ExtractionStatusUtils::toString(info.extractionStatus),
-                              info.extractionError, info.pathPrefix, info.reversePath,
-                              info.pathHash, info.parentHash, info.pathDepth, info.id));
-
-        YAMS_TRY(stmt.execute());
-        if (db.changes() > 0) {
-            const auto nextSize = static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0));
-            const auto prevSize = static_cast<uint64_t>(std::max<int64_t>(priorFileSize, 0));
-            if (nextSize >= prevSize) {
-                cachedTotalSizeBytes_.fetch_add(nextSize - prevSize, std::memory_order_relaxed);
-            } else {
-                saturatingSubBytes(cachedTotalSizeBytes_, prevSize - nextSize);
-            }
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, priorExtension, -1);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, info.fileExtension, 1);
-            saturatingSubBytes(cachedPathDepthSum_,
-                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
-                                          std::memory_order_relaxed);
-            auto currentDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
-            const auto nextDepth = static_cast<uint64_t>(std::max(info.pathDepth, 0));
-            while (nextDepth > currentDepthMax &&
-                   !cachedPathDepthMax_.compare_exchange_weak(currentDepthMax, nextDepth,
-                                                              std::memory_order_acq_rel,
-                                                              std::memory_order_relaxed)) {
-            }
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
-                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
-            }
-        }
-        return Result<void>();
-    });
-}
-
-Result<void> MetadataRepository::deleteDocument(int64_t id) {
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // Query document flags before deletion to update counters
-        bool wasExtracted = false;
-        bool wasIndexed = false;
-        bool wasEmbedded = false;
-        uint64_t priorFileSize = 0;
-        std::string priorExtension;
-        int priorPathDepth = 0;
-        {
-            // Use prepareCached for better performance on repeated deletes.
-            // wasIndexed checks actual FTS row presence; wasEmbedded checks
-            // document_embeddings_status.has_embedding.
-            auto checkStmt = db.prepareCached(R"(
-                SELECT d.content_extracted,
-                       d.file_size,
-                       d.file_extension,
-                       d.path_depth,
-                       CASE WHEN EXISTS(
-                           SELECT 1 FROM documents_fts WHERE rowid = d.id
-                       ) THEN 1 ELSE 0 END,
-                       COALESCE(des.has_embedding, 0)
-                FROM documents d
-                LEFT JOIN document_embeddings_status des ON des.document_id = d.id
-                WHERE d.id = ?
-            )");
-            if (checkStmt) {
-                auto& stmt = *checkStmt.value();
-                stmt.bind(1, id);
-                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                    wasExtracted = stmt.getInt(0) != 0;
-                    priorFileSize = static_cast<uint64_t>(std::max<int64_t>(stmt.getInt64(1), 0));
-                    priorExtension = stmt.getString(2);
-                    priorPathDepth = stmt.getInt(3);
-                    wasIndexed = stmt.getInt(4) != 0;
-                    wasEmbedded = stmt.getInt(5) != 0;
-                }
-            }
-        }
-
-        // Foreign key constraints will handle cascading deletes
-        // Use prepareCached for better performance
-        auto stmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto& stmt = *stmtResult.value();
-        auto bindResult = stmt.bind(1, id);
-        if (!bindResult)
-            return bindResult.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        // Update component-owned metrics (using saturating subtraction to prevent underflow)
-        if (db.changes() > 0) {
-            core::saturating_sub(cachedDocumentCount_, uint64_t{1});
-            saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
-            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                     cachedBinaryDocCount_, priorExtension, -1);
-            saturatingSubBytes(cachedPathDepthSum_,
-                               static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
-            }
-            if (wasExtracted) {
-                core::saturating_sub(cachedExtractedCount_, uint64_t{1});
-            }
-            if (wasIndexed) {
-                core::saturating_sub(cachedIndexedCount_, uint64_t{1});
-            }
-            if (wasEmbedded) {
-                core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
-            }
-
-            YAMS_DCHECK(
-                cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: indexed count must not exceed total document count after delete");
-            YAMS_DCHECK(
-                cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: extracted count must not exceed total document count after delete");
-            YAMS_DCHECK(
-                cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: embedded count must not exceed total document count after delete");
-        }
-
-        return Result<void>();
-    });
-
-    if (result) {
-        // Signal enumeration cache invalidation (document deletion cascades to metadata)
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
-    }
-    return result;
-}
-
-Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_t>& ids) {
-    if (ids.empty()) {
-        return size_t{0};
-    }
-
-    auto result = executeQuery<size_t>([&](Database& db) -> Result<size_t> {
-        // Begin transaction for batch operation
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
-
-        size_t deletedCount = 0;
-
-        // Prepare statement for checking document flags.
-        // wasIndexed checks actual FTS row presence; wasEmbedded checks
-        // document_embeddings_status.has_embedding.
-        auto checkStmtResult = db.prepareCached(R"(
-            SELECT d.id, d.content_extracted, d.file_size, d.file_extension, d.path_depth,
-                   CASE WHEN EXISTS(
-                       SELECT 1 FROM documents_fts WHERE rowid = d.id
-                   ) THEN 1 ELSE 0 END,
-                   COALESCE(des.has_embedding, 0)
-            FROM documents d
-            LEFT JOIN document_embeddings_status des ON des.document_id = d.id
-            WHERE d.id = ?
-        )");
-        if (!checkStmtResult) {
-            db.execute("ROLLBACK");
-            return checkStmtResult.error();
-        }
-        auto& checkStmt = *checkStmtResult.value();
-
-        // Prepare statement for deletion
-        auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
-        if (!deleteStmtResult) {
-            db.execute("ROLLBACK");
-            return deleteStmtResult.error();
-        }
-        auto& deleteStmt = *deleteStmtResult.value();
-
-        // Process each document
-        for (int64_t id : ids) {
-            // Check flags before deletion
-            bool wasExtracted = false;
-            bool wasIndexed = false;
-            bool wasEmbedded = false;
-            uint64_t priorFileSize = 0;
-            std::string priorExtension;
-            int priorPathDepth = 0;
-
-            if (auto r = checkStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = checkStmt.bind(1, id); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
-                wasExtracted = checkStmt.getInt(1) != 0;
-                priorFileSize = static_cast<uint64_t>(std::max<int64_t>(checkStmt.getInt64(2), 0));
-                priorExtension = checkStmt.getString(3);
-                priorPathDepth = checkStmt.getInt(4);
-                wasIndexed = checkStmt.getInt(5) != 0;
-                wasEmbedded = checkStmt.getInt(6) != 0;
-            }
-
-            // Delete document
-            if (auto r = deleteStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = deleteStmt.bind(1, id); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto execRes = deleteStmt.execute(); !execRes) {
-                db.execute("ROLLBACK");
-                return execRes.error();
-            }
-
-            // Update metrics
-            if (db.changes() > 0) {
-                deletedCount++;
-                core::saturating_sub(cachedDocumentCount_, uint64_t{1});
-                saturatingSubBytes(cachedTotalSizeBytes_, priorFileSize);
-                applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
-                                         cachedBinaryDocCount_, priorExtension, -1);
-                saturatingSubBytes(cachedPathDepthSum_,
-                                   static_cast<uint64_t>(std::max(priorPathDepth, 0)));
-                {
-                    std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                    updateExtensionCountMap(cachedExtensionCounts_, priorExtension, -1);
-                }
-                if (wasExtracted) {
-                    core::saturating_sub(cachedExtractedCount_, uint64_t{1});
-                }
-                if (wasIndexed) {
-                    core::saturating_sub(cachedIndexedCount_, uint64_t{1});
-                }
-                if (wasEmbedded) {
-                    core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
-                }
-
-                YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: indexed count must not exceed total document count after "
-                            "batch delete");
-                YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: extracted count must not exceed total document count after "
-                            "batch delete");
-                YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                            "metadata: embedded count must not exceed total document count after "
-                            "batch delete");
-            }
-        }
-
-        // Commit transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
-
-        return deletedCount;
-    });
-
-    if (result) {
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
-    }
-    return result;
-}
-
-Result<size_t> MetadataRepository::updateDocumentsMimeBatch(
-    const std::vector<std::pair<int64_t, std::string>>& idMimePairs) {
-    if (idMimePairs.empty()) {
-        return size_t{0};
-    }
-
-    return executeQuery<size_t>([&](Database& db) -> Result<size_t> {
-        // Begin transaction for batch operation
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
-
-        // Prepare cached statement for updates
-        auto updateStmtResult = db.prepareCached("UPDATE documents SET mime_type = ? WHERE id = ?");
-        if (!updateStmtResult) {
-            db.execute("ROLLBACK");
-            return updateStmtResult.error();
-        }
-        auto& updateStmt = *updateStmtResult.value();
-
-        size_t updatedCount = 0;
-
-        for (const auto& [id, mimeType] : idMimePairs) {
-            if (auto r = updateStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = updateStmt.bind(1, mimeType); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = updateStmt.bind(2, id); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto execRes = updateStmt.execute(); !execRes) {
-                db.execute("ROLLBACK");
-                return execRes.error();
-            }
-
-            if (db.changes() > 0) {
-                updatedCount++;
-            }
-        }
-
-        // Commit transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
-
-        return updatedCount;
-    });
-}
-
-// Content operations
-Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::insertContent");
-    YAMS_PLOT("metadata_repo::insert_content_bytes",
-              static_cast<int64_t>(content.contentText.size()));
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        DocumentContent sanitized = content;
-        sanitized.contentText = common::sanitizeUtf8(content.contentText);
-        sanitized.contentLength = static_cast<int64_t>(sanitized.contentText.length());
-
-        repository::CrudOps<DocumentContent> ops;
-        return ops.upsertOnConflict(db, sanitized, "document_id");
-    });
-}
-
-Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::getContent");
-    auto result = executeReadQuery<std::optional<DocumentContent>>(
-        [&](Database& db) -> Result<std::optional<DocumentContent>> {
-            repository::CrudOps<DocumentContent> ops;
-            return ops.getById(db, documentId);
-        });
-    if (result && result.value().has_value()) {
-        YAMS_PLOT("metadata_repo::get_content_bytes",
-                  static_cast<int64_t>(result.value()->contentText.size()));
-    }
-    return result;
-}
-
-Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::updateContent");
-    YAMS_PLOT("metadata_repo::update_content_bytes",
-              static_cast<int64_t>(content.contentText.size()));
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        DocumentContent sanitized = content;
-        sanitized.contentText = common::sanitizeUtf8(content.contentText);
-        sanitized.contentLength = static_cast<int64_t>(sanitized.contentText.length());
-
-        repository::CrudOps<DocumentContent> ops;
-        return ops.update(db, sanitized);
-    });
-}
-
-Result<void> MetadataRepository::deleteContent(int64_t documentId) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::deleteContent");
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::CrudOps<DocumentContent> ops;
-        return ops.deleteById(db, documentId);
-    });
-}
-
 Result<void>
 MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::batchInsertContentAndIndex");
@@ -1511,127 +644,161 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         uint64_t newlyIndexed{0};
         std::vector<int64_t> indexedDocIds;
     };
+    struct PreparedBatchContentEntry {
+        int64_t documentId = 0;
+        std::string sanitizedTitle;
+        std::string sanitizedContent;
+        std::string boostedContent;
+        std::string extractionMethod;
+        std::string language;
+        bool priorStateKnown = false;
+        bool priorContentExtracted = false;
+    };
+
+    constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
+    constexpr std::size_t kMaxBoostedBytes = kMaxTextBytes;
+    std::vector<PreparedBatchContentEntry> preparedEntries;
+    preparedEntries.reserve(entries.size());
+    for (const auto& entry : entries) {
+        YAMS_DCHECK(entry.documentId != 0,
+                    "batch content entry should target a persisted document");
+
+        std::string_view contentView = entry.contentText;
+        if (contentView.size() > kMaxTextBytes) {
+            contentView = contentView.substr(0, kMaxTextBytes);
+        }
+
+        // Sanitize and build the boosted FTS payload before taking the write transaction so
+        // contention is dominated by SQLite work, not per-entry UTF-8 cleanup/string assembly.
+        preparedEntries.emplace_back();
+        auto& prepared = preparedEntries.back();
+        prepared.documentId = entry.documentId;
+        prepared.extractionMethod = entry.extractionMethod;
+        prepared.language = entry.language;
+        prepared.priorStateKnown = entry.priorStateKnown;
+        prepared.priorContentExtracted = entry.priorContentExtracted;
+
+        std::string contentStorage;
+        prepared.sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
+
+        std::string titleStorage;
+        prepared.sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
+
+        prepared.boostedContent.reserve(
+            std::min<std::size_t>(prepared.sanitizedContent.size() + 512, kMaxBoostedBytes));
+        auto append_repeated = [&](std::string_view text, int times) {
+            if (text.empty())
+                return;
+            for (int t = 0; t < times; ++t) {
+                if (prepared.boostedContent.size() >= kMaxBoostedBytes)
+                    break;
+                if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
+                    prepared.boostedContent.push_back(' ');
+                }
+                std::size_t avail = kMaxBoostedBytes - prepared.boostedContent.size();
+                if (avail < text.size() + 1) {
+                    prepared.boostedContent.append(text.substr(0, std::min(text.size(), avail)));
+                    break;
+                }
+                prepared.boostedContent.append(text);
+            }
+        };
+
+        append_repeated(prepared.sanitizedTitle, 3);
+        if (!entry.abstract.empty()) {
+            std::string absStorage;
+            auto sanitizedAbstract = common::ensureValidUtf8(entry.abstract, absStorage);
+            append_repeated(sanitizedAbstract, 2);
+        }
+        if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
+            prepared.boostedContent.push_back(' ');
+        }
+        const std::size_t bodySpace = kMaxBoostedBytes > prepared.boostedContent.size()
+                                          ? kMaxBoostedBytes - prepared.boostedContent.size()
+                                          : 0;
+        prepared.boostedContent.append(prepared.sanitizedContent.substr(
+            0, std::min(bodySpace, prepared.sanitizedContent.size())));
+    }
 
     auto result = executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
         // Track counter deltas per attempt. executeQueryOnPool may retry the lambda
         // after lock/constraint races; deltas from failed attempts must not leak into
         // the final cache update.
         BatchContentDelta delta;
-        delta.indexedDocIds.reserve(entries.size());
-        // Begin transaction for batch operation
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
+        delta.indexedDocIds.reserve(preparedEntries.size());
+        YAMS_TRY(beginTransaction(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
 
         // Check if FTS5 is available once
-        auto fts5Result = db.hasFTS5();
-        if (!fts5Result) {
-            db.execute("ROLLBACK");
-            return fts5Result.error();
-        }
-        const bool hasFts5 = fts5Result.value();
+        YAMS_TRY_UNWRAP(hasFts5, db.hasFTS5());
 
         // Prepare cached statements for reuse
-        auto contentStmtResult = db.prepareCached(R"(
-            INSERT INTO document_content (
-                document_id, content_text, content_length,
-                extraction_method, language
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(document_id) DO UPDATE SET
-                content_text = excluded.content_text,
-                content_length = excluded.content_length,
-                extraction_method = excluded.extraction_method,
-                language = excluded.language
-        )");
-        if (!contentStmtResult) {
-            db.execute("ROLLBACK");
-            return contentStmtResult.error();
-        }
-        auto& contentStmt = *contentStmtResult.value();
+        YAMS_TRY_UNWRAP(contentStmtResult, db.prepareCached(R"(
+                INSERT INTO document_content (
+                    document_id, content_text, content_length,
+                    extraction_method, language
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    content_text = excluded.content_text,
+                    content_length = excluded.content_length,
+                    extraction_method = excluded.extraction_method,
+                    language = excluded.language
+            )"));
+        auto& contentStmt = *contentStmtResult;
 
         std::optional<CachedStatement> ftsStmtOpt;
         if (hasFts5) {
-            auto ftsStmtResult = db.prepareCached(R"(
-                INSERT OR REPLACE INTO documents_fts (rowid, content, title)
-                VALUES (?, ?, ?)
-            )");
-            if (!ftsStmtResult) {
-                db.execute("ROLLBACK");
-                return ftsStmtResult.error();
-            }
-            ftsStmtOpt = std::move(ftsStmtResult.value());
+            YAMS_TRY_UNWRAP(ftsStmtResult, db.prepareCached(R"(
+                    INSERT OR REPLACE INTO documents_fts (rowid, content, title)
+                    VALUES (?, ?, ?)
+                )"));
+            ftsStmtOpt = std::move(ftsStmtResult);
         }
 
         // Pre-check statement to determine counter increments before the combined UPDATE.
-        auto checkStmtResult = db.prepareCached(hasFts5 ? R"(
-            SELECT COALESCE(content_extracted, 0),
-                   CASE WHEN EXISTS(
-                       SELECT 1 FROM documents_fts WHERE rowid = documents.id
-                   ) THEN 1 ELSE 0 END
-            FROM documents WHERE id = ?
-        )"
-                                                        : R"(
-            SELECT COALESCE(content_extracted, 0), 0
-            FROM documents WHERE id = ?
-        )");
-        if (!checkStmtResult) {
-            db.execute("ROLLBACK");
-            return checkStmtResult.error();
-        }
-        auto& checkStmt = *checkStmtResult.value();
+        YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
+                SELECT COALESCE(content_extracted, 0),
+                       CASE WHEN EXISTS(
+                           SELECT 1 FROM documents_fts WHERE rowid = documents.id
+                       ) THEN 1 ELSE 0 END
+                FROM documents WHERE id = ?
+            )"
+                                                                  : R"(
+                SELECT COALESCE(content_extracted, 0), 0
+                FROM documents WHERE id = ?
+            )"));
+        auto& checkStmt = *checkStmtResult;
 
         // Combined UPDATE: sets all extraction fields in a single statement
         // (replaces 3 separate conditional UPDATEs per document).
-        auto combinedStmtResult = db.prepareCached(R"(
-            UPDATE documents
-            SET content_extracted = 1,
-                extraction_status = 'Success',
-                extraction_error = NULL,
-                repair_status = 'completed',
-                repair_attempted_at = unixepoch(),
-                repair_attempts = repair_attempts + 1
-            WHERE id = ?
-        )");
-        if (!combinedStmtResult) {
-            db.execute("ROLLBACK");
-            return combinedStmtResult.error();
-        }
-        auto& combinedStmt = *combinedStmtResult.value();
+        YAMS_TRY_UNWRAP(combinedStmtResult, db.prepareCached(R"(
+                UPDATE documents
+                SET content_extracted = 1,
+                    extraction_status = 'Success',
+                    extraction_error = NULL,
+                    repair_status = 'completed',
+                    repair_attempted_at = unixepoch(),
+                    repair_attempts = repair_attempts + 1
+                WHERE id = ?
+            )"));
+        auto& combinedStmt = *combinedStmtResult;
 
-        // Process each entry
-        constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
-        std::string contentStorage, titleStorage;
-        for (const auto& entry : entries) {
-            std::string_view contentView = entry.contentText;
-            if (contentView.size() > kMaxTextBytes) {
-                contentView = contentView.substr(0, kMaxTextBytes);
-            }
-            contentStorage.clear();
-            titleStorage.clear();
-            const auto sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
-            const auto sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
-
+        for (const auto& entry : preparedEntries) {
             bool wasExtracted = entry.priorContentExtracted;
             // Without FTS5 there is no documents_fts state to reconcile, so avoid
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
             if (!entry.priorStateKnown || hasFts5) {
-                if (auto r = checkStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = checkStmt.bind(1, entry.documentId); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
+                YAMS_TRY(checkStmt.reset());
+                YAMS_TRY(checkStmt.clearBindings());
+                YAMS_TRY(checkStmt.bind(1, entry.documentId));
                 auto checkStep = checkStmt.step();
                 if (!checkStep) {
-                    db.execute("ROLLBACK");
                     return checkStep.error();
                 }
                 if (checkStep.value()) {
@@ -1648,108 +815,27 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 }
             }
 
-            // 1. Insert content
-            if (auto r = contentStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = contentStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto bindResult = contentStmt.bindAll(entry.documentId, sanitizedContent,
-                                                  static_cast<int64_t>(sanitizedContent.length()),
-                                                  entry.extractionMethod, entry.language);
-            if (!bindResult) {
-                db.execute("ROLLBACK");
-                return bindResult.error();
-            }
-            auto execResult = contentStmt.execute();
-            if (!execResult) {
-                db.execute("ROLLBACK");
-                return execResult.error();
-            }
+            YAMS_TRY(contentStmt.reset());
+            YAMS_TRY(contentStmt.clearBindings());
+            YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
+                                         static_cast<int64_t>(entry.sanitizedContent.length()),
+                                         entry.extractionMethod, entry.language));
+            YAMS_TRY(contentStmt.execute());
 
-            // 2. Insert FTS index with field-weighted content
-            // Title tokens repeated 3x, abstract tokens 2x, body tokens 1x.
-            // This gives BM25 natural field weighting without schema changes.
             if (hasFts5 && ftsStmtOpt) {
                 auto& ftsStmt = **ftsStmtOpt;
-                if (auto r = ftsStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = ftsStmt.clearBindings(); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-
-                // Build boosted content: title (3x) + abstract (2x) + body
-                std::string boosted;
-                constexpr std::size_t kMaxBoostedBytes = kMaxTextBytes;
-                boosted.reserve(
-                    std::min<std::size_t>(sanitizedContent.size() + 512, kMaxBoostedBytes));
-
-                auto append_repeated = [&](std::string_view text, int times) {
-                    if (text.empty())
-                        return;
-                    for (int t = 0; t < times; ++t) {
-                        if (boosted.size() >= kMaxBoostedBytes)
-                            break;
-                        if (!boosted.empty() && boosted.back() != ' ')
-                            boosted.push_back(' ');
-                        std::size_t avail = kMaxBoostedBytes - boosted.size();
-                        if (avail < text.size() + 1) {
-                            boosted.append(text.data(), std::min(text.size(), avail));
-                            break;
-                        }
-                        boosted.append(text);
-                    }
-                };
-
-                append_repeated(sanitizedTitle, 3);
-                if (!entry.abstract.empty()) {
-                    std::string absStorage;
-                    auto sanitizedAbstract = common::ensureValidUtf8(entry.abstract, absStorage);
-                    append_repeated(sanitizedAbstract, 2);
-                }
-                if (!boosted.empty() && boosted.back() != ' ')
-                    boosted.push_back(' ');
-                std::size_t bodySpace =
-                    kMaxBoostedBytes > boosted.size() ? kMaxBoostedBytes - boosted.size() : 0;
-                boosted.append(sanitizedContent.data(),
-                               std::min(bodySpace, sanitizedContent.size()));
-
-                auto ftsBind = ftsStmt.bindAll(entry.documentId, boosted, sanitizedTitle);
-                if (!ftsBind) {
-                    db.execute("ROLLBACK");
-                    return ftsBind.error();
-                }
-                auto ftsExec = ftsStmt.execute();
-                if (!ftsExec) {
-                    db.execute("ROLLBACK");
-                    return ftsExec.error();
-                }
+                YAMS_TRY(ftsStmt.reset());
+                YAMS_TRY(ftsStmt.clearBindings());
+                YAMS_TRY(
+                    ftsStmt.bindAll(entry.documentId, entry.boostedContent, entry.sanitizedTitle));
+                YAMS_TRY(ftsStmt.execute());
                 delta.indexedDocIds.push_back(entry.documentId);
             }
 
-            if (auto r = combinedStmt.reset(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = combinedStmt.clearBindings(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = combinedStmt.bind(1, entry.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            auto combExec = combinedStmt.execute();
-            if (!combExec) {
-                db.execute("ROLLBACK");
-                return combExec.error();
-            }
+            YAMS_TRY(combinedStmt.reset());
+            YAMS_TRY(combinedStmt.clearBindings());
+            YAMS_TRY(combinedStmt.bind(1, entry.documentId));
+            YAMS_TRY(combinedStmt.execute());
             if (!wasExtracted) {
                 delta.newlyExtracted++;
             }
@@ -1758,12 +844,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             }
         }
 
-        // Commit transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        rollback.dismiss();
 
         return delta;
     });
@@ -1807,312 +890,6 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         return result.error();
     }
     return Result<void>();
-}
-
-// Metadata operations
-Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
-                                             const MetadataValue& value) {
-    uint64_t tagCountDelta = 0;
-    uint64_t docsWithTagsDelta = 0;
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        if (isTagMetadataKey(key)) {
-            auto countStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? "
-                                              "AND (key = 'tag' OR key LIKE 'tag:%')");
-            if (countStmt) {
-                auto& stmt = *countStmt.value();
-                YAMS_TRY(stmt.reset());
-                YAMS_TRY(stmt.bind(1, documentId));
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                const auto priorTagCount = hasRow ? stmt.getInt64(0) : 0;
-
-                auto existsStmt = db.prepareCached(
-                    "SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
-                if (existsStmt) {
-                    auto& estmt = *existsStmt.value();
-                    YAMS_TRY(estmt.reset());
-                    YAMS_TRY(estmt.bind(1, documentId));
-                    YAMS_TRY(estmt.bind(2, key));
-                    YAMS_TRY_UNWRAP(existsRow, estmt.step());
-                    const auto priorKeyCount = existsRow ? estmt.getInt64(0) : 0;
-                    if (priorKeyCount == 0) {
-                        tagCountDelta = 1;
-                        if (priorTagCount == 0) {
-                            docsWithTagsDelta = 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Single-row fast path: avoid batch scaffolding + explicit transaction.
-        // Use ON CONFLICT to avoid DELETE+INSERT semantics of OR REPLACE (less write
-        // amplification).
-        static const std::string sql =
-            "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-            "value_type = excluded.value_type";
-        YAMS_TRY_UNWRAP(stmt, db.prepareCached(sql));
-        YAMS_TRY(stmt->bind(1, documentId));
-        YAMS_TRY(stmt->bind(2, key));
-        YAMS_TRY(stmt->bind(3, value.value));
-        YAMS_TRY(stmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
-        YAMS_TRY(stmt->execute());
-        return {};
-    });
-
-    if (result) {
-        if (tagCountDelta > 0) {
-            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
-        }
-        if (docsWithTagsDelta > 0) {
-            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
-        }
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
-    }
-    return result;
-}
-
-Result<void> MetadataRepository::setMetadataBatch(
-    const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) {
-    if (entries.empty()) {
-        return Result<void>();
-    }
-
-    // Deduplicate entries by (document_id, key) within the batch.
-    // Duplicate pairs cause SQLite ON CONFLICT DO UPDATE to fail.
-    // Keep the last entry for each key (latest write wins).
-    std::vector<std::tuple<int64_t, std::string, MetadataValue>> deduped;
-    deduped.reserve(entries.size());
-    std::unordered_map<uint64_t, size_t> seen;
-    for (const auto& entry : entries) {
-        auto docId = std::get<0>(entry);
-        auto& key = std::get<1>(entry);
-        uint64_t hash = static_cast<uint64_t>(docId) * 31 + std::hash<std::string>{}(key);
-        auto it = seen.find(hash);
-        if (it != seen.end()) {
-            deduped[it->second] = entry;
-        } else {
-            seen[hash] = deduped.size();
-            deduped.push_back(entry);
-        }
-    }
-
-    uint64_t tagCountDelta = 0;
-    uint64_t docsWithTagsDelta = 0;
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // Chunked multi-row upsert:
-        // - Avoid INSERT OR REPLACE delete+insert semantics (less write amplification)
-        // - Avoid per-entry MetadataEntry allocations/copies
-        // - Reuse cached statement for the common "full chunk" shape
-        constexpr int kColumnsPerRow = 4; // document_id, key, value, value_type
-        constexpr int kSqliteParamLimit = 999;
-        constexpr int kMaxRowsPerChunk = kSqliteParamLimit / kColumnsPerRow; // 249
-
-        auto buildUpsertSql = [](int rows) -> std::string {
-            std::string sql;
-            sql.reserve(static_cast<size_t>(rows) * 20 + 200);
-            sql += "INSERT INTO metadata (document_id, key, value, value_type) VALUES ";
-            for (int i = 0; i < rows; ++i) {
-                if (i > 0)
-                    sql += ',';
-                sql += "(?, ?, ?, ?)";
-            }
-            sql += " ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
-                   "value_type = excluded.value_type";
-            return sql;
-        };
-
-        const std::string fullChunkSql = buildUpsertSql(kMaxRowsPerChunk);
-
-        // Wrap the full operation in a single transaction.
-        // beginTransactionWithRetry() uses BEGIN IMMEDIATE on SQLite to avoid mid-loop lock
-        // surprises; commit/rollback uses Database::execute.
-        YAMS_TRY(beginTransactionWithRetry(db));
-        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
-
-        std::unordered_map<int64_t, std::vector<std::string>> pendingTagKeysByDoc;
-        for (const auto& [documentId, key, _value] : deduped) {
-            if (isTagMetadataKey(key)) {
-                pendingTagKeysByDoc[documentId].push_back(key);
-            }
-        }
-
-        if (!pendingTagKeysByDoc.empty()) {
-            auto tagCountStmt = db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id "
-                                                 "= ? AND (key = 'tag' OR key LIKE 'tag:%')");
-            auto keyExistsStmt =
-                db.prepareCached("SELECT COUNT(*) FROM metadata WHERE document_id = ? AND key = ?");
-            if (tagCountStmt && keyExistsStmt) {
-                for (auto& [documentId, keys] : pendingTagKeysByDoc) {
-                    auto& tcStmt = *tagCountStmt.value();
-                    YAMS_TRY(tcStmt.reset());
-                    YAMS_TRY(tcStmt.bind(1, documentId));
-                    YAMS_TRY_UNWRAP(tagRow, tcStmt.step());
-                    const auto priorTagCount = tagRow ? tcStmt.getInt64(0) : 0;
-                    bool docWillGainFirstTag = priorTagCount == 0;
-                    std::unordered_set<std::string> seenKeys;
-                    for (const auto& tagKey : keys) {
-                        if (!seenKeys.insert(tagKey).second) {
-                            continue;
-                        }
-                        auto& keStmt = *keyExistsStmt.value();
-                        YAMS_TRY(keStmt.reset());
-                        YAMS_TRY(keStmt.bind(1, documentId));
-                        YAMS_TRY(keStmt.bind(2, tagKey));
-                        YAMS_TRY_UNWRAP(keyRow, keStmt.step());
-                        const auto priorKeyCount = keyRow ? keStmt.getInt64(0) : 0;
-                        if (priorKeyCount == 0) {
-                            ++tagCountDelta;
-                            if (docWillGainFirstTag) {
-                                ++docsWithTagsDelta;
-                                docWillGainFirstTag = false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (size_t offset = 0; offset < deduped.size(); offset += kMaxRowsPerChunk) {
-            const int rows = static_cast<int>(
-                std::min(deduped.size() - offset, static_cast<size_t>(kMaxRowsPerChunk)));
-
-            if (rows == kMaxRowsPerChunk) {
-                YAMS_TRY_UNWRAP(stmt, db.prepareCached(fullChunkSql));
-                int bindIndex = 1;
-                for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
-                    YAMS_TRY(stmt->bind(bindIndex++, documentId));
-                    YAMS_TRY(stmt->bind(bindIndex++, key));
-                    YAMS_TRY(stmt->bind(bindIndex++, value.value));
-                    YAMS_TRY(
-                        stmt->bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
-                }
-                YAMS_TRY(stmt->execute());
-            } else {
-                const std::string tailSql = buildUpsertSql(rows);
-                YAMS_TRY_UNWRAP(stmt, db.prepare(tailSql));
-                int bindIndex = 1;
-                for (int i = 0; i < rows; ++i) {
-                    const auto& [documentId, key, value] = deduped[offset + static_cast<size_t>(i)];
-                    YAMS_TRY(stmt.bind(bindIndex++, documentId));
-                    YAMS_TRY(stmt.bind(bindIndex++, key));
-                    YAMS_TRY(stmt.bind(bindIndex++, value.value));
-                    YAMS_TRY(
-                        stmt.bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
-                }
-                YAMS_TRY(stmt.execute());
-            }
-        }
-
-        YAMS_TRY(db.execute("COMMIT"));
-        rollback.dismiss();
-        return {};
-    });
-
-    if (result) {
-        // Signal corpus stats stale - metadata batch may affect corpus statistics
-        signalCorpusStatsStale();
-        if (tagCountDelta > 0) {
-            cachedTagCount_.fetch_add(tagCountDelta, std::memory_order_relaxed);
-        }
-        if (docsWithTagsDelta > 0) {
-            cachedDocsWithTags_.fetch_add(docsWithTagsDelta, std::memory_order_relaxed);
-        }
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
-    }
-    return result;
-}
-
-Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t documentId,
-                                                                     const std::string& key) {
-    return executeReadQuery<std::optional<MetadataValue>>(
-        [&](Database& db) -> Result<std::optional<MetadataValue>> {
-            repository::CrudOps<repository::MetadataEntry> ops;
-            YAMS_TRY_UNWRAP(entry,
-                            ops.queryOne(db, "document_id = ? AND key = ?", documentId, key));
-            if (!entry) {
-                return std::optional<MetadataValue>{};
-            }
-            MetadataValue value;
-            value.value = entry->value;
-            value.type = MetadataValueTypeUtils::fromString(entry->valueType);
-            return std::optional<MetadataValue>{std::move(value)};
-        });
-}
-
-Result<std::unordered_map<std::string, MetadataValue>>
-MetadataRepository::getAllMetadata(int64_t documentId) {
-    return executeReadQuery<std::unordered_map<std::string, MetadataValue>>(
-        [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
-            repository::CrudOps<repository::MetadataEntry> ops;
-            YAMS_TRY_UNWRAP(entries, ops.query(db, "document_id = ?", documentId));
-
-            std::unordered_map<std::string, MetadataValue> result;
-            for (const auto& entry : entries) {
-                MetadataValue value;
-                value.value = entry.value;
-                value.type = MetadataValueTypeUtils::fromString(entry.valueType);
-                result[entry.key] = value;
-            }
-            return result;
-        });
-}
-
-Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
-MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds) {
-    YAMS_ZONE_SCOPED_N("MetadataRepo::getMetadataForDocuments");
-    YAMS_PLOT("metadata_repo::metadata_batch_requested", static_cast<int64_t>(documentIds.size()));
-    if (documentIds.empty())
-        return std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>{};
-
-    auto result = executeReadQuery<
-        std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>(
-        [&](Database& db)
-            -> Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>> {
-            using yams::metadata::sql::QuerySpec;
-            std::string inList;
-            inList.reserve(documentIds.size() * 2);
-            inList += '(';
-            for (size_t i = 0; i < documentIds.size(); ++i) {
-                if (i > 0)
-                    inList += ',';
-                inList += '?';
-            }
-            inList += ')';
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"document_id", "key", "value", "value_type"};
-            spec.conditions = {"document_id IN " + inList};
-
-            YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
-            int index = 1;
-            for (auto id : documentIds) {
-                YAMS_TRY(stmt.bind(index++, id));
-            }
-
-            std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>> result;
-            while (true) {
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                if (!hasRow)
-                    break;
-
-                int64_t docId = stmt.getInt64(0);
-                MetadataValue value;
-                value.value = stmt.getString(2);
-                value.type = MetadataValueTypeUtils::fromString(stmt.getString(3));
-                result[docId][stmt.getString(1)] = value;
-            }
-
-            return result;
-        });
-    if (result) {
-        YAMS_PLOT("metadata_repo::metadata_batch_docs",
-                  static_cast<int64_t>(result.value().size()));
-    }
-    return result;
 }
 
 std::string
@@ -2303,60 +1080,6 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
     return queryResult;
 }
 
-Result<void> MetadataRepository::removeMetadata(int64_t documentId, const std::string& key) {
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::CrudOps<repository::MetadataEntry> ops;
-        ops.deleteWhere(db, "document_id = ? AND key = ?", documentId, key);
-        return {};
-    });
-
-    if (result) {
-        // Signal enumeration cache invalidation
-        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
-    }
-    return result;
-}
-
-// Relationship operations
-Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationship& relationship) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        YAMS_TRY_UNWRAP(stmt, db.prepare(R"(
-            INSERT INTO document_relationships (
-                parent_id, child_id, relationship_type, created_time
-            ) VALUES (?, ?, ?, ?)
-        )"));
-
-        if (relationship.parentId > 0) {
-            YAMS_TRY(stmt.bindAll(relationship.parentId, relationship.childId,
-                                  relationship.getRelationshipTypeString(),
-                                  relationship.createdTime));
-        } else {
-            YAMS_TRY(stmt.bind(1, nullptr));
-            YAMS_TRY(stmt.bind(2, relationship.childId));
-            YAMS_TRY(stmt.bind(3, relationship.getRelationshipTypeString()));
-            YAMS_TRY(stmt.bind(4, relationship.createdTime));
-        }
-
-        YAMS_TRY(stmt.execute());
-        return db.lastInsertRowId();
-    });
-}
-
-Result<std::vector<DocumentRelationship>> MetadataRepository::getRelationships(int64_t documentId) {
-    return executeReadQuery<std::vector<DocumentRelationship>>(
-        [&](Database& db) -> Result<std::vector<DocumentRelationship>> {
-            repository::CrudOps<DocumentRelationship> ops;
-            return ops.query(db, "parent_id = ? OR child_id = ?", documentId, documentId);
-        });
-}
-
-Result<void> MetadataRepository::deleteRelationship(int64_t relationshipId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::CrudOps<DocumentRelationship> ops;
-        return ops.deleteById(db, relationshipId);
-    });
-}
-
 Result<int64_t>
 MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& group) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
@@ -2386,20 +1109,11 @@ MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& g
         YAMS_TRY(stmt.bind(2, group.algorithmVersion));
         YAMS_TRY(stmt.bind(3, group.status));
         YAMS_TRY(stmt.bind(4, group.reviewState));
-        if (group.canonicalDocumentId.has_value())
-            YAMS_TRY(stmt.bind(5, *group.canonicalDocumentId));
-        else
-            YAMS_TRY(stmt.bind(5, nullptr));
+        YAMS_TRY(bindOptionalInt64(stmt, 5, group.canonicalDocumentId));
         YAMS_TRY(stmt.bind(6, group.memberCount));
         YAMS_TRY(stmt.bind(7, group.maxPairScore));
-        if (group.threshold.has_value())
-            YAMS_TRY(stmt.bind(8, *group.threshold));
-        else
-            YAMS_TRY(stmt.bind(8, nullptr));
-        if (group.evidenceJson.empty())
-            YAMS_TRY(stmt.bind(9, nullptr));
-        else
-            YAMS_TRY(stmt.bind(9, group.evidenceJson));
+        YAMS_TRY(bindOptionalDouble(stmt, 8, group.threshold));
+        YAMS_TRY(bindNullableText(stmt, 9, group.evidenceJson));
         YAMS_TRY(stmt.bind(10, group.createdAt));
         YAMS_TRY(stmt.bind(11, group.updatedAt));
         YAMS_TRY(stmt.bind(12, group.lastComputedAt));
@@ -2422,120 +1136,31 @@ MetadataRepository::upsertSemanticDuplicateGroup(const SemanticDuplicateGroup& g
 Result<void> MetadataRepository::replaceSemanticDuplicateGroupMembers(
     int64_t groupId, const std::vector<SemanticDuplicateGroupMember>& members) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        YAMS_TRY(db.execute("BEGIN IMMEDIATE"));
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
 
-        auto deleteResult =
-            db.prepare("DELETE FROM semantic_duplicate_group_members WHERE group_id = ?");
-        if (!deleteResult) {
-            db.execute("ROLLBACK");
-            return deleteResult.error();
-        }
+        YAMS_TRY_UNWRAP(
+            deleteStmt,
+            db.prepare("DELETE FROM semantic_duplicate_group_members WHERE group_id = ?"));
+        YAMS_TRY(deleteStmt.bind(1, groupId));
+        YAMS_TRY(deleteStmt.execute());
 
-        Statement deleteStmt = std::move(deleteResult).value();
-        if (auto r = deleteStmt.bind(1, groupId); !r) {
-            db.execute("ROLLBACK");
-            return r.error();
-        }
-        if (auto r = deleteStmt.execute(); !r) {
-            db.execute("ROLLBACK");
-            return r.error();
-        }
-
-        auto insertResult = db.prepare(R"(
+        YAMS_TRY_UNWRAP(insertStmt, db.prepare(R"(
             INSERT INTO semantic_duplicate_group_members (
                 group_id, document_id, role, similarity_to_canonical,
                 title_overlap, path_overlap, pair_score, decision, reason,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        )");
-        if (!insertResult) {
-            db.execute("ROLLBACK");
-            return insertResult.error();
-        }
+        )"));
 
-        Statement insertStmt = std::move(insertResult).value();
         for (const auto& member : members) {
-            insertStmt.reset();
-            if (auto r = insertStmt.bind(1, groupId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(2, member.documentId); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(3, member.role); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.similarityToCanonical.has_value()) {
-                if (auto r = insertStmt.bind(4, *member.similarityToCanonical); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(4, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.titleOverlap.has_value()) {
-                if (auto r = insertStmt.bind(5, *member.titleOverlap); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(5, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.pathOverlap.has_value()) {
-                if (auto r = insertStmt.bind(6, *member.pathOverlap); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(6, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.pairScore.has_value()) {
-                if (auto r = insertStmt.bind(7, *member.pairScore); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(7, nullptr); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(8, member.decision); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (member.reason.empty()) {
-                if (auto r = insertStmt.bind(9, nullptr); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-            } else if (auto r = insertStmt.bind(9, member.reason); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(10, member.createdAt); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.bind(11, member.updatedAt); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
-            if (auto r = insertStmt.execute(); !r) {
-                db.execute("ROLLBACK");
-                return r.error();
-            }
+            YAMS_TRY(insertStmt.reset());
+            YAMS_TRY(bindSemanticDuplicateGroupMemberInsert(insertStmt, groupId, member));
+            YAMS_TRY(insertStmt.execute());
         }
 
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
         return Result<void>();
     });
 }
@@ -2695,88 +1320,6 @@ Result<void> MetadataRepository::updateSemanticDuplicateGroupStatus(const std::s
     });
 }
 
-// Search history operations (refactored with YAMS_TRY - ADR-0004 Phase 2)
-Result<int64_t> MetadataRepository::insertSearchHistory(const SearchHistoryEntry& entry) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        repository::CrudOps<SearchHistoryEntry> ops;
-        return ops.insert(db, entry);
-    });
-}
-
-Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(int limit) {
-    return executeReadQuery<std::vector<SearchHistoryEntry>>(
-        [&](Database& db) -> Result<std::vector<SearchHistoryEntry>> {
-            repository::CrudOps<SearchHistoryEntry> ops;
-            return ops.getAllOrdered(db, "query_time DESC", limit);
-        });
-}
-
-Result<int64_t> MetadataRepository::insertFeedbackEvent(const FeedbackEvent& event) {
-    // Best-effort: feedback events are telemetry. If the DB is locked by concurrent
-    // writes, drop the event rather than blocking the worker thread for 15+ seconds
-    // in busy_timeout + retry loops, which causes system-wide starvation.
-    return executeBestEffortWrite<int64_t>([&](Database& db) -> Result<int64_t> {
-        repository::CrudOps<FeedbackEvent> ops;
-        return ops.insert(db, event);
-    });
-}
-
-Result<std::vector<FeedbackEvent>>
-MetadataRepository::getFeedbackEventsByTrace(const std::string& traceId, int limit) {
-    return executeReadQuery<std::vector<FeedbackEvent>>(
-        [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
-            repository::CrudOps<FeedbackEvent> ops;
-            return ops.query(db, "trace_id = ? ORDER BY created_at DESC", traceId, limit);
-        });
-}
-
-Result<std::vector<FeedbackEvent>> MetadataRepository::getRecentFeedbackEvents(int limit) {
-    return executeReadQuery<std::vector<FeedbackEvent>>(
-        [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
-            repository::CrudOps<FeedbackEvent> ops;
-            return ops.getAllOrdered(db, "created_at DESC", limit);
-        });
-}
-
-// Saved queries operations (refactored with YAMS_TRY - ADR-0004 Phase 2)
-Result<int64_t> MetadataRepository::insertSavedQuery(const SavedQuery& query) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        repository::CrudOps<SavedQuery> ops;
-        return ops.insert(db, query);
-    });
-}
-
-Result<std::optional<SavedQuery>> MetadataRepository::getSavedQuery(int64_t id) {
-    return executeReadQuery<std::optional<SavedQuery>>(
-        [&](Database& db) -> Result<std::optional<SavedQuery>> {
-            repository::CrudOps<SavedQuery> ops;
-            return ops.getById(db, id);
-        });
-}
-
-Result<std::vector<SavedQuery>> MetadataRepository::getAllSavedQueries() {
-    return executeReadQuery<std::vector<SavedQuery>>(
-        [&](Database& db) -> Result<std::vector<SavedQuery>> {
-            repository::CrudOps<SavedQuery> ops;
-            return ops.getAllOrdered(db, "use_count DESC, last_used DESC");
-        });
-}
-
-Result<void> MetadataRepository::updateSavedQuery(const SavedQuery& query) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::CrudOps<SavedQuery> ops;
-        return ops.update(db, query);
-    });
-}
-
-Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::CrudOps<SavedQuery> ops;
-        return ops.deleteById(db, id);
-    });
-}
-
-// Full-text search operations
 namespace {
 struct FtsIndexDelta {
     bool indexed{false};
@@ -3105,26 +1648,27 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
         // Check if FTS5 is available once
         auto fts5Result = db.hasFTS5();
         if (!fts5Result) {
-            db.execute("ROLLBACK");
+            rollbackIgnoringErrors(db);
             return fts5Result.error();
         }
         const bool hasFts5 = fts5Result.value();
 
         if (!hasFts5) {
+            rollbackIgnoringErrors(db);
             return Result<size_t>(0);
         }
 
         // Prepare cached statements for reuse
         auto selectStmtResult = db.prepareCached("SELECT id FROM documents WHERE sha256_hash = ?");
         if (!selectStmtResult) {
-            db.execute("ROLLBACK");
+            rollbackIgnoringErrors(db);
             return selectStmtResult.error();
         }
         auto& selectStmt = *selectStmtResult.value();
 
         auto deleteStmtResult = db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
         if (!deleteStmtResult) {
-            db.execute("ROLLBACK");
+            rollbackIgnoringErrors(db);
             return deleteStmtResult.error();
         }
         auto& deleteStmt = *deleteStmtResult.value();
@@ -3133,18 +1677,18 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
         for (const auto& hash : hashes) {
             // Reset and rebind select statement
             if (auto r = selectStmt.reset(); !r) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return r.error();
             }
             auto bindResult = selectStmt.bind(1, hash);
             if (!bindResult) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return bindResult.error();
             }
 
             auto stepResult = selectStmt.step();
             if (!stepResult) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return stepResult.error();
             }
 
@@ -3157,28 +1701,29 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
 
             // Reset and rebind delete statement
             if (auto r = deleteStmt.reset(); !r) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return r.error();
             }
             auto delBindResult = deleteStmt.bind(1, docId);
             if (!delBindResult) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return delBindResult.error();
             }
 
             auto execResult = deleteStmt.execute();
             if (!execResult) {
-                db.execute("ROLLBACK");
+                rollbackIgnoringErrors(db);
                 return execResult.error();
             }
 
-            removedDocIds.push_back(docId);
-            ++removed;
+            if (db.changes() > 0) {
+                removedDocIds.push_back(docId);
+                ++removed;
+            }
         }
 
         // Commit the transaction
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
+        if (auto commitResult = commitOrRollback(db); !commitResult) {
             return commitResult.error();
         }
 
@@ -3200,9 +1745,15 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
     }
 
     bool allowBackfill = true;
-    if (const char* env = std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); env && *env) {
-        std::string_view value(env);
-        allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
+    {
+        static std::mutex envMutex;
+        std::lock_guard<std::mutex> lock(envMutex);
+        const char* env =
+            std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); // NOLINT(concurrency-mt-unsafe)
+        if (env && *env) {
+            std::string_view value(env);
+            allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
+        }
     }
     if (!allowBackfill) {
         setCachedFtsIndexedIds({});
@@ -3438,25 +1989,138 @@ Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     });
 }
 
-Result<int64_t> MetadataRepository::getEmbeddedDocumentCount() {
+Result<int64_t> MetadataRepository::queryTotalSizeBytesForInitialization() {
     return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult =
-            db.prepare("SELECT COUNT(*) FROM document_embeddings_status WHERE has_embedding = 1");
-        if (!stmtResult)
+        auto stmtResult = db.prepare("SELECT COALESCE(SUM(file_size), 0) FROM documents");
+        if (!stmtResult) {
             return stmtResult.error();
+        }
         auto& stmt = stmtResult.value();
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        return stepResult.value() ? stmt.getInt64(0) : int64_t{0};
+        YAMS_TRY_UNWRAP(hasRow, stmt.step());
+        if (!hasRow) {
+            return int64_t{0};
+        }
+        return stmt.getInt64(0);
     });
 }
 
-Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
-    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        repository::CrudOps<DocumentInfo> ops;
-        return ops.count(db, "extraction_status = ?", ExtractionStatusUtils::toString(status));
-    });
+Result<std::unordered_map<std::string, int64_t>>
+MetadataRepository::queryExtensionCountsForInitialization() {
+    return executeReadQuery<std::unordered_map<std::string, int64_t>>(
+        [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
+            auto stmtResult = db.prepare(
+                "SELECT file_extension, COUNT(*) FROM documents GROUP BY file_extension");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            std::unordered_map<std::string, int64_t> counts;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
+                    break;
+                }
+                counts[stmt.getString(0)] = stmt.getInt64(1);
+            }
+            return counts;
+        });
+}
+
+Result<std::pair<int64_t, int64_t>> MetadataRepository::queryPathDepthStatsForInitialization() {
+    return executeReadQuery<std::pair<int64_t, int64_t>>(
+        [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+            auto stmtResult = db.prepare(
+                "SELECT COALESCE(SUM(path_depth), 0), COALESCE(MAX(path_depth), 0) FROM documents");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow) {
+                return std::pair<int64_t, int64_t>{0, 0};
+            }
+            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+        });
+}
+
+Result<std::pair<int64_t, int64_t>> MetadataRepository::queryTagStatsForInitialization() {
+    return executeReadQuery<std::pair<int64_t, int64_t>>(
+        [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
+            auto stmtResult = db.prepare(R"(
+                SELECT COUNT(DISTINCT document_id), COUNT(*)
+                FROM metadata
+                WHERE key = 'tag' OR key LIKE 'tag:%'
+            )");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto& stmt = stmtResult.value();
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow) {
+                return std::pair<int64_t, int64_t>{0, 0};
+            }
+            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
+        });
+}
+
+void MetadataRepository::applyInitializedExtensionCounts(
+    std::unordered_map<std::string, int64_t> counts) {
+    std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+    cachedExtensionCounts_ = std::move(counts);
+    const auto bucketCounts = calculateExtensionBucketCounts(cachedExtensionCounts_);
+    cachedCodeDocCount_.store(bucketCounts.code, std::memory_order_release);
+    cachedProseDocCount_.store(bucketCounts.prose, std::memory_order_release);
+    cachedBinaryDocCount_.store(bucketCounts.binary, std::memory_order_release);
+}
+
+void MetadataRepository::logInitializedCounters() const {
+    const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
+    const auto totalBytes = cachedTotalSizeBytes_.load(std::memory_order_relaxed);
+    const auto indexed = cachedIndexedCount_.load(std::memory_order_relaxed);
+    const auto extracted = cachedExtractedCount_.load(std::memory_order_relaxed);
+    const auto embedded = cachedEmbeddedCount_.load(std::memory_order_relaxed);
+    const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount_.load(std::memory_order_relaxed);
+    const auto pathDepthSum = cachedPathDepthSum_.load(std::memory_order_relaxed);
+    const auto pathDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+    std::size_t extensionCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+        extensionCount = cachedExtensionCounts_.size();
+    }
+
+    spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
+                 "extracted={}, embedded={}, docs_with_tags={}, tag_count={}, exts={}, "
+                 "path_sum={}, path_max={}",
+                 total, totalBytes, indexed, extracted, embedded, docsWithTags, tagCount,
+                 extensionCount, pathDepthSum, pathDepthMax);
+}
+
+void MetadataRepository::debugCheckInitializedCounters() const {
+    const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
+    const auto indexed = cachedIndexedCount_.load(std::memory_order_relaxed);
+    const auto extracted = cachedExtractedCount_.load(std::memory_order_relaxed);
+    const auto embedded = cachedEmbeddedCount_.load(std::memory_order_relaxed);
+    const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+    const auto tagCount = cachedTagCount_.load(std::memory_order_relaxed);
+    const auto pathDepthSum = cachedPathDepthSum_.load(std::memory_order_relaxed);
+    const auto pathDepthMax = cachedPathDepthMax_.load(std::memory_order_relaxed);
+
+    YAMS_DCHECK(indexed <= total,
+                "metadata: indexed count must not exceed total after initialization");
+    YAMS_DCHECK(extracted <= total,
+                "metadata: extracted count must not exceed total after initialization");
+    YAMS_DCHECK(embedded <= total,
+                "metadata: embedded count must not exceed total after initialization");
+    YAMS_DCHECK(docsWithTags <= total,
+                "metadata: tagged document count must not exceed total after initialization");
+    YAMS_DCHECK(tagCount >= docsWithTags,
+                "metadata: tag entry count must cover each tagged document after initialization");
+    YAMS_DCHECK(pathDepthMax <= pathDepthSum,
+                "metadata: max path depth must not exceed depth sum after initialization");
 }
 
 void MetadataRepository::initializeCounters() {
@@ -3467,153 +2131,35 @@ void MetadataRepository::initializeCounters() {
     try {
         // Query actual counts from DB once at startup
         if (auto totalResult = getDocumentCount(); totalResult) {
-            cachedDocumentCount_.store(static_cast<uint64_t>(totalResult.value()),
-                                       std::memory_order_release);
+            storeNonNegativeCount(cachedDocumentCount_, totalResult.value());
         }
-        auto totalSizeResult = executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-            auto stmtResult = db.prepare("SELECT COALESCE(SUM(file_size), 0) FROM documents");
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-            auto& stmt = stmtResult.value();
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                return int64_t{0};
-            }
-            return stmt.getInt64(0);
-        });
-        if (totalSizeResult) {
-            cachedTotalSizeBytes_.store(
-                static_cast<uint64_t>(std::max<int64_t>(totalSizeResult.value(), 0)),
-                std::memory_order_release);
+        if (auto totalSizeResult = queryTotalSizeBytesForInitialization(); totalSizeResult) {
+            storeNonNegativeCount(cachedTotalSizeBytes_, totalSizeResult.value());
         }
         if (auto indexedResult = getIndexedDocumentCount(); indexedResult) {
-            cachedIndexedCount_.store(static_cast<uint64_t>(indexedResult.value()),
-                                      std::memory_order_release);
+            storeNonNegativeCount(cachedIndexedCount_, indexedResult.value());
         }
         if (auto extractedResult = getContentExtractedDocumentCount(); extractedResult) {
-            cachedExtractedCount_.store(static_cast<uint64_t>(extractedResult.value()),
-                                        std::memory_order_release);
+            storeNonNegativeCount(cachedExtractedCount_, extractedResult.value());
         }
         if (auto embeddedResult = getEmbeddedDocumentCount(); embeddedResult) {
-            cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
-                                       std::memory_order_release);
+            storeNonNegativeCount(cachedEmbeddedCount_, embeddedResult.value());
         }
-        auto extensionStatsResult = executeReadQuery<std::unordered_map<std::string, int64_t>>(
-            [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
-                auto stmtResult = db.prepare(
-                    "SELECT file_extension, COUNT(*) FROM documents GROUP BY file_extension");
-                if (!stmtResult) {
-                    return stmtResult.error();
-                }
-                auto stmt = std::move(stmtResult).value();
-                std::unordered_map<std::string, int64_t> counts;
-                while (true) {
-                    auto stepResult = stmt.step();
-                    if (!stepResult) {
-                        return stepResult.error();
-                    }
-                    if (!stepResult.value()) {
-                        break;
-                    }
-                    counts[stmt.getString(0)] = stmt.getInt64(1);
-                }
-                return counts;
-            });
-        if (extensionStatsResult) {
-            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-            cachedExtensionCounts_ = std::move(extensionStatsResult.value());
-            uint64_t codeCount = 0;
-            uint64_t proseCount = 0;
-            uint64_t binaryCount = 0;
-            for (const auto& [ext, count] : cachedExtensionCounts_) {
-                switch (classifyExtensionBucket(ext)) {
-                    case ExtensionBucket::Code:
-                        codeCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
-                        break;
-                    case ExtensionBucket::Prose:
-                        proseCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
-                        break;
-                    case ExtensionBucket::Binary:
-                        binaryCount += static_cast<uint64_t>(std::max<int64_t>(count, 0));
-                        break;
-                    case ExtensionBucket::Other:
-                        break;
-                }
-            }
-            cachedCodeDocCount_.store(codeCount, std::memory_order_release);
-            cachedProseDocCount_.store(proseCount, std::memory_order_release);
-            cachedBinaryDocCount_.store(binaryCount, std::memory_order_release);
+        if (auto extensionStatsResult = queryExtensionCountsForInitialization();
+            extensionStatsResult) {
+            applyInitializedExtensionCounts(std::move(extensionStatsResult.value()));
         }
-        auto pathStatsResult = executeReadQuery<
-            std::pair<int64_t, int64_t>>([&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
-            auto stmtResult = db.prepare(
-                "SELECT COALESCE(SUM(path_depth), 0), COALESCE(MAX(path_depth), 0) FROM documents");
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-            auto stmt = std::move(stmtResult).value();
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-            if (!stepResult.value()) {
-                return std::pair<int64_t, int64_t>{0, 0};
-            }
-            return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
-        });
-        if (pathStatsResult) {
-            cachedPathDepthSum_.store(
-                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().first, 0)),
-                std::memory_order_release);
-            cachedPathDepthMax_.store(
-                static_cast<uint64_t>(std::max<int64_t>(pathStatsResult.value().second, 0)),
-                std::memory_order_release);
+        if (auto pathStatsResult = queryPathDepthStatsForInitialization(); pathStatsResult) {
+            storeNonNegativeCount(cachedPathDepthSum_, pathStatsResult.value().first);
+            storeNonNegativeCount(cachedPathDepthMax_, pathStatsResult.value().second);
         }
-        auto tagStatsResult = executeReadQuery<std::pair<int64_t, int64_t>>(
-            [&](Database& db) -> Result<std::pair<int64_t, int64_t>> {
-                auto stmtResult = db.prepare(R"(
-                    SELECT COUNT(DISTINCT document_id), COUNT(*)
-                    FROM metadata
-                    WHERE key = 'tag' OR key LIKE 'tag:%'
-                )");
-                if (!stmtResult) {
-                    return stmtResult.error();
-                }
-                auto& stmt = stmtResult.value();
-                YAMS_TRY_UNWRAP(hasRow, stmt.step());
-                if (!hasRow) {
-                    return std::pair<int64_t, int64_t>{0, 0};
-                }
-                return std::pair<int64_t, int64_t>{stmt.getInt64(0), stmt.getInt64(1)};
-            });
-        if (tagStatsResult) {
-            cachedDocsWithTags_.store(
-                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().first, 0)),
-                std::memory_order_release);
-            cachedTagCount_.store(
-                static_cast<uint64_t>(std::max<int64_t>(tagStatsResult.value().second, 0)),
-                std::memory_order_release);
+        if (auto tagStatsResult = queryTagStatsForInitialization(); tagStatsResult) {
+            storeNonNegativeCount(cachedDocsWithTags_, tagStatsResult.value().first);
+            storeNonNegativeCount(cachedTagCount_, tagStatsResult.value().second);
         }
-        spdlog::info("MetadataRepository: initialized counters - total={}, bytes={}, indexed={}, "
-                     "extracted={}, embedded={}, docs_with_tags={}, tag_count={}, exts={}, "
-                     "path_sum={}, path_max={}",
-                     cachedDocumentCount_.load(), cachedTotalSizeBytes_.load(),
-                     cachedIndexedCount_.load(), cachedExtractedCount_.load(),
-                     cachedEmbeddedCount_.load(), cachedDocsWithTags_.load(),
-                     cachedTagCount_.load(), cachedExtensionCounts_.size(),
-                     cachedPathDepthSum_.load(), cachedPathDepthMax_.load());
 
-        // Cross-check: derived counters must be consistent with the primary count.
-        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: indexed count must not exceed total after initialization");
-        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: extracted count must not exceed total after initialization");
-        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: embedded count must not exceed total after initialization");
+        logInitializedCounters();
+        debugCheckInitializedCounters();
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
@@ -3966,133 +2512,48 @@ MetadataRepository::getDocumentCountsByExtension() {
 Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     constexpr auto kCorpusStatsOverlayTtl = std::chrono::minutes(5);
     const bool countersPrimedForOverlay = countersInitialized_.load(std::memory_order_acquire);
-    auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
-        const auto reconciledAtMs = stats.computedAtMs;
-        const double reconciledMinDepth = stats.pathDepthAvg - stats.pathRelativeDepthAvg;
-        const auto liveDocCount =
-            static_cast<int64_t>(cachedDocumentCount_.load(std::memory_order_relaxed));
-        const auto liveEmbeddedCount =
+    auto makeOnlineOverlayInput = [&]() {
+        CorpusStatsOverlayInput input;
+        input.docCount = static_cast<int64_t>(cachedDocumentCount_.load(std::memory_order_relaxed));
+        input.embeddedCount =
             static_cast<int64_t>(cachedEmbeddedCount_.load(std::memory_order_relaxed));
-        const auto liveTotalSizeBytes =
+        input.totalSizeBytes =
             static_cast<int64_t>(cachedTotalSizeBytes_.load(std::memory_order_relaxed));
-        const auto liveDocsWithTags =
+        input.docsWithTags =
             static_cast<int64_t>(cachedDocsWithTags_.load(std::memory_order_relaxed));
-        const auto liveTagCount =
-            static_cast<int64_t>(cachedTagCount_.load(std::memory_order_relaxed));
-        const auto liveKgCounts =
-            kgStore_ ? kgStore_->getEntityCountSnapshot() : KGEntityCountSnapshot{};
-        const auto liveCodeCount =
+        input.tagCount = static_cast<int64_t>(cachedTagCount_.load(std::memory_order_relaxed));
+        input.codeDocCount =
             static_cast<int64_t>(cachedCodeDocCount_.load(std::memory_order_relaxed));
-        const auto liveProseCount =
+        input.proseDocCount =
             static_cast<int64_t>(cachedProseDocCount_.load(std::memory_order_relaxed));
-        const auto liveBinaryCount =
+        input.binaryDocCount =
             static_cast<int64_t>(cachedBinaryDocCount_.load(std::memory_order_relaxed));
-        const auto livePathDepthSum =
+        input.pathDepthSum =
             static_cast<int64_t>(cachedPathDepthSum_.load(std::memory_order_relaxed));
-        const auto livePathDepthMax =
+        input.pathDepthMax =
             static_cast<int64_t>(cachedPathDepthMax_.load(std::memory_order_relaxed));
+        input.contentExtractedCount =
+            static_cast<int64_t>(cachedExtractedCount_.load(std::memory_order_relaxed));
+        input.ftsIndexedCount =
+            static_cast<int64_t>(cachedIndexedCount_.load(std::memory_order_relaxed));
 
-        if (liveDocCount > 0) {
-            stats.docCount = liveDocCount;
-            stats.totalSizeBytes = std::max<int64_t>(liveTotalSizeBytes, 0);
-            stats.embeddingCount = std::clamp<int64_t>(liveEmbeddedCount, 0, liveDocCount);
-            stats.embeddingCoverage =
-                static_cast<double>(stats.embeddingCount) / static_cast<double>(stats.docCount);
-            stats.docsWithTags = std::clamp<int64_t>(liveDocsWithTags, 0, liveDocCount);
-            stats.tagCount = std::max<int64_t>(liveTagCount, 0);
-            stats.symbolCount = std::max<int64_t>(liveKgCounts.totalCount, 0);
-            stats.nativeSymbolCount = std::max<int64_t>(liveKgCounts.nativeSymbolCount, 0);
-            stats.nerEntityCount = std::max<int64_t>(liveKgCounts.nerEntityCount, 0);
-            stats.tagCoverage =
-                static_cast<double>(stats.docsWithTags) / static_cast<double>(stats.docCount);
-            stats.codeRatio = static_cast<double>(std::max<int64_t>(liveCodeCount, 0)) /
-                              static_cast<double>(stats.docCount);
-            stats.proseRatio = static_cast<double>(std::max<int64_t>(liveProseCount, 0)) /
-                               static_cast<double>(stats.docCount);
-            stats.binaryRatio = static_cast<double>(std::max<int64_t>(liveBinaryCount, 0)) /
-                                static_cast<double>(stats.docCount);
-            stats.symbolDensity =
-                static_cast<double>(stats.symbolCount) / static_cast<double>(stats.docCount);
-            stats.nativeSymbolDensity =
-                static_cast<double>(stats.nativeSymbolCount) / static_cast<double>(stats.docCount);
-            stats.nerEntityDensity =
-                static_cast<double>(stats.nerEntityCount) / static_cast<double>(stats.docCount);
+        const auto kgCounts =
+            kgStore_ ? kgStore_->getEntityCountSnapshot() : KGEntityCountSnapshot{};
+        input.symbolCount = kgCounts.totalCount;
+        input.nativeSymbolCount = kgCounts.nativeSymbolCount;
+        input.nerEntityCount = kgCounts.nerEntityCount;
+        input.kgEdgeCount = kgCounts.edgeCount;
+        input.kgAliasCount = kgCounts.aliasCount;
 
-            stats.kgEdgeCount = std::max<int64_t>(liveKgCounts.edgeCount, 0);
-            stats.kgEdgeDensity =
-                static_cast<double>(stats.kgEdgeCount) / static_cast<double>(stats.docCount);
-            stats.kgAliasCount = std::max<int64_t>(liveKgCounts.aliasCount, 0);
-            stats.kgAliasDensity =
-                static_cast<double>(stats.kgAliasCount) / static_cast<double>(stats.docCount);
-
-            stats.contentExtractedCount =
-                static_cast<int64_t>(cachedExtractedCount_.load(std::memory_order_relaxed));
-            stats.contentExtractedCoverage = static_cast<double>(stats.contentExtractedCount) /
-                                             static_cast<double>(stats.docCount);
-            stats.ftsIndexedCount =
-                static_cast<int64_t>(cachedIndexedCount_.load(std::memory_order_relaxed));
-            stats.ftsIndexedCoverage =
-                static_cast<double>(stats.ftsIndexedCount) / static_cast<double>(stats.docCount);
-
-            stats.pathDepthAvg = static_cast<double>(std::max<int64_t>(livePathDepthSum, 0)) /
-                                 static_cast<double>(stats.docCount);
-            stats.pathDepthMax = static_cast<double>(std::max<int64_t>(livePathDepthMax, 0));
-            // Carry the reconciled MIN(path_depth) forward. We can't track MIN as a single
-            // atomic (delete of the current-min doc would need a scan), but any insert of a
-            // path shallower than the reconciled min only lowers the true min, so clamping
-            // the relative average at zero keeps it within a valid range.
-            const double relativeDepth = stats.pathDepthAvg - reconciledMinDepth;
-            stats.pathRelativeDepthAvg = relativeDepth > 0.0 ? relativeDepth : 0.0;
-            if (stats.totalSizeBytes > 0) {
-                stats.avgDocLengthBytes =
-                    static_cast<double>(stats.totalSizeBytes) / static_cast<double>(stats.docCount);
-            }
-            {
-                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
-                stats.extensionCounts = cachedExtensionCounts_;
-            }
-        } else {
-            stats.docCount = 0;
-            stats.totalSizeBytes = 0;
-            stats.embeddingCount = 0;
-            stats.embeddingCoverage = 0.0;
-            stats.docsWithTags = 0;
-            stats.tagCount = 0;
-            stats.symbolCount = 0;
-            stats.nativeSymbolCount = 0;
-            stats.nerEntityCount = 0;
-            stats.codeRatio = 0.0;
-            stats.proseRatio = 0.0;
-            stats.binaryRatio = 0.0;
-            stats.tagCoverage = 0.0;
-            stats.symbolDensity = 0.0;
-            stats.nativeSymbolDensity = 0.0;
-            stats.nerEntityDensity = 0.0;
-            stats.contentExtractedCount = 0;
-            stats.contentExtractedCoverage = 0.0;
-            stats.ftsIndexedCount = 0;
-            stats.ftsIndexedCoverage = 0.0;
-            stats.titleCount = 0;
-            stats.titleCoverage = 0.0;
-            stats.docsWithLanguage = 0;
-            stats.languageCoverage = 0.0;
-            stats.kgEdgeCount = 0;
-            stats.kgEdgeDensity = 0.0;
-            stats.kgAliasCount = 0;
-            stats.kgAliasDensity = 0.0;
-            stats.avgDocLengthBytes = 0.0;
-            stats.pathDepthAvg = 0.0;
-            stats.pathDepthMax = 0.0;
-            stats.extensionCounts.clear();
+        {
+            std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+            input.extensionCounts = cachedExtensionCounts_;
         }
+        return input;
+    };
 
-        stats.computedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-        stats.usedOnlineOverlay = true;
-        stats.reconciledComputedAtMs = reconciledAtMs;
-        stats.pathDepthMaxApproximate = true;
-        return stats;
+    auto mergeOnlineOverlay = [&](storage::CorpusStats stats) {
+        return applyCorpusStatsOnlineOverlay(std::move(stats), makeOnlineOverlayInput());
     };
 
     // Check cache first (reader lock)
@@ -4280,7 +2741,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             {
                 // Check if table exists
                 auto checkResult = db.prepare(R"(
-                    SELECT COUNT(*) FROM sqlite_master 
+                    SELECT COUNT(*) FROM sqlite_master
                     WHERE type='table' AND name='kg_doc_entities'
                 )");
                 bool tableExists = false;
@@ -4757,667 +3218,6 @@ Result<int64_t> MetadataRepository::getCorpusDocumentCount() {
     });
 }
 
-Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentId,
-                                                               bool hasEmbedding,
-                                                               const std::string& modelId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Check current embedding status to track changes
-        bool hadEmbedding = false;
-        {
-            auto checkStmt = db.prepare("SELECT COALESCE(has_embedding, 0) FROM "
-                                        "document_embeddings_status WHERE document_id = ?");
-            if (checkStmt) {
-                auto& stmt = checkStmt.value();
-                stmt.bind(1, documentId);
-                if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                    hadEmbedding = stmt.getInt(0) != 0;
-                }
-            }
-        }
-
-        // Ensure the document exists
-        auto docCheckStmt = db.prepare("SELECT 1 FROM documents WHERE id = ?");
-        if (!docCheckStmt)
-            return docCheckStmt.error();
-
-        auto& stmt = docCheckStmt.value();
-        if (auto r = stmt.bind(1, documentId); !r)
-            return r.error();
-
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value()) {
-            return Error{ErrorCode::NotFound, "Document not found"};
-        }
-
-        // Ensure model_id exists in vector_models (FK constraint)
-        if (!modelId.empty()) {
-            auto ensureModelStmt = db.prepare(R"(
-                INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
-                VALUES (?, ?, 0)
-            )");
-            if (ensureModelStmt) {
-                auto& mstmt = ensureModelStmt.value();
-                mstmt.bind(1, modelId);
-                mstmt.bind(2, modelId); // Use model_id as name if not registered
-                (void)mstmt.execute();
-            }
-        }
-
-        // Insert or update the embedding status
-        auto updateStmt = db.prepare(R"(
-                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
-                VALUES (?, ?, ?, unixepoch())
-                ON CONFLICT(document_id) DO UPDATE SET
-                    has_embedding = excluded.has_embedding,
-                    model_id = excluded.model_id,
-                    updated_at = excluded.updated_at
-            )");
-        if (!updateStmt)
-            return updateStmt.error();
-
-        auto& ustmt = updateStmt.value();
-        if (auto r = ustmt.bind(1, documentId); !r)
-            return r.error();
-        if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r)
-            return r.error();
-        if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r)
-            return r.error();
-
-        auto execResult = ustmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        // Note: cachedIndexedCount_ now tracks actual FTS5 rows, not extraction success or
-        // embedding status. Embedding status is tracked separately via
-        // VectorDatabase::getVectorCount()
-
-        // Update component-owned embedded-doc counter only on state transition.
-        if (!hadEmbedding && hasEmbedding) {
-            cachedEmbeddedCount_.fetch_add(1, std::memory_order_relaxed);
-            signalCorpusStatsStale();
-        } else if (hadEmbedding && !hasEmbedding) {
-            core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
-            signalCorpusStatsStale();
-        }
-
-        return Result<void>();
-    });
-}
-
-Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::string& hash,
-                                                                     bool hasEmbedding,
-                                                                     const std::string& modelId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Get document ID and previous embedding status in one query.
-        auto getIdStmt = db.prepare(R"(
-            SELECT d.id, COALESCE(des.has_embedding, 0)
-            FROM documents d
-            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
-            WHERE d.sha256_hash = ?
-        )");
-        if (!getIdStmt)
-            return getIdStmt.error();
-
-        auto& stmt = getIdStmt.value();
-        if (auto r = stmt.bind(1, hash); !r)
-            return r.error();
-
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value()) {
-            return Error{ErrorCode::NotFound, "Document with hash not found"};
-        }
-
-        int64_t documentId = stmt.getInt64(0);
-        bool hadEmbedding = stmt.getInt(1) != 0;
-
-        // Ensure model_id exists in vector_models (FK constraint)
-        if (!modelId.empty()) {
-            auto ensureModelStmt = db.prepare(R"(
-                INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
-                VALUES (?, ?, 0)
-            )");
-            if (ensureModelStmt) {
-                auto& mstmt = ensureModelStmt.value();
-                mstmt.bind(1, modelId);
-                mstmt.bind(2, modelId); // Use model_id as name if not registered
-                (void)mstmt.execute();
-            }
-        }
-
-        // Insert or update the embedding status
-        auto updateStmt = db.prepare(R"(
-                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
-                VALUES (?, ?, ?, unixepoch())
-                ON CONFLICT(document_id) DO UPDATE SET
-                    has_embedding = excluded.has_embedding,
-                    model_id = excluded.model_id,
-                    updated_at = excluded.updated_at
-            )");
-        if (!updateStmt)
-            return updateStmt.error();
-
-        auto& ustmt = updateStmt.value();
-        if (auto r = ustmt.bind(1, documentId); !r)
-            return r.error();
-        if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r)
-            return r.error();
-        if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r)
-            return r.error();
-
-        auto execResult = ustmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        // Update component-owned embedded-doc counter only on state transition.
-        if (!hadEmbedding && hasEmbedding) {
-            cachedEmbeddedCount_.fetch_add(1, std::memory_order_relaxed);
-            signalCorpusStatsStale();
-        } else if (hadEmbedding && !hasEmbedding) {
-            core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
-            signalCorpusStatsStale();
-        }
-
-        return Result<void>();
-    });
-}
-
-Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
-    const std::vector<std::string>& hashes, bool hasEmbedding, const std::string& modelId) {
-    if (hashes.empty())
-        return Result<void>();
-
-    constexpr int kMaxRetries = 7; // Increased for heavy concurrent load
-    constexpr int kBaseDelayMs = 50;
-
-    // Thread-local RNG for jitter to avoid thundering herd
-    thread_local std::mt19937 rng(std::random_device{}());
-
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
-
-            // Ensure model_id exists in vector_models (FK constraint) - once per batch
-            if (!modelId.empty()) {
-                auto ensureModelStmt = db.prepare(R"(
-                    INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
-                    VALUES (?, ?, 0)
-                )");
-                if (ensureModelStmt) {
-                    auto& mstmt = ensureModelStmt.value();
-                    mstmt.bind(1, modelId);
-                    mstmt.bind(2, modelId); // Use model_id as name if not registered
-                    (void)mstmt.execute();
-                }
-            }
-
-            auto lookupStmt = db.prepare(R"(
-                SELECT d.id, COALESCE(des.has_embedding, 0)
-                FROM documents d
-                LEFT JOIN document_embeddings_status des ON d.id = des.document_id
-                WHERE d.sha256_hash = ?
-            )");
-            if (!lookupStmt) {
-                db.execute("ROLLBACK");
-                return lookupStmt.error();
-            }
-
-            auto updateStmt = db.prepare(R"(
-                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
-                VALUES (?, ?, ?, unixepoch())
-                ON CONFLICT(document_id) DO UPDATE SET
-                    has_embedding = excluded.has_embedding,
-                    model_id = excluded.model_id,
-                    updated_at = excluded.updated_at
-            )");
-            if (!updateStmt) {
-                db.execute("ROLLBACK");
-                return updateStmt.error();
-            }
-
-            auto& lstmt = lookupStmt.value();
-            auto& ustmt = updateStmt.value();
-            int64_t embeddedDelta = 0;
-
-            for (const auto& hash : hashes) {
-                lstmt.reset();
-                if (auto r = lstmt.bind(1, hash); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-
-                auto stepResult = lstmt.step();
-                if (!stepResult) {
-                    db.execute("ROLLBACK");
-                    return stepResult.error();
-                }
-                if (!stepResult.value())
-                    continue;
-
-                int64_t documentId = lstmt.getInt64(0);
-                bool hadEmbedding = lstmt.getInt(1) != 0;
-
-                ustmt.reset();
-                if (auto r = ustmt.bind(1, documentId); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-
-                auto execResult = ustmt.execute();
-                if (!execResult) {
-                    db.execute("ROLLBACK");
-                    return execResult.error();
-                }
-
-                if (!hadEmbedding && hasEmbedding) {
-                    ++embeddedDelta;
-                } else if (hadEmbedding && !hasEmbedding) {
-                    --embeddedDelta;
-                }
-            }
-
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult)
-                return commitResult.error();
-
-            if (embeddedDelta > 0) {
-                cachedEmbeddedCount_.fetch_add(static_cast<uint64_t>(embeddedDelta),
-                                               std::memory_order_relaxed);
-            } else if (embeddedDelta < 0) {
-                core::saturating_sub(cachedEmbeddedCount_, static_cast<uint64_t>(-embeddedDelta));
-            }
-
-            signalCorpusStatsStale();
-            return Result<void>();
-        });
-
-        if (result)
-            return result;
-
-        if (result.error().message.find("database is locked") == std::string::npos)
-            return result;
-
-        // Exponential backoff with jitter (±25%) to prevent thundering herd
-        int baseDelayMs = kBaseDelayMs * (1 << attempt);
-        int jitter = static_cast<int>(baseDelayMs * 0.25);
-        std::uniform_int_distribution<int> dist(-jitter, jitter);
-        int delayMs = baseDelayMs + dist(rng);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-    }
-
-    daemon::TuneAdvisor::reportDbLockError();
-    return Error{ErrorCode::DatabaseError,
-                 "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
-}
-
-Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
-    const std::vector<std::string>& embeddedHashes, const std::string& modelId) {
-    constexpr int kMaxRetries = 5;
-    constexpr int kBaseDelayMs = 50;
-
-    std::vector<std::string> uniqueHashes = embeddedHashes;
-    std::sort(uniqueHashes.begin(), uniqueHashes.end());
-    uniqueHashes.erase(std::unique(uniqueHashes.begin(), uniqueHashes.end()), uniqueHashes.end());
-
-    thread_local std::mt19937 rng(std::random_device{}());
-    std::size_t reconciledEmbeddedDocs = 0;
-
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
-
-            auto rollback = [&db](const Result<void>& err) -> Result<void> {
-                db.execute("ROLLBACK");
-                return err;
-            };
-
-            if (auto createTemp =
-                    db.execute("CREATE TEMP TABLE IF NOT EXISTS temp_embedding_reconcile_hashes ("
-                               "sha256_hash TEXT PRIMARY KEY)");
-                !createTemp) {
-                return rollback(createTemp.error());
-            }
-            if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
-                !clearTemp) {
-                return rollback(clearTemp.error());
-            }
-
-            if (!modelId.empty()) {
-                auto ensureModelStmt = db.prepare(R"(
-                    INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
-                    VALUES (?, ?, 0)
-                )");
-                if (!ensureModelStmt) {
-                    return rollback(ensureModelStmt.error());
-                }
-                auto& mstmt = ensureModelStmt.value();
-                if (auto r = mstmt.bind(1, modelId); !r) {
-                    return rollback(r.error());
-                }
-                if (auto r = mstmt.bind(2, modelId); !r) {
-                    return rollback(r.error());
-                }
-                if (auto exec = mstmt.execute(); !exec) {
-                    return rollback(exec.error());
-                }
-            }
-
-            if (!uniqueHashes.empty()) {
-                auto insertHashStmt = db.prepare(
-                    "INSERT OR IGNORE INTO temp_embedding_reconcile_hashes (sha256_hash) "
-                    "VALUES (?)");
-                if (!insertHashStmt) {
-                    return rollback(insertHashStmt.error());
-                }
-                auto& hstmt = insertHashStmt.value();
-                for (const auto& hash : uniqueHashes) {
-                    hstmt.reset();
-                    if (auto r = hstmt.bind(1, hash); !r) {
-                        return rollback(r.error());
-                    }
-                    if (auto exec = hstmt.execute(); !exec) {
-                        return rollback(exec.error());
-                    }
-                }
-            }
-
-            auto countStmt = db.prepare(R"(
-                SELECT COUNT(*)
-                FROM documents d
-                JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
-            )");
-            if (!countStmt) {
-                return rollback(countStmt.error());
-            }
-            if (auto step = countStmt.value().step(); !step) {
-                return rollback(step.error());
-            } else if (step.value()) {
-                reconciledEmbeddedDocs = static_cast<std::size_t>(countStmt.value().getInt64(0));
-            }
-
-            auto reconcileStmt = db.prepare(R"(
-                INSERT INTO document_embeddings_status (
-                    document_id, has_embedding, model_id, chunk_count, updated_at
-                )
-                SELECT d.id,
-                       CASE WHEN th.sha256_hash IS NOT NULL THEN 1 ELSE 0 END,
-                       CASE WHEN th.sha256_hash IS NOT NULL THEN ? ELSE NULL END,
-                       CASE WHEN th.sha256_hash IS NOT NULL THEN 1 ELSE 0 END,
-                       unixepoch()
-                FROM documents d
-                LEFT JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
-                ON CONFLICT(document_id) DO UPDATE SET
-                    has_embedding = excluded.has_embedding,
-                    model_id = CASE
-                        WHEN excluded.has_embedding = 0 THEN NULL
-                        WHEN excluded.model_id IS NOT NULL THEN excluded.model_id
-                        ELSE document_embeddings_status.model_id
-                    END,
-                    chunk_count = CASE
-                        WHEN excluded.has_embedding = 0 THEN 0
-                        WHEN document_embeddings_status.chunk_count > 0
-                            THEN document_embeddings_status.chunk_count
-                        ELSE excluded.chunk_count
-                    END,
-                    updated_at = excluded.updated_at
-            )");
-            if (!reconcileStmt) {
-                return rollback(reconcileStmt.error());
-            }
-            auto& rstmt = reconcileStmt.value();
-            if (auto r = rstmt.bind(1, modelId.empty() ? nullptr : modelId.c_str()); !r) {
-                return rollback(r.error());
-            }
-            if (auto exec = rstmt.execute(); !exec) {
-                return rollback(exec.error());
-            }
-
-            if (auto clearTemp = db.execute("DELETE FROM temp_embedding_reconcile_hashes");
-                !clearTemp) {
-                return rollback(clearTemp.error());
-            }
-
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult) {
-                db.execute("ROLLBACK");
-                return commitResult.error();
-            }
-            return Result<void>();
-        });
-
-        if (result) {
-            cachedEmbeddedCount_.store(static_cast<uint64_t>(reconciledEmbeddedDocs),
-                                       std::memory_order_relaxed);
-            signalCorpusStatsStale();
-            return result;
-        }
-
-        if (result.error().message.find("database is locked") == std::string::npos) {
-            return result;
-        }
-
-        int baseDelayMs = kBaseDelayMs * (1 << attempt);
-        int jitter = static_cast<int>(baseDelayMs * 0.25);
-        std::uniform_int_distribution<int> dist(-jitter, jitter);
-        int delayMs = baseDelayMs + dist(rng);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-    }
-
-    daemon::TuneAdvisor::reportDbLockError();
-    return Error{ErrorCode::DatabaseError,
-                 "reconcileDocumentEmbeddingStatusByHashes: max retries exceeded"};
-}
-
-Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& hash) {
-    return executeReadQuery<bool>([&](Database& db) -> Result<bool> {
-        auto stmtResult = db.prepare(R"(
-            SELECT COALESCE(des.has_embedding, 0)
-            FROM documents d
-            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
-            WHERE d.sha256_hash = ?
-        )");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto& stmt = stmtResult.value();
-        if (auto r = stmt.bind(1, hash); !r)
-            return r.error();
-
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-
-        if (!stepResult.value()) {
-            // Document not found - treat as no embedding
-            return false;
-        }
-
-        return stmt.getInt(0) != 0;
-    });
-}
-
-Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
-                                                                bool contentExtracted,
-                                                                ExtractionStatus status,
-                                                                const std::string& error) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Check previous extracted state for counter updates. Indexed/FTS counters are managed
-        // only when an FTS row is inserted or removed.
-        bool extractedBefore = false;
-        {
-            auto checkStmt = db.prepareCached(R"(
-                SELECT COALESCE(content_extracted, 0)
-                FROM documents WHERE id = ?
-            )");
-            if (checkStmt) {
-                auto& stmt = *checkStmt.value();
-                if (auto bindRes = stmt.bind(1, documentId); bindRes) {
-                    if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
-                        extractedBefore = stmt.getInt(0) != 0;
-                    }
-                }
-            }
-        }
-
-        auto updateStmt = db.prepare(R"(
-            UPDATE documents
-            SET content_extracted = ?, extraction_status = ?, extraction_error = ?
-            WHERE id = ?
-        )");
-        if (!updateStmt)
-            return updateStmt.error();
-
-        auto& stmt = updateStmt.value();
-        if (auto r = stmt.bind(1, contentExtracted ? 1 : 0); !r)
-            return r.error();
-        if (auto r = stmt.bind(2, ExtractionStatusUtils::toString(status)); !r)
-            return r.error();
-        if (auto r = stmt.bind(3, error.empty() ? nullptr : error.c_str()); !r)
-            return r.error();
-        if (auto r = stmt.bind(4, documentId); !r)
-            return r.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        if (!extractedBefore && contentExtracted) {
-            cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
-        } else if (extractedBefore && !contentExtracted) {
-            core::saturating_sub(cachedExtractedCount_, uint64_t{1});
-        }
-
-        return Result<void>{};
-    });
-}
-
-Result<void> MetadataRepository::updateDocumentRepairStatus(const std::string& hash,
-                                                            RepairStatus status) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto updateStmt = db.prepare(R"(
-            UPDATE documents
-            SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
-            WHERE sha256_hash = ?
-        )");
-        if (!updateStmt)
-            return updateStmt.error();
-
-        auto& stmt = updateStmt.value();
-        if (auto r = stmt.bind(1, RepairStatusUtils::toString(status)); !r)
-            return r.error();
-        if (auto r = stmt.bind(2, hash); !r)
-            return r.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        return Result<void>();
-    });
-}
-
-Result<void>
-MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
-                                                      RepairStatus status) {
-    if (hashes.empty())
-        return Result<void>();
-
-    constexpr int kMaxRetries = 7; // Increased for heavy concurrent load
-    constexpr int kBaseDelayMs = 50;
-
-    // Thread-local RNG for jitter to avoid thundering herd
-    thread_local std::mt19937 rng(std::random_device{}());
-
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-#if YAMS_LIBSQL_BACKEND
-            auto beginResult = db.execute("BEGIN");
-#else
-            auto beginResult = db.execute("BEGIN IMMEDIATE");
-#endif
-            if (!beginResult)
-                return beginResult.error();
-
-            auto updateStmt = db.prepare(R"(
-                UPDATE documents
-                SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
-                WHERE sha256_hash = ?
-            )");
-            if (!updateStmt) {
-                db.execute("ROLLBACK");
-                return updateStmt.error();
-            }
-
-            auto& stmt = updateStmt.value();
-            std::string statusStr = RepairStatusUtils::toString(status);
-
-            for (const auto& hash : hashes) {
-                stmt.reset();
-                if (auto r = stmt.bind(1, statusStr.c_str()); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-                if (auto r = stmt.bind(2, hash); !r) {
-                    db.execute("ROLLBACK");
-                    return r.error();
-                }
-
-                auto execResult = stmt.execute();
-                if (!execResult) {
-                    db.execute("ROLLBACK");
-                    return execResult.error();
-                }
-            }
-
-            auto commitResult = db.execute("COMMIT");
-            if (!commitResult)
-                return commitResult.error();
-
-            return Result<void>();
-        });
-
-        if (result)
-            return result;
-
-        if (result.error().message.find("database is locked") == std::string::npos)
-            return result;
-
-        // Exponential backoff with jitter (±25%) to prevent thundering herd
-        int baseDelayMs = kBaseDelayMs * (1 << attempt);
-        int jitter = static_cast<int>(baseDelayMs * 0.25);
-        std::uniform_int_distribution<int> dist(-jitter, jitter);
-        int delayMs = baseDelayMs + dist(rng);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-    }
-
-    daemon::TuneAdvisor::reportDbLockError();
-    return Error{ErrorCode::DatabaseError,
-                 "batchUpdateDocumentRepairStatuses: max retries exceeded"};
-}
-
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
         // Use PASSIVE checkpoint — non-blocking, only checkpoints pages not
@@ -5463,788 +3263,6 @@ Result<void> MetadataRepository::checkpointWalTruncate() {
 
 void MetadataRepository::refreshAllConnections() {
     pool_.refreshAll();
-}
-
-Result<std::optional<PathTreeNode>>
-MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegment) {
-    return executeReadQuery<std::optional<PathTreeNode>>(
-        [&](Database& db) -> Result<std::optional<PathTreeNode>> {
-            const bool parentIsNull = parentId == kPathTreeNullParent;
-            const char* sql =
-                parentIsNull ? "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight, centroid FROM path_tree_nodes "
-                               "WHERE parent_id IS NULL AND path_segment = ?"
-                             : "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                               "centroid_weight, centroid FROM path_tree_nodes "
-                               "WHERE parent_id = ? AND path_segment = ?";
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            int bindIndex = 1;
-
-            if (!parentIsNull) {
-                if (auto bindResult = stmt.bind(bindIndex++, parentId); !bindResult)
-                    return bindResult.error();
-            }
-            if (auto bindResult = stmt.bind(bindIndex, pathSegment); !bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            if (!stepResult.value())
-                return std::optional<PathTreeNode>{};
-
-            return std::optional<PathTreeNode>{mapPathTreeNodeRow(stmt)};
-        });
-}
-
-Result<PathTreeNode> MetadataRepository::insertPathTreeNode(int64_t parentId,
-                                                            std::string_view pathSegment,
-                                                            std::string_view fullPath) {
-    return executeQuery<PathTreeNode>([&](Database& db) -> Result<PathTreeNode> {
-        auto insertStmtResult = db.prepare("INSERT OR IGNORE INTO path_tree_nodes "
-                                           "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
-        if (!insertStmtResult)
-            return insertStmtResult.error();
-
-        auto insertStmt = std::move(insertStmtResult).value();
-        if (auto bindParent = bindParentId(insertStmt, 1, parentId); !bindParent)
-            return bindParent.error();
-        if (auto bindSeg = insertStmt.bind(2, pathSegment); !bindSeg)
-            return bindSeg.error();
-        if (auto bindFull = insertStmt.bind(3, fullPath); !bindFull)
-            return bindFull.error();
-
-        if (auto execResult = insertStmt.execute(); !execResult)
-            return execResult.error();
-
-        auto selectStmtResult = db.prepare(
-            "SELECT node_id, parent_id, path_segment, full_path, doc_count, centroid_weight "
-            "FROM path_tree_nodes WHERE full_path = ?");
-        if (!selectStmtResult)
-            return selectStmtResult.error();
-
-        auto selectStmt = std::move(selectStmtResult).value();
-        if (auto bindPath = selectStmt.bind(1, fullPath); !bindPath)
-            return bindPath.error();
-
-        auto stepResult = selectStmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value())
-            return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
-
-        return mapPathTreeNodeRow(selectStmt);
-    });
-}
-
-Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Use INSERT OR IGNORE to handle concurrent inserts atomically.
-        // This avoids the race condition in check-then-insert pattern.
-        auto insertStmtResult = db.prepare(
-            "INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) VALUES (?, ?)");
-        if (!insertStmtResult)
-            return insertStmtResult.error();
-        auto insertStmt = std::move(insertStmtResult).value();
-        if (auto bindNode = insertStmt.bind(1, nodeId); !bindNode)
-            return bindNode.error();
-        if (auto bindDoc = insertStmt.bind(2, documentId); !bindDoc)
-            return bindDoc.error();
-        if (auto execResult = insertStmt.execute(); !execResult)
-            return execResult.error();
-
-        // Only increment doc_count if a new row was actually inserted
-        // (changes() returns 0 if INSERT was ignored due to conflict)
-        if (db.changes() == 0) {
-            return Result<void>(); // Already associated, nothing to update
-        }
-
-        auto updateStmtResult =
-            db.prepare("UPDATE path_tree_nodes "
-                       "SET doc_count = doc_count + 1, last_updated = unixepoch() "
-                       "WHERE node_id = ?");
-        if (!updateStmtResult)
-            return updateStmtResult.error();
-        auto updateStmt = std::move(updateStmtResult).value();
-        if (auto bindNode = updateStmt.bind(1, nodeId); !bindNode)
-            return bindNode.error();
-        return updateStmt.execute();
-    });
-}
-
-Result<void>
-MetadataRepository::accumulatePathTreeCentroid(int64_t nodeId,
-                                               std::span<const float> embeddingValues) {
-    if (embeddingValues.empty())
-        return Result<void>();
-
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto selectStmtResult =
-            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
-        if (!selectStmtResult)
-            return selectStmtResult.error();
-
-        auto selectStmt = std::move(selectStmtResult).value();
-        if (auto bindNode = selectStmt.bind(1, nodeId); !bindNode)
-            return bindNode.error();
-
-        auto stepResult = selectStmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value())
-            return Error{ErrorCode::NotFound, "Path tree node not found"};
-
-        std::vector<float> centroid;
-        centroid.reserve(embeddingValues.size());
-        int64_t currentWeight = selectStmt.getInt64(1);
-
-        auto existingBlob = selectStmt.isNull(0) ? std::vector<std::byte>() : selectStmt.getBlob(0);
-        if (!existingBlob.empty() &&
-            existingBlob.size() == embeddingValues.size() * sizeof(float) && currentWeight > 0) {
-            centroid.resize(embeddingValues.size());
-            std::memcpy(centroid.data(), existingBlob.data(), existingBlob.size());
-        } else {
-            centroid.assign(embeddingValues.begin(), embeddingValues.end());
-            currentWeight = 0;
-        }
-
-        int64_t newWeight = currentWeight + 1;
-        if (currentWeight > 0) {
-            const double weightFactor = static_cast<double>(currentWeight);
-            for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
-                double updated = (centroid[i] * weightFactor + embeddingValues[i]) /
-                                 static_cast<double>(newWeight);
-                centroid[i] = static_cast<float>(updated);
-            }
-        } else {
-            centroid.assign(embeddingValues.begin(), embeddingValues.end());
-        }
-
-        auto updateStmtResult =
-            db.prepare("UPDATE path_tree_nodes "
-                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
-                       "WHERE node_id = ?");
-        if (!updateStmtResult)
-            return updateStmtResult.error();
-
-        auto updateStmt = std::move(updateStmtResult).value();
-
-        std::span<const std::byte> blob(reinterpret_cast<const std::byte*>(centroid.data()),
-                                        centroid.size() * sizeof(float));
-        if (auto bindBlob = updateStmt.bind(1, blob); !bindBlob)
-            return bindBlob.error();
-        if (auto bindWeight = updateStmt.bind(2, newWeight); !bindWeight)
-            return bindWeight.error();
-        if (auto bindNode = updateStmt.bind(3, nodeId); !bindNode)
-            return bindNode.error();
-
-        return updateStmt.execute();
-    });
-}
-
-Result<std::optional<PathTreeNode>>
-MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
-    if (fullPath.empty())
-        return std::optional<PathTreeNode>{};
-
-    return executeReadQuery<std::optional<PathTreeNode>>(
-        [&](Database& db) -> Result<std::optional<PathTreeNode>> {
-            auto stmtResult = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
-                                         "doc_count, centroid_weight, centroid "
-                                         "FROM path_tree_nodes WHERE full_path = ?");
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            if (auto bindRes = stmt.bind(1, fullPath); !bindRes)
-                return bindRes.error();
-
-            auto stepRes = stmt.step();
-            if (!stepRes)
-                return stepRes.error();
-            if (!stepRes.value())
-                return std::optional<PathTreeNode>{};
-
-            PathTreeNode node;
-            node.id = stmt.getInt64(0);
-            node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
-            node.pathSegment = stmt.getString(2);
-            node.fullPath = stmt.getString(3);
-            node.docCount = stmt.getInt64(4);
-            node.centroidWeight = stmt.getInt64(5);
-            if (!stmt.isNull(6)) {
-                node.centroid = blobToFloatVector(stmt.getBlob(6));
-            }
-            return std::optional<PathTreeNode>{std::move(node)};
-        });
-}
-
-// ---------------------------------------------------------------------------
-// Repair helpers (concrete-class only)
-// ---------------------------------------------------------------------------
-
-Result<uint64_t> MetadataRepository::countDocsMissingPathTree() {
-    return executeReadQuery<uint64_t>([&](Database& db) -> Result<uint64_t> {
-        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents d "
-                                     "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
-                                     "WHERE d.file_path != '' AND p.node_id IS NULL");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto stmt = std::move(stmtResult).value();
-        auto stepRes = stmt.step();
-        if (!stepRes)
-            return stepRes.error();
-        if (!stepRes.value())
-            return uint64_t(0);
-
-        return static_cast<uint64_t>(stmt.getInt64(0));
-    });
-}
-
-Result<std::vector<DocumentInfo>> MetadataRepository::findDocsMissingPathTree(int limit) {
-    return executeReadQuery<std::vector<DocumentInfo>>(
-        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            std::string sql = "SELECT ";
-            sql += documentColumnList(false);
-            sql += " FROM documents d "
-                   "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
-                   "WHERE d.file_path != '' AND p.node_id IS NULL";
-            if (limit > 0) {
-                sql += " LIMIT ?";
-            }
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            if (limit > 0) {
-                if (auto r = stmt.bind(1, static_cast<int64_t>(limit)); !r)
-                    return r.error();
-            }
-
-            std::vector<DocumentInfo> docs;
-            while (true) {
-                auto stepRes = stmt.step();
-                if (!stepRes)
-                    return stepRes.error();
-                if (!stepRes.value())
-                    break;
-                docs.push_back(mapDocumentRow(stmt));
-            }
-            return docs;
-        });
-}
-
-Result<std::vector<PathTreeNode>>
-MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t limit) {
-    return executeReadQuery<std::vector<PathTreeNode>>(
-        [&](Database& db) -> Result<std::vector<PathTreeNode>> {
-            bool isRoot = fullPath.empty() || fullPath == "/";
-            int64_t parentId = kPathTreeNullParent;
-
-            if (!isRoot) {
-                auto parentRes = findPathTreeNodeByFullPath(fullPath);
-                if (!parentRes)
-                    return parentRes.error();
-                const auto& parentOpt = parentRes.value();
-                if (!parentOpt)
-                    return std::vector<PathTreeNode>{};
-                parentId = parentOpt->id;
-            }
-
-            std::string sql = "SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                              "centroid_weight, centroid "
-                              "FROM path_tree_nodes ";
-            if (isRoot) {
-                sql += "WHERE parent_id IS NULL ";
-            } else {
-                sql += "WHERE parent_id = ? ";
-            }
-            sql += "ORDER BY doc_count DESC, path_segment ASC ";
-            if (limit > 0)
-                sql += "LIMIT ?";
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            int bindIndex = 1;
-            if (!isRoot) {
-                if (auto bindParent = stmt.bind(bindIndex++, parentId); !bindParent)
-                    return bindParent.error();
-            }
-            if (limit > 0) {
-                if (auto bindLimit = stmt.bind(bindIndex, static_cast<int64_t>(limit)); !bindLimit)
-                    return bindLimit.error();
-            }
-
-            std::vector<PathTreeNode> children;
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                children.push_back(mapPathTreeNodeRow(stmt));
-            }
-            return children;
-        });
-}
-
-namespace {
-std::vector<std::string> splitPathSegments(const std::string& normalizedPath) {
-    std::vector<std::string> segments;
-    std::string segment;
-    for (char ch : normalizedPath) {
-        if (ch == '/') {
-            if (!segment.empty()) {
-                segments.push_back(segment);
-                segment.clear();
-            }
-        } else {
-            segment.push_back(ch);
-        }
-    }
-    if (!segment.empty())
-        segments.push_back(segment);
-    return segments;
-}
-} // namespace
-
-Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& info,
-                                                           int64_t documentId, bool isNewDocument,
-                                                           std::span<const float> embeddingValues) {
-    if (info.filePath.empty())
-        return Result<void>();
-
-    auto segments = splitPathSegments(info.filePath);
-    if (segments.empty())
-        return Result<void>();
-
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
-
-        auto findStmtRes =
-            db.prepare("SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                       "centroid_weight, centroid FROM path_tree_nodes "
-                       "WHERE parent_id IS ? AND path_segment = ?");
-        if (!findStmtRes)
-            return findStmtRes.error();
-        auto findStmt = std::move(findStmtRes).value();
-
-        auto insertStmtRes = db.prepare("INSERT OR IGNORE INTO path_tree_nodes "
-                                        "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
-        if (!insertStmtRes)
-            return insertStmtRes.error();
-        auto insertStmt = std::move(insertStmtRes).value();
-
-        auto selectStmtRes = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
-                                        "doc_count, centroid_weight, centroid "
-                                        "FROM path_tree_nodes WHERE full_path = ?");
-        if (!selectStmtRes)
-            return selectStmtRes.error();
-        auto selectStmt = std::move(selectStmtRes).value();
-
-        auto assocInsertRes =
-            db.prepare("INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) "
-                       "VALUES (?, ?)");
-        if (!assocInsertRes)
-            return assocInsertRes.error();
-        auto assocStmt = std::move(assocInsertRes).value();
-
-        auto docCountRes = db.prepare("UPDATE path_tree_nodes "
-                                      "SET doc_count = doc_count + 1, last_updated = unixepoch() "
-                                      "WHERE node_id = ?");
-        if (!docCountRes)
-            return docCountRes.error();
-        auto docCountStmt = std::move(docCountRes).value();
-
-        auto centroidSelectRes =
-            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
-        if (!centroidSelectRes)
-            return centroidSelectRes.error();
-        auto centroidSelStmt = std::move(centroidSelectRes).value();
-
-        auto centroidUpdateRes =
-            db.prepare("UPDATE path_tree_nodes "
-                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
-                       "WHERE node_id = ?");
-        if (!centroidUpdateRes)
-            return centroidUpdateRes.error();
-        auto centroidUpdStmt = std::move(centroidUpdateRes).value();
-
-        int64_t parentNodeId = kPathTreeNullParent;
-        std::string currentPath = isAbsolute ? std::string("/") : std::string{};
-
-        for (const auto& part : segments) {
-            if (!currentPath.empty() && currentPath.back() != '/')
-                currentPath.push_back('/');
-            currentPath += part;
-
-            // --- findPathTreeNode (inlined) ---
-            findStmt.reset();
-            if (parentNodeId == kPathTreeNullParent) {
-                if (auto b = findStmt.bind(1, nullptr); !b)
-                    return b.error();
-            } else {
-                if (auto b = findStmt.bind(1, parentNodeId); !b)
-                    return b.error();
-            }
-            if (auto b = findStmt.bind(2, part); !b)
-                return b.error();
-
-            auto stepRes = findStmt.step();
-            if (!stepRes)
-                return stepRes.error();
-
-            int64_t nodeId = 0;
-            bool found = stepRes.value();
-            if (found) {
-                nodeId = findStmt.getInt64(0);
-            } else {
-                // --- insertPathTreeNode (inlined) ---
-                insertStmt.reset();
-                if (auto b = bindParentId(insertStmt, 1, parentNodeId); !b)
-                    return b.error();
-                if (auto b = insertStmt.bind(2, part); !b)
-                    return b.error();
-                if (auto b = insertStmt.bind(3, currentPath); !b)
-                    return b.error();
-                if (auto execRes = insertStmt.execute(); !execRes)
-                    return execRes.error();
-
-                selectStmt.reset();
-                if (auto b = selectStmt.bind(1, currentPath); !b)
-                    return b.error();
-                auto selRes = selectStmt.step();
-                if (!selRes)
-                    return selRes.error();
-                if (!selRes.value())
-                    return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
-                nodeId = selectStmt.getInt64(0);
-            }
-
-            if (isNewDocument) {
-                // --- incrementPathTreeDocCount (inlined) ---
-                assocStmt.reset();
-                if (auto b = assocStmt.bind(1, nodeId); !b)
-                    return b.error();
-                if (auto b = assocStmt.bind(2, documentId); !b)
-                    return b.error();
-                if (auto execRes = assocStmt.execute(); !execRes)
-                    return execRes.error();
-
-                if (db.changes() > 0) {
-                    docCountStmt.reset();
-                    if (auto b = docCountStmt.bind(1, nodeId); !b)
-                        return b.error();
-                    if (auto execRes = docCountStmt.execute(); !execRes)
-                        return execRes.error();
-                }
-            }
-
-            if (!embeddingValues.empty()) {
-                // --- accumulatePathTreeCentroid (inlined) ---
-                centroidSelStmt.reset();
-                if (auto b = centroidSelStmt.bind(1, nodeId); !b)
-                    return b.error();
-                auto cStepRes = centroidSelStmt.step();
-                if (!cStepRes)
-                    return cStepRes.error();
-                if (!cStepRes.value())
-                    return Error{ErrorCode::NotFound, "Path tree node not found"};
-
-                int64_t currentWeight = centroidSelStmt.getInt64(1);
-                bool hasBlob = !centroidSelStmt.isNull(0);
-
-                std::size_t dimCount = embeddingValues.size();
-                std::vector<float> centroid;
-                centroid.reserve(dimCount);
-
-                if (hasBlob && currentWeight > 0) {
-                    auto blob = centroidSelStmt.getBlob(0);
-                    if (blob.size() == dimCount * sizeof(float)) {
-                        centroid.resize(dimCount);
-                        std::memcpy(centroid.data(), blob.data(), blob.size());
-                    } else {
-                        centroid.assign(embeddingValues.begin(), embeddingValues.end());
-                        currentWeight = 0;
-                    }
-                } else {
-                    centroid.assign(embeddingValues.begin(), embeddingValues.end());
-                    currentWeight = 0;
-                }
-
-                int64_t newWeight = currentWeight + 1;
-                if (currentWeight > 0) {
-                    const double weightFactor = static_cast<double>(currentWeight);
-                    for (std::size_t i = 0; i < dimCount; ++i) {
-                        double updated = (centroid[i] * weightFactor + embeddingValues[i]) /
-                                         static_cast<double>(newWeight);
-                        centroid[i] = static_cast<float>(updated);
-                    }
-                }
-
-                centroidUpdStmt.reset();
-                std::span<const std::byte> blob(reinterpret_cast<const std::byte*>(centroid.data()),
-                                                centroid.size() * sizeof(float));
-                if (auto b = centroidUpdStmt.bind(1, blob); !b)
-                    return b.error();
-                if (auto b = centroidUpdStmt.bind(2, newWeight); !b)
-                    return b.error();
-                if (auto b = centroidUpdStmt.bind(3, nodeId); !b)
-                    return b.error();
-                if (auto execRes = centroidUpdStmt.execute(); !execRes)
-                    return execRes.error();
-            }
-
-            parentNodeId = nodeId;
-        }
-
-        return Result<void>();
-    });
-}
-
-Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& info,
-                                                           int64_t documentId,
-                                                           std::span<const float> embeddingValues) {
-    if (info.filePath.empty())
-        return Result<void>();
-
-    auto segments = splitPathSegments(info.filePath);
-    if (segments.empty())
-        return Result<void>();
-
-    const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
-    int64_t parentNodeId = kPathTreeNullParent;
-    std::string currentPath = isAbsolute ? std::string("/") : std::string{};
-
-    // Collect all node IDs along the path for later cleanup
-    std::vector<int64_t> pathNodeIds;
-
-    for (const auto& part : segments) {
-        if (!currentPath.empty() && currentPath.back() != '/')
-            currentPath.push_back('/');
-        currentPath += part;
-
-        auto nodeResult = findPathTreeNode(parentNodeId, part);
-        if (!nodeResult)
-            return nodeResult.error();
-
-        if (!nodeResult.value()) {
-            // Node doesn't exist, nothing to remove
-            return Result<void>();
-        }
-
-        pathNodeIds.push_back(nodeResult.value()->id);
-        parentNodeId = nodeResult.value()->id;
-    }
-
-    // First pass: Remove document associations and decrement counts from leaf to root
-    for (auto it = pathNodeIds.rbegin(); it != pathNodeIds.rend(); ++it) {
-        int64_t nodeId = *it;
-
-        // Remove the document-node association
-        auto removeAssoc = executeQuery<void>([&](Database& db) -> Result<void> {
-            auto deleteStmt = db.prepare(
-                "DELETE FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
-            if (!deleteStmt)
-                return deleteStmt.error();
-
-            auto stmt = std::move(deleteStmt).value();
-            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                return bindNode.error();
-            if (auto bindDoc = stmt.bind(2, documentId); !bindDoc)
-                return bindDoc.error();
-
-            return stmt.execute();
-        });
-        if (!removeAssoc)
-            return removeAssoc.error();
-
-        // Decrement doc_count
-        auto decrementCount = executeQuery<void>([&](Database& db) -> Result<void> {
-            auto updateStmt =
-                db.prepare("UPDATE path_tree_nodes "
-                           "SET doc_count = MAX(0, doc_count - 1), last_updated = unixepoch() "
-                           "WHERE node_id = ?");
-            if (!updateStmt)
-                return updateStmt.error();
-
-            auto stmt = std::move(updateStmt).value();
-            if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                return bindNode.error();
-
-            return stmt.execute();
-        });
-        if (!decrementCount)
-            return decrementCount.error();
-
-        // Recalculate centroid if embedding was provided
-        if (!embeddingValues.empty()) {
-            auto recalc = executeQuery<void>([&](Database& db) -> Result<void> {
-                // Get current centroid and weight
-                auto selectStmt =
-                    db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes "
-                               "WHERE node_id = ?");
-                if (!selectStmt)
-                    return selectStmt.error();
-
-                auto stmt = std::move(selectStmt).value();
-                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                    return bindNode.error();
-
-                auto stepRes = stmt.step();
-                if (!stepRes)
-                    return stepRes.error();
-                if (!stepRes.value())
-                    return Result<void>(); // Node doesn't exist anymore
-
-                std::vector<float> centroid;
-                int64_t currentWeight = stmt.getInt64(1);
-
-                if (!stmt.isNull(0)) {
-                    centroid = blobToFloatVector(stmt.getBlob(0));
-                }
-
-                if (currentWeight <= 1) {
-                    // Reset centroid when no documents remain
-                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
-                                                 "SET centroid = NULL, centroid_weight = 0, "
-                                                 "last_updated = unixepoch() "
-                                                 "WHERE node_id = ?");
-                    if (!updateStmt)
-                        return updateStmt.error();
-
-                    auto update = std::move(updateStmt).value();
-                    if (auto bindNode = update.bind(1, nodeId); !bindNode)
-                        return bindNode.error();
-
-                    return update.execute();
-                }
-
-                if (centroid.size() == embeddingValues.size()) {
-                    const double oldWeightFactor = static_cast<double>(currentWeight);
-                    const int64_t newWeight = currentWeight - 1;
-                    const double newWeightFactor = static_cast<double>(newWeight);
-                    for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
-                        double updated =
-                            (centroid[i] * oldWeightFactor - embeddingValues[i]) / newWeightFactor;
-                        centroid[i] = static_cast<float>(updated);
-                    }
-
-                    auto updateStmt = db.prepare("UPDATE path_tree_nodes "
-                                                 "SET centroid = ?, centroid_weight = ?, "
-                                                 "last_updated = unixepoch() "
-                                                 "WHERE node_id = ?");
-                    if (!updateStmt)
-                        return updateStmt.error();
-
-                    auto update = std::move(updateStmt).value();
-
-                    std::span<const std::byte> blob(
-                        reinterpret_cast<const std::byte*>(centroid.data()),
-                        centroid.size() * sizeof(float));
-                    if (auto bindBlob = update.bind(1, blob); !bindBlob)
-                        return bindBlob.error();
-                    if (auto bindWeight = update.bind(2, newWeight); !bindWeight)
-                        return bindWeight.error();
-                    if (auto bindNode = update.bind(3, nodeId); !bindNode)
-                        return bindNode.error();
-
-                    return update.execute();
-                }
-
-                return Result<void>();
-            });
-            if (!recalc)
-                return recalc.error();
-        }
-    }
-
-    // Second pass: Delete empty nodes from leaf to root, but keep top-level directories
-    // This ensures parent nodes are only checked after all their children have been processed
-    for (size_t i = 0; i < pathNodeIds.size(); ++i) {
-        size_t reverseIdx = pathNodeIds.size() - 1 - i;
-        int64_t nodeId = pathNodeIds[reverseIdx];
-
-        // Keep first-level directories (direct children of root) even if empty
-        bool isFirstLevel = (reverseIdx == 0);
-        if (isFirstLevel) {
-            continue; // Don't delete top-level directories
-        }
-
-        // Check if node is now empty and has no children
-        auto shouldDelete = executeQuery<bool>([&](Database& db) -> Result<bool> {
-            auto checkStmt = db.prepare(
-                "SELECT doc_count, "
-                "(SELECT COUNT(*) FROM path_tree_nodes WHERE parent_id = ?) as child_count "
-                "FROM path_tree_nodes WHERE node_id = ?");
-            if (!checkStmt)
-                return checkStmt.error();
-
-            auto stmt = std::move(checkStmt).value();
-            if (auto bind1 = stmt.bind(1, nodeId); !bind1)
-                return bind1.error();
-            if (auto bind2 = stmt.bind(2, nodeId); !bind2)
-                return bind2.error();
-
-            auto stepRes = stmt.step();
-            if (!stepRes)
-                return stepRes.error();
-            if (!stepRes.value())
-                return false; // Node doesn't exist
-
-            int64_t docCount = stmt.getInt64(0);
-            int64_t childCount = stmt.getInt64(1);
-
-            return (docCount == 0 && childCount == 0);
-        });
-
-        if (!shouldDelete)
-            return shouldDelete.error();
-
-        if (shouldDelete.value()) {
-            auto deleteNode = executeQuery<void>([&](Database& db) -> Result<void> {
-                auto deleteStmt = db.prepare("DELETE FROM path_tree_nodes WHERE node_id = ?");
-                if (!deleteStmt)
-                    return deleteStmt.error();
-
-                auto stmt = std::move(deleteStmt).value();
-                if (auto bindNode = stmt.bind(1, nodeId); !bindNode)
-                    return bindNode.error();
-
-                return stmt.execute();
-            });
-            if (!deleteNode)
-                return deleteNode.error();
-        }
-    }
-
-    return Result<void>();
-}
-
-// -----------------------------------------------------------------------------
-// Tree-based document queries (PBI-043 integration)
-// -----------------------------------------------------------------------------
-
-Result<std::vector<DocumentInfo>>
-MetadataRepository::findDocumentsByPathTreePrefix(std::string_view pathPrefix,
-                                                  bool includeSubdirectories, int limit) {
-    DocumentQueryOptions opts;
-    if (!pathPrefix.empty())
-        opts.pathPrefix = std::string(pathPrefix);
-    opts.includeSubdirectories = includeSubdirectories;
-    opts.limit = limit;
-    return queryDocuments(opts);
 }
 
 // -----------------------------------------------------------------------------

@@ -1,17 +1,19 @@
 #pragma once
 
+#include "yams/core/types.h"
 #include <sqlite3.h>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <yams/core/types.h>
 
 namespace yams::metadata {
 
@@ -130,9 +132,41 @@ public:
 private:
     sqlite3_stmt* stmt_ = nullptr;
 
+    template <typename T> Result<void> bindOne(int index, T&& value) {
+        using Decayed = std::remove_cvref_t<T>;
+        if constexpr (std::is_enum_v<Decayed>) {
+            using Underlying = std::underlying_type_t<Decayed>;
+            return bindOne(index, static_cast<Underlying>(value));
+        } else if constexpr (std::is_integral_v<Decayed> && !std::is_same_v<Decayed, bool> &&
+                             !std::is_same_v<Decayed, int> && !std::is_same_v<Decayed, int64_t>) {
+            if constexpr (std::is_signed_v<Decayed>) {
+                if constexpr (sizeof(Decayed) <= sizeof(int)) {
+                    return bind(index, static_cast<int>(value));
+                } else {
+                    return bind(index, static_cast<int64_t>(value));
+                }
+            } else {
+                if constexpr (sizeof(Decayed) < sizeof(int)) {
+                    return bind(index, static_cast<int>(value));
+                } else {
+                    using Unsigned64 = std::make_unsigned_t<int64_t>;
+                    const auto unsignedValue = static_cast<Unsigned64>(value);
+                    if (unsignedValue >
+                        static_cast<Unsigned64>(std::numeric_limits<int64_t>::max())) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Unsigned integer too large to bind as SQLite INTEGER"};
+                    }
+                    return bind(index, static_cast<int64_t>(value));
+                }
+            }
+        } else {
+            return bind(index, std::forward<T>(value));
+        }
+    }
+
     template <typename T, typename... Rest>
     Result<void> bindHelper(int index, T&& value, Rest&&... rest) {
-        auto result = bind(index, std::forward<T>(value));
+        auto result = bindOne(index, std::forward<T>(value));
         if (!result)
             return result;
         if constexpr (sizeof...(rest) > 0) {

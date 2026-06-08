@@ -175,6 +175,14 @@ public:
     }
 
     /**
+     * @brief Interrupt blocked connection-pool acquires during shutdown.
+     *
+     * Safe to call multiple times. Existing leased connections are left alone;
+     * only pending/future acquire() calls fail fast.
+     */
+    void interruptPendingConnectionAcquiresForShutdown();
+
+    /**
      * @brief Check if database is ready for queries.
      */
     bool isReady() const { return database_ != nullptr && metadataRepo_ != nullptr; }

@@ -1,3 +1,4 @@
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
@@ -16,7 +17,9 @@
 
 namespace yams::daemon {
 
-static constexpr std::size_t kMaxBatchesPerIteration = 8;
+// Keep each writer-loop turn bounded, but allow enough batches to coalesce noisy
+// status-only producers before they churn the single SQLite writer.
+static constexpr std::size_t kMaxBatchesPerIteration = 64;
 
 WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                                    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
@@ -25,6 +28,11 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
     : strand_(boost::asio::make_strand(ioc)), kg_(std::move(kgStore)),
       meta_(std::move(metadataRepo)), config_(config),
       wakeTimer_(std::make_shared<boost::asio::steady_timer>(strand_)) {
+    YAMS_PRECONDITION(config_.maxBatchSize > 0, "WriteCoordinator maxBatchSize must be positive");
+    YAMS_PRECONDITION(config_.channelCapacity > 0,
+                      "WriteCoordinator channelCapacity must be positive");
+    YAMS_PRECONDITION(config_.maxBatchDelayMs.count() >= 0,
+                      "WriteCoordinator maxBatchDelayMs must be non-negative");
     spdlog::info("[WriteCoordinator] Initialized maxBatchSize={} maxDelayMs={} capacity={}",
                  config_.maxBatchSize, config_.maxBatchDelayMs.count(), config_.channelCapacity);
 }
@@ -250,12 +258,15 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             spdlog::warn("[WriteCoordinator] Batch apply failed: {}", result.error().message);
         }
         inFlight_.store(0);
+        bool hasPendingAfterApply = false;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
+            hasPendingAfterApply = !pendingBatches_.empty();
             drainCv_.notify_all();
         }
 
-        pollTimer->expires_after(std::chrono::milliseconds(1));
+        pollTimer->expires_after(hasPendingAfterApply ? std::chrono::milliseconds(0)
+                                                      : std::chrono::milliseconds(1));
         boost::system::error_code ec;
         co_await pollTimer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     }
@@ -352,13 +363,10 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, InsertRelationshipOp>) {
                             return;
-                        } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
-                            r = applyOp(kgBatch, concrete, nodeKeyToId);
-                        } else if constexpr (std::is_same_v<T, AddDeferredDocEntitiesOp>) {
-                            r = applyOp(kgBatch, concrete, nodeKeyToId);
-                        } else if constexpr (std::is_same_v<T, UpsertNodesOp>) {
-                            r = applyOp(kgBatch, concrete, nodeKeyToId);
-                        } else if constexpr (std::is_same_v<T, AddAliasesOp>) {
+                        } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp> ||
+                                             std::is_same_v<T, AddDeferredDocEntitiesOp> ||
+                                             std::is_same_v<T, UpsertNodesOp> ||
+                                             std::is_same_v<T, AddAliasesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
                         } else {
                             r = applyOp(kgBatch, concrete);
@@ -417,6 +425,10 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             std::string modelName;
             std::vector<std::string> hashes;
         };
+        struct ExtractionStatusGroup {
+            std::string source;
+            std::vector<metadata::ExtractionStatusUpdate> updates;
+        };
 
         std::unordered_map<
             std::string,
@@ -424,6 +436,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             metadataBySource;
         std::unordered_map<std::string, RepairStatusGroup> repairStatusBySourceAndStatus;
         std::unordered_map<std::string, EmbeddingStatusGroup> embeddingStatusBySourceAndState;
+        std::unordered_map<std::string, ExtractionStatusGroup> extractionStatusBySource;
 
         auto recordMetaApply = [&](const std::string& source, std::uint64_t sourceOps,
                                    std::uint64_t sourceApplyMs, bool sourceError) {
@@ -446,7 +459,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     [&](auto& concrete) -> void {
                         using T = std::decay_t<decltype(concrete)>;
                         Result<void> r;
-                        if constexpr (std::is_same_v<T, InsertDocumentOp>) {
+                        if constexpr (std::is_same_v<T, InsertDocumentOp> ||
+                                      std::is_same_v<T, UpsertTreeSnapshotOp> ||
+                                      std::is_same_v<T, InsertRelationshipOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
                             if (concrete.hashes.empty())
@@ -463,8 +478,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                                 std::make_move_iterator(concrete.hashes.end()));
                             concrete.hashes.clear();
                             return;
-                        } else if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp>) {
-                            r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, SetMetadataBatchOp>) {
                             if (concrete.entries.empty())
                                 return;
@@ -475,7 +488,16 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             concrete.entries.clear();
                             return;
                         } else if constexpr (std::is_same_v<T, UpdateExtractionStatusOp>) {
-                            r = applyMetadataOp(concrete);
+                            auto& group = extractionStatusBySource[batch->source];
+                            if (group.source.empty()) {
+                                group.source = batch->source;
+                            }
+                            group.updates.push_back(metadata::ExtractionStatusUpdate{
+                                .documentId = concrete.documentId,
+                                .contentExtracted = concrete.contentExtracted,
+                                .status = concrete.status,
+                                .error = std::move(concrete.error)});
+                            return;
                         } else if constexpr (std::is_same_v<T, UpdateEmbeddingStatusByHashOp>) {
                             if (concrete.hash.empty())
                                 return;
@@ -513,8 +535,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                 r.error().message.find("database is locked") != std::string::npos) {
                                 return;
                             }
-                        } else if constexpr (std::is_same_v<T, InsertRelationshipOp>) {
-                            r = applyMetadataOp(concrete);
                         } else {
                             return;
                         }
@@ -541,6 +561,33 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             }
         }
 
+        for (auto& [_, group] : extractionStatusBySource) {
+            if (stopped()) {
+                spdlog::info("[WriteCoordinator] applyBatches extraction coalesce aborted "
+                             "(stop requested)");
+                return Result<void>();
+            }
+            if (group.updates.empty()) {
+                continue;
+            }
+            const auto sourceStart = std::chrono::steady_clock::now();
+            const auto updateCount = static_cast<std::uint64_t>(group.updates.size());
+            auto r = meta_->batchUpdateDocumentExtractionStatuses(group.updates);
+            const auto sourceApplyMs =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - sourceStart)
+                                               .count());
+            if (!r) {
+                spdlog::warn("[WriteCoordinator] coalesced extraction-status op '{}' failed: {}",
+                             group.source, r.error().message);
+            } else {
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.opsApplied += updateCount;
+                stats_.extractionStatusesUpdated += updateCount;
+            }
+            recordMetaApply(group.source, updateCount, sourceApplyMs, !r);
+        }
+
         for (auto& [source, entries] : metadataBySource) {
             if (stopped()) {
                 spdlog::info(
@@ -548,6 +595,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 return Result<void>();
             }
             const auto sourceStart = std::chrono::steady_clock::now();
+            const auto entryCount = static_cast<std::uint64_t>(entries.size());
             SetMetadataBatchOp op{std::move(entries)};
             auto r = applyMetadataOp(op);
             const auto sourceApplyMs =
@@ -559,13 +607,17 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                              r.error().message);
             } else {
                 std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied++;
+                stats_.opsApplied += entryCount;
             }
-            recordMetaApply(source, 1, sourceApplyMs, !r);
+            recordMetaApply(source, entryCount, sourceApplyMs, !r);
         }
 
         for (auto& [_, group] : repairStatusBySourceAndStatus) {
+            if (group.hashes.empty()) {
+                continue;
+            }
             const auto sourceStart = std::chrono::steady_clock::now();
+            const auto hashCount = static_cast<std::uint64_t>(group.hashes.size());
             UpdateRepairStatusOp op{std::move(group.hashes), group.status};
             auto r = applyMetadataOp(op);
             const auto sourceApplyMs =
@@ -577,13 +629,17 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                              group.source, r.error().message);
             } else {
                 std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied++;
+                stats_.opsApplied += hashCount;
             }
-            recordMetaApply(group.source, 1, sourceApplyMs, !r);
+            recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
         }
 
         for (auto& [_, group] : embeddingStatusBySourceAndState) {
+            if (group.hashes.empty()) {
+                continue;
+            }
             const auto sourceStart = std::chrono::steady_clock::now();
+            const auto hashCount = static_cast<std::uint64_t>(group.hashes.size());
             UpdateEmbeddingStatusByHashesOp op{std::move(group.hashes), group.embedded,
                                                std::move(group.modelName)};
             auto r = applyMetadataOp(op);
@@ -596,9 +652,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                              group.source, r.error().message);
             } else {
                 std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied++;
+                stats_.opsApplied += hashCount;
             }
-            recordMetaApply(group.source, 1, sourceApplyMs, !r);
+            recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
         }
     }
 

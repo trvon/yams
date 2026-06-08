@@ -59,6 +59,14 @@ void drainPostIngestChannel() {
     }
 }
 
+void drainEmbedJobsChannel() {
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+        "embed_jobs", 2048);
+    InternalEventBus::EmbedJob drain;
+    while (channel->try_pop(drain)) {
+    }
+}
+
 using yams::test::ScopedEnvVar;
 
 // =============================================================================
@@ -151,7 +159,7 @@ public:
         for (unsigned char c : data) {
             bytes.push_back(static_cast<std::byte>(c));
         }
-        blobs_[hash] = std::move(bytes);
+        blobs_[hash] = bytes;
     }
 
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
@@ -180,7 +188,7 @@ public:
             return bytes.error();
         }
         api::IContentStore::RawContent raw;
-        raw.data = std::move(bytes.value());
+        raw.data = bytes.value();
         return raw;
     }
 
@@ -425,7 +433,7 @@ public:
             content.contentLength = static_cast<int64_t>(indexedContent_.size());
             content.extractionMethod = "post_ingest";
             content.language = "en";
-            out.emplace(id, std::move(content));
+            out.emplace(id, content);
         }
         return out;
     }
@@ -528,6 +536,11 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
 
     SECTION("Process single task successfully") {
+        drainEmbedJobsChannel();
+        auto embedChannel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+                "embed_jobs", 2048);
+
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                        nullptr, &coordinator, nullptr, 32);
         queue->start(); // Start the channel poller
@@ -540,6 +553,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         REQUIRE(queue->started());
 
         PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
+        task.noEmbeddings = true;
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -547,23 +561,52 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        REQUIRE(queue->processed() == 1);
-        REQUIRE(queue->failed() == 0);
-        REQUIRE(queue->entityInFlight() == 0);
+        REQUIRE((queue->processed() == 1));
+        REQUIRE((queue->failed() == 0));
+        REQUIRE((queue->entityInFlight() == 0));
         REQUIRE(metadataRepo->contentInserted());
 
         auto content = metadataRepo->lastContent();
-        REQUIRE(content.documentId == doc.id);
-        REQUIRE(content.contentText == payload);
-        REQUIRE(content.contentLength == static_cast<int64_t>(payload.size()));
-        REQUIRE(content.extractionMethod == "post_ingest");
+        REQUIRE((content.documentId == doc.id));
+        REQUIRE((content.contentText == payload));
+        REQUIRE((content.contentLength == static_cast<int64_t>(payload.size())));
+        REQUIRE((content.extractionMethod == "post_ingest"));
         REQUIRE_FALSE(content.language.empty());
 
         auto updated = metadataRepo->lastUpdated();
         REQUIRE(updated.contentExtracted);
-        REQUIRE(updated.extractionStatus == metadata::ExtractionStatus::Success);
+        REQUIRE((updated.extractionStatus == metadata::ExtractionStatus::Success));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        InternalEventBus::EmbedJob embedJob;
+        CHECK_FALSE(embedChannel->try_pop(embedJob));
 
         stopAndResetQueue(queue);
+    }
+
+    SECTION("Stop wakes title-inactive poller promptly") {
+        auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                       nullptr, &coordinator, nullptr, 32);
+        queue->start();
+
+        auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        REQUIRE(queue->started());
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+        const auto stopStart = std::chrono::steady_clock::now();
+        queue->stop();
+        const auto stopElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - stopStart);
+
+        INFO("stopElapsedMs=" << stopElapsed.count());
+        CHECK((stopElapsed < std::chrono::milliseconds(150)));
+        CHECK_FALSE(queue->started());
+
+        queue.reset();
     }
 
     SECTION("Queue shutdown drains pending tasks") {
@@ -579,7 +622,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         REQUIRE(queue->started());
 
         PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
-        REQUIRE(queue->tryEnqueue(std::move(task)));
+        REQUIRE(queue->tryEnqueue(task));
 
         stopAndResetQueue(queue);
         SUCCEED("Queue shutdown completed without hang");
@@ -656,7 +699,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
 
     for (const auto& doc : docs) {
         PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
-        REQUIRE(queue->tryEnqueue(std::move(task)));
+        REQUIRE(queue->tryEnqueue(task));
     }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -664,7 +707,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == docs.size());
+    REQUIRE((queue->processed() == docs.size()));
     // Note: With parallel processing and caching, individual lookups may be used instead of batch
     // The important thing is that all documents were processed successfully
 
@@ -691,12 +734,12 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     }
 
     // PostIngestQueue should enqueue embedding jobs for successfully extracted documents.
-    REQUIRE(jobCount > 0);
+    REQUIRE((jobCount > 0));
 
     // Phase 2: embed jobs should include prepared doc chunks for at least some docs.
-    REQUIRE(docsWithPreparedChunks > 0);
+    REQUIRE((docsWithPreparedChunks > 0));
     // With fixed chunking target=16 and a large payload, at least one doc should have >1 chunk.
-    REQUIRE(docsWithMultipleChunks > 0);
+    REQUIRE((docsWithMultipleChunks > 0));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -755,7 +798,7 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
 
     for (const auto& doc : docs) {
         PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
-        REQUIRE(queue->tryEnqueue(std::move(task)));
+        REQUIRE(queue->tryEnqueue(task));
     }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
@@ -763,17 +806,17 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == docs.size());
-    REQUIRE(queue->failed() == 0);
+    REQUIRE((queue->processed() == docs.size()));
+    REQUIRE((queue->failed() == 0));
 
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
-    REQUIRE(insertedDocIds.size() == docs.size());
+    REQUIRE((insertedDocIds.size() == docs.size()));
 
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-            insertedDocIds.end());
+    REQUIRE(
+        (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
     for (int i = 0; i < kDocCount; ++i) {
-        REQUIRE(insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i);
+        REQUIRE((insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i));
     }
 
     stopAndResetQueue(queue);
@@ -831,14 +874,14 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == kDocCount);
-    REQUIRE(queue->failed() == 0);
+    REQUIRE((queue->processed() == kDocCount));
+    REQUIRE((queue->failed() == 0));
 
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
-    REQUIRE(insertedDocIds.size() == static_cast<std::size_t>(kDocCount));
+    REQUIRE((insertedDocIds.size() == static_cast<std::size_t>(kDocCount)));
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
-    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
-            insertedDocIds.end());
+    REQUIRE(
+        (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -894,9 +937,9 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    REQUIRE(queue->processed() == kDocCount);
-    REQUIRE(queue->failed() == 0);
-    REQUIRE(metadataRepo->maxBatchWriteSize() > 1);
+    REQUIRE((queue->processed() == kDocCount));
+    REQUIRE((queue->failed() == 0));
+    REQUIRE((metadataRepo->maxBatchWriteSize() > 1));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -920,14 +963,13 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
     tasks.push_back(PostIngestQueue::Task{"log-test-hash-1", "text/plain"});
     tasks.push_back(PostIngestQueue::Task{"log-test-hash-2", "text/plain"});
 
-    std::thread producer(
-        [&queue, tasks = std::move(tasks)]() mutable { queue->enqueueBatch(std::move(tasks)); });
+    std::thread producer([&queue, tasks]() mutable { queue->enqueueBatch(tasks); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(350));
     queue->stop();
     producer.join();
 
-    CHECK(logs.str().find("enqueueBatch waiting on full channel") == std::string::npos);
+    CHECK((logs.str().find("enqueueBatch waiting on full channel") == std::string::npos));
 }
 
 // =============================================================================
@@ -1002,9 +1044,9 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        REQUIRE(static_cast<int>(pq->processed()) == expected);
-        REQUIRE(pq->failed() == 0);
-        REQUIRE(pq->entityInFlight() == 0);
+        REQUIRE((static_cast<int>(pq->processed()) == expected));
+        REQUIRE((pq->failed() == 0));
+        REQUIRE((pq->entityInFlight() == 0));
 
         stopAndResetQueue(pq);
     }
@@ -1074,7 +1116,7 @@ TEST_CASE("InternalEventBus: MPMC queue correctness under concurrent load",
             t.join();
         }
 
-        REQUIRE(produced.load() == kProducers * kPerProducer);
-        REQUIRE(consumed.load() == kProducers * kPerProducer);
+        REQUIRE((produced.load() == kProducers * kPerProducer));
+        REQUIRE((consumed.load() == kProducers * kPerProducer));
     }
 }

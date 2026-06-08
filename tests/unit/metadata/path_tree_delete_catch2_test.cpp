@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <string>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -14,6 +15,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 
+using yams::Result;
 using namespace yams::metadata;
 
 namespace {
@@ -39,20 +41,20 @@ struct PathTreeDeleteFixture {
 
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), poolCfg);
         auto initRes = pool_->initialize();
-        REQUIRE(initRes.has_value());
+        REQUIRE((initRes.has_value()));
 
         repository_ = std::make_shared<MetadataRepository>(*pool_);
 
         // Run migrations
         auto connRes = pool_->acquire();
-        REQUIRE(connRes.has_value());
+        REQUIRE((connRes.has_value()));
         auto& db = **connRes.value();
         yams::metadata::MigrationManager mgr(db);
         mgr.registerMigrations(yams::metadata::YamsMetadataMigrations::getAllMigrations());
         auto initRes2 = mgr.initialize();
-        REQUIRE(initRes2.has_value());
+        REQUIRE((initRes2.has_value()));
         auto migrate = mgr.migrate();
-        REQUIRE(migrate.has_value());
+        REQUIRE((migrate.has_value()));
     }
 
     ~PathTreeDeleteFixture() {
@@ -77,6 +79,46 @@ struct PathTreeDeleteFixture {
         return doc;
     }
 
+    Result<void> installDocCountAbortTrigger(int64_t nodeId, const std::string& triggerName) {
+        return pool_->withConnection([&](Database& db) -> Result<void> {
+            return db.execute("CREATE TRIGGER " + triggerName +
+                              " BEFORE UPDATE OF doc_count ON path_tree_nodes "
+                              "WHEN NEW.node_id = " +
+                              std::to_string(nodeId) +
+                              " AND NEW.doc_count = OLD.doc_count - 1 "
+                              "BEGIN "
+                              "SELECT RAISE(ABORT, 'injected path tree remove failure'); "
+                              "END");
+        });
+    }
+
+    Result<int64_t> countNodeDocumentAssociations(int64_t nodeId, int64_t documentId) {
+        return pool_->withConnection([&](Database& db) -> Result<int64_t> {
+            auto stmtResult = db.prepare("SELECT COUNT(*) FROM path_tree_node_documents "
+                                         "WHERE node_id = ? AND document_id = ?");
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+
+            auto stmt = std::move(stmtResult).value();
+            if (auto bindNode = stmt.bind(1, nodeId); !bindNode) {
+                return bindNode.error();
+            }
+            if (auto bindDoc = stmt.bind(2, documentId); !bindDoc) {
+                return bindDoc.error();
+            }
+
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                return int64_t{0};
+            }
+            return stmt.getInt64(0);
+        });
+    }
+
     std::filesystem::path testDir_;
     std::filesystem::path dbPath_;
     std::unique_ptr<ConnectionPool> pool_;
@@ -91,25 +133,25 @@ TEST_CASE("PathTreeDelete: remove document decrements count", "[unit][metadata][
     auto docInfo = fix.makeDocumentWithPath(
         "/src/example.txt", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     auto docId = docInsert.value();
     docInfo.id = docId;
 
     auto upsert = fix.repository_->upsertPathTreeForDocument(docInfo, docId, true, {});
-    REQUIRE(upsert.has_value());
+    REQUIRE((upsert.has_value()));
 
     auto lookup = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(lookup.has_value());
-    REQUIRE(lookup.value().has_value());
-    CHECK(lookup.value()->docCount == 1);
+    REQUIRE((lookup.has_value()));
+    REQUIRE((lookup.value().has_value()));
+    CHECK((lookup.value()->docCount == 1));
 
     auto remove = fix.repository_->removePathTreeForDocument(docInfo, docId, {});
-    REQUIRE(remove.has_value());
+    REQUIRE((remove.has_value()));
 
     auto afterRemove = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(afterRemove.has_value());
-    REQUIRE(afterRemove.value().has_value());
-    CHECK(afterRemove.value()->docCount == 0);
+    REQUIRE((afterRemove.has_value()));
+    REQUIRE((afterRemove.value().has_value()));
+    CHECK((afterRemove.value()->docCount == 0));
 }
 
 TEST_CASE("PathTreeDelete: remove document deletes empty nodes", "[unit][metadata][path_tree]") {
@@ -118,30 +160,30 @@ TEST_CASE("PathTreeDelete: remove document deletes empty nodes", "[unit][metadat
     auto docInfo = fix.makeDocumentWithPath(
         "/src/lib/example.txt", "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     auto docId = docInsert.value();
     docInfo.id = docId;
 
     auto upsert = fix.repository_->upsertPathTreeForDocument(docInfo, docId, true, {});
-    REQUIRE(upsert.has_value());
+    REQUIRE((upsert.has_value()));
 
     auto srcLookup = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(srcLookup.has_value());
-    REQUIRE(srcLookup.value().has_value());
+    REQUIRE((srcLookup.has_value()));
+    REQUIRE((srcLookup.value().has_value()));
 
     auto libLookup = fix.repository_->findPathTreeNode(srcLookup.value()->id, "lib");
-    REQUIRE(libLookup.has_value());
-    REQUIRE(libLookup.value().has_value());
+    REQUIRE((libLookup.has_value()));
+    REQUIRE((libLookup.value().has_value()));
 
     auto remove = fix.repository_->removePathTreeForDocument(docInfo, docId, {});
-    REQUIRE(remove.has_value());
+    REQUIRE((remove.has_value()));
 
     auto leafLookup = fix.repository_->findPathTreeNodeByFullPath("/src/lib/example.txt");
-    REQUIRE(leafLookup.has_value());
+    REQUIRE((leafLookup.has_value()));
     CHECK_FALSE(leafLookup.value().has_value());
 
     auto libAfter = fix.repository_->findPathTreeNode(srcLookup.value()->id, "lib");
-    REQUIRE(libAfter.has_value());
+    REQUIRE((libAfter.has_value()));
     CHECK_FALSE(libAfter.value().has_value());
 }
 
@@ -151,13 +193,13 @@ TEST_CASE("PathTreeDelete: remove document recalculates centroid", "[unit][metad
     auto doc1 = fix.makeDocumentWithPath(
         "/src/file1.txt", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
     auto doc1Insert = fix.repository_->insertDocument(doc1);
-    REQUIRE(doc1Insert.has_value());
+    REQUIRE((doc1Insert.has_value()));
     doc1.id = doc1Insert.value();
 
     auto doc2 = fix.makeDocumentWithPath(
         "/src/file2.txt", "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
     auto doc2Insert = fix.repository_->insertDocument(doc2);
-    REQUIRE(doc2Insert.has_value());
+    REQUIRE((doc2Insert.has_value()));
     doc2.id = doc2Insert.value();
 
     std::vector<float> embedding1{1.0F, 2.0F, 3.0F};
@@ -165,35 +207,35 @@ TEST_CASE("PathTreeDelete: remove document recalculates centroid", "[unit][metad
 
     auto upsert1 = fix.repository_->upsertPathTreeForDocument(
         doc1, doc1.id, true, std::span<const float>(embedding1.data(), embedding1.size()));
-    REQUIRE(upsert1.has_value());
+    REQUIRE((upsert1.has_value()));
 
     auto upsert2 = fix.repository_->upsertPathTreeForDocument(
         doc2, doc2.id, true, std::span<const float>(embedding2.data(), embedding2.size()));
-    REQUIRE(upsert2.has_value());
+    REQUIRE((upsert2.has_value()));
 
     auto srcNode = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(srcNode.has_value());
-    REQUIRE(srcNode.value().has_value());
-    CHECK(srcNode.value()->centroidWeight == 2);
-    REQUIRE(srcNode.value()->centroid.size() == 3);
+    REQUIRE((srcNode.has_value()));
+    REQUIRE((srcNode.value().has_value()));
+    CHECK((srcNode.value()->centroidWeight == 2));
+    REQUIRE((srcNode.value()->centroid.size() == 3));
 
     // Expected centroid: [(1+5)/2, (2+6)/2, (3+7)/2] = [3.0, 4.0, 5.0]
-    CHECK(srcNode.value()->centroid[0] == Catch::Approx(3.0F).epsilon(0.01));
-    CHECK(srcNode.value()->centroid[1] == Catch::Approx(4.0F).epsilon(0.01));
-    CHECK(srcNode.value()->centroid[2] == Catch::Approx(5.0F).epsilon(0.01));
+    CHECK((srcNode.value()->centroid[0] == Catch::Approx(3.0F).epsilon(0.01)));
+    CHECK((srcNode.value()->centroid[1] == Catch::Approx(4.0F).epsilon(0.01)));
+    CHECK((srcNode.value()->centroid[2] == Catch::Approx(5.0F).epsilon(0.01)));
 
     auto remove = fix.repository_->removePathTreeForDocument(
         doc1, doc1.id, std::span<const float>(embedding1.data(), embedding1.size()));
-    REQUIRE(remove.has_value());
+    REQUIRE((remove.has_value()));
 
     auto srcAfter = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(srcAfter.has_value());
-    REQUIRE(srcAfter.value().has_value());
-    CHECK(srcAfter.value()->centroidWeight == 1);
-    REQUIRE(srcAfter.value()->centroid.size() == 3);
-    CHECK(srcAfter.value()->centroid[0] == Catch::Approx(5.0F).epsilon(0.01));
-    CHECK(srcAfter.value()->centroid[1] == Catch::Approx(6.0F).epsilon(0.01));
-    CHECK(srcAfter.value()->centroid[2] == Catch::Approx(7.0F).epsilon(0.01));
+    REQUIRE((srcAfter.has_value()));
+    REQUIRE((srcAfter.value().has_value()));
+    CHECK((srcAfter.value()->centroidWeight == 1));
+    REQUIRE((srcAfter.value()->centroid.size() == 3));
+    CHECK((srcAfter.value()->centroid[0] == Catch::Approx(5.0F).epsilon(0.01)));
+    CHECK((srcAfter.value()->centroid[1] == Catch::Approx(6.0F).epsilon(0.01)));
+    CHECK((srcAfter.value()->centroid[2] == Catch::Approx(7.0F).epsilon(0.01)));
 }
 
 TEST_CASE("PathTreeDelete: remove nonexistent document succeeds", "[unit][metadata][path_tree]") {
@@ -203,11 +245,11 @@ TEST_CASE("PathTreeDelete: remove nonexistent document succeeds", "[unit][metada
         "/nonexistent/file.txt",
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
     auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE(docInsert.has_value());
+    REQUIRE((docInsert.has_value()));
     docInfo.id = docInsert.value();
 
     auto remove = fix.repository_->removePathTreeForDocument(docInfo, docInfo.id, {});
-    CHECK(remove.has_value());
+    CHECK((remove.has_value()));
 }
 
 TEST_CASE("PathTreeDelete: remove document keeps shared ancestors", "[unit][metadata][path_tree]") {
@@ -216,39 +258,83 @@ TEST_CASE("PathTreeDelete: remove document keeps shared ancestors", "[unit][meta
     auto doc1 = fix.makeDocumentWithPath(
         "/src/dir1/file1.txt", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
     auto doc1Insert = fix.repository_->insertDocument(doc1);
-    REQUIRE(doc1Insert.has_value());
+    REQUIRE((doc1Insert.has_value()));
     doc1.id = doc1Insert.value();
 
     auto doc2 = fix.makeDocumentWithPath(
         "/src/dir2/file2.txt", "1111111111111111111111111111111111111111111111111111111111111111");
     auto doc2Insert = fix.repository_->insertDocument(doc2);
-    REQUIRE(doc2Insert.has_value());
+    REQUIRE((doc2Insert.has_value()));
     doc2.id = doc2Insert.value();
 
     auto upsert1 = fix.repository_->upsertPathTreeForDocument(doc1, doc1.id, true, {});
-    REQUIRE(upsert1.has_value());
+    REQUIRE((upsert1.has_value()));
 
     auto upsert2 = fix.repository_->upsertPathTreeForDocument(doc2, doc2.id, true, {});
-    REQUIRE(upsert2.has_value());
+    REQUIRE((upsert2.has_value()));
 
     auto srcBefore = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(srcBefore.has_value());
-    REQUIRE(srcBefore.value().has_value());
-    CHECK(srcBefore.value()->docCount == 2);
+    REQUIRE((srcBefore.has_value()));
+    REQUIRE((srcBefore.value().has_value()));
+    CHECK((srcBefore.value()->docCount == 2));
 
     auto remove = fix.repository_->removePathTreeForDocument(doc1, doc1.id, {});
-    REQUIRE(remove.has_value());
+    REQUIRE((remove.has_value()));
 
     auto srcAfter = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
-    REQUIRE(srcAfter.has_value());
-    REQUIRE(srcAfter.value().has_value());
-    CHECK(srcAfter.value()->docCount == 1);
+    REQUIRE((srcAfter.has_value()));
+    REQUIRE((srcAfter.value().has_value()));
+    CHECK((srcAfter.value()->docCount == 1));
 
     auto dir1After = fix.repository_->findPathTreeNodeByFullPath("/src/dir1");
-    REQUIRE(dir1After.has_value());
+    REQUIRE((dir1After.has_value()));
     CHECK_FALSE(dir1After.value().has_value());
 
     auto dir2After = fix.repository_->findPathTreeNodeByFullPath("/src/dir2");
-    REQUIRE(dir2After.has_value());
-    CHECK(dir2After.value().has_value());
+    REQUIRE((dir2After.has_value()));
+    CHECK((dir2After.value().has_value()));
+}
+
+TEST_CASE("PathTreeDelete: remove document rolls back partial changes on failure",
+          "[unit][metadata][path_tree][atomicity]") {
+    PathTreeDeleteFixture fix;
+
+    auto doc = fix.makeDocumentWithPath(
+        "/atomic/lib/file.txt", "9999999999999999999999999999999999999999999999999999999999999999");
+    auto docInsert = fix.repository_->insertDocument(doc);
+    REQUIRE((docInsert.has_value()));
+    doc.id = docInsert.value();
+
+    auto upsert = fix.repository_->upsertPathTreeForDocument(doc, doc.id, true, {});
+    REQUIRE((upsert.has_value()));
+
+    auto leafNode = fix.repository_->findPathTreeNodeByFullPath("/atomic/lib/file.txt");
+    REQUIRE((leafNode.has_value()));
+    REQUIRE((leafNode.value().has_value()));
+
+    auto assocBefore = fix.countNodeDocumentAssociations(leafNode.value()->id, doc.id);
+    REQUIRE((assocBefore.has_value()));
+    CHECK((assocBefore.value() == 1));
+
+    REQUIRE(fix.installDocCountAbortTrigger(leafNode.value()->id,
+                                            "abort_path_tree_remove_leaf_decrement")
+                .has_value());
+
+    auto remove = fix.repository_->removePathTreeForDocument(doc, doc.id, {});
+    REQUIRE_FALSE(remove.has_value());
+    CHECK((remove.error().message.find("constraint failed") != std::string::npos));
+
+    auto leafAfter = fix.repository_->findPathTreeNodeByFullPath("/atomic/lib/file.txt");
+    REQUIRE((leafAfter.has_value()));
+    REQUIRE((leafAfter.value().has_value()));
+    CHECK((leafAfter.value()->docCount == 1));
+
+    auto libAfter = fix.repository_->findPathTreeNodeByFullPath("/atomic/lib");
+    REQUIRE((libAfter.has_value()));
+    REQUIRE((libAfter.value().has_value()));
+    CHECK((libAfter.value()->docCount == 1));
+
+    auto assocAfter = fix.countNodeDocumentAssociations(leafNode.value()->id, doc.id);
+    REQUIRE((assocAfter.has_value()));
+    CHECK((assocAfter.value() == 1));
 }

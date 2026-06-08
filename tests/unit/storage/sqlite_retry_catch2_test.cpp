@@ -30,10 +30,37 @@ TEST_CASE("SQLite retry policy bounds exponential retry attempts", "[storage][sq
     CHECK_FALSE(canRetry(SQLITE_CONSTRAINT, 0, policy));
 
 #if YAMS_LIBSQL_BACKEND
-    CHECK(metadataStatementPolicy().maxRetries == 2);
-    CHECK(vectorWritePolicy().maxRetries == 3);
+    CHECK((metadataStatementPolicy().maxRetries == 2));
+    CHECK((vectorWritePolicy().maxRetries == 3));
 #else
-    CHECK(metadataStatementPolicy().maxRetries == 3);
-    CHECK(vectorWritePolicy().maxRetries == 5);
+    CHECK((metadataStatementPolicy().maxRetries == 3));
+    CHECK((vectorWritePolicy().maxRetries == 5));
 #endif
+}
+
+TEST_CASE("SQLite retry policy tunes document update metadata bursts", "[storage][sqlite][retry]") {
+    using namespace yams::storage::sqlite_retry;
+
+    const auto readPolicy = metadataRepositoryQueryRetryPolicy("read", "client_search");
+    CHECK((readPolicy.maxRetries == 3));
+    CHECK((readPolicy.baseDelayMs == 25));
+    CHECK((readPolicy.maxDelayMs == 500));
+
+    const auto defaultWritePolicy =
+        metadataRepositoryQueryRetryPolicy("write", "bench_set_metadata_batch");
+    CHECK((defaultWritePolicy.maxRetries == 5));
+    CHECK((defaultWritePolicy.baseDelayMs == 25));
+    CHECK((defaultWritePolicy.maxDelayMs == 500));
+
+    const auto documentUpdatePolicy =
+        metadataRepositoryQueryRetryPolicy("write", "app_document_update_metadata");
+    CHECK((documentUpdatePolicy.maxRetries == 7));
+    CHECK((documentUpdatePolicy.baseDelayMs == 10));
+    CHECK((documentUpdatePolicy.maxDelayMs == 200));
+
+    const auto downloadMetadataPolicy =
+        metadataRepositoryQueryRetryPolicy("write", "app_download_metadata_burst");
+    CHECK((downloadMetadataPolicy.maxRetries == 2));
+    CHECK((downloadMetadataPolicy.baseDelayMs == 5));
+    CHECK((downloadMetadataPolicy.maxDelayMs == 10));
 }

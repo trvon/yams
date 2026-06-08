@@ -8,6 +8,7 @@ argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<star
 This file supplements `docs/prompts/PROMPT-eng-codex.md`.
 
 Use `docs/prompts/PROMPT-eng-codex.md` for the generic Codex/YAMS operating model.
+Use `docs/prompts/PROMPT-yams-cpp-workflow.md` for repo-specific C++ design/TDD/assertion/profiling flow.
 Use this file for YAMS repo specifics, local conventions, and repo-scoped safety.
 
 ## Repo Intent
@@ -169,6 +170,16 @@ yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
 - Use `Result<T>` for fallible operations and explicit propagation.
 - Prefer `YAMS_HAS_*` feature gates from `include/yams/core/cpp23_features.hpp` over raw compiler checks.
 
+## Engineering Quality Loop (C++ / Systems)
+
+Use this loop before changing production C++ behavior:
+
+1. **Design the seam first**: name the observable behavior, the boundary you will change, and the smallest dependency seam needed to test it. Prefer ordinary dependency injection or a narrow helper extraction; use template/link seams only when runtime polymorphism would add unacceptable cost or churn.
+2. **Red before green**: add a focused Catch2 test that fails on the current code and asserts post-fix behavior through public or repository-stable APIs. For refactors, first preserve/characterize existing behavior.
+3. **Assertion policy**: keep recoverable failures in `Result<T>`/normal error handling. Use `YAMS_ASSERT`/`YAMS_PRECONDITION`/`YAMS_POSTCONDITION` for always-on invariants, `YAMS_DCHECK` for debug-only consistency checks, and keep assertion expressions side-effect free.
+4. **Refactor under tests**: make the smallest implementation change, then reduce duplication/complexity while tests stay green. Avoid broad rewrites unless the seam/test evidence justifies them.
+5. **Measure before optimizing**: for performance claims, define the workload and KPI, collect a baseline, choose the least invasive profiler/benchmark that answers the question, change one thing, and re-measure. Use `YAMS_*` profiling macros only where the measurement question is clear.
+
 ## Testing Conventions
 
 - **Framework**: Catch2 (v3+). All test files end in `_catch2_test.cpp`.
@@ -180,7 +191,7 @@ yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
 - **YAMS_TESTING gate**: Test executables are compiled with `-DYAMS_TESTING=1`. Use `#ifdef YAMS_TESTING` in production headers to expose `testing_*` helpers (e.g., `testing_postIngestBudget`, `testing_notifyWakeup`).
 - **Isolation guards**: Use RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard` from TuneAdvisor). Reset atomics and overrides between test cases.
 - **Naming**: Descriptive file names reflecting the feature under test (e.g., `dynamic_cap_sentinel_catch2_test.cpp`, `health_check_isolation_catch2_test.cpp`).
-- **TDD workflow**: Write tests first (red), implement fix (green), refactor. Tests should assert post-fix behavior and fail against pre-fix code.
+- **TDD workflow**: Design seam → write failing behavior test (red) → implement the minimum fix (green) → refactor while tests stay green. Tests should assert post-fix behavior and fail against pre-fix code.
 - **DynamicCap sentinel**: `UINT32_MAX` means "unset/no cap". `0` means "cap to zero concurrency". When resetting DynamicCaps in tests, use `UINT32_MAX` (requires `#include <climits>`), not `0`.
 
 ## Repo Patterns To Reuse (High Signal)

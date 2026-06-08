@@ -1,7 +1,7 @@
+#include <yams/daemon/components/db_salvage.h>
+#include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
-#include <yams/daemon/components/MetadataWriteFacade.h>
-#include <yams/daemon/components/db_salvage.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -39,9 +39,11 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
@@ -52,7 +54,19 @@ namespace yams::daemon {
 
 namespace {
 
-constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxTextToPersistInMetadataBytes =
+    16ULL * 1024ULL * 1024ULL; // 16 MiB (best-effort)
+
+std::string getenvCopy(std::string_view name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    const std::string key(name);
+    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
+    if (!env || !*env) {
+        return {};
+    }
+    return std::string(env);
+}
 
 template <typename Meta>
 inline void submitRepairStatusUpdate(const RepairServiceContext& ctx, Meta& metaRepo,
@@ -63,8 +77,8 @@ inline void submitRepairStatusUpdate(const RepairServiceContext& ctx, Meta& meta
     if (auto* coord = ctx.getWriteCoordinator ? ctx.getWriteCoordinator() : nullptr) {
         auto wb = std::make_unique<WriteBatch>();
         wb->source.assign(source.data(), source.size());
-        wb->ops.emplace_back(UpdateRepairStatusOp{std::move(hashes), status});
-        coord->enqueue(std::move(wb));
+        wb->ops.emplace_back(UpdateRepairStatusOp{hashes, status});
+        coord->enqueue(std::unique_ptr<WriteBatch>(wb.release()));
         return;
     }
     if (metaRepo) {
@@ -110,9 +124,9 @@ uint64_t repairOperationCode(std::string_view operation) {
 
 // Check if vector operations are disabled via environment variables
 bool vectorsDisabledByEnv() {
-    if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env)
+    if (!getenvCopy("YAMS_DISABLE_VECTORS").empty())
         return true;
-    if (const char* env = std::getenv("YAMS_DISABLE_VECTOR_DB"); env && *env)
+    if (!getenvCopy("YAMS_DISABLE_VECTOR_DB").empty())
         return true;
     return false;
 }
@@ -351,13 +365,12 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
 
 RepairService::RepairService(ServiceManager* services, StateComponent* state,
                              std::function<size_t()> activeConnFn, Config cfg)
-    : RepairService(makeRepairServiceContext(services), state, std::move(activeConnFn),
-                    std::move(cfg)) {}
+    : RepairService(makeRepairServiceContext(services), state, activeConnFn, cfg) {}
 
 RepairService::RepairService(RepairServiceContext ctx, StateComponent* state,
                              std::function<size_t()> activeConnFn, Config cfg)
-    : ctx_(std::move(ctx)), state_(state), activeConnFn_(std::move(activeConnFn)),
-      cfg_(std::move(cfg)), shutdownState_(std::make_shared<ShutdownState>()) {
+    : ctx_(ctx), state_(state), activeConnFn_(activeConnFn), cfg_(cfg),
+      shutdownState_(std::make_shared<ShutdownState>()) {
     coordinator_ = ctx_.vectorIndexCoordinator;
 }
 
@@ -1588,6 +1601,10 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
                                      metadata::RepairStatus::Pending,
                                      "RepairService::recovery/single");
             ++result.succeeded;
+        } else if (isCanceled()) {
+            result.failed += (stuckDocs.size() - i);
+            result.message = "Repair canceled";
+            co_return result;
         } else {
             ++result.failed;
             spdlog::warn("RepairService: PostIngest channel full after retries, could not "
@@ -2045,7 +2062,11 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
                 metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
                 metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
+                          sourceUrl, e.what());
         } catch (...) {
+            spdlog::debug("RepairService: failed to persist download metadata for {}", sourceUrl);
         }
     }
 
@@ -2629,7 +2650,12 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
                                 }
                             }
                         }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("RepairService: failed to parse block references for {}: {}",
+                                      fileEntry.path().string(), e.what());
                     } catch (...) {
+                        spdlog::debug("RepairService: failed to parse block references for {}",
+                                      fileEntry.path().string());
                     }
                 }
             }
@@ -3078,13 +3104,19 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
     if (modelName.empty() && ctx_.resolvePreferredModel) {
         try {
             modelName = ctx_.resolvePreferredModel();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: resolvePreferredModel failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("RepairService: resolvePreferredModel failed");
         }
     }
     if (modelName.empty() && ctx_.getEmbeddingModelName) {
         try {
             modelName = ctx_.getEmbeddingModelName();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: getEmbeddingModelName failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("RepairService: getEmbeddingModelName failed");
         }
     }
     if (isCanceled()) {
@@ -3130,10 +3162,15 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         const bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                       jobLabel, batch.size(), 50, 1000, isCanceled);
         if (!queued) {
-            result.failed += batch.size();
             submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Pending,
                                      "RepairService::executeBatch/rollback");
             InternalEventBus::instance().incEmbedDropped(batch.size());
+            if (isCanceled()) {
+                result.failed += (hashes.size() - i);
+                result.message = "Repair canceled";
+                co_return result;
+            }
+            result.failed += batch.size();
             continue;
         }
 
@@ -3271,13 +3308,19 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     if (modelName.empty() && ctx_.resolvePreferredModel) {
         try {
             modelName = ctx_.resolvePreferredModel();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: resolvePreferredModel failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("RepairService: resolvePreferredModel failed");
         }
     }
     if (modelName.empty() && ctx_.getEmbeddingModelName) {
         try {
             modelName = ctx_.getEmbeddingModelName();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: getEmbeddingModelName failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("RepairService: getEmbeddingModelName failed");
         }
     }
     if (req.foreground && modelName.empty()) {

@@ -158,7 +158,7 @@ public:
         auto connResult =
             acquire(std::chrono::milliseconds(30000), priority, callerTag, callerLocation);
         if (!connResult) {
-            return Error{ErrorCode::ResourceExhausted, "Failed to acquire database connection"};
+            return connResult.error();
         }
 
         auto conn = std::move(connResult).value();
@@ -212,6 +212,14 @@ public:
     Result<void> healthCheck();
 
     /**
+     * @brief Interrupt blocked acquire() waiters during shutdown.
+     *
+     * Causes pending and future acquires to fail fast with OperationCancelled
+     * instead of waiting for the normal timeout window.
+     */
+    void interruptPendingAcquires();
+
+    /**
      * @brief Prune idle connections
      */
     void pruneIdleConnections();
@@ -244,6 +252,7 @@ private:
     std::atomic<size_t> totalReleased_{0};
     std::atomic<size_t> failedAcquisitions_{0};
     std::atomic<bool> shutdown_{false};
+    std::atomic<bool> acquireInterrupted_{false};
     std::atomic<uint64_t> currentGeneration_{0}; // PBI-079: Incremented on refreshAll()
 
     std::array<std::atomic<std::uint64_t>, kHolderHistogramBucketCount> holderDurationBuckets_{};

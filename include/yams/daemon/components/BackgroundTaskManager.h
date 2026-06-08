@@ -9,7 +9,10 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 namespace yams::daemon {
 
@@ -107,6 +110,10 @@ public:
      */
     bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
+    // Test-only accounting probe declared unconditionally so production daemon
+    // libraries still satisfy test callers compiled with -DYAMS_TESTING=1.
+    [[nodiscard]] std::size_t testingActiveCoroutineCount() const noexcept;
+
 private:
     /**
      * @brief Launches the Fts5Job consumer coroutine.
@@ -161,6 +168,13 @@ private:
      */
     void launchAutoRepairTask();
 
+    void registerTrackedCoroutine();
+    void unregisterTrackedCoroutine();
+    void registerTrackedTimer(const std::shared_ptr<boost::asio::steady_timer>& timer);
+    void cancelTrackedTimers();
+    void waitForTrackedCoroutines();
+    void requestStopAndQuiesceTrackedCoroutines();
+
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active
 
@@ -168,10 +182,10 @@ private:
     // (must outlive coroutines, so use shared_ptr)
     std::shared_ptr<std::atomic<bool>> stopRequested_;
 
-    // Note: Coroutines are detached (boost::asio::detached) and run until
-    // the executor stops. No manual timer management - coroutines create
-    // their own local timers and exit naturally when stopRequested_ is set
-    // and the executor shuts down.
+    mutable std::mutex trackedCoroutineMutex_;
+    std::condition_variable trackedCoroutineCv_;
+    std::size_t trackedCoroutineCount_{0};
+    std::vector<std::weak_ptr<boost::asio::steady_timer>> trackedTimers_;
 };
 
 } // namespace yams::daemon

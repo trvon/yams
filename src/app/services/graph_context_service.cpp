@@ -96,6 +96,20 @@ bool queryMentionsTests(const std::string& query) {
     return lowered.find("test") != std::string::npos || lowered.find("spec") != std::string::npos;
 }
 
+bool looksLikePathQuery(const std::string& query) {
+    if (query.empty()) {
+        return false;
+    }
+    if (query.find('/') != std::string::npos || query.find('\\') != std::string::npos) {
+        return true;
+    }
+    if (query.find_first_of(" \t\n\r") != std::string::npos) {
+        return false;
+    }
+    const auto ext = std::filesystem::path(query).extension().string();
+    return !ext.empty() && ext.size() <= 10;
+}
+
 std::string languageFromPath(const std::string& path) {
     const auto ext = lowerAscii(std::filesystem::path(path).extension().string());
     if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".hpp" || ext == ".h")
@@ -421,20 +435,41 @@ public:
         std::vector<GraphContextSymbol> symbols;
         std::unordered_set<std::string> seenKeys;
         const auto perTermLimit = std::max<std::size_t>(req.budget.maxSymbols, 16);
-        for (const auto& term : terms) {
-            auto symResult =
-                kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, term, perTermLimit, 0);
-            if (!symResult) {
-                return symResult.error();
-            }
-            for (const auto& sym : symResult.value()) {
+        const bool pathQuery = looksLikePathQuery(req.query);
+        const auto addSymbols = [&](const std::vector<metadata::SymbolMetadata>& matches,
+                                    double filePathBoost) {
+            for (const auto& sym : matches) {
                 auto contextSymbol = makeContextSymbol(sym, req.query);
+                if (pathQuery && containsToken(sym.filePath, req.query)) {
+                    contextSymbol.score += filePathBoost;
+                    contextSymbol.exactMatch = lowerAscii(sym.filePath) == lowerAscii(req.query);
+                }
                 if (!req.includeTests && contextSymbol.testFile && !queryMentionsTests(req.query)) {
                     continue;
                 }
                 if (seenKeys.insert(contextSymbol.nodeKey).second) {
                     symbols.push_back(std::move(contextSymbol));
                 }
+            }
+        };
+
+        if (pathQuery) {
+            auto filePathResult = kgStore_->querySymbolMetadata(req.query, std::nullopt,
+                                                                std::nullopt, perTermLimit, 0);
+            if (!filePathResult) {
+                return filePathResult.error();
+            }
+            addSymbols(filePathResult.value(), 60.0);
+        }
+
+        if (!pathQuery || symbols.empty()) {
+            for (const auto& term : terms) {
+                auto symResult = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, term,
+                                                               perTermLimit, 0);
+                if (!symResult) {
+                    return symResult.error();
+                }
+                addSymbols(symResult.value(), 0.0);
             }
         }
 

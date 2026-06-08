@@ -1,4 +1,3 @@
-#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -7,9 +6,6 @@
 #include <sstream>
 #include <unordered_set>
 
-#include <yams/metadata/metadata_repository.h>
-
-#include "document_query_filters.hpp"
 #include "search_query_helpers.hpp"
 
 namespace yams::metadata {
@@ -287,7 +283,8 @@ std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard) {
 }
 
 Fts5QueryMode parseFts5ModeEnv() {
-    if (const char* env = std::getenv("YAMS_FTS_MODE"); env && *env) {
+    if (const char* env = std::getenv("YAMS_FTS_MODE");
+        env && *env) { // NOLINT(concurrency-mt-unsafe)
         std::string mode(env);
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return toLowerAscii(c); });
@@ -432,6 +429,8 @@ static bool isStopword(const std::string& term) {
     return getStopwords().count(lower) > 0;
 }
 
+static std::atomic<int> gIncludeSearchSnippetsCached{-1};
+
 static std::vector<std::string> tokenizeNaturalLanguageQuery(std::string_view query) {
     std::vector<std::string> tokens;
     std::istringstream iss{std::string(query)};
@@ -466,18 +465,22 @@ std::string sanitizeFTS5Query(const std::string& query) {
 // Snippet extraction forces additional FTS content-table reads and can dominate
 // latency on large corpora. Keep disabled by default for fast retrieval/ranking.
 bool includeSearchSnippets() {
-    static std::atomic<int> cached{-1};
-    int cachedValue = cached.load(std::memory_order_relaxed);
+    int cachedValue = gIncludeSearchSnippetsCached.load(std::memory_order_relaxed);
     if (cachedValue >= 0)
         return cachedValue == 1;
 
     bool enabled = false;
-    if (const char* env = std::getenv("YAMS_SEARCH_INCLUDE_SNIPPET"); env && *env) {
+    if (const char* env = std::getenv("YAMS_SEARCH_INCLUDE_SNIPPET");
+        env && *env) { // NOLINT(concurrency-mt-unsafe)
         std::string_view value(env);
         enabled = (value != "0" && value != "false" && value != "off" && value != "no");
     }
-    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    gIncludeSearchSnippetsCached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
+}
+
+void testingResetSearchQueryHelperCaches() {
+    gIncludeSearchSnippetsCached.store(-1, std::memory_order_relaxed);
 }
 
 } // namespace yams::metadata

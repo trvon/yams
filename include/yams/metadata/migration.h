@@ -5,9 +5,12 @@
 #include <map>
 #include <string>
 #include <vector>
-#include <yams/metadata/database.h>
+
+#include "yams/core/types.h"
 
 namespace yams::metadata {
+
+class Database;
 
 /**
  * @brief Database migration definition
@@ -258,6 +261,9 @@ private:
 
     // Version 34: Cover graph expansion adjacency reads ordered by edge strength.
     static Migration createKgEdgesSemanticNeighborOrderIndex();
+
+    // Version 35: Avoid path-FTS churn on document updates that do not change file_path.
+    static Migration optimizeDocumentsPathFtsUpdateTrigger();
 };
 
 /**

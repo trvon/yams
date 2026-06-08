@@ -1230,7 +1230,7 @@ void PluginManager::refreshStatusSnapshot() {
     statusSnapshot_ = std::move(snap);
 }
 
-void PluginManager::__test_setEmbeddingDegraded(bool degraded, const std::string& error) {
+void PluginManager::testingSetEmbeddingDegraded(bool degraded, const std::string& error) {
     if (degraded) {
         embeddingFsm_.dispatch(ProviderDegradedEvent{error.empty() ? std::string{"test"} : error});
     } else {
@@ -1238,14 +1238,12 @@ void PluginManager::__test_setEmbeddingDegraded(bool degraded, const std::string
     }
 }
 
-#ifdef YAMS_TESTING
-void PluginManager::__test_pluginLoadFailed(const std::string& error) {
+void PluginManager::testingPluginLoadFailed(const std::string& error) {
     pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
 }
 
-void PluginManager::__test_pluginScanComplete(std::size_t count) {
+void PluginManager::testingPluginScanComplete(std::size_t count) {
     pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
 }
-#endif
 
 } // namespace yams::daemon

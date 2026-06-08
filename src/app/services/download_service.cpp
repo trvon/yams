@@ -1,6 +1,10 @@
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
+#include <mutex>
+#include <string_view>
+#include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/detection/file_type_detector.h>
@@ -12,8 +16,18 @@ namespace fs = std::filesystem;
 namespace yams::app::services {
 
 namespace {
-constexpr size_t kMaxIndexedDownloadTextBytes = 16 * 1024 * 1024;
+constexpr std::size_t kMaxIndexedDownloadTextBytes = std::size_t{16} * 1024 * 1024;
+
+std::string getenvCopy(std::string_view key) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value =
+            std::getenv(std::string(key).c_str())) { // NOLINT(concurrency-mt-unsafe)
+        return value;
+    }
+    return {};
 }
+} // namespace
 
 class DownloadServiceImpl : public IDownloadService {
 public:
@@ -33,9 +47,9 @@ public:
         // Initialize download manager once with proper config
         // Get storage path from content store or environment
         fs::path storagePath;
-        if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
+        if (const std::string storageEnv = getenvCopy("YAMS_STORAGE"); !storageEnv.empty()) {
             storagePath = fs::path(storageEnv);
-        } else if (const char* homeEnv = std::getenv("HOME")) {
+        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
             storagePath = fs::path(homeEnv) / "yams";
         } else {
             storagePath = fs::current_path() / "yams";
@@ -54,7 +68,7 @@ public:
         spdlog::debug("Staging directory: {}", storageCfg_.stagingDir.string());
 
         dlCfg_.defaultConcurrency = 4;
-        dlCfg_.defaultChunkSizeBytes = 8 * 1024 * 1024;
+        dlCfg_.defaultChunkSizeBytes = std::size_t{8} * 1024 * 1024;
         dlCfg_.defaultTimeout = std::chrono::milliseconds(60000);
         dlCfg_.followRedirects = true;
         dlCfg_.resume = true;
@@ -172,7 +186,10 @@ public:
                                     detection::FileTypeDetector::getMimeTypeFromExtension(
                                         docInfo.fileExtension);
                             }
+                        } catch (const std::exception& ex) {
+                            spdlog::debug("DownloadService: MIME sniff failed: {}", ex.what());
                         } catch (...) {
+                            spdlog::debug("DownloadService: MIME sniff failed with unknown error");
                         }
                         if (docInfo.mimeType.empty()) {
                             docInfo.mimeType = "application/octet-stream";
@@ -188,89 +205,25 @@ public:
                         auto ins = ctx_.metadataRepo->insertDocument(docInfo);
                         if (ins) {
                             const int64_t docId = ins.value();
+                            YAMS_DCHECK(docId > 0,
+                                        "download ingest should only batch metadata for persisted "
+                                        "documents");
 
-                            // Core provenance metadata
-                            ctx_.metadataRepo->setMetadata(
-                                docId, "source_url", metadata::MetadataValue(finalResult.url));
-                            if (finalResult.etag) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "etag", metadata::MetadataValue(*finalResult.etag));
-                            }
-                            if (finalResult.lastModified) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "last_modified",
-                                    metadata::MetadataValue(*finalResult.lastModified));
-                            }
-                            // Surface content type and suggested filename when available
-                            if (finalResult.contentType) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "content_type",
-                                    metadata::MetadataValue(*finalResult.contentType));
-                            }
-                            if (finalResult.suggestedName) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "suggested_name",
-                                    metadata::MetadataValue(*finalResult.suggestedName));
-                            }
-                            if (finalResult.httpStatus) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "http_status",
-                                    metadata::MetadataValue(
-                                        std::to_string(*finalResult.httpStatus)));
-                            }
-                            if (finalResult.checksumOk) {
-                                ctx_.metadataRepo->setMetadata(
-                                    docId, "checksum_ok",
-                                    metadata::MetadataValue(*finalResult.checksumOk ? "true"
-                                                                                    : "false"));
-                            }
-
-                            // Apply user-provided tags and metadata first
-                            for (const auto& t : req.tags) {
-                                if (!t.empty())
-                                    ctx_.metadataRepo->setMetadata(docId, "tag",
-                                                                   metadata::MetadataValue(t));
-                            }
-                            for (const auto& [k, v] : req.metadata) {
-                                if (!k.empty())
-                                    ctx_.metadataRepo->setMetadata(docId, k,
-                                                                   metadata::MetadataValue(v));
-                            }
-
-                            // Derive and index helper tags for discoverability
-                            // downloaded, host:..., scheme:...
-                            ctx_.metadataRepo->setMetadata(docId, "tag",
-                                                           metadata::MetadataValue("downloaded"));
-                            // parse host/scheme from URL
-                            try {
-                                std::string scheme, host;
-                                const std::string& u = finalResult.url;
-                                auto pos = u.find("://");
-                                if (pos != std::string::npos) {
-                                    scheme = u.substr(0, pos);
-                                    auto rest = u.substr(pos + 3);
-                                    auto slash = rest.find('/');
-                                    host =
-                                        (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                            const auto metadataEntries =
+                                buildDownloadMetadataEntries(docId, req, finalResult);
+                            if (!metadataEntries.empty()) {
+                                // Download metadata enrichments are advisory: if the DB is under
+                                // write contention, keep the successful download/ingest moving and
+                                // let the scoped retry policy bound how long we wait here.
+                                metadata::MetadataOpScope metadataScope(
+                                    "app_download_metadata_burst");
+                                auto metadataResult =
+                                    ctx_.metadataRepo->setMetadataBatch(metadataEntries);
+                                if (!metadataResult) {
+                                    spdlog::warn("DownloadService: Failed to batch downloaded "
+                                                 "document metadata: {}",
+                                                 metadataResult.error().message);
                                 }
-                                if (!host.empty()) {
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("host:" + host));
-                                }
-                                if (!scheme.empty()) {
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("scheme:" + scheme));
-                                }
-                                if (finalResult.httpStatus) {
-                                    int code = *finalResult.httpStatus;
-                                    std::string bucket = (code >= 200 && code < 300)   ? "2xx"
-                                                         : (code >= 400 && code < 500) ? "4xx"
-                                                                                       : "5xx";
-                                    ctx_.metadataRepo->setMetadata(
-                                        docId, "tag", metadata::MetadataValue("status:" + bucket));
-                                }
-                            } catch (...) {
-                                // best-effort tag derivation
                             }
 
                             auto extractedText = extraction::util::extractDocumentText(
@@ -299,7 +252,12 @@ public:
                                     textLike =
                                         detection::FileTypeDetector::instance().isTextMimeType(
                                             docInfo.mimeType);
+                                } catch (const std::exception& ex) {
+                                    spdlog::debug("DownloadService: text MIME probe failed: {}",
+                                                  ex.what());
                                 } catch (...) {
+                                    spdlog::debug("DownloadService: text MIME probe failed with "
+                                                  "unknown error");
                                 }
 
                                 (void)ctx_.metadataRepo->updateDocumentExtractionStatus(

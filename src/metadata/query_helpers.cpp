@@ -1,11 +1,7 @@
-#include <spdlog/spdlog.h>
 #include <numeric>
-#include <ranges>
 #include <string>
 #include <string_view>
 #include <unordered_set>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
 
 namespace yams::metadata::sql {
@@ -201,6 +197,48 @@ std::string globToSqlLike(const std::string& glob) {
 
     return result;
 }
+
+bool hasGlobWildcards(std::string_view globPattern) {
+    return globPattern.find_first_of("*?") != std::string_view::npos;
+}
+
+Result<std::vector<DocumentInfo>>
+queryDocumentsForGlobPattern(IMetadataRepository& repo, std::string_view globPattern, int limit) {
+    if (!hasGlobWildcards(globPattern)) {
+        return queryDocumentsByPattern(repo, std::string(globPattern), limit);
+    }
+
+    std::string sqlPattern = globToSqlLike(std::string(globPattern));
+    if (globPattern.find('?') != std::string_view::npos) {
+        DocumentQueryOptions opts;
+        opts.likePattern = sqlPattern;
+        if (limit > 0)
+            opts.limit = limit;
+        return repo.queryDocuments(opts);
+    }
+
+    return queryDocumentsByPattern(repo, sqlPattern, limit);
+}
+
+Result<std::vector<GrepCandidateProjection>>
+queryGrepCandidatesForGlobPattern(IMetadataRepository& repo, std::string_view globPattern,
+                                  int limit) {
+    if (!hasGlobWildcards(globPattern)) {
+        return queryGrepCandidatesByPattern(repo, std::string(globPattern), limit);
+    }
+
+    std::string sqlPattern = globToSqlLike(std::string(globPattern));
+    if (globPattern.find('?') != std::string_view::npos) {
+        DocumentQueryOptions opts;
+        opts.likePattern = sqlPattern;
+        opts.excludeBinaryMimeTypes = true;
+        if (limit > 0)
+            opts.limit = limit;
+        return repo.queryDocumentsForGrepCandidates(opts);
+    }
+
+    return queryGrepCandidatesByPattern(repo, sqlPattern, limit);
+}
 } // namespace
 
 Result<std::vector<DocumentInfo>>
@@ -212,9 +250,7 @@ queryDocumentsByGlobPatterns(IMetadataRepository& repo,
     }
 
     if (globPatterns.size() == 1) {
-        // Single pattern - use existing optimized path
-        std::string sqlPattern = globToSqlLike(globPatterns[0]);
-        return queryDocumentsByPattern(repo, sqlPattern, limit);
+        return queryDocumentsForGlobPattern(repo, globPatterns[0], limit);
     }
 
     // Multiple patterns - need to OR them together
@@ -224,8 +260,7 @@ queryDocumentsByGlobPatterns(IMetadataRepository& repo,
     std::unordered_set<int64_t> seenIds;
 
     for (const auto& globPattern : globPatterns) {
-        std::string sqlPattern = globToSqlLike(globPattern);
-        auto result = queryDocumentsByPattern(repo, sqlPattern, 0); // No limit per pattern
+        auto result = queryDocumentsForGlobPattern(repo, globPattern, 0); // No limit per pattern
         if (!result) {
             return result.error();
         }
@@ -273,8 +308,7 @@ queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
     }
 
     if (globPatterns.size() == 1) {
-        std::string sqlPattern = globToSqlLike(globPatterns[0]);
-        return queryGrepCandidatesByPattern(repo, sqlPattern, limit);
+        return queryGrepCandidatesForGlobPattern(repo, globPatterns[0], limit);
     }
 
     // Multiple patterns — OR them together with O(1) dedup
@@ -283,8 +317,7 @@ queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
     std::unordered_set<int64_t> seenIds;
 
     for (const auto& globPattern : globPatterns) {
-        std::string sqlPattern = globToSqlLike(globPattern);
-        auto result = queryGrepCandidatesByPattern(repo, sqlPattern, 0);
+        auto result = queryGrepCandidatesForGlobPattern(repo, globPattern, 0);
         if (!result) {
             return result.error();
         }

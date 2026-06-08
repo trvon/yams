@@ -1,12 +1,13 @@
 #pragma once
 
-#include <yams/daemon/components/WriteBatchCoalescer.h>
-#include <yams/daemon/components/WriteCoordinator.h>
+#include "WriteBatchCoalescer.h"
+#include "WriteCoordinator.h"
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace yams::daemon {
@@ -27,6 +28,9 @@ private:
     WriteCoordinator* wc_;
     metadata::MetadataRepository* repo_;
     WriteBatchCoalescer coalescer_;
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> pendingMetadata_;
+    std::vector<metadata::ExtractionStatusUpdate> pendingExtractionUpdates_;
+    std::vector<UpdateRepairStatusOp> pendingRepairStatusOps_;
 };
 
 } // namespace yams::daemon

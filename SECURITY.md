@@ -2,23 +2,34 @@
 
 If you believe you have found a security vulnerability in YAMS, please report it responsibly.
 
-Reporting
+Thank you for taking the time to do that work.
+
+## Reporting
 - Please report vulnerabilities privately, not in public tickets.
-- Email: admin@yamsmemory.ai (PGP optional)
-- Include: affected version/commit, platform, impact, minimal PoC and repro steps, logs if available.
+- Email: `admin@yamsmemory.ai` (PGP optional).
+- Include, if you can: affected version or commit, platform, impact, minimal PoC, repro steps, and relevant logs.
+- If you are unsure whether something is security-sensitive, email first and we can help triage.
 
-Response targets
-- Acknowledge receipt within 48 hours.
-- Triage within 7 days; we'll let you know about severity and next steps.
-- Fix or mitigation target within 90 days for high/critical, the best effort otherwise.
+## Response targets
+- We aim to acknowledge receipt within 48 hours.
+- We aim to triage within 7 days and share next steps.
+- For high/critical issues, our target is a fix or mitigation within 90 days; otherwise best effort depending on scope and risk.
 
-Disclosure
-- We prefer coordinated disclosure. We will credit reporters unless you ask otherwise.
-- CVEs: If warranted, we will request a CVE and share the ID in the advisory.
+## Disclosure
+- We prefer coordinated disclosure.
+- We will credit reporters unless you ask us not to.
+- If warranted, we will request a CVE and share the ID in the advisory.
 
-Scope
-- YAMS daemon, CLI, plugins maintained in this repo.
-- Excludes third‑party dependencies (report upstream) and unsupported forks.
+## Scope
+In scope:
+- YAMS daemon
+- YAMS CLI
+- plugins maintained in this repository
 
-Supported versions
-- Main branch and the latest minor release line receive security fixes.
+Out of scope:
+- third-party dependencies (please report those upstream)
+- unsupported forks or heavily modified downstream builds
+
+## Supported versions
+- `main`
+- the latest minor release line

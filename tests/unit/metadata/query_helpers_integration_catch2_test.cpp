@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <set>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -30,13 +31,13 @@ std::filesystem::path make_temp_db() {
 }
 
 DocumentInfo make_doc(const std::string& path, const std::string& hash,
-                      const std::string& mime = "text/plain") {
+                      const std::string& mime = "text/plain", int64_t fileSize = 0) {
     DocumentInfo d;
     d.filePath = path;
     auto derived = computePathDerivedValues(path);
     d.fileName = std::filesystem::path(derived.normalizedPath).filename().string();
     d.fileExtension = std::filesystem::path(d.fileName).extension().string();
-    d.fileSize = 0;
+    d.fileSize = fileSize;
     d.sha256Hash = hash;
     d.mimeType = mime;
     d.pathPrefix = derived.pathPrefix;
@@ -53,6 +54,15 @@ DocumentInfo make_doc(const std::string& path, const std::string& hash,
     return d;
 }
 
+template <typename Projection>
+std::set<std::string> collectPaths(const std::vector<Projection>& docs) {
+    std::set<std::string> paths;
+    for (const auto& doc : docs) {
+        paths.insert(doc.filePath);
+    }
+    return paths;
+}
+
 } // namespace
 
 TEST_CASE("QueryHelpersIntegration: query documents by pattern basic",
@@ -63,35 +73,92 @@ TEST_CASE("QueryHelpersIntegration: query documents by pattern basic",
     cfg.minConnections = 1;
     cfg.maxConnections = 2;
     ConnectionPool pool(dbPath.string(), cfg);
-    REQUIRE(pool.initialize().has_value());
-
+    REQUIRE((pool.initialize().has_value()));
     MetadataRepository repo(pool);
 
-    // Seed three docs
-    auto id1 = repo.insertDocument(make_doc("/notes/todo.md", "hashA"));
-    REQUIRE(id1.has_value());
-    auto id2 = repo.insertDocument(make_doc("/notes/ideas.txt", "hashB"));
-    REQUIRE(id2.has_value());
-    auto id3 = repo.insertDocument(make_doc("/projects/yams/README.md", "hashC"));
-    REQUIRE(id3.has_value());
+    // Seed representative text and binary docs.
+    auto id1 = repo.insertDocument(make_doc("/notes/todo.md", "hashA", "text/plain", 11));
+    REQUIRE((id1.has_value()));
+    auto id2 = repo.insertDocument(make_doc("/notes/ideas.txt", "hashB", "text/plain", 22));
+    REQUIRE((id2.has_value()));
+    auto id3 = repo.insertDocument(make_doc("/projects/yams/README.md", "hashC", "text/plain", 33));
+    REQUIRE((id3.has_value()));
+    auto id4 = repo.insertDocument(make_doc("/notes/todo1.md", "hashD", "text/plain", 44));
+    REQUIRE((id4.has_value()));
+    auto id5 = repo.insertDocument(make_doc("/images/logo.png", "hashE", "image/png", 55));
+    REQUIRE((id5.has_value()));
+    SECTION("Pattern: wildcard all documents") {
+        auto allDocs = queryDocumentsByPattern(repo, "%");
+        REQUIRE((allDocs.has_value()));
+        CHECK((allDocs.value().size() == 5));
+    }
 
     SECTION("Pattern: directory prefix") {
         auto r1 = queryDocumentsByPattern(repo, "/notes/%");
-        REQUIRE(r1.has_value());
-        CHECK(r1.value().size() == 2);
+        REQUIRE((r1.has_value()));
+        CHECK((r1.value().size() == 3));
+    }
+
+    SECTION("Pattern: directory prefix limit") {
+        auto limited = queryDocumentsByPattern(repo, "/notes/%", 2);
+        REQUIRE((limited.has_value()));
+        CHECK((limited.value().size() == 2));
     }
 
     SECTION("Pattern: extension") {
         auto r2 = queryDocumentsByPattern(repo, "%.md");
-        REQUIRE(r2.has_value());
-        CHECK(r2.value().size() >= 2);
+        REQUIRE((r2.has_value()));
+        CHECK((r2.value().size() == 3));
     }
 
     SECTION("Pattern: contains fragment by name") {
         auto r3 = queryDocumentsByPattern(repo, "%/README.md");
-        REQUIRE(r3.has_value());
-        REQUIRE(r3.value().size() == 1);
-        CHECK(r3.value().at(0).filePath == "/projects/yams/README.md");
+        REQUIRE((r3.has_value()));
+        REQUIRE((r3.value().size() == 1));
+        CHECK((r3.value().at(0).filePath == "/projects/yams/README.md"));
+    }
+
+    SECTION("Glob: empty pattern list matches all documents") {
+        auto results = queryDocumentsByGlobPatterns(repo, {});
+        REQUIRE((results.has_value()));
+        CHECK((results.value().size() == 5));
+    }
+
+    SECTION("Glob: recursive markdown") {
+        auto results = queryDocumentsByGlobPatterns(repo, {"**/*.md"});
+        REQUIRE((results.has_value()));
+        CHECK((collectPaths(results.value()) == std::set<std::string>{"/notes/todo.md",
+                                                                      "/notes/todo1.md",
+                                                                      "/projects/yams/README.md"}));
+    }
+
+    SECTION("Glob: question mark wildcard matches a single character") {
+        auto results = queryDocumentsByGlobPatterns(repo, {"/notes/todo?.md"});
+        REQUIRE((results.has_value()));
+        CHECK((collectPaths(results.value()) == std::set<std::string>{"/notes/todo1.md"}));
+    }
+
+    SECTION("Glob: multiple patterns dedupe overlaps") {
+        auto results = queryDocumentsByGlobPatterns(repo, {"*.md", "/notes/*"});
+        REQUIRE((results.has_value()));
+        CHECK((collectPaths(results.value()) ==
+               std::set<std::string>{"/notes/todo.md", "/notes/todo1.md", "/notes/ideas.txt",
+                                     "/projects/yams/README.md"}));
+    }
+
+    SECTION("Grep candidates exclude binary mime types") {
+        auto results = queryGrepCandidatesByPattern(repo, "%");
+        REQUIRE((results.has_value()));
+        CHECK((results.value().size() == 4));
+        CHECK((collectPaths(results.value()) ==
+               std::set<std::string>{"/notes/todo.md", "/notes/todo1.md", "/notes/ideas.txt",
+                                     "/projects/yams/README.md"}));
+    }
+
+    SECTION("Grep candidates honor question mark globs") {
+        auto results = queryGrepCandidatesByGlobPatterns(repo, {"/notes/todo?.md"});
+        REQUIRE((results.has_value()));
+        CHECK((collectPaths(results.value()) == std::set<std::string>{"/notes/todo1.md"}));
     }
 
     // Cleanup

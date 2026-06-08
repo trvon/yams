@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <functional>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,6 +22,7 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/profiling.h>
+#include <yams/storage/sqlite_retry.h>
 
 namespace yams::search {
 class SymSpellSearch; // Forward declaration for SQLite-backed fuzzy search
@@ -51,8 +51,13 @@ inline bool metadata_trace_enabled() {
     int v = cached.load(std::memory_order_relaxed);
     if (v >= 0)
         return v == 1;
-    const char* env = std::getenv("YAMS_METADATA_TRACE");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    static std::mutex envMutex;
+    bool enabled = false;
+    {
+        std::lock_guard<std::mutex> lock(envMutex);
+        const char* env = std::getenv("YAMS_METADATA_TRACE"); // NOLINT(concurrency-mt-unsafe)
+        enabled = env && *env && std::string_view(env) != "0";
+    }
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -235,6 +240,13 @@ struct GrepCandidateProjection {
 struct MetadataValueCount {
     std::string value;
     int64_t count{0};
+};
+
+struct ExtractionStatusUpdate {
+    int64_t documentId{0};
+    bool contentExtracted{false};
+    ExtractionStatus status{ExtractionStatus::Pending};
+    std::string error;
 };
 
 /**
@@ -777,6 +789,8 @@ public:
     Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
                                                 ExtractionStatus status,
                                                 const std::string& error = "") override;
+    Result<void>
+    batchUpdateDocumentExtractionStatuses(const std::vector<ExtractionStatusUpdate>& updates);
 
     // Repair status operations
     Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;
@@ -963,6 +977,7 @@ private:
 
     // Approximate LRU hit recording (lock-free ring of path hashes)
     mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;
+    mutable std::once_flag hitRingInitOnce_{};
     mutable std::size_t hitRingSize_{0};
     mutable std::atomic<uint64_t> hitSeq_{0};
     mutable std::size_t hitRingMask_{0};
@@ -983,6 +998,14 @@ private:
 
     Result<void> ensureFuzzyIndexInitialized();
 
+    Result<int64_t> queryTotalSizeBytesForInitialization();
+    Result<std::unordered_map<std::string, int64_t>> queryExtensionCountsForInitialization();
+    Result<std::pair<int64_t, int64_t>> queryPathDepthStatsForInitialization();
+    Result<std::pair<int64_t, int64_t>> queryTagStatsForInitialization();
+    void applyInitializedExtensionCounts(std::unordered_map<std::string, int64_t> counts);
+    void logInitializedCounters() const;
+    void debugCheckInitializedCounters() const;
+
     // Internal helpers that accept an existing Database& to avoid nested connection acquisition
     // These are used within executeQuery lambdas to prevent deadlock when sub-queries are needed
     Result<std::optional<DocumentInfo>> getDocumentInternal(Database& db, int64_t id);
@@ -993,6 +1016,7 @@ private:
     void storePathCache(const DocumentInfo& info) const;
     void flushPathCacheBuffer() const;
     void recordPathHit(const std::string& normalizedPath) const;
+    void ensurePathHitRingInitialized() const;
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
@@ -1016,21 +1040,18 @@ private:
         // IMPORTANT: std::this_thread::sleep_for() blocks the calling worker thread,
         // so aggressive retries cause system-wide starvation when all WorkCoordinator
         // threads are sleeping in retry loops simultaneously.
-        // Read path: rarely encounters locks (WAL + read_uncommitted), so few retries.
-        // Write path: moderate retries for genuine contention.
-        const int kMaxRetries = (route == "read") ? 3 : 5;
-        constexpr int kBaseDelayMs = 25;
-        constexpr int kMaxDelayMs = 500;
 
         // Thread-local RNG for jitter to avoid thundering herd
         thread_local std::mt19937 rng(std::random_device{}());
 
         const std::string_view opTag = current_metadata_op();
+        const auto retryPolicy =
+            storage::sqlite_retry::metadataRepositoryQueryRetryPolicy(route, opTag);
         const ConnectionPriority priority = (route == "read" && opTag.starts_with("client_"))
                                                 ? ConnectionPriority::High
                                                 : ConnectionPriority::Normal;
 
-        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        for (int attempt = 0; attempt < retryPolicy.maxRetries; ++attempt) {
             const auto attemptStart = std::chrono::steady_clock::now();
             const auto acquireStart = attemptStart;
             auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority, opTag);
@@ -1057,64 +1078,69 @@ private:
                 return Error{connResult.error()};
             }
 
-            auto conn = std::move(connResult).value();
-            conn->touch();
-
-            const auto queryStart = std::chrono::steady_clock::now();
             Result<T> result;
-            try {
-                result = func(**conn);
-            } catch (const std::exception& e) {
-                result = Error{ErrorCode::DatabaseError, e.what()};
-            }
-            const auto queryEnd = std::chrono::steady_clock::now();
-            const auto queryMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - queryStart)
-                    .count();
-            const auto totalMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - attemptStart)
-                    .count();
+            {
+                auto conn = std::move(connResult).value();
+                conn->touch();
 
-            if (metadata_trace_enabled()) {
-                auto op = current_metadata_op();
+                const auto queryStart = std::chrono::steady_clock::now();
+                try {
+                    result = func(**conn);
+                } catch (const std::exception& e) {
+                    result = Error{ErrorCode::DatabaseError, e.what()};
+                }
+                const auto queryEnd = std::chrono::steady_clock::now();
+                const auto queryMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - queryStart)
+                        .count();
+                const auto totalMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - attemptStart)
+                        .count();
+
+                if (metadata_trace_enabled()) {
+                    auto op = current_metadata_op();
+                    if (result.has_value()) {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} query_ms={} total_ms={} ok=true",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
+                            totalMs);
+                    } else {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} query_ms={} total_ms={} ok=false error='{}'",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
+                            totalMs, result.error().message);
+                    }
+                }
+
                 if (result.has_value()) {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} query_ms={} total_ms={} ok=true",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
-                        totalMs);
-                } else {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} query_ms={} total_ms={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
-                        totalMs, result.error().message);
+                    if (attempt > 0) {
+                        // Log successful retry at debug level
+                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                      "after {} retries",
+                                      route, attempt);
+                    }
+                    if constexpr (std::is_void_v<T>) {
+                        return Result<void>();
+                    } else {
+                        return result.value();
+                    }
                 }
             }
 
-            if (result.has_value()) {
-                if (attempt > 0) {
-                    // Log successful retry at debug level
-                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                  "after {} retries",
-                                  route, attempt);
-                }
-                if constexpr (std::is_void_v<T>) {
-                    return Result<void>();
-                } else {
-                    return result.value();
-                }
-            }
+            // The scoped connection above has been returned to the pool before retry backoff.
+            // Holding the single write connection while sleeping would serialize unrelated
+            // writes behind this failed attempt and amplify WriteCoordinator queue waits.
 
             // Check if it's a lock error that we should retry
-            bool isLockError =
-                result.error().message.find("database is locked") != std::string::npos;
+            bool isLockError = storage::sqlite_retry::isBusyOrLockedMessage(result.error().message);
             // Constraint failures can be transient (e.g. FOREIGN KEY race when
             // a document insert hasn't committed yet). Retry with backoff.
             bool isRetryable = isLockError || result.error().message.find("constraint failed") !=
                                                   std::string::npos;
 
-            if (!isRetryable || attempt == kMaxRetries - 1) {
+            if (!isRetryable || attempt == retryPolicy.maxRetries - 1) {
                 // Non-retryable error or final attempt - report and return error
                 if (isLockError) {
                     daemon::TuneAdvisor::reportDbLockError();
@@ -1133,8 +1159,9 @@ private:
                 return Error{result.error()};
             }
 
-            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
-            int baseDelayMs = std::min(kBaseDelayMs * (1 << attempt), kMaxDelayMs);
+            // Exponential backoff with jitter (±25%), capped per operation.
+            int baseDelayMs =
+                std::min(retryPolicy.baseDelayMs * (1 << attempt), retryPolicy.maxDelayMs);
             int jitter = static_cast<int>(baseDelayMs * 0.25);
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);
@@ -1177,9 +1204,10 @@ private:
             detail::metadata_op_tag = "best_effort_write";
         }
 
+        constexpr auto kBestEffortAcquireTimeout = std::chrono::milliseconds(5);
         const auto start = std::chrono::steady_clock::now();
-        auto connResult = pool_.acquire(std::chrono::milliseconds(30000),
-                                        ConnectionPriority::Normal, current_metadata_op());
+        auto connResult = pool_.acquire(kBestEffortAcquireTimeout, ConnectionPriority::Normal,
+                                        current_metadata_op());
         if (!connResult) {
             if (metadata_trace_enabled()) {
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -763,10 +763,10 @@ TEST_CASE("DocumentService - Error Handling", "[document][service][errors]") {
         auto r = svc->store(req);
 
         REQUIRE_FALSE(r);
-        CHECK(r.error().code == ErrorCode::FileNotFound);
+        CHECK((r.error().code == ErrorCode::FileNotFound));
         auto msg = r.error().message;
-        CHECK(msg.find("a,b,c") != std::string::npos);
-        CHECK(msg.find("commas") != std::string::npos);
+        CHECK((msg.find("a,b,c") != std::string::npos));
+        CHECK((msg.find("commas") != std::string::npos));
     }
 }
 
@@ -785,7 +785,7 @@ TEST_CASE("DocumentService - Performance", "[document][service][performance]") {
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
         REQUIRE(result);
-        CHECK(duration.count() < 1000);
+        CHECK((duration.count() < 1000));
     }
 
     SECTION("Retrieval performance") {
@@ -802,7 +802,7 @@ TEST_CASE("DocumentService - Performance", "[document][service][performance]") {
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
         REQUIRE(result);
-        CHECK(duration.count() < 1000);
+        CHECK((duration.count() < 1000));
     }
 }
 
@@ -816,7 +816,7 @@ TEST_CASE("DocumentService - Integration", "[document][service][integration]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        CHECK(result.value().documents.size() >= 2);
+        CHECK((result.value().documents.size() >= 2));
     }
 
     SECTION("Service context integration") {
@@ -838,7 +838,7 @@ TEST_CASE("DocumentService - Integration", "[document][service][integration]") {
         auto doc = fixture.metadataRepo_->getDocumentByHash(stored.value().hash);
         REQUIRE(doc);
         REQUIRE(doc.value().has_value());
-        CHECK(doc.value()->mimeType == "application/octet-stream");
+        CHECK((doc.value()->mimeType == "application/octet-stream"));
         CHECK_FALSE(doc.value()->contentExtracted);
     }
 }

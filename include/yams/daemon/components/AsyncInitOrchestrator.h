@@ -3,13 +3,33 @@
 
 #pragma once
 
+#if __has_include(<yams/compat/thread_stop_compat.h>)
 #include <yams/compat/thread_stop_compat.h>
+#elif __has_include("yams/compat/thread_stop_compat.h")
+#include "yams/compat/thread_stop_compat.h"
+#endif
 
 #include <atomic>
 #include <chrono>
 #include <future>
 
 namespace yams::daemon {
+namespace detail {
+#if __has_include(<yams/compat/thread_stop_compat.h>) || __has_include("yams/compat/thread_stop_compat.h")
+using AsyncInitStopToken = yams::compat::stop_token;
+using AsyncInitStopSource = yams::compat::stop_source;
+#else
+struct AsyncInitStopToken {
+    constexpr bool stop_requested() const noexcept { return false; }
+};
+
+struct AsyncInitStopSource {
+    AsyncInitStopToken get_token() const noexcept { return AsyncInitStopToken{}; }
+    bool request_stop() noexcept { return true; }
+    constexpr bool stop_possible() const noexcept { return true; }
+};
+#endif
+} // namespace detail
 
 /**
  * @brief Owns the state machine for ServiceManager's async initialization.
@@ -46,7 +66,7 @@ public:
     }
 
     /// Stop-token passed to the async init coroutine.
-    yams::compat::stop_token getStopToken() { return stopSource_.get_token(); }
+    detail::AsyncInitStopToken getStopToken() { return stopSource_.get_token(); }
 
     /// Store the future returned by co_spawn.
     void setFuture(std::future<void> fut) { future_ = std::move(fut); }
@@ -54,7 +74,7 @@ public:
     /// Reset lifecycle state so the daemon can be re-initialized after a
     /// restart. Does not affect an in-flight future — callers must drain it
     /// first via requestStopAndWait().
-    void resetForRestart() { stopSource_ = yams::compat::stop_source{}; }
+    void resetForRestart() { stopSource_ = detail::AsyncInitStopSource{}; }
 
     /// Request cancellation and wait up to `timeout` for the coroutine to
     /// complete. Safe to call when no future has been stored.
@@ -73,8 +93,12 @@ public:
         }
         try {
             future_.get();
+        } catch (const std::exception&) {
+            future_ = std::future<void>();
+            return true;
         } catch (...) {
-            // swallow — the coroutine's own error handling already dispatched.
+            future_ = std::future<void>();
+            return true;
         }
         future_ = std::future<void>();
         return true;
@@ -83,7 +107,7 @@ public:
 private:
     std::atomic<bool> started_{false};
     std::atomic<bool> metadataWarmupStarted_{false};
-    yams::compat::stop_source stopSource_;
+    detail::AsyncInitStopSource stopSource_;
     std::future<void> future_;
 };
 

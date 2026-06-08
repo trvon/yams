@@ -45,6 +45,18 @@
 - Discord: https://discord.gg/rTBmRHdTEc
 - License: GPL-3.0-or-later
 
+## Community and contributing
+
+Questions, bug reports, docs fixes, tests, and feature ideas are all welcome.
+
+If you'd like to contribute, start with:
+- `CONTRIBUTING.md` for workflow and expectations
+- `CODE_OF_CONDUCT.md` for community standards
+- `SECURITY.md` for responsible vulnerability reporting
+- `.github/ISSUE_TEMPLATE/` for issue templates
+
+If you're unsure whether something is worth opening, it usually is.
+
 ## Install
 
 Supported: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.

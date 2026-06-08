@@ -6,8 +6,16 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#if __has_include(<boost/asio/awaitable.hpp>)
 #include <boost/asio/awaitable.hpp>
+#else
+#include "boost/asio/awaitable.hpp"
+#endif
+#if __has_include(<boost/asio/local/stream_protocol.hpp>)
 #include <boost/asio/local/stream_protocol.hpp>
+#else
+#include "boost/asio/local/stream_protocol.hpp"
+#endif
 #include <yams/core/types.h>
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/client_transport.h>
@@ -27,14 +35,15 @@ public:
 
     explicit AsioTransportAdapter(const Options& opts);
 
-    boost::asio::awaitable<Result<Response>> send_request(Request req) override;
+    boost::asio::awaitable<Result<Response>, boost::asio::any_io_executor>
+    send_request(Request req) override;
 
     using HeaderCallback = IClientTransport::HeaderCallback;
     using ChunkCallback = IClientTransport::ChunkCallback;
     using ErrorCallback = IClientTransport::ErrorCallback;
     using CompleteCallback = IClientTransport::CompleteCallback;
 
-    boost::asio::awaitable<Result<void>>
+    boost::asio::awaitable<Result<void>, boost::asio::any_io_executor>
     send_request_streaming(Request req, const HeaderCallback& onHeader,
                            const ChunkCallback& onChunk, const ErrorCallback& onError,
                            const CompleteCallback& onComplete) override;
@@ -69,7 +78,7 @@ private:
                     const std::vector<uint8_t>& data, std::chrono::milliseconds timeout);
 
     // Unified receive loop for both non-chunked and chunked responses
-    boost::asio::awaitable<Result<void>>
+    boost::asio::awaitable<Result<void>, boost::asio::any_io_executor>
     receive_frames(boost::asio::local::stream_protocol::socket& socket, MessageFramer& framer,
                    const HeaderCallback& onHeader, const ChunkCallback& onChunk,
                    const ErrorCallback& onError, const CompleteCallback& onComplete);

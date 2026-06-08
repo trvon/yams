@@ -29,6 +29,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
+#include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DatabaseManager.h>
@@ -96,7 +97,7 @@ class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
 class TuningManager;
-class CheckpointManager;
+class BackgroundTaskManager;
 class VectorIndexCoordinator;
 } // namespace yams::daemon
 
@@ -353,6 +354,8 @@ public:
 
     // Write Coordinator - unified single-writer entry point for all metadata writes
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
+    // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
+    // historical __test_* names across many suites; rename is tracked separately.
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -633,6 +636,7 @@ public:
         }
         return Result<bool>(false);
     }
+    // NOLINTEND(bugprone-reserved-identifier)
 
 private:
     std::shared_ptr<GraphComponent> loadGraphComponent() const {
@@ -712,7 +716,7 @@ private:
     // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::unique_ptr<CheckpointManager> checkpointManager_;
-    std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
+    std::unique_ptr<BackgroundTaskManager> backgroundTaskManager_;
 
     SearchAdmissionController searchAdmission_;
     IngestMetricsPublisher metricsPublisher_;

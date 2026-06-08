@@ -1611,6 +1611,7 @@ if catch2_dep.found()
     files(
       'unit/metadata/fts5_catch2_test.cpp',
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
+      'unit/metadata/search_query_helpers_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1671,7 +1672,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_metadata_repository_exe = executable('catch2_metadata_repository',
-    files('unit/metadata/metadata_repository_catch2_test.cpp'),
+    files(
+      'unit/metadata/metadata_repository_catch2_test.cpp',
+      'unit/metadata/metadata_repository_tag_stats_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2079,6 +2083,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  document_service_update_metadata_exe = executable('document_service_update_metadata',
+    files('unit/app/services/document_service_update_metadata_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   document_ingestion_batch_exe = executable('document_ingestion_batch',
     files('unit/app/services/document_ingestion_batch_catch2_test.cpp'),
     include_directories: incs,
@@ -2091,6 +2104,7 @@ if catch2_dep.found()
   service_utilities_exe = executable('service_utilities',
     files(
       'unit/app/services/service_utilities_test.cpp',
+      'unit/app/services/download_metadata_entries_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2662,8 +2676,10 @@ if catch2_dep.found()
 
   test('assert_val', catch2_assert_val_exe,
     suite: ['catch2', 'unit', 'core', 'assert'],
+    args: ['--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 15
+    timeout: host_machine.system() == 'windows' ? 60 : 30,
+    is_parallel: false
   )
 
   test('metrics_consistency', catch2_metrics_consistency_exe,

@@ -103,6 +103,14 @@ CLAIM
 - Post findings/tasks to blackboard when coordination matters.
 - Keep notes concise and indexable.
 
+For C++/systems code, use a design-first TDD loop:
+
+1. Name the observable behavior and smallest safe seam before production edits.
+2. Add a failing behavior test or characterization test first.
+3. Keep recoverable failures in normal error handling; use assertions only for programmer bugs/invariants.
+4. Make the minimal change, then refactor while tests stay green.
+5. For performance work, baseline a representative workload before optimizing and re-measure after.
+
 ### 4) Checkpoint (index changes)
 
 ```bash

@@ -494,29 +494,56 @@ void PostIngestQueue::start() {
     logStageAvailabilitySnapshot();
     initializeGradientLimiters();
 
+    bool startKg = graphComponent_ != nullptr;
+    bool startSymbol = false;
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        startSymbol = !symbolExtensionMap_.empty();
+    }
+    bool startEntity = false;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        startEntity = !entityProviders_.empty();
+    }
+    const bool startTitle = hasTitleExtractor();
+
     spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
     boost::asio::co_spawn(coordinator_->makeStrand(), channelPoller(), boost::asio::detached);
-    spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->makeStrand(), kgPoller(), boost::asio::detached);
-    spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->makeStrand(), symbolPoller(), boost::asio::detached);
-    spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-    auto entityExec =
-        entityCoordinator_ ? entityCoordinator_->makeStrand() : coordinator_->makeStrand();
-    boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
-    spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-    boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
+    if (startKg) {
+        spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->makeStrand(), kgPoller(), boost::asio::detached);
+    }
+    if (startSymbol) {
+        spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->makeStrand(), symbolPoller(), boost::asio::detached);
+    }
+    if (startEntity) {
+        spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
+        auto entityExec =
+            entityCoordinator_ ? entityCoordinator_->makeStrand() : coordinator_->makeStrand();
+        boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
+    }
+    if (startTitle) {
+        spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
+        boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
+    }
 
     const auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     bool allStarted = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
-        allStarted =
-            lifecycleCv_.wait_until(lock, startupDeadline, [this]() { return allStagesStarted(); });
+        allStarted = lifecycleCv_.wait_until(
+            lock, startupDeadline, [this, startKg, startSymbol, startEntity, startTitle]() {
+                return stageStarted_[0].load(std::memory_order_acquire) &&
+                       (!startKg || stageStarted_[1].load(std::memory_order_acquire)) &&
+                       (!startSymbol || stageStarted_[2].load(std::memory_order_acquire)) &&
+                       (!startEntity || stageStarted_[3].load(std::memory_order_acquire)) &&
+                       (!startTitle || stageStarted_[4].load(std::memory_order_acquire));
+            });
     }
 
     if (!allStarted) {
-        spdlog::warn("[PostIngestQueue] not all stages started within 100ms; "
+        spdlog::warn("[PostIngestQueue] not all required stages started within 100ms; "
                      "extraction={}, kg={}, symbol={}, entity={}, title={}",
                      stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
                      stageStarted_[3].load(), stageStarted_[4].load());
@@ -975,6 +1002,9 @@ void PostIngestQueue::enqueue(Task t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     uint32_t waits = 0;
@@ -1005,20 +1035,25 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         InternalEventBus::PostIngestTask task;
         task.hash = std::move(t.hash);
         task.mime = std::move(t.mime);
+        task.documentId = t.documentId;
+        task.filePath = std::move(t.filePath);
+        task.noEmbeddings = t.noEmbeddings;
         busTasks.push_back(std::move(task));
     }
 
     constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
     std::size_t next = 0;
     uint32_t waits = 0;
+    bool queuedAny = false;
     while (!stop_.load(std::memory_order_acquire) && next < busTasks.size()) {
         const std::size_t pushed = channel->try_push_many(busTasks, next);
         next += pushed;
+        queuedAny = queuedAny || (pushed > 0);
         if (next >= busTasks.size()) {
             break;
         }
         if (channel->push_wait(busTasks[next], kEnqueueTimeout)) {
-            TuningManager::notifyWakeup();
+            queuedAny = true;
             ++next;
             continue;
         }
@@ -1028,6 +1063,10 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
                 "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
                 busTasks.size() - next, waits);
         }
+    }
+    if (queuedAny) {
+        TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
 }
 
@@ -1051,10 +1090,14 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
     task.mime = t.mime;
+    task.documentId = t.documentId;
+    task.filePath = t.filePath;
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(task);
     if (pushed) {
         TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
     return pushed;
 }
@@ -1077,10 +1120,14 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
+    task.documentId = t.documentId;
+    task.filePath = std::move(t.filePath);
+    task.noEmbeddings = t.noEmbeddings;
 
     const bool pushed = channel->try_push(std::move(task));
     if (pushed) {
         TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::Extraction);
     }
     return pushed;
 }
@@ -2938,7 +2985,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
     auto cached = metadataCache_.infoCache.get(hash);
     if (cached) {
-        return cached.value();
+        return cached;
     }
 
     // Cache miss - query DB
@@ -2960,7 +3007,7 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
     // Try cache first
     auto cached = metadataCache_.tagsCache.get(docId);
     if (cached) {
-        return cached.value();
+        return cached;
     }
 
     // Cache miss - query DB
@@ -3019,6 +3066,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
 
         const auto contentWriteStart = std::chrono::steady_clock::now();
+        metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
         recordTiming("commit_content_index", contentWriteStart);
         if (!batchResult) {
@@ -3058,7 +3106,11 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                         }
                     }
                     if (!wb->ops.empty()) {
-                        writeCoordinator_->tryEnqueue(wb);
+                        if (!writeCoordinator_->tryEnqueue(wb)) {
+                            spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while "
+                                         "enqueuing title metadata; forcing enqueue");
+                            writeCoordinator_->enqueue(std::move(wb));
+                        }
                     } else {
                         spdlog::debug("[PostIngestQueue] Skipping empty title metadata batch");
                     }
@@ -3093,7 +3145,13 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                 wb->ops.emplace_back(
                     UpdateRepairStatusOp{std::move(failedHashes), metadata::RepairStatus::Failed});
             }
-            writeCoordinator_->tryEnqueue(wb);
+            if (!wb->ops.empty()) {
+                if (!writeCoordinator_->tryEnqueue(wb)) {
+                    spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while enqueuing "
+                                 "extraction failures; forcing enqueue");
+                    writeCoordinator_->enqueue(std::move(wb));
+                }
+            }
         } else {
             spdlog::warn("[PostIngestQueue] WriteCoordinator unavailable; cannot mark {} "
                          "extraction failures",
@@ -3325,8 +3383,13 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         const std::vector<std::string> emptyTags;
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
-        return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                    stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+        auto result = prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                           stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+        if (task.noEmbeddings && std::holds_alternative<PreparedMetadataEntry>(result)) {
+            auto& prepared = std::get<PreparedMetadataEntry>(result);
+            prepared.shouldDispatchEmbed = false;
+        }
+        return result;
     };
 
     // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't

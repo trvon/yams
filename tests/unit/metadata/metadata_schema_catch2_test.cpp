@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -82,6 +83,102 @@ struct MetadataSchemaFixture {
     }
 };
 
+std::filesystem::path makeStandaloneMigrationDbPath(std::string_view prefix) {
+    const char* t = std::getenv("YAMS_TEST_TMPDIR");
+    auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
+    std::error_code ec;
+    std::filesystem::create_directories(base, ec);
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    return base / (std::string(prefix) + "_" + std::to_string(ts) + ".db");
+}
+
+struct StandaloneMigrationDb {
+    std::filesystem::path dbPath;
+    Database db;
+    MigrationManager mm;
+
+    explicit StandaloneMigrationDb(std::string_view prefix, bool registerBuiltins = true)
+        : dbPath(makeStandaloneMigrationDbPath(prefix)), mm(db) {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        auto openResult = db.open(dbPath.string(), ConnectionMode::Create);
+        REQUIRE(openResult.has_value());
+        auto initResult = mm.initialize();
+        REQUIRE(initResult.has_value());
+        if (registerBuiltins) {
+            mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        }
+    }
+
+    ~StandaloneMigrationDb() {
+        db.close();
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+    }
+};
+
+template <typename... Args>
+Result<void> executeBound(Database& db, const std::string& sql, Args&&... args) {
+    auto stmtResult = db.prepare(sql);
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto stmt = std::move(stmtResult).value();
+    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+        return bindResult.error();
+    }
+    return stmt.execute();
+}
+
+template <typename... Args>
+Result<int64_t> querySingleInt64(Database& db, const std::string& sql, Args&&... args) {
+    auto stmtResult = db.prepare(sql);
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto stmt = std::move(stmtResult).value();
+    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+        return bindResult.error();
+    }
+
+    auto stepResult = stmt.step();
+    if (!stepResult) {
+        return stepResult.error();
+    }
+    if (!stepResult.value()) {
+        return Error{ErrorCode::NotFound, "Expected row"};
+    }
+    return stmt.getInt64(0);
+}
+
+template <typename... Args>
+Result<std::optional<std::string>> queryOptionalString(Database& db, const std::string& sql,
+                                                       Args&&... args) {
+    auto stmtResult = db.prepare(sql);
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto stmt = std::move(stmtResult).value();
+    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+        return bindResult.error();
+    }
+
+    auto stepResult = stmt.step();
+    if (!stepResult) {
+        return stepResult.error();
+    }
+    if (!stepResult.value()) {
+        return std::optional<std::string>{};
+    }
+    if (stmt.isNull(0)) {
+        return std::optional<std::string>{};
+    }
+    return std::optional<std::string>{stmt.getString(0)};
+}
+
 } // namespace
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
@@ -91,7 +188,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
         auto insertResult = repo_->insertDocument(doc);
         REQUIRE(insertResult.has_value());
         int64_t docId = insertResult.value();
-        CHECK(docId > 0);
+        CHECK((docId > 0));
     }
 
     SECTION("Read document by ID") {
@@ -104,9 +201,9 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
         REQUIRE(getResult.has_value());
         REQUIRE(getResult.value().has_value());
         auto retrieved = getResult.value().value();
-        CHECK(retrieved.id == docId);
-        CHECK(retrieved.fileName == doc.fileName);
-        CHECK(retrieved.sha256Hash == doc.sha256Hash);
+        CHECK((retrieved.id == docId));
+        CHECK((retrieved.fileName == doc.fileName));
+        CHECK((retrieved.sha256Hash == doc.sha256Hash));
     }
 
     SECTION("Read document by hash") {
@@ -118,7 +215,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
         auto hashResult = repo_->getDocumentByHash(doc.sha256Hash);
         REQUIRE(hashResult.has_value());
         REQUIRE(hashResult.value().has_value());
-        CHECK(hashResult.value().value().id == docId);
+        CHECK((hashResult.value().value().id == docId));
     }
 
     SECTION("Update document") {
@@ -142,9 +239,9 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
         REQUIRE(updatedResult.has_value());
         REQUIRE(updatedResult.value().has_value());
         auto updated = updatedResult.value().value();
-        CHECK(updated.fileSize == 2048);
-        CHECK(updated.contentExtracted);
-        CHECK(updated.extractionStatus == ExtractionStatus::Success);
+        CHECK((updated.fileSize == 2048));
+        CHECK((updated.contentExtracted));
+        CHECK((updated.extractionStatus == ExtractionStatus::Success));
     }
 
     SECTION("Delete document") {
@@ -196,9 +293,9 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations",
         REQUIRE(getResult.has_value());
         REQUIRE(getResult.value().has_value());
         auto retrieved = getResult.value().value();
-        CHECK(retrieved.documentId == docId);
-        CHECK(retrieved.contentText == content.contentText);
-        CHECK(retrieved.language == content.language);
+        CHECK((retrieved.documentId == docId));
+        CHECK((retrieved.contentText == content.contentText));
+        CHECK((retrieved.language == content.language));
     }
 
     SECTION("Update content") {
@@ -225,7 +322,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations",
         auto updatedResult = repo_->getContent(docId);
         REQUIRE(updatedResult.has_value());
         REQUIRE(updatedResult.value().has_value());
-        CHECK(updatedResult.value().value().contentText == "Updated content");
+        CHECK((updatedResult.value().value().contentText == "Updated content"));
     }
 
     SECTION("Delete content") {
@@ -262,8 +359,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto authorResult = repo_->getMetadata(docId, "author");
         REQUIRE(authorResult.has_value());
         REQUIRE(authorResult.value().has_value());
-        CHECK(authorResult.value().value().asString() == "John Doe");
-        CHECK(authorResult.value().value().type == MetadataValueType::String);
+        CHECK((authorResult.value().value().asString() == "John Doe"));
+        CHECK((authorResult.value().value().type == MetadataValueType::String));
     }
 
     SECTION("Set and get integer metadata") {
@@ -273,8 +370,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto versionResult = repo_->getMetadata(docId, "version");
         REQUIRE(versionResult.has_value());
         REQUIRE(versionResult.value().has_value());
-        CHECK(versionResult.value().value().asInteger() == 3);
-        CHECK(versionResult.value().value().type == MetadataValueType::Integer);
+        CHECK((versionResult.value().value().asInteger() == 3));
+        CHECK((versionResult.value().value().type == MetadataValueType::Integer));
     }
 
     SECTION("Set and get double metadata") {
@@ -284,7 +381,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto scoreResult = repo_->getMetadata(docId, "score");
         REQUIRE(scoreResult.has_value());
         REQUIRE(scoreResult.value().has_value());
-        CHECK(scoreResult.value().value().asReal() == 4.5);
+        CHECK((scoreResult.value().value().asReal() == 4.5));
     }
 
     SECTION("Set and get bool metadata") {
@@ -294,7 +391,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto publishedResult = repo_->getMetadata(docId, "published");
         REQUIRE(publishedResult.has_value());
         REQUIRE(publishedResult.value().has_value());
-        CHECK(publishedResult.value().value().asBoolean() == true);
+        CHECK((publishedResult.value().value().asBoolean() == true));
     }
 
     SECTION("Get all metadata") {
@@ -306,11 +403,11 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto allResult = repo_->getAllMetadata(docId);
         REQUIRE(allResult.has_value());
         auto allMeta = allResult.value();
-        CHECK(allMeta.size() == 4);
-        CHECK(allMeta.count("author") > 0);
-        CHECK(allMeta.count("version") > 0);
-        CHECK(allMeta.count("score") > 0);
-        CHECK(allMeta.count("published") > 0);
+        CHECK((allMeta.size() == 4));
+        CHECK((allMeta.count("author") > 0));
+        CHECK((allMeta.count("version") > 0));
+        CHECK((allMeta.count("score") > 0));
+        CHECK((allMeta.count("published") > 0));
     }
 
     SECTION("Update metadata replaces value") {
@@ -323,7 +420,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Metadata operations",
         auto getMeta = repo_->getMetadata(docId, "author");
         REQUIRE(getMeta.has_value());
         REQUIRE(getMeta.value().has_value());
-        CHECK(getMeta.value().value().asString() == "value2");
+        CHECK((getMeta.value().value().asString() == "value2"));
     }
 
     SECTION("Remove metadata") {
@@ -379,12 +476,12 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations",
 
         auto parentRels = repo_->getRelationships(parentId);
         REQUIRE(parentRels.has_value());
-        CHECK(parentRels.value().size() == 2);
+        CHECK((parentRels.value().size() == 2));
 
         auto childRels = repo_->getRelationships(child1Id);
         REQUIRE(childRels.has_value());
-        CHECK(childRels.value().size() == 1);
-        CHECK(childRels.value()[0].parentId == parentId);
+        CHECK((childRels.value().size() == 1));
+        CHECK((childRels.value()[0].parentId == parentId));
     }
 
     SECTION("Orphan relationship") {
@@ -417,7 +514,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations",
 
         auto afterDelete = repo_->getRelationships(parentId);
         REQUIRE(afterDelete.has_value());
-        CHECK(afterDelete.value().size() == 0);
+        CHECK((afterDelete.value().size() == 0));
     }
 }
 
@@ -464,7 +561,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Full text search", "[unit][metadata][sc
         REQUIRE(quickResult.has_value());
         auto quickSearch = quickResult.value();
         REQUIRE(quickSearch.isSuccess());
-        CHECK(quickSearch.results.size() == 2); // doc1 and doc3
+        CHECK((quickSearch.results.size() == 2)); // doc1 and doc3
     }
 
     SECTION("Search for programming") {
@@ -472,13 +569,13 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Full text search", "[unit][metadata][sc
         REQUIRE(cppResult.has_value());
         auto cppSearch = cppResult.value();
         REQUIRE(cppSearch.isSuccess());
-        CHECK(cppSearch.results.size() >= 2); // At least doc2 and doc4
+        CHECK((cppSearch.results.size() >= 2)); // At least doc2 and doc4
     }
 
     SECTION("Test pagination") {
         auto page1Result = repo_->search("programming", 2, 0);
         REQUIRE(page1Result.has_value());
-        CHECK(page1Result.value().results.size() == 2);
+        CHECK((page1Result.value().results.size() == 2));
 
         auto page2Result = repo_->search("programming", 2, 2);
         REQUIRE(page2Result.has_value());
@@ -493,7 +590,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Full text search", "[unit][metadata][sc
         // matching doc3 which contains "quick" (part of "quick brown fox")
         auto afterRemove = repo_->search("lazy dog", 10, 0);
         REQUIRE(afterRemove.has_value());
-        CHECK(afterRemove.value().results.size() == 0);
+        CHECK((afterRemove.value().results.size() == 0));
     }
 }
 
@@ -526,11 +623,11 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Search history",
         auto recentResult = repo_->getRecentSearches(5);
         REQUIRE(recentResult.has_value());
         auto recent = recentResult.value();
-        CHECK(recent.size() == 5);
+        CHECK((recent.size() == 5));
 
         // Verify ordering (most recent first)
-        CHECK(recent[0].query == "query 9");
-        CHECK(recent[1].query == "query 8");
+        CHECK((recent[0].query == "query 9"));
+        CHECK((recent[1].query == "query 8"));
     }
 }
 
@@ -553,8 +650,8 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Saved queries",
         REQUIRE(getResult.has_value());
         REQUIRE(getResult.value().has_value());
         auto retrieved = getResult.value().value();
-        CHECK(retrieved.name == query1.name);
-        CHECK(retrieved.query == query1.query);
+        CHECK((retrieved.name == query1.name));
+        CHECK((retrieved.query == query1.query));
     }
 
     SECTION("Update saved query") {
@@ -573,7 +670,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Saved queries",
     SECTION("Get all saved queries") {
         auto allResult = repo_->getAllSavedQueries();
         REQUIRE(allResult.has_value());
-        CHECK(allResult.value().size() >= 1);
+        CHECK((allResult.value().size() >= 1));
     }
 
     SECTION("Delete saved query") {
@@ -600,20 +697,20 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Bulk operations", "[unit][metadata][sch
     SECTION("Find by path pattern") {
         auto pathResult = metadata::queryDocumentsByPattern(*repo_, "%bulk%");
         REQUIRE(pathResult.has_value());
-        CHECK(pathResult.value().size() == 5);
+        CHECK((pathResult.value().size() == 5));
     }
 
     SECTION("Find by extension") {
         auto extResult = repo_->findDocumentsByExtension(".txt");
         REQUIRE(extResult.has_value());
-        CHECK(extResult.value().size() >= 5);
+        CHECK((extResult.value().size() >= 5));
     }
 
     SECTION("Find modified since") {
         auto since = std::chrono::system_clock::now() - std::chrono::hours(3);
         auto sinceResult = repo_->findDocumentsModifiedSince(since);
         REQUIRE(sinceResult.has_value());
-        CHECK(sinceResult.value().size() >= 3);
+        CHECK((sinceResult.value().size() >= 3));
     }
 }
 
@@ -632,7 +729,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Statistics", "[unit][metadata][schema][
     SECTION("Get document count") {
         auto countResult = repo_->getDocumentCount();
         REQUIRE(countResult.has_value());
-        CHECK(static_cast<std::size_t>(countResult.value()) == extensions.size());
+        CHECK((static_cast<std::size_t>(countResult.value()) == extensions.size()));
     }
 
     SECTION("Get indexed document count") {
@@ -648,20 +745,20 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Statistics", "[unit][metadata][schema][
         // Embeddings-based, expected 0 in this test
         auto embeddingIndexedResult = repo_->getIndexedDocumentCount();
         REQUIRE(embeddingIndexedResult.has_value());
-        CHECK(embeddingIndexedResult.value() == 0);
+        CHECK((embeddingIndexedResult.value() == 0));
 
         auto extractedCount = repo_->getContentExtractedDocumentCount();
         REQUIRE(extractedCount.has_value());
-        CHECK(extractedCount.value() == 3);
+        CHECK((extractedCount.value() == 3));
     }
 
     SECTION("Get counts by extension") {
         auto extCountResult = repo_->getDocumentCountsByExtension();
         REQUIRE(extCountResult.has_value());
         auto extCounts = extCountResult.value();
-        CHECK(extCounts[".txt"] == 3);
-        CHECK(extCounts[".pdf"] == 2);
-        CHECK(extCounts[".doc"] == 1);
+        CHECK((extCounts[".txt"] == 3));
+        CHECK((extCounts[".pdf"] == 2));
+        CHECK((extCounts[".doc"] == 1));
     }
 }
 
@@ -703,11 +800,11 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Cascading deletes", "[unit][metadata][s
 
     auto metaResult = repo_->getAllMetadata(docId);
     REQUIRE(metaResult.has_value());
-    CHECK(metaResult.value().size() == 0);
+    CHECK((metaResult.value().size() == 0));
 
     auto relResult = repo_->getRelationships(docId);
     REQUIRE(relResult.has_value());
-    CHECK(relResult.value().size() == 0);
+    CHECK((relResult.value().size() == 0));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder",
@@ -737,14 +834,14 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder",
                      .limit(10)
                      .buildQuery();
 
-    CHECK(query.find("file_extension = ?") != std::string::npos);
-    CHECK(query.find("modified_time >= ?") != std::string::npos);
-    CHECK(query.find("ORDER BY modified_time DESC") != std::string::npos);
-    CHECK(query.find("LIMIT 10") != std::string::npos);
+    CHECK((query.find("file_extension = ?") != std::string::npos));
+    CHECK((query.find("modified_time >= ?") != std::string::npos));
+    CHECK((query.find("ORDER BY modified_time DESC") != std::string::npos));
+    CHECK((query.find("LIMIT 10") != std::string::npos));
 
     auto params = qb.getParameters();
-    CHECK(params.size() == 2);
-    CHECK(params[0] == ".txt");
+    CHECK((params.size() == 2));
+    CHECK((params[0] == ".txt"));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints",
@@ -761,7 +858,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints",
         auto result2 = repo_->insertDocument(doc2);
         // Implementation uses INSERT OR IGNORE, so it returns the existing document's ID
         REQUIRE(result2.has_value());
-        CHECK(result1.value() == result2.value());
+        CHECK((result1.value() == result2.value()));
     }
 
     SECTION("Unique metadata per document") {
@@ -781,7 +878,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints",
         auto getMeta = repo_->getMetadata(docId, "unique_key");
         REQUIRE(getMeta.has_value());
         REQUIRE(getMeta.value().has_value());
-        CHECK(getMeta.value().value().asString() == "value2");
+        CHECK((getMeta.value().value().asString() == "value2"));
     }
 }
 
@@ -810,9 +907,9 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Extraction status handling",
         REQUIRE(result.has_value());
         REQUIRE(result.value().has_value());
         auto doc = result.value().value();
-        CHECK(doc.extractionStatus == statuses[i]);
+        CHECK((doc.extractionStatus == statuses[i]));
         if (statuses[i] == ExtractionStatus::Failed) {
-            CHECK(doc.extractionError == "Test error message");
+            CHECK((doc.extractionError == "Test error message"));
         }
     }
 }
@@ -834,7 +931,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics",
 
     // Should be able to insert 1000 documents in under 5 seconds
     // (Windows I/O can be slower than Linux/macOS)
-    CHECK(insertTime.count() < 5000);
+    CHECK((insertTime.count() < 5000));
 
     // Measure query performance
     start = std::chrono::high_resolution_clock::now();
@@ -848,7 +945,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics",
     auto queryTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
     // Should be able to query 100 documents by hash in under 100ms
-    CHECK(queryTime.count() < 100);
+    CHECK((queryTime.count() < 100));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 16 hash",
@@ -989,7 +1086,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
         });
 
         REQUIRE(hashQuery.has_value());
-        CHECK(hashQuery.value() == 3);
+        CHECK((hashQuery.value() == 3));
     }
 
     SECTION("Query by symbol name") {
@@ -1009,7 +1106,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
         });
 
         REQUIRE(nameQuery.has_value());
-        CHECK(nameQuery.value() == "ns::myFunction");
+        CHECK((nameQuery.value() == "ns::myFunction"));
     }
 
     SECTION("Query by kind") {
@@ -1028,7 +1125,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
         });
 
         REQUIRE(kindQuery.has_value());
-        CHECK(kindQuery.value() == 1);
+        CHECK((kindQuery.value() == 1));
     }
 
     SECTION("Query by file path") {
@@ -1047,7 +1144,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
         });
 
         REQUIRE(pathQuery.has_value());
-        CHECK(pathQuery.value() == 3);
+        CHECK((pathQuery.value() == 3));
     }
 }
 
@@ -1083,7 +1180,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata foreign key constraint"
 
     // Should fail due to FK constraint
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().message.find("constraint") != std::string::npos);
+    CHECK((result.error().message.find("constraint") != std::string::npos));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Repair status handling",
@@ -1117,27 +1214,27 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Repair status handling",
         REQUIRE(result.has_value());
         REQUIRE(result.value().has_value());
         auto doc = result.value().value();
-        CHECK(doc.repairStatus == statuses[i]);
-        CHECK(doc.repairAttempts >= 1);
+        CHECK((doc.repairStatus == statuses[i]));
+        CHECK((doc.repairAttempts >= 1));
     }
 }
 
 TEST_CASE("Repair status string conversion", "[unit][metadata][schema][repair]") {
     SECTION("toString") {
-        CHECK(RepairStatusUtils::toString(RepairStatus::Pending) == "pending");
-        CHECK(RepairStatusUtils::toString(RepairStatus::Processing) == "processing");
-        CHECK(RepairStatusUtils::toString(RepairStatus::Completed) == "completed");
-        CHECK(RepairStatusUtils::toString(RepairStatus::Failed) == "failed");
-        CHECK(RepairStatusUtils::toString(RepairStatus::Skipped) == "skipped");
+        CHECK((RepairStatusUtils::toString(RepairStatus::Pending) == "pending"));
+        CHECK((RepairStatusUtils::toString(RepairStatus::Processing) == "processing"));
+        CHECK((RepairStatusUtils::toString(RepairStatus::Completed) == "completed"));
+        CHECK((RepairStatusUtils::toString(RepairStatus::Failed) == "failed"));
+        CHECK((RepairStatusUtils::toString(RepairStatus::Skipped) == "skipped"));
     }
 
     SECTION("fromString") {
-        CHECK(RepairStatusUtils::fromString("pending") == RepairStatus::Pending);
-        CHECK(RepairStatusUtils::fromString("processing") == RepairStatus::Processing);
-        CHECK(RepairStatusUtils::fromString("completed") == RepairStatus::Completed);
-        CHECK(RepairStatusUtils::fromString("failed") == RepairStatus::Failed);
-        CHECK(RepairStatusUtils::fromString("skipped") == RepairStatus::Skipped);
-        CHECK(RepairStatusUtils::fromString("unknown") == RepairStatus::Pending);
+        CHECK((RepairStatusUtils::fromString("pending") == RepairStatus::Pending));
+        CHECK((RepairStatusUtils::fromString("processing") == RepairStatus::Processing));
+        CHECK((RepairStatusUtils::fromString("completed") == RepairStatus::Completed));
+        CHECK((RepairStatusUtils::fromString("failed") == RepairStatus::Failed));
+        CHECK((RepairStatusUtils::fromString("skipped") == RepairStatus::Skipped));
+        CHECK((RepairStatusUtils::fromString("unknown") == RepairStatus::Pending));
     }
 }
 
@@ -1255,4 +1352,354 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 31 semantic duplicate
     });
 
     REQUIRE(result.has_value());
+}
+
+TEST_CASE("MigrationBuilder composes reversible migration definitions",
+          "[unit][metadata][schema][migration]") {
+    auto migration = MigrationBuilder(99, "builder smoke test")
+                         .createTable("widgets")
+                         .addColumn("widgets", "name", "TEXT", false)
+                         .createIndex("idx_widgets_name", "widgets", {"name"}, true)
+                         .dropIndex("idx_widgets_old")
+                         .renameTable("widgets", "gadgets")
+                         .renameColumn("gadgets", "name", "display_name")
+                         .dropColumn("gadgets", "legacy_column")
+                         .dropTable("gadgets")
+                         .up("PRAGMA optimize;")
+                         .down("PRAGMA wal_checkpoint(TRUNCATE);")
+                         .wrapInTransaction(false)
+                         .build();
+
+    CHECK((migration.version == 99));
+    CHECK((migration.name == "builder smoke test"));
+    CHECK_FALSE(migration.wrapInTransaction);
+    CHECK((migration.upSQL.find("CREATE TABLE widgets") != std::string::npos));
+    CHECK((migration.upSQL.find("ALTER TABLE widgets ADD COLUMN name TEXT NOT NULL") !=
+           std::string::npos));
+    CHECK((migration.upSQL.find("CREATE UNIQUE INDEX idx_widgets_name") != std::string::npos));
+    CHECK((migration.upSQL.find("DROP INDEX IF EXISTS idx_widgets_old") != std::string::npos));
+    CHECK((migration.upSQL.find("ALTER TABLE widgets RENAME TO gadgets") != std::string::npos));
+    CHECK((migration.upSQL.find("ALTER TABLE gadgets RENAME COLUMN name TO display_name") !=
+           std::string::npos));
+    CHECK((migration.upSQL.find("legacy_column") == std::string::npos));
+    CHECK((migration.upSQL.find("DROP TABLE IF EXISTS gadgets") != std::string::npos));
+    CHECK((migration.upSQL.find("PRAGMA optimize;") != std::string::npos));
+    CHECK((migration.downSQL.find("PRAGMA wal_checkpoint(TRUNCATE);") != std::string::npos));
+    CHECK((migration.downSQL.find("DROP INDEX IF EXISTS idx_widgets_name") != std::string::npos));
+}
+
+TEST_CASE("MigrationManager records failed migrations and keeps readiness pending",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_manager_failure", false};
+
+    Migration okMigration;
+    okMigration.version = 1;
+    okMigration.name = "create widgets";
+    okMigration.upSQL = "CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL);";
+    okMigration.downSQL = "DROP TABLE IF EXISTS widgets;";
+    okMigration.created = std::chrono::system_clock::now();
+
+    Migration failingMigration;
+    failingMigration.version = 2;
+    failingMigration.name = "broken migration";
+    failingMigration.upSQL = "CREATE TABLE broken (";
+    failingMigration.downSQL = "DROP TABLE IF EXISTS broken;";
+    failingMigration.created = std::chrono::system_clock::now();
+
+    std::vector<std::string> progressNames;
+    db.mm.setProgressCallback(
+        [&progressNames](int, int, const std::string& name) { progressNames.push_back(name); });
+    db.mm.registerMigration(std::move(okMigration));
+    db.mm.registerMigration(std::move(failingMigration));
+
+    CHECK((db.mm.getLatestVersion() == 2));
+    auto initialNeedsMigration = db.mm.needsMigration();
+    REQUIRE(initialNeedsMigration.has_value());
+    CHECK((initialNeedsMigration.value()));
+
+    auto migrateResult = db.mm.migrate();
+    REQUIRE_FALSE(migrateResult.has_value());
+    CHECK((progressNames.size() == 2));
+    CHECK((progressNames[0] == "create widgets"));
+    CHECK((progressNames[1] == "broken migration"));
+
+    auto currentVersion = db.mm.getCurrentVersion();
+    REQUIRE(currentVersion.has_value());
+    CHECK((currentVersion.value() == 1));
+
+    auto historyResult = db.mm.getHistory();
+    REQUIRE(historyResult.has_value());
+    bool sawSuccess = false;
+    bool sawFailure = false;
+    for (const auto& entry : historyResult.value()) {
+        if (entry.version == 1 && entry.success) {
+            sawSuccess = true;
+        }
+        if (entry.version == 2 && !entry.success && entry.name == "broken migration") {
+            sawFailure = true;
+        }
+    }
+    CHECK((sawSuccess));
+    CHECK((sawFailure));
+
+    auto integrityResult = db.mm.verifyIntegrity();
+    REQUIRE(integrityResult.has_value());
+
+    auto stillNeedsMigration = db.mm.needsMigration();
+    REQUIRE(stillNeedsMigration.has_value());
+    CHECK((stillNeedsMigration.value()));
+}
+
+TEST_CASE("Migration version 26 deduplicates symbol metadata before adding uniqueness",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v26_symbol_uniqueness"};
+    REQUIRE(db.mm.migrateTo(25).has_value());
+
+    REQUIRE(executeBound(db.db,
+                         R"(
+            INSERT INTO documents (
+                file_path, file_name, file_extension, file_size, sha256_hash, mime_type,
+                created_time, modified_time, indexed_time, content_extracted, extraction_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )",
+                         "/tmp/symbol.cpp", "symbol.cpp", ".cpp", int64_t{128}, "doc-hash-v26",
+                         "text/x-c++src", int64_t{1}, int64_t{1}, int64_t{1}, 1, "success")
+                .has_value());
+
+    REQUIRE(db.db
+                .execute(R"(
+        DROP TABLE IF EXISTS symbol_metadata;
+        CREATE TABLE symbol_metadata (
+            symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_hash TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            qualified_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            return_type TEXT,
+            parameters TEXT,
+            documentation TEXT,
+            FOREIGN KEY (document_hash) REFERENCES documents(sha256_hash) ON DELETE CASCADE
+        );
+    )")
+                .has_value());
+
+    REQUIRE(executeBound(db.db,
+                         R"(
+            INSERT INTO symbol_metadata (
+                document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        )",
+                         "doc-hash-v26", "/tmp/symbol.cpp", "duplicate", "ns::duplicate",
+                         "function", 10, 12)
+                .has_value());
+    REQUIRE(executeBound(db.db,
+                         R"(
+            INSERT INTO symbol_metadata (
+                document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        )",
+                         "doc-hash-v26", "/tmp/symbol.cpp", "duplicate_latest", "ns::duplicate",
+                         "function", 20, 24)
+                .has_value());
+
+    auto preCount = querySingleInt64(db.db, "SELECT COUNT(*) FROM symbol_metadata");
+    REQUIRE(preCount.has_value());
+    CHECK((preCount.value() == 2));
+
+    REQUIRE(db.mm.migrateTo(26).has_value());
+
+    auto postCount = querySingleInt64(db.db, "SELECT COUNT(*) FROM symbol_metadata");
+    REQUIRE(postCount.has_value());
+    CHECK((postCount.value() == 1));
+
+    auto survivingStartLine = querySingleInt64(
+        db.db,
+        "SELECT start_line FROM symbol_metadata WHERE document_hash = ? AND qualified_name = ?",
+        "doc-hash-v26", "ns::duplicate");
+    REQUIRE(survivingStartLine.has_value());
+    CHECK((survivingStartLine.value() == 20));
+
+    auto duplicateInsert = executeBound(db.db,
+                                        R"(
+            INSERT INTO symbol_metadata (
+                document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        )",
+                                        "doc-hash-v26", "/tmp/symbol.cpp", "duplicate_again",
+                                        "ns::duplicate", "function", 30, 32);
+    REQUIRE_FALSE(duplicateInsert.has_value());
+    CHECK((duplicateInsert.error().message.find("constraint") != std::string::npos));
+}
+
+TEST_CASE("Migration version 27 backfills metadata value counts and maintains trigger state",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v27_value_counts"};
+    REQUIRE(db.mm.migrateTo(26).has_value());
+
+    for (int64_t docId = 1; docId <= 3; ++docId) {
+        const auto suffix = std::to_string(docId);
+        REQUIRE(executeBound(db.db,
+                             R"(
+                INSERT INTO documents (
+                    id, file_path, file_name, file_extension, file_size, sha256_hash, mime_type,
+                    created_time, modified_time, indexed_time, content_extracted, extraction_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            )",
+                             docId, "/tmp/doc" + suffix + ".txt", "doc" + suffix + ".txt", ".txt",
+                             int64_t{64}, "doc-hash-v27-" + suffix, "text/plain", int64_t{1},
+                             int64_t{1}, int64_t{1}, 1, "success")
+                    .has_value());
+    }
+
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?)",
+                int64_t{1}, "author", "alice", "string")
+                .has_value());
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?)",
+                int64_t{2}, "author", "alice", "string")
+                .has_value());
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?)",
+                int64_t{3}, "author", "bob", "string")
+                .has_value());
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?)",
+                int64_t{3}, "empty", "", "string")
+                .has_value());
+
+    REQUIRE(db.mm.migrateTo(27).has_value());
+
+    const auto countSql =
+        "SELECT COALESCE((SELECT count FROM metadata_value_counts WHERE key = ? AND value = ?), 0)";
+    auto aliceCount = querySingleInt64(db.db, countSql, "author", "alice");
+    auto bobCount = querySingleInt64(db.db, countSql, "author", "bob");
+    auto emptyCount = querySingleInt64(db.db, countSql, "empty", "");
+    REQUIRE(aliceCount.has_value());
+    REQUIRE(bobCount.has_value());
+    REQUIRE(emptyCount.has_value());
+    CHECK((aliceCount.value() == 2));
+    CHECK((bobCount.value() == 1));
+    CHECK((emptyCount.value() == 0));
+
+    REQUIRE(executeBound(db.db, "UPDATE metadata SET value = ? WHERE document_id = ? AND key = ?",
+                         "alice", int64_t{3}, "author")
+                .has_value());
+    aliceCount = querySingleInt64(db.db, countSql, "author", "alice");
+    bobCount = querySingleInt64(db.db, countSql, "author", "bob");
+    REQUIRE(aliceCount.has_value());
+    REQUIRE(bobCount.has_value());
+    CHECK((aliceCount.value() == 3));
+    CHECK((bobCount.value() == 0));
+
+    REQUIRE(executeBound(db.db, "DELETE FROM metadata WHERE document_id = ? AND key = ?",
+                         int64_t{1}, "author")
+                .has_value());
+    aliceCount = querySingleInt64(db.db, countSql, "author", "alice");
+    REQUIRE(aliceCount.has_value());
+    CHECK((aliceCount.value() == 2));
+
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?)",
+                int64_t{1}, "topic", "sqlite", "string")
+                .has_value());
+    auto topicCount = querySingleInt64(db.db, countSql, "topic", "sqlite");
+    REQUIRE(topicCount.has_value());
+    CHECK((topicCount.value() == 1));
+}
+
+TEST_CASE("Migration version 30 rewrites legacy knowledge-graph path node prefixes",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v30_path_prefixes"};
+    REQUIRE(db.mm.migrateTo(29).has_value());
+
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO kg_nodes (node_key, label, type, created_time) VALUES (?, ?, ?, ?)",
+                "file:/tmp/a.cpp", "a.cpp", "file", int64_t{1})
+                .has_value());
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO kg_nodes (node_key, label, type, created_time) VALUES (?, ?, ?, ?)",
+                "dir:/tmp", "/tmp", "directory", int64_t{1})
+                .has_value());
+    REQUIRE(executeBound(
+                db.db,
+                "INSERT INTO kg_nodes (node_key, label, type, created_time) VALUES (?, ?, ?, ?)",
+                "path:file:/tmp/keep.cpp", "keep.cpp", "file", int64_t{1})
+                .has_value());
+
+    REQUIRE(db.mm.migrateTo(30).has_value());
+
+    auto migratedFile = querySingleInt64(db.db, "SELECT COUNT(*) FROM kg_nodes WHERE node_key = ?",
+                                         "path:file:/tmp/a.cpp");
+    auto migratedDir = querySingleInt64(db.db, "SELECT COUNT(*) FROM kg_nodes WHERE node_key = ?",
+                                        "path:dir:/tmp");
+    auto preservedModern = querySingleInt64(
+        db.db, "SELECT COUNT(*) FROM kg_nodes WHERE node_key = ?", "path:file:/tmp/keep.cpp");
+    auto remainingLegacy = querySingleInt64(
+        db.db,
+        "SELECT COUNT(*) FROM kg_nodes WHERE node_key LIKE 'file:%' OR node_key LIKE 'dir:%'");
+    REQUIRE(migratedFile.has_value());
+    REQUIRE(migratedDir.has_value());
+    REQUIRE(preservedModern.has_value());
+    REQUIRE(remainingLegacy.has_value());
+    CHECK((migratedFile.value() == 1));
+    CHECK((migratedDir.value() == 1));
+    CHECK((preservedModern.value() == 1));
+    CHECK((remainingLegacy.value() == 0));
+}
+
+TEST_CASE("Migration version 35 narrows the documents path FTS update trigger",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v35_documents_au"};
+    REQUIRE(db.mm.migrateTo(34).has_value());
+
+    REQUIRE(db.db
+                .execute(R"(
+        DROP TRIGGER IF EXISTS documents_au;
+        CREATE TRIGGER documents_au
+        AFTER UPDATE ON documents BEGIN
+            INSERT INTO documents_path_fts(documents_path_fts, rowid, file_path)
+            VALUES('delete', old.id, old.file_path);
+            INSERT INTO documents_path_fts(rowid, file_path)
+            VALUES(new.id, new.file_path);
+        END;
+    )")
+                .has_value());
+
+    auto beforeSql = queryOptionalString(
+        db.db, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", "documents_au");
+    REQUIRE(beforeSql.has_value());
+    REQUIRE(beforeSql.value().has_value());
+    CHECK(
+        (beforeSql.value()->find("WHEN old.file_path IS NOT new.file_path") == std::string::npos));
+
+    REQUIRE(db.mm.migrateTo(35).has_value());
+
+    auto narrowedSql = queryOptionalString(
+        db.db, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", "documents_au");
+    REQUIRE(narrowedSql.has_value());
+    REQUIRE(narrowedSql.value().has_value());
+    CHECK((narrowedSql.value()->find("WHEN old.file_path IS NOT new.file_path") !=
+           std::string::npos));
+
+    REQUIRE(db.mm.rollbackTo(34).has_value());
+
+    auto rolledBackSql = queryOptionalString(
+        db.db, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", "documents_au");
+    REQUIRE(rolledBackSql.has_value());
+    REQUIRE(rolledBackSql.value().has_value());
+    CHECK((rolledBackSql.value()->find("WHEN old.file_path IS NOT new.file_path") ==
+           std::string::npos));
 }
