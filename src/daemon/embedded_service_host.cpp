@@ -19,10 +19,6 @@
 #include <atomic>
 #include <cstdlib>
 
-#if __has_include(<barrier>)
-#include <barrier>
-#endif
-
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -126,17 +122,9 @@ public:
         // On Windows, std::thread can return before the thread has started
         // executing; without this, early async work can execute on a
         // not-yet-running executor and dereference null internal state.
+        // Uses an atomic counter rather than std::barrier to avoid
+        // TSan false positives in libc++'s barrier implementation.
         {
-#if __has_include(<barrier>)
-            std::barrier ioThreadsReady{static_cast<ptrdiff_t>(threadCount + 1)};
-            for (std::size_t i = 0; i < threadCount; ++i) {
-                ioThreads_.emplace_back([ctx = ioContext_.get(), &ioThreadsReady]() {
-                    ioThreadsReady.arrive_and_wait();
-                    ctx->run();
-                });
-            }
-            ioThreadsReady.arrive_and_wait();
-#else
             std::atomic<std::size_t> threadsStarted{0};
             for (std::size_t i = 0; i < threadCount; ++i) {
                 ioThreads_.emplace_back([ctx = ioContext_.get(), &threadsStarted]() {
@@ -147,7 +135,6 @@ public:
             while (threadsStarted.load(std::memory_order_acquire) < threadCount) {
                 std::this_thread::yield();
             }
-#endif
         }
 
         lifecycleFsm_.reset();

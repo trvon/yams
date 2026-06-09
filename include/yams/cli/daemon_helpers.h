@@ -769,164 +769,164 @@ inline bool is_transport_failure(const yams::Error& err);
 
 namespace detail {
 
-inline std::string trim_copy(std::string_view sv) {
-
-inline bool cli_perf_trace_enabled() {
-    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    std::string mode = yams::common::asciiToLowerCopy(raw);
-    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
-}
-
-inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
-                           std::string_view note = {}) {
-    if (!cli_perf_trace_enabled()) {
-        return;
-    }
-    if (note.empty()) {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()));
-    } else {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
-                     note.data());
-    }
-}
-
 inline std::string to_lower_copy(std::string value) {
     return yams::common::asciiToLowerCopy(std::move(value));
 }
 
-inline std::string trim_copy(std::string_view sv) {
-    std::size_t start = 0;
-    std::size_t end = sv.size();
-    while (start < end && std::isspace(static_cast<unsigned char>(sv[start])) != 0) {
-        ++start;
-    }
-    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1])) != 0) {
-        --end;
-    }
-    return std::string(sv.substr(start, end - start));
-}
+inline std::string trim_copy(std::string_view sv);
 
-inline bool is_socket_mode_forced_by_env() {
-    const char* raw = std::getenv("YAMS_EMBEDDED");
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    auto mode = yams::common::asciiToLowerCopy(trim_copy(raw));
-    return mode == "0" || mode == "false" || mode == "off" || mode == "no" || mode == "socket" ||
-           mode == "daemon";
-}
-
-inline bool explicit_socket_without_autostart() {
-    const char* socketPath = std::getenv("YAMS_DAEMON_SOCKET_PATH");
-    if (socketPath == nullptr || *socketPath == '\0') {
-        return false;
-    }
-
-    const char* disableAutoStart = std::getenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART");
-    if (disableAutoStart == nullptr || *disableAutoStart == '\0') {
-        return false;
-    }
-
-    std::string mode = yams::common::asciiToLowerCopy(disableAutoStart);
-    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
-}
-
-template <typename FallbackFn>
-inline Result<void> daemon_error_or_local_fallback(const yams::Error& err, std::string_view opName,
-                                                   FallbackFn&& fallback) {
-    if (yams::cli::is_transport_failure(err)) {
-        return err;
-    }
-    spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
-    return std::invoke(std::forward<FallbackFn>(fallback));
-}
-
-template <typename FallbackFn>
-inline boost::asio::awaitable<Result<void>>
-daemon_error_or_local_fallback_async(const yams::Error& err, std::string_view opName,
-                                     FallbackFn&& fallback) {
-    if (yams::cli::is_transport_failure(err)) {
-        co_return err;
-    }
-    spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
-    co_return co_await std::invoke(std::forward<FallbackFn>(fallback));
-}
-
-inline Result<void> ensure_socket_daemon_ready(
-    const yams::daemon::ClientConfig& cfg,
-    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
-    const auto start = std::chrono::steady_clock::now();
-    std::optional<std::filesystem::path> resolvedSocket;
-    const std::filesystem::path* effectiveSocket = &cfg.socketPath;
-    if (cfg.socketPath.empty()) {
-        resolvedSocket = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-        effectiveSocket = &*resolvedSocket;
-    }
-
-    // When the caller explicitly pins a daemon socket and disables auto-start, trust that target
-    // and let the actual request path surface any connect failure. This avoids an extra ping per
-    // CLI process on the hot path.
-    if (!cfg.autoStart && explicit_socket_without_autostart()) {
-        cli_perf_trace("daemon_ready.skip_explicit_socket",
-                       std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - start));
-        return Result<void>();
-    }
-
-    if (!yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
-        if (!cfg.autoStart) {
-            return Error{ErrorCode::NotInitialized, "Daemon is not running"};
+inline bool cli_perf_trace_enabled() {
+        const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
+        if (raw == nullptr || *raw == '\0') {
+            return false;
         }
+        std::string mode = yams::common::asciiToLowerCopy(raw);
+        return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
+    }
 
-        yams::daemon::ClientConfig startCfg;
-        startCfg.socketPath = *effectiveSocket;
-        startCfg.dataDir = cfg.dataDir;
-        if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
-            cli_perf_trace("daemon_ready.start_failed",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - start),
-                           r.error().message);
-            return Error{ErrorCode::InternalError,
-                         std::string("Failed to start daemon: ") + r.error().message};
+    inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
+                               std::string_view note = {}) {
+        if (!cli_perf_trace_enabled()) {
+            return;
+        }
+        if (note.empty()) {
+            std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
+                         static_cast<int>(stage.size()), stage.data(),
+                         static_cast<long long>(elapsed.count()));
+        } else {
+            std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
+                         static_cast<int>(stage.size()), stage.data(),
+                         static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
+                         note.data());
         }
     }
 
-    if (readyTimeout.count() <= 0) {
-        cli_perf_trace("daemon_ready.no_wait",
-                       std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - start));
-        return Result<void>();
+    inline std::string trim_copy(std::string_view sv) {
+        std::size_t start = 0;
+        std::size_t end = sv.size();
+        while (start < end && std::isspace(static_cast<unsigned char>(sv[start])) != 0) {
+            ++start;
+        }
+        while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1])) != 0) {
+            --end;
+        }
+        return std::string(sv.substr(start, end - start));
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
-    auto sleepFor = std::chrono::milliseconds(50);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
-            cli_perf_trace("daemon_ready.success",
+    inline bool is_socket_mode_forced_by_env() {
+        const char* raw = std::getenv("YAMS_EMBEDDED");
+        if (raw == nullptr || *raw == '\0') {
+            return false;
+        }
+        auto mode = yams::common::asciiToLowerCopy(trim_copy(raw));
+        return mode == "0" || mode == "false" || mode == "off" || mode == "no" ||
+               mode == "socket" || mode == "daemon";
+    }
+
+    inline bool explicit_socket_without_autostart() {
+        const char* socketPath = std::getenv("YAMS_DAEMON_SOCKET_PATH");
+        if (socketPath == nullptr || *socketPath == '\0') {
+            return false;
+        }
+
+        const char* disableAutoStart = std::getenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART");
+        if (disableAutoStart == nullptr || *disableAutoStart == '\0') {
+            return false;
+        }
+
+        std::string mode = yams::common::asciiToLowerCopy(disableAutoStart);
+        return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
+    }
+
+    template <typename FallbackFn>
+    inline Result<void> daemon_error_or_local_fallback(
+        const yams::Error& err, std::string_view opName, FallbackFn&& fallback) {
+        if (yams::cli::is_transport_failure(err)) {
+            return err;
+        }
+        spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
+        return std::invoke(std::forward<FallbackFn>(fallback));
+    }
+
+    template <typename FallbackFn>
+    inline boost::asio::awaitable<Result<void>> daemon_error_or_local_fallback_async(
+        const yams::Error& err, std::string_view opName, FallbackFn&& fallback) {
+        if (yams::cli::is_transport_failure(err)) {
+            co_return err;
+        }
+        spdlog::warn("{}: daemon path failed ({}); using local services", opName, err.message);
+        co_return co_await std::invoke(std::forward<FallbackFn>(fallback));
+    }
+
+    inline Result<void> ensure_socket_daemon_ready(const yams::daemon::ClientConfig& cfg,
+                                                   std::chrono::milliseconds readyTimeout =
+                                                       std::chrono::milliseconds{10000}) {
+        const auto start = std::chrono::steady_clock::now();
+        std::optional<std::filesystem::path> resolvedSocket;
+        const std::filesystem::path* effectiveSocket = &cfg.socketPath;
+        if (cfg.socketPath.empty()) {
+            resolvedSocket = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+            effectiveSocket = &*resolvedSocket;
+        }
+
+        // When the caller explicitly pins a daemon socket and disables auto-start, trust that
+        // target and let the actual request path surface any connect failure. This avoids an extra
+        // ping per CLI process on the hot path.
+        if (!cfg.autoStart && explicit_socket_without_autostart()) {
+            cli_perf_trace("daemon_ready.skip_explicit_socket",
                            std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now() - start));
             return Result<void>();
         }
-        auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            break;
-        }
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        std::this_thread::sleep_for(std::min(sleepFor, remaining));
-        sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
-    }
 
-    cli_perf_trace("daemon_ready.timeout", std::chrono::duration_cast<std::chrono::microseconds>(
-                                               std::chrono::steady_clock::now() - start));
-    return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
-}
+        if (!yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
+            if (!cfg.autoStart) {
+                return Error{ErrorCode::NotInitialized, "Daemon is not running"};
+            }
+
+            yams::daemon::ClientConfig startCfg;
+            startCfg.socketPath = *effectiveSocket;
+            startCfg.dataDir = cfg.dataDir;
+            if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
+                cli_perf_trace("daemon_ready.start_failed",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start),
+                               r.error().message);
+                return Error{ErrorCode::InternalError,
+                             std::string("Failed to start daemon: ") + r.error().message};
+            }
+        }
+
+        if (readyTimeout.count() <= 0) {
+            cli_perf_trace("daemon_ready.no_wait",
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start));
+            return Result<void>();
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
+        auto sleepFor = std::chrono::milliseconds(50);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (yams::daemon::DaemonClient::isDaemonRunning(*effectiveSocket)) {
+                cli_perf_trace("daemon_ready.success",
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start));
+                return Result<void>();
+            }
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            std::this_thread::sleep_for(std::min(sleepFor, remaining));
+            sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
+        }
+
+        cli_perf_trace("daemon_ready.timeout",
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start));
+        return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+    }
 
 } // namespace detail
 

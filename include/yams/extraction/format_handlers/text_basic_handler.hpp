@@ -1,5 +1,7 @@
 #pragma once
 
+#include <yams/common/string_utils.h>
+
 // TextBasicHandler: basic, format-agnostic text extraction with line-range and substring search.
 // Phase 1 (PBI-006): Supports
 // - scope: "all" (default) and "range" (line ranges like "1-3,10")
