@@ -17,7 +17,7 @@ Site landing: [index.md](index.md) • Project README: [../README.md](../README.
 | Plugins           | [PLUGINS.md](PLUGINS.md)                         |
 | Build from source | [BUILD.md](BUILD.md)                             |
 | Admin / ops       | [admin/operations.md](admin/operations.md)       |
-| Hosting           | [hosting/](hosting/)                             |
+| Self-hosting      | [hosting/self_hosting.md](hosting/self_hosting.md) |
 | Changelog         | [changelogs/](changelogs/)                       |
 | Roadmap           | [roadmap.md](roadmap.md)                         |
 | Release policy    | [release-policy.md](release-policy.md)           |
@@ -26,7 +26,7 @@ Site landing: [index.md](index.md) • Project README: [../README.md](../README.
 
 | Topic               | Link                                           |
 |---------------------|------------------------------------------------|
-| Architecture        | [architecture/](architecture/)                 |
+| System Architecture | [architecture/system_architecture.md](architecture/system_architecture.md) |
 | API (MCP, plugins)  | [api/](api/)                                   |
 | Plugin spec (WIT, schemas) | [spec/](spec/)                          |
 | Contributing        | [developer/contributing.md](developer/contributing.md) |

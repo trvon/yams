@@ -2,6 +2,19 @@
 
 YAMS supports multiple profiling and analysis tools to help identify performance bottlenecks and optimize critical paths.
 
+## Measurement Loop
+
+Use profiling as an evidence loop, not as a rewrite trigger:
+
+1. State the question in falsifiable terms: p95/p99 latency, throughput, allocation volume, lock wait, startup time, or stage time.
+2. Choose or build a representative workload/benchmark that can be rerun with low noise.
+3. Build the right binary for the question: production-like optimization, symbols/frame pointers when needed, and Tracy zones only where they clarify the path.
+4. Capture the baseline before code changes.
+5. Change one important thing, rerun the same workload, and record the delta plus any trade-off.
+6. Document non-fixes: suspicious paths measured and ruled out.
+
+Prefer broad tools first: sampling for CPU, tracing for waiting/stage interaction, heap tools for allocation churn, and hardware counters only after the hot path is proven.
+
 ## Profiling Build
 
 The `Profiling` build type enables instrumentation for various profiling tools:
@@ -188,12 +201,13 @@ Target areas for fuzzing:
 
 ## Best Practices
 
-1. **Start with Tracy** for interactive, real-time profiling
-2. **Use Valgrind** for deep memory analysis and leak detection
-3. **Use Perf** for system-wide CPU profiling on Linux
-4. **Profile realistic workloads** - synthetic benchmarks may not represent production
-5. **Focus on hot paths** - optimize where it matters most
-6. **Measure before and after** - validate optimizations with data
+1. **Start with a question and baseline** before opening a profiler.
+2. **Start with Tracy** when you need timeline/stage/lock interaction and existing `YAMS_*` zones can answer the question.
+3. **Use Perf** for broad CPU sampling on Linux, especially when you need flamegraphs or system-wide context.
+4. **Use Heaptrack/Massif** when allocation volume, peak memory, or transient churn is the suspected bottleneck.
+5. **Profile realistic workloads** - synthetic benchmarks may not represent production.
+6. **Focus on causal hot paths** - optimize where it matters most; do not rewrite code only because it is visible in a profile.
+7. **Measure before and after** - validate optimizations with data and keep the same workload.
 
 ## Disabling Profiling
 
@@ -206,6 +220,8 @@ Regular builds have no profiling overhead:
 
 ## References
 
+- KDAB, "C and C++ Profiling Tools: What You Need to Know" — measurement loop and tool selection: https://www.kdab.com/c-cpp-profiling-tools/
+- "The Art of Profiling C++ Applications" — ask precise profiling questions, separate CPU work from waiting, and keep representative workloads: https://stofu.io/blog/art-of-profiling-cpp-applications.html
 - **Tracy**: https://github.com/wolfpld/tracy
 - **Valgrind**: https://valgrind.org/docs/manual/
 - **Perf**: https://perf.wiki.kernel.org/index.php/Tutorial

@@ -59,7 +59,7 @@ Supported: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.
 
 | Resource   | URL                                               |
 |------------|---------------------------------------------------|
-| Full docs  | [README.md](README.md)                            |
+| Full docs  | [user_guide/README.md](user_guide/README.md)       |
 | Newsletter | [newsletter.md](newsletter.md)                    |
 | Benchmarks | [benchmarks/README.md](benchmarks/README.md)      |
 | Roadmap    | [roadmap.md](roadmap.md)                          |

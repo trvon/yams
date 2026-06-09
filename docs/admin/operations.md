@@ -298,4 +298,4 @@ See the repo `src/daemon/components/DaemonMetrics.cpp` for implementation.
 **References:**
 - [User Guide: CLI](../user_guide/cli.md)
 - [Developer: Build System](../developer/build_system.md)
-- [Architecture: Daemon](../architecture/daemon_architecture.md)
+- [Architecture: System](../architecture/system_architecture.md)

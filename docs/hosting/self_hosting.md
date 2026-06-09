@@ -6,14 +6,11 @@ title: Self-hosting
 
 Run YAMS on your own infrastructure with full control over data, backups, and operations.
 
-**Consider managed hosting if** you want zero-ops, automated backups, and metrics. See [Managed Hosting](managed.md).
+## Deployment Profile
 
-## Who Should Self-host
-
-- Need full control over infrastructure and data locality
-- Prefer your own backup/monitoring stack
-- Have security/compliance requirements limiting SaaS
-- Want to evaluate internally before choosing managed hosting
+- Full control over infrastructure and data locality
+- Seamless integration with your own backup and monitoring stack
+- Compliance with security requirements limiting external SaaS providers
 
 ## Quick Start
 
@@ -150,5 +147,3 @@ Open issues on GitHub with environment details and steps to reproduce.
 **Related:**
 - [Installation](../user_guide/installation.md)
 - [Admin: Operations](../admin/operations.md)
-- [Managed Hosting](managed.md)
-- [Pricing](pricing.md)

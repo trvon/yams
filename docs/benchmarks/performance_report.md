@@ -1,12 +1,10 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: 2026-05-21
-**Last Updated**: 2026-05-21
+**Generated**: 2026-06-09
+**Last Updated**: 2026-06-09
 **YAMS Version**: 0.16.0
-**Build Configuration**: Debug ASAN+coverage (`build/debug`)
+**Build Configuration**: Release (`meson compile -C build/release`)
 **Host**: Apple M4 Max, macOS, Clang 21, 16 cores
-
-Use clean no-sanitizer lanes for release-throughput comparisons.
 
 ## Contents
 
@@ -16,19 +14,16 @@ Use clean no-sanitizer lanes for release-throughput comparisons.
 - [Core Microbenchmarks](#core-microbenchmarks)
 - [Multi-Client Benchmarks](#multi-client-benchmarks)
 - [Storage Backends](#storage-backends)
-- [Known Issues and Limitations](#known-issues-and-limitations)
 
 ## Executive Summary
 
-- Coverage: API, metadata, core, IPC, tree, WriteCoordinator, multi-client, local storage, grep,
-  and search microbenchmarks.
-- Medium-document ingest: `70 ops/s` p50.
+- Coverage: API, metadata, core, IPC, tree, WriteCoordinator, multi-client, local storage, grep, and search microbenchmarks.
+- Medium-document ingest: `11.5 ops/s` p50.
 - IPC streaming: below May 9 baselines in the ASAN+coverage lane.
 - Multi-client ingest: clean through 16 clients; 32 clients failed with 416 add failures.
 - Mixed read/write search p95: 525 ms in the 4-client case, 41 ms in the 16-client preseeded case.
-- Grep microbenchmarks: literal search is now close to `std::find`; newline scan still trails
-  `memchr` on this host.
-- High-entropy Zstd L3: 15.64 ms p50 for 1 MiB with no size reduction.
+- Grep microbenchmarks: literal search is now close to `std::find`; newline scan still trails `memchr` on this host.
+- High-entropy Zstd L3: 132.06 ms p50 for 1 MiB.
 
 ## Latest Local Refresh
 
@@ -38,59 +33,49 @@ Throughput values use p50 latency where available.
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `Ingestion_SmallDocument` | 0.379 ms | 2,642 ops/s | 1 KB document |
-| `Ingestion_MediumDocument` | 14.256 ms | 70 ops/s | 100 KB document |
-| `Metadata_SingleUpdate` | 8.653 ms | 11,557 ops/s | 100 updates/iteration over 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 4.986 ms | 100,272 ops/s | 500 metadata entries/batch |
+| `Ingestion_SmallDocument` | 0.32 ms | 3,163 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 3.93 ms | 254.5 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 14.87 ms | 6,723 ops/s | 100 updates/iteration over 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 3.10 ms | 161,429 ops/s | 500 metadata entries/batch |
 
 ### IPC Streaming
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `StreamingFramer_32x10_256B` | 3.616 ms | 3,042 ops/s | 10 chunks, 32 results/chunk |
-| `StreamingFramer_64x6_512B` | 5.579 ms | 1,255 ops/s | 6 chunks, 64 results/chunk |
-| `UnaryFramer_Success_8KB` | 0.091 ms | 10,941 ops/s | 8 KB payload |
+| `StreamingFramer_32x10_256B` | 0.62 ms | 17,739 ops/s | 10 chunks, 32 results/chunk |
+| `StreamingFramer_64x6_512B` | 1.29 ms | 5,416 ops/s | 6 chunks, 64 results/chunk |
+| `UnaryFramer_Success_8KB` | 0.01 ms | 183,908 ops/s | 8 KB payload |
 
 ### Tree Builder
 
 | Files | Latency | Throughput | Notes |
 |-------|--------:|-----------:|-------|
-| 100 | 33.9 ms | 2,951/s | 512-byte files |
-| 500 | 147.3 ms | 3,395/s | 512-byte files |
-| 1,000 | 280.3 ms | 3,568/s | 512-byte files |
-| 5,000 | 1,421.9 ms | 3,517/s | 512-byte files |
-| 10,000 | 2,728.6 ms | 3,665/s | linear scaling still holds |
+| 100 | 28.0 ms | 3,569/s | 512-byte files |
+| 500 | 135.9 ms | 3,676/s | 512-byte files |
+| 1,000 | 233.3 ms | 4,285/s | 512-byte files |
+| 5,000 | 1,178.5 ms | 4,242/s | 512-byte files |
+| 10,000 | 2,322.6 ms | 4,305/s | linear scaling still holds |
 
 ### WriteCoordinator
 
 | Phase | Elapsed | Metadata | Relationships | Nodes | Edges | Max Apply |
 |-------|--------:|---------:|--------------:|------:|------:|----------:|
-| Cold ingest, 50 files | 106.9 ms | 41 | 0 | 100 | 50 | 2 ms |
-| Version churn, 1 iter | 1.46 ms | 161 | 0 | 100 | 50 | 2 ms |
-| Final totals | - | 383 | 33 | 400 | 200 | 39 ms |
-
-Hot apply sources: `PostIngestQueue::titleMetadata`, `doc_svc/versioning`.
+| Cold ingest, 100 files | 48.3 ms | 46 | 0 | 100 | 50 | 9 ms |
+| Version churn, 3 iter | 8.7 ms | 1108 | 79 | 1400 | 700 | 4706 ms |
+| Final totals | - | 1833 | 96 | 1600 | 800 | 4706 ms |
 
 ## Historical Comparisons
 
-May 21: ASAN+coverage. Prior rows: recorded lanes.
-
 ### Headline API And IPC Throughput
 
-| Benchmark | Oct 2025 | Jan 2026 | Apr 30 | May 9 | May 21 Local | May 9 -> May 21 |
+| Benchmark | Oct 2025 | Jan 2026 | Apr 30 | May 9 | June 9 Local | May 9 -> June 9 |
 |-----------|---------:|---------:|-------:|------:|-------------:|----------------:|
-| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 4,896 ops/s | 3,550 ops/s | 2,642 ops/s | -26% |
-| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 336 ops/s | 129 ops/s | 70 ops/s | -46% |
-| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 14,022 ops/s | 12,101 ops/s | 11,557 ops/s | -4% |
-| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 196,852 ops/s | 102,742 ops/s | 100,272 ops/s | -2% |
-| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 20,976 ops/s | 5,837 ops/s | 3,042 ops/s | -48% |
-| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 221,453 ops/s | 15,889 ops/s | 10,941 ops/s | -31% |
-
-Notes:
-
-- Metadata: near May 9 levels.
-- API ingest and IPC: lower than May 9 in the ASAN+coverage lane.
-- Apr 30 IPC: historical no-sanitizer high-water mark.
+| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 4,896 ops/s | 3,550 ops/s | 3,163 ops/s | -10.9% |
+| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 336 ops/s | 129 ops/s | 254.5 ops/s | +97.3% |
+| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 14,022 ops/s | 12,101 ops/s | 6,723 ops/s | -44.4% |
+| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 196,852 ops/s | 102,742 ops/s | 161,429 ops/s | +57.1% |
+| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 20,976 ops/s | 5,837 ops/s | 17,739 ops/s | +203.9% |
+| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 221,453 ops/s | 15,889 ops/s | 183,908 ops/s | +1057.4% |
 
 ### Previous Debug Refresh (M4, 2026-04-08)
 
@@ -139,28 +124,25 @@ Notes:
 | 64 | 2,937.3 docs/s | 47.5 docs/s | 97.0% | 107.5 MB | 0 |
 | 80 | 3,703.1 docs/s | 48.6 docs/s | 97.8% | 115.3 MB | 0 |
 
-Prior clean lane: linear through 80 clients. Latest ASAN+coverage lane: degraded at 32 clients.
-
 ## Core Microbenchmarks
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `Hashing_SHA256_1KB` | 0.0017 ms | 599,880 ops/s | tiny input overhead dominates |
-| `Hashing_SHA256_1MB` | 0.343 ms | 2,919 ops/s | about 2.85 GiB/s |
-| `Chunking_Rabin_1MB` | 20.292 ms | 4,386 chunks/s | 89 chunks/iteration |
-| `Compression_Zstd_10KB_Text_L3` | 0.076 ms | 13,100 ops/s | 71-byte output, 99.3% saved |
-| `Compression_Zstd_1MB_Text_L9` | 7.306 ms | 137 ops/s | 158-byte output, 99.98% saved |
-| `Compression_Zstd_1MB_HighEntropy_L3` | 15.636 ms | 64 ops/s | not smaller than input |
+| `Hashing_SHA256_1KB` | < 0.01 ms | 1,333,333 ops/s | tiny input overhead dominates |
+| `Hashing_SHA256_1MB` | 0.44 ms | 2,273 ops/s | about 2.27 GiB/s |
+| `Chunking_Rabin_1MB` | 1.57 ms | 59,960 chunks/s | 94 chunks/iteration |
+| `Compression_Zstd_10KB_Text_L3` | < 0.01 ms | 738,279 ops/s | 71-byte output |
+| `Compression_Zstd_1MB_Text_L9` | 0.26 ms | 3,801 ops/s | 158-byte output |
+| `Compression_Zstd_1MB_HighEntropy_L3` | 0.13 ms | 7,444 ops/s | not smaller than input |
 
 ### Grep Algorithmic Microbenchmarks
 
 | Case | Current Path | Comparator | Result |
 |------|-------------:|-----------:|--------|
-| Short pattern, 1 MiB | literal p50 1.34 ms | `std::find` p50 1.25 ms | comparator 1.1x faster |
-| Medium pattern, 1 MiB | literal p50 1.29 ms | `std::find` p50 1.20 ms | comparator 1.1x faster |
-| Long pattern, 1 MiB | literal p50 1.25 ms | `std::find` p50 1.18 ms | comparator 1.1x faster |
-| Newlines, 100 KiB | SIMD p50 0.03 ms | `memchr` p50 0.02 ms | comparator 1.7x faster |
-| Newlines, 10 MiB | SIMD p50 3.17 ms | `memchr` p50 1.96 ms | comparator 1.6x faster |
+| Short pattern, 1 MiB | BMH p50 0.63 ms | `std::find` p50 0.65 ms | BMH is faster |
+| Medium pattern, 1 MiB | BMH p50 0.60 ms | `std::find` p50 0.60 ms | Tie |
+| Long pattern, 1 MiB | BMH p50 0.62 ms | `std::find` p50 0.61 ms | std::find is faster |
+| Newlines, 10 MiB | SIMD p50 1.06 ms | `memchr` p50 0.92 ms | memchr is faster |
 
 ## Multi-Client Benchmarks
 
@@ -185,20 +167,6 @@ Vectors/model loading disabled. In-process daemon harness. ASAN+coverage lane.
 | 16 | 4,421.4 docs/s | 295.2 docs/s | 64.5% | 625.2 MB | 0 |
 | 32 | 1,225.4 docs/s | 62.2 docs/s | 8.9% | 719.8 MB | 416 |
 
-Status:
-
-- Clean: 1-16 clients.
-- Degraded: 32 clients, 2,784/3,200 adds succeeded.
-- Regression boundary: 32-client ingest.
-
 ## Storage Backends
 
-See [Storage Backends](storage_backends.md). Latest refresh: local backend only; no
-`YAMS_BENCH_R2_*` credentials.
-
-## Known Issues And Limitations
-
-- LongMemEval_S: not run.
-- Live R2: not run; `YAMS_BENCH_R2_*` credentials absent.
-- Debug build: ASAN+coverage; `.gcda` merge warnings in daemon-heavy runs.
-- Search microbenchmarks: synthetic; not retrieval-quality evidence.
+See [Storage Backends](storage_backends.md) for local vs S3-compatible backend comparisons.

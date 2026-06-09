@@ -4,10 +4,8 @@ This index points to architecture references that mirror the live implementation
 
 ## Core Architecture References
 
-- Daemon and services — lifecycle, IPC, plugin hosting
-  - [Architecture: Daemon and Services](../../architecture/daemon_architecture.md)
-- Plugin pipeline — manifest parsing, trust, runtime loaders
-  - [Architecture: Plugin and Content Extraction](../../architecture/plugin_architecture.md)
+- System Architecture — subsystems, lifecycle, plugin hosting
+  - [Architecture: System](../../architecture/system_architecture.md)
 - Search pipeline — ingestion, ranking, hybrid fusion
   - [CLI search and grep reference](../../user_guide/cli.md)
 - Vector subsystem — embedding providers, storage, repair routines
@@ -15,8 +13,6 @@ This index points to architecture references that mirror the live implementation
 
 ## Supporting Design Notes
 
-- Content handlers and normalization pathways
-  - [Design: Content Handler Architecture](../../design/content-handler-architecture.md)
 - Synchronization protocol details
   - [Design: Sync Protocol](../../design/sync-protocol.md)
 

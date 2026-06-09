@@ -2384,7 +2384,8 @@ private:
 
             auto fieldMatches = [&](std::string_view text) {
                 return !text.empty() &&
-                       yams::common::asciiToLowerCopy(std::string(text)).find(loweredQuery) != std::string::npos;
+                       yams::common::asciiToLowerCopy(std::string(text)).find(loweredQuery) !=
+                           std::string::npos;
             };
 
             for (const auto& hash : recentLexicalDeltaHashes) {
