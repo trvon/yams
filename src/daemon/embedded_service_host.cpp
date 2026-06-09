@@ -17,6 +17,7 @@
 #include <boost/asio/system_executor.hpp>
 
 #include <atomic>
+#include <cstdlib>
 
 #if __has_include(<barrier>)
 #include <barrier>
@@ -345,6 +346,24 @@ Result<std::shared_ptr<EmbeddedServiceHost>>
 EmbeddedServiceHost::getOrCreate(const Options& options) {
     static std::mutex sMutex;
     static std::unordered_map<std::string, std::weak_ptr<EmbeddedServiceHost>> sHosts;
+
+    // Register an atexit handler to drain the static map before CRT begins
+    // uncontrolled static destruction. On Windows in particular, static
+    // weak_ptr destruction during CRT exit can race with IOCP-backed
+    // coroutine frames that still hold shared_ptr references.
+    static const int sAtexitRegistered = []() {
+        std::atexit([]() {
+            std::lock_guard<std::mutex> lk(sMutex);
+            for (auto& [key, weak] : sHosts) {
+                if (auto host = weak.lock()) {
+                    (void)host->shutdown();
+                }
+            }
+            sHosts.clear();
+        });
+        return 0;
+    }();
+    (void)sAtexitRegistered;
 
     Options resolved = options;
     if (resolved.dataDir.empty()) {
