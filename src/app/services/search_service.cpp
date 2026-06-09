@@ -486,10 +486,6 @@ static bool looksLikePathQuery(const std::string& raw) {
     return looksLikePathToken(token);
 }
 
-static std::string toLowerAscii(std::string value) {
-    return yams::common::asciiToLowerCopy(std::move(value));
-}
-
 static std::size_t pathDepth(std::string_view path) {
     return static_cast<std::size_t>(
         std::count_if(path.begin(), path.end(), [](char c) { return c == '/' || c == '\\'; }));
@@ -506,9 +502,9 @@ static std::string_view basenameView(std::string_view path) {
 static double computePathMatchScore(const metadata::DocumentInfo& doc, const std::string& query,
                                     bool wildcard) {
     const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
-    const std::string pathLower = toLowerAscii(path);
-    const std::string nameLower = toLowerAscii(doc.fileName);
-    const std::string queryLower = toLowerAscii(trimCopy(query));
+    const std::string pathLower = yams::common::asciiToLowerCopy(path);
+    const std::string nameLower = yams::common::asciiToLowerCopy(doc.fileName);
+    const std::string queryLower = yams::common::asciiToLowerCopy(trimCopy(query));
 
     if (queryLower.empty()) {
         return 0.01;
@@ -2376,7 +2372,7 @@ private:
                 return overlayResults;
             }
 
-            const std::string loweredQuery = toLowerAscii(processedQuery);
+            const std::string loweredQuery = yams::common::asciiToLowerCopy(processedQuery);
             overlayResults.reserve(recentLexicalDeltaHashes.size());
 
             auto docIdAllowed = [&](int64_t id) {
@@ -2388,7 +2384,7 @@ private:
 
             auto fieldMatches = [&](std::string_view text) {
                 return !text.empty() &&
-                       toLowerAscii(std::string(text)).find(loweredQuery) != std::string::npos;
+                       yams::common::asciiToLowerCopy(std::string(text)).find(loweredQuery) != std::string::npos;
             };
 
             for (const auto& hash : recentLexicalDeltaHashes) {

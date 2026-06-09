@@ -769,8 +769,7 @@ inline bool is_transport_failure(const yams::Error& err);
 
 namespace detail {
 
-inline std::string to_lower_copy(std::string value);
-inline std::string trim_copy(std::string_view sv);
+inline std::string trim_copy(std::string_view sv) {
 
 inline bool cli_perf_trace_enabled() {
     const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
@@ -819,7 +818,7 @@ inline bool is_socket_mode_forced_by_env() {
     if (raw == nullptr || *raw == '\0') {
         return false;
     }
-    auto mode = to_lower_copy(trim_copy(raw));
+    auto mode = yams::common::asciiToLowerCopy(trim_copy(raw));
     return mode == "0" || mode == "false" || mode == "off" || mode == "no" || mode == "socket" ||
            mode == "daemon";
 }
@@ -936,7 +935,7 @@ inline bool cli_one_shot_enabled() {
     if (raw == nullptr || *raw == '\0') {
         return false;
     }
-    auto mode = detail::to_lower_copy(detail::trim_copy(raw));
+    auto mode = yams::common::asciiToLowerCopy(detail::trim_copy(raw));
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 

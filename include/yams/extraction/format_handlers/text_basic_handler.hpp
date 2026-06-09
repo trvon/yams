@@ -88,7 +88,8 @@ public:
         // Fast path for Scope::All with no search or range filtering.
         if (query.scope == Scope::All && query.range.empty() && query.search.empty()) {
             ExtractionResult out;
-            const std::string fmt = toLower(query.format.empty() ? "text" : query.format);
+            const std::string fmt = yams::common::asciiToLowerCopy(
+                query.format.empty() ? std::string_view("text") : std::string_view(query.format));
             if (fmt == "json") {
                 out.mime = "application/json";
                 out.json = buildJson(
@@ -177,7 +178,8 @@ public:
 
         // Prepare result container and mime/format selection
         ExtractionResult out;
-        const std::string fmt = toLower(query.format.empty() ? "text" : query.format);
+        const std::string fmt = yams::common::asciiToLowerCopy(
+            query.format.empty() ? std::string_view("text") : std::string_view(query.format));
         if (fmt == "json") {
             out.mime = "application/json";
         } else if (fmt == "markdown") {
@@ -281,11 +283,14 @@ private:
     }
 
     static std::string toLower(std::string s) {
+        // Thin delegate — kept for internal toLowerInPlace calls.
         toLowerInPlace(s);
         return s;
     }
 
     static void toLowerInPlace(std::string& s) {
+        // Prefer yams::common::asciiToLowerCopy for copy-and-lowercase;
+        // this in-place variant is preserved for hot loops that reuse a buffer.
         std::transform(s.begin(), s.end(), s.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     }
@@ -311,7 +316,7 @@ private:
         auto it = opts.find(std::string(key));
         if (it == opts.end())
             return false;
-        std::string v = toLower(it->second);
+        std::string v = yams::common::asciiToLowerCopy(it->second);
         return (v == "0" || v == "false" || v == "no" || v == "off");
     }
 

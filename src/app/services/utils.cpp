@@ -30,10 +30,6 @@ std::string trimCopy(const std::string& value) {
     return std::string(begin, end);
 }
 
-std::string toLowerCopy(std::string value) {
-    return yams::common::asciiToLowerCopy(std::move(value));
-}
-
 std::int64_t nowEpochSeconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -153,7 +149,7 @@ Result<std::int64_t> parseTimeExpression(const std::string& timeExpr) {
         return Error{ErrorCode::InvalidArgument, "Time expression is empty"};
     }
 
-    const std::string lowered = toLowerCopy(trimmed);
+    const std::string lowered = yams::common::asciiToLowerCopy(trimmed);
     const std::int64_t now = nowEpochSeconds();
 
     if (lowered == "now") {
