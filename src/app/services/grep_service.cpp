@@ -90,14 +90,6 @@ struct PathTreeConfigSettings {
     std::string mode{"fallback"};
 };
 
-static auto toLower = [](unsigned char c) noexcept { return static_cast<char>(std::tolower(c)); };
-
-static std::string toLowerCopy(std::string_view value) {
-    std::string lowered(value);
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(), toLower);
-    return lowered;
-}
-
 static std::filesystem::path resolveConfigPath() {
     if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
         std::filesystem::path p{explicitPath};
@@ -122,18 +114,18 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
     if (auto cfgPath = resolveConfigPath(); !cfgPath.empty()) {
         auto values = yams::config::parse_simple_toml(cfgPath);
         if (auto it = values.find("search.path_tree.enable"); it != values.end()) {
-            auto v = toLowerCopy(it->second);
+            auto v = yams::common::asciiToLowerCopy(it->second);
             cfg.enabled = (v == "1" || v == "true" || v == "yes" || v == "on");
         }
         if (auto it = values.find("search.path_tree.mode"); it != values.end()) {
-            auto v = toLowerCopy(it->second);
+            auto v = yams::common::asciiToLowerCopy(it->second);
             if (v == "preferred" || v == "fallback")
                 cfg.mode = v;
         }
     }
 
     if (const char* envEnable = std::getenv("YAMS_GREP_PATH_TREE")) {
-        auto v = toLowerCopy(envEnable);
+        auto v = yams::common::asciiToLowerCopy(envEnable);
         if (v == "0" || v == "false" || v == "off" || v == "no") {
             cfg.enabled = false;
         } else {
@@ -143,7 +135,7 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
         }
     }
     if (const char* envMode = std::getenv("YAMS_GREP_PATH_TREE_MODE")) {
-        auto v = toLowerCopy(envMode);
+        auto v = yams::common::asciiToLowerCopy(envMode);
         if (v == "preferred" || v == "fallback")
             cfg.mode = v;
     }

@@ -9,7 +9,7 @@ title: Object Storage Plugin v1 — API and Capability Matrix
 
 ## Overview
 
-Provider-agnostic plugin API for object storage used by DR and hosting. Backends expose capabilities; core negotiates behavior. The current production path is S3-compatible.
+Provider-agnostic plugin API for object storage used by disaster recovery (DR) and remote backups. Backends expose capabilities; core negotiates behavior. The current production path is S3-compatible.
 
 ## Key Interfaces
 

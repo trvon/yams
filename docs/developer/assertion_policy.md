@@ -22,6 +22,14 @@ Use assertions for:
 - broken ownership / concurrency assumptions
 - preconditions and postconditions that represent programmer misuse
 
+## Design principles
+
+- Prefer the YAMS assertion layer over raw `assert(...)` for project invariants; raw `assert(...)` is globally controlled by `NDEBUG` and may vanish in release-like builds.
+- Disabled debug checks must not evaluate expensive or side-effecting expressions. Compute side effects before the assertion and assert on the resulting value.
+- Include a message that explains the invariant, not just the boolean expression.
+- Choose the cheapest assertion tier that preserves safety: always-on for corruption/UB-adjacent invariants, debug-only for expensive consistency checks.
+- Treat preconditions/postconditions as design documentation: they should state what the caller/provider has already promised, not validate ordinary user input.
+
 ## Assertion tiers
 
 ### Always-on hard assertions
@@ -115,6 +123,8 @@ silence compiler warnings on paths that might still occur.
 
 ## Suggested rollout order
 
+The assertion rollout is test-first: add or identify behavior coverage before hardening a path, then introduce assertions as executable invariants. Death tests are useful only when the failure mode is stable across platforms; otherwise prefer normal behavior tests around the code that prevents the invariant breach.
+
 1. Introduce the shared assertion layer.
 2. Harden lifecycle / shutdown invariants first.
 3. Migrate raw `assert(...)` in non-generated code.
@@ -127,4 +137,11 @@ Highest-value adoption surfaces:
 - `PostIngestQueue`
 - `ServiceManager`
 - daemon lifecycle / FSM wrappers
+- metadata counters, path-tree consistency, and batch write accounting
 - non-generated raw `assert(...)` sites such as `src/vector/turboquant.cpp`
+
+## References
+
+- Jonathan Müller, "How do I implement assertions?" — limitations of global `assert`, assertion levels, delayed evaluation, and custom handlers: https://www.foonathan.net/2016/09/assertions/
+- cppreference, `assert` / `NDEBUG` semantics: https://en.cppreference.com/cpp/error/assert
+- C++ Core Guidelines — contracts, preconditions, postconditions, and invariants

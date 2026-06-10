@@ -261,21 +261,6 @@ size_t SimdNewlineScanner::countNewlinesScalar(const char* data, size_t size) {
 // than custom SIMD implementations for single-byte search on modern CPUs.
 // ============================================================================
 
-size_t SimdNewlineScanner::findNewline(const char* data, size_t size) {
-    if (size == 0) {
-        return 0;
-    }
-    if (data == nullptr) {
-        return size;
-    }
-
-    return findNewlineScalar(data, size);
-}
-
-bool SimdNewlineScanner::containsNewline(const char* data, size_t size) {
-    return findNewline(data, size) < size;
-}
-
 size_t SimdNewlineScanner::countNewlines(const char* data, size_t size) {
     if (size == 0 || data == nullptr) {
         return 0;

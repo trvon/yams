@@ -15,8 +15,6 @@ exclude_docs: |
   testing/embedding_dimension_robustness.md
   hosting/p0-object-storage-s3-validation.md
   design/monolith_refactor_program_codex_yams.md
-  benchmarks/retrieval_precision_optimization.md
-  benchmarks/multi_client_optimization_loop.md
 
 nav:
   - Home: index.md
@@ -25,30 +23,21 @@ nav:
       - Quick Start: user_guide/README.md
       - CLI Reference: user_guide/cli.md
       - MCP Server: user_guide/mcp.md
-      - Tutorials: user_guide/tutorials/README.md
   - Guides:
       - Embeddings & Search: user_guide/embeddings.md
       - Self-hosting: hosting/self_hosting.md
       - Operations: admin/operations.md
       - Plugins: PLUGINS.md
       - Prompt Templates: PROMPT.md
-  - API:
-      - Overview: api/README.md
-      - MCP Tools: api/mcp_tools.md
-  - Hosting:
-      - Managed Hosting: hosting/managed.md
-      - Pricing (Preview): hosting/pricing.md
-      - Services: services/README.md
-      - Support Plans: services/support_plans.md
-      - Contact: services/contact.md
   - Reference:
-      - Architecture:
-          - Daemon & Services: architecture/daemon_architecture.md
-          - Plugins & Extraction: architecture/plugin_architecture.md
+      - API Overview: api/README.md
+      - MCP Tools: api/mcp_tools.md
+      - System Architecture: architecture/system_architecture.md
       - Benchmarks:
           - Overview: benchmarks/README.md
           - Performance Report: benchmarks/performance_report.md
           - Storage Backends: benchmarks/storage_backends.md
+          - LongMemEval_S Baseline: benchmarks/longmemeval_s_baseline.md
       - Developer:
           - Setup: developer/setup.md
           - Build System: developer/build_system.md
@@ -65,10 +54,23 @@ theme:
     - navigation.top
     - content.code.copy
   palette:
-    scheme: slate
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: blue
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: green
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
   language: en
   font:
-    text: "JetBrains Mono"
+    text: "Outfit"
     code: "JetBrains Mono"
   logo: assets/yams.png
   favicon: assets/yams.png
@@ -86,7 +88,11 @@ markdown_extensions:
   - tables
   - pymdownx.details
   - pymdownx.highlight
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 plugins:
   - search
@@ -102,11 +108,8 @@ extra:
     - icon: fontawesome/solid/envelope
       link: mailto:support@yamsmemory.ai
       name: Email
-  announcement: '<a href="https://trvon.github.io/yams/hosting/managed/">Join Hosting Early Access →</a>'
 
 extra_css:
   - assets/retro.css
-  - assets/landing.css
-extra_javascript:
-  - assets/landing.js
+extra_javascript: []
 copyright: "© YAMS"

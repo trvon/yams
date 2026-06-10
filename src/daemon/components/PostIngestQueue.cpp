@@ -189,8 +189,8 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
     }
 
     bool hasAlphaNum = false;
-    for (unsigned char c : qc.text) {
-        if (std::isalnum(c)) {
+    for (char c : qc.text) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
             hasAlphaNum = true;
             break;
         }
@@ -429,7 +429,15 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
         }
     }
     if (timer) {
-        boost::asio::post(timer->get_executor(),
+        // NB: read the executor into a local BEFORE moving `timer` into the
+        // handler. Function-argument evaluation order is unspecified in C++,
+        // and MSVC evaluates the lambda capture (which moves `timer` to null)
+        // before `timer->get_executor()`, dereferencing a moved-from shared_ptr
+        // -> read from null+offset -> access violation. Left-to-right compilers
+        // (GCC/Clang on Linux) happened to evaluate get_executor() first, which
+        // is why this crash was Windows-only.
+        auto executor = timer->get_executor();
+        boost::asio::post(executor,
                           [timer = std::move(timer)]() mutable { (void)timer->cancel(); });
     }
 }
@@ -3399,7 +3407,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         std::vector<PreparedMetadataEntry> allSuccesses;
         std::vector<ExtractionFailure> allFailures;
         allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / 10);
+        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
 
         const auto prepareStart = std::chrono::steady_clock::now();
         for (const auto& task : tasks) {
@@ -3428,7 +3436,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         std::vector<PreparedMetadataEntry> allSuccesses;
         std::vector<ExtractionFailure> allFailures;
         allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / 10);
+        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
 
         const auto prepareStart = std::chrono::steady_clock::now();
         for (const auto& task : tasks) {

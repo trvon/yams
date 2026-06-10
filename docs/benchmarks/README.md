@@ -15,8 +15,6 @@ Each page answers three things:
 - [WriteCoordinator](performance_report.md#writecoordinator) - ingest apply profile.
 - [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics and retrieval-quality baselines.
 - [Storage Backends Benchmark](storage_backends.md) - local vs R2 CLI CRUD and multi-client benchmark results.
-- [Multi-Client Optimization Loop](multi_client_optimization_loop.md) - throughput/stability summary and regression interpretation.
-- [Retrieval Precision Optimization](retrieval_precision_optimization.md) - ranking-quality tuning loop and summary workflow.
 
 ## Scope
 

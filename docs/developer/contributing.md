@@ -51,6 +51,28 @@ meson setup builddir --buildtype debug -Denable-tsan=true -Db_sanitize=thread -D
 meson compile -C builddir
 meson test -C builddir
 ```
+## AI usage policy
+
+AI tools may be used in an **assistive** role, but we do not want pull requests that are fully or predominantly AI-generated.
+
+If you use AI for any part of a contribution:
+- Disclose that AI was used and how it was used.
+- Manually review the entire change before opening the PR.
+- Be prepared to explain every part of the submitted change.
+- Make sure the final technical judgment is your own.
+
+**Examples of acceptable use:**
+- Brainstorming approaches.
+- Drafting small refactors you fully review and revise.
+- Generating repetitive boilerplate from a design you already understand.
+- Improving wording or structure in docs that you then verify.
+
+**Examples of unacceptable use:**
+- Submitting large, mostly AI-authored patches you do not fully understand.
+- Using AI to answer maintainers or contributors in your place.
+- Using AI to generate bug reports, feature requests, or PR discussion as if it were your own firsthand reasoning.
+
+When in doubt, favor smaller PRs, more disclosure, and more human review.
 
 ## Commit messages
 - Use imperative mood, present tense. Keep subject ≤ 72 chars.
@@ -60,28 +82,29 @@ meson test -C builddir
 ## Pull requests
 - Keep changes minimal and atomic; avoid mixing refactors with behavioral changes.
 - Include:
-  - Rationale and scope
-  - Implementation notes (assumptions, tradeoffs)
-  - Tests added/updated
-  - Docs updated (if user-visible change)
+    - Rationale and scope
+    - Implementation notes (assumptions, tradeoffs)
+    - Tests added/updated
+    - Docs updated (if user-visible change)
 - Checklist before opening:
-  - [ ] Builds clean (Debug/Release) with no new warnings
-  - [ ] Tests pass locally (include negative and edge cases)
-  - [ ] clang-format applied; static analysis warnings addressed or justified
-  - [ ] Dependencies unchanged or properly updated via Conan
-  - [ ] Performance impact assessed for hot paths (if relevant)
+    - Builds clean (Debug/Release) with no new warnings
+    - Tests pass locally (include negative and edge cases)
+    - clang-format applied; static analysis warnings addressed or justified
+    - Dependencies unchanged or properly updated via Conan
+    - Performance impact assessed for hot paths (if relevant)
 - CI must be green before review/merge.
 
 ## Coding standards (C++)
-- C++17/20, modern idioms (RAII, smart pointers, algorithms).
+- C++20, modern idioms (RAII, smart pointers, algorithms).
 - Enforce const-correctness; prefer std::optional/variant over sentinel values.
 - Avoid raw owning pointers; prefer value types or std::unique_ptr/std::shared_ptr.
 - Error handling: exceptions for exceptional failures; clear error messages.
 - Naming:
-  - Classes/Types: PascalCase
-  - Methods/Variables: camelCase
-  - Constants/Macros: SCREAMING_SNAKE_CASE
-  - Member fields: _name or m_name
+    - Classes/Types: PascalCase
+    - Methods/Variables: camelCase
+    - Constants: kPascalCase
+    - Member fields: trailing `_` (e.g. `member_`)
+    - Files: snake_case
 - Structure: headers (*.hpp) for interfaces; implementations (*.cpp) separate.
 - Formatting: clang-format (project config). No unrelated formatting churn.
 
@@ -93,10 +116,10 @@ meson test -C builddir
 
 ## Documentation
 - Update or add docs for user-facing changes:
-  - User guides (docs/user_guide/*)
-  - API (docs/api/*)
-  - Admin/Operations (docs/admin/*, docs/operations/*)
-  - Developer docs (docs/developer/*)
+    - User guides (docs/user_guide/*)
+    - API (docs/api/*)
+    - Admin/Operations (docs/admin/*, docs/operations/*)
+    - Developer docs (docs/developer/*)
 - Keep docs concise and technical; avoid marketing language.
 
 ## Dependencies (Conan)
@@ -117,9 +140,11 @@ meson test -C builddir
 
 ## Licensing
 - YAMS is GPL-3.0-or-later. Ensure new files include an SPDX header when applicable:
-```text
-SPDX-License-Identifier: GPL-3.0-or-later
-```
+
+    ```text
+    SPDX-License-Identifier: GPL-3.0-or-later
+    ```
+
 - Only contribute code you are authorized to submit under the project license.
 
 ## Code review and merge

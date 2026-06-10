@@ -1,6 +1,6 @@
 # LongMemEval_S Retrieval Quality Baseline
 
-**Date:** 2026-04-08
+**Date:** 2026-06-09
 **Dataset:** LongMemEval_S (ICLR 2025) — `xiaowu0162/longmemeval-cleaned`, split `longmemeval_s_cleaned`
 **Conversion:** `scripts/prepare_longmemeval_s.py` (BEIR format)
 
@@ -57,106 +57,9 @@ YAMS_BENCH_EMBED_MAX_WAIT=0 \
 ./build/debug/tests/benchmarks/retrieval_quality_bench
 ```
 
-Total runtime: ~4 hours
-
-## Root Cause Analysis
-
-Vector search adds only +3.3% recall and MRR *regresses* by -0.095. Three compounding issues:
-
-### 1. MAX-POOL Chunk Aggregation
-
-Only the single highest-scoring chunk per document contributes to the vector score.
-With 5.37 chunks/doc average, 80%+ of chunk-level
-semantic signal is discarded. For multi-session conversational data where different
-parts of a session may be relevant, this is the wrong trade-off.
-
-### 2. ~5x Text Advantage in Fusion
-
-- Component weights: text=0.70, vector=0.25 (2.8x ratio)
-- Field-aware score scaling: text=1.00, vector=0.45 (2.2x additional ratio)
-- Vector-only penalty: 0.8x multiplier for semantic-only matches
-- Combined: text contributions are ~5x stronger than vector in fusion scoring
-
-### 3. Semantic Rescue Disabled
-
-SCIENTIFIC profile sets `semanticRescueSlots=0`. High-confidence vector matches
-that fall below the fusion cutoff are never rescued into the final top-K.
-
 ## Reference Baselines
 
 The LongMemEval paper (Table 3) reports on LongMemEval_M (larger variant):
 - Best retrieval config (K=V+fact): Recall@10=0.784, NDCG@10=0.536
 - Retrievers evaluated: BM25, Contriever, Stella V5 1.5B, GTE-Qwen2 7B-instruct
 - No published retrieval baselines for LongMemEval_S specifically
-
-## First Tuning Attempt (2026-04-08)
-
-Changes applied:
-- Chunk aggregation: MAX → SUM
-- SCIENTIFIC profile: textWeight 0.70→0.60, vectorWeight 0.25→0.35
-- Vector scoreScale: 0.45 → 0.75
-- Semantic rescue: 2 slots, min score 0.65
-- Rerank top-K: 5 → 12
-
-| Metric | Baseline | Attempt 1 | Delta |
-|--------|----------|-----------|-------|
-| MRR | 0.407 | 0.414 | +0.007 |
-| Recall@10 | 0.653 | 0.485 | **-0.168** |
-| NDCG@10 | 0.418 | 0.387 | -0.031 |
-| MAP | 0.363 | 0.397 | +0.034 |
-
-**Result: Recall@10 regressed significantly.** Root causes:
-
-### 4. Similarity Threshold Filters Most Vector Results
-
-`similarityThreshold=0.40` but embeddinggemma-300m produces cosine similarities
-of 0.25-0.55 on this dataset. Of 479 HNSW searches:
-- 54 (11.3%) returned **zero** results (all 150 candidates filtered)
-- Many others heavily filtered (e.g. returned=1/150, 7/150, 17/150)
-
-Raising vector weight without lowering the threshold just weakened text scoring.
-
-### 5. CorpusStats-Driven Graph Reranking Activated
-
-The `473274de` commit's CorpusStats-driven tuning detected high "symbol density"
-(9.05) in chat sessions (proper nouns = brand names, people, places) and enabled
-graph reranking that was OFF in baseline:
-- `kg_weight`: 0.00 → 0.14 (consumed weight from text/vector)
-- `graph_rerank_weight`: 0.00 → 0.32
-- `graph_community_weight`: 0.00 → 0.16
-
-Auto-tuner also reduced textWeight from 0.60→0.51 and vectorWeight from 0.35→0.30
-due to weight redistribution to graph features.
-
-### Key Env-Vars for A/B Testing
-
-```bash
-YAMS_SEARCH_SIMILARITY_THRESHOLD=0.25   # let vector results through
-YAMS_SEARCH_ENABLE_GRAPH_RERANK=false   # disable confounding graph rerank
-YAMS_SEARCH_TEXT_WEIGHT=0.60            # override auto-tuner adjustment
-YAMS_SEARCH_VECTOR_WEIGHT=0.35          # override auto-tuner adjustment
-YAMS_SEARCH_CHUNK_AGGREGATION=sum       # SUM chunk aggregation
-```
-
-## Second Tuning Attempt — Graph Pipeline Activation (2026-04-09)
-
-Fixes: entity extraction enabled (`PostIngestQueue.cpp:1102`), SCIENTIFIC zoom
-`Map` → `Auto` (`search_tuner.h`), 7 graph fields added to `toJson()`.
-
-### Pre-Fix Benchmark (v3 — entity extraction off, zoom=Map)
-
-| Metric | Baseline | v3 | Delta |
-|--------|----------|----|-------|
-| MRR | 0.407 | 0.507 | +0.100 |
-| Recall@10 | 0.653 | 0.554 | **-0.099** |
-| NDCG@10 | 0.418 | — | — |
-| graph_rerank_apply_rate | 0.0 | 0.0 | — |
-
-### Pending Validation
-
-Both fixes applied but not yet benchmarked together.
-
-## Improvement Targets
-
-- Recall@10: 0.653 → 0.75+
-- MRR: 0.407 → 0.55+

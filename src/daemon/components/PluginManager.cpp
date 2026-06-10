@@ -63,7 +63,7 @@ std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defa
 template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
 static size_t
 adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
-                         int interfaceVersion,
+                         uint32_t interfaceVersion,
                          std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
                          const std::function<bool(const AbiTableType*)>& validateTable = nullptr) {
     size_t adopted = 0;

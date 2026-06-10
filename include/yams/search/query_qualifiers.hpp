@@ -1,5 +1,7 @@
 #pragma once
 
+#include <yams/common/string_utils.h>
+
 // Shared qualifier parser for hybrid/metadata search normalization.
 // Purpose:
 // - Allow users to write inline scope and filter qualifiers in a single query string.
@@ -69,11 +71,9 @@ inline std::string trim_copy(std::string s) {
     return rtrim_copy(ltrim_copy(std::move(s)));
 }
 
-// Lowercase copy
+// Lowercase copy — delegates to the canonical implementation in string_utils.h
 inline std::string to_lower_copy(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
+    return yams::common::asciiToLowerCopy(std::move(s));
 }
 
 // Unquote if "..." or '...'

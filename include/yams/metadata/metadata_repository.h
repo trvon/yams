@@ -747,6 +747,14 @@ public:
         return cachedEmbeddedCount_.load(std::memory_order_relaxed);
     }
     void initializeCounters(); // Called once during startup to sync with DB
+    /// Lazy hydration: ensures counters reflect the DB before the first
+    /// counter-mutating write on instances that never went through the
+    /// DatabaseManager startup path (stateless CLI, tests).
+    void ensureCountersInitialized() {
+        if (!countersInitialized_.load(std::memory_order_acquire)) {
+            initializeCounters();
+        }
+    }
 
     /// Warm the metadata value counts cache for common keys (best-effort, non-critical path)
     void warmValueCountsCache();
@@ -920,7 +928,12 @@ private:
         std::make_shared<PathCacheSnapshot>()};
     std::size_t pathCacheCapacity_ = 1024;
     struct PathCacheWriteBuffer {
-        std::vector<DocumentInfo> pending;
+        struct Op {
+            DocumentInfo doc;
+            std::string erasePath;
+            bool erase{false};
+        };
+        std::vector<Op> pending;
         std::mutex mutex;
         std::atomic<std::size_t> size{0};
     };
@@ -1014,6 +1027,8 @@ private:
 
     std::optional<DocumentInfo> lookupPathCache(const std::string& normalizedPath) const;
     void storePathCache(const DocumentInfo& info) const;
+    void invalidatePathCache(const std::string& filePath) const;
+    void invalidatePathCache(const std::vector<std::string>& filePaths) const;
     void flushPathCacheBuffer() const;
     void recordPathHit(const std::string& normalizedPath) const;
     void ensurePathHitRingInitialized() const;
@@ -1184,6 +1199,7 @@ private:
 
     template <typename T>
     Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func) {
+        ensureCountersInitialized();
         if (current_metadata_op().empty()) {
             MetadataOpScope opScope("write_query");
             return executeQueryOnPool<T>(pool_, "write", func);

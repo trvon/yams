@@ -30,20 +30,17 @@
 namespace yams::detection {
 
 namespace {
-std::string toLowerCopy(std::string value) {
-    return yams::common::asciiToLowerCopy(std::move(value));
-}
 
 std::string normalizeExtensionCopy(std::string extension) {
     if (extension.empty())
         return {};
     if (extension.front() != '.')
         extension.insert(extension.begin(), '.');
-    return toLowerCopy(std::move(extension));
+    return yams::common::asciiToLowerCopy(std::move(extension));
 }
 
 std::string normalizeMimeType(std::string mimeType) {
-    mimeType = toLowerCopy(std::move(mimeType));
+    mimeType = yams::common::asciiToLowerCopy(std::move(mimeType));
 
     if (mimeType == "application/x-dosexec")
         return "application/x-msdownload";

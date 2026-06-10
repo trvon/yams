@@ -56,8 +56,8 @@ void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinF
             }
         }
         if (flavor.logExactPath) {
-            spdlog::info("[MetadataRepository] exactPath query path='{}' normalized='{}' hash={}",
-                         *options.exactPath, derived.normalizedPath, derived.pathHash);
+            spdlog::debug("[MetadataRepository] exactPath query path='{}' normalized='{}' hash={}",
+                          *options.exactPath, derived.normalizedPath, derived.pathHash);
         }
     }
 

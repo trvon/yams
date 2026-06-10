@@ -11,12 +11,15 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <sqlite3.h>
@@ -513,6 +516,81 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar basic"
 
     // First result should be exact match (same seed)
     CHECK(results[0].chunk_id == "chunk_search_0");
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend SPQ rerank improves recall",
+                 "[vector][backend][search][spq][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    constexpr size_t kCorpus = 400;
+    constexpr size_t kQueries = 20;
+    constexpr size_t kTopK = 10;
+
+    std::vector<std::vector<float>> corpus;
+    for (size_t i = 0; i < kCorpus; ++i) {
+        corpus.push_back(createEmbedding(kDim, static_cast<float>(i + 1)));
+    }
+    std::vector<std::vector<float>> queries;
+    for (size_t i = 0; i < kQueries; ++i) {
+        queries.push_back(createEmbedding(kDim, static_cast<float>(5000 + i)));
+    }
+
+    auto cosine = [](const std::vector<float>& a, const std::vector<float>& b) {
+        float dot = 0.0f;
+        for (size_t i = 0; i < a.size(); ++i)
+            dot += a[i] * b[i];
+        return dot;
+    };
+
+    auto runRecall = [&](size_t rerank_factor) {
+        SqliteVecBackend::Config config;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.embedding_dim = kDim;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_rerank_factor = rerank_factor;
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(":memory:").has_value());
+        REQUIRE(backend.createTables(kDim).has_value());
+
+        std::vector<VectorRecord> records;
+        for (size_t i = 0; i < kCorpus; ++i) {
+            records.push_back(createVectorRecord("r" + std::to_string(i), corpus[i]));
+        }
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+        REQUIRE(backend.buildIndex().has_value());
+
+        size_t hits = 0;
+        for (const auto& q : queries) {
+            std::vector<std::pair<float, size_t>> exact;
+            for (size_t i = 0; i < kCorpus; ++i) {
+                exact.emplace_back(cosine(q, corpus[i]), i);
+            }
+            std::partial_sort(exact.begin(), exact.begin() + kTopK, exact.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+            std::unordered_set<std::string> expected;
+            for (size_t i = 0; i < kTopK; ++i) {
+                expected.insert("chunk_r" + std::to_string(exact[i].second));
+            }
+
+            auto result = backend.searchSimilar(q, kTopK, 0.0f, std::nullopt, {});
+            REQUIRE(result.has_value());
+            float prev = std::numeric_limits<float>::max();
+            for (const auto& rec : result.value()) {
+                CHECK(rec.relevance_score <= prev + 1e-5f);
+                prev = rec.relevance_score;
+                hits += expected.contains(rec.chunk_id) ? 1 : 0;
+            }
+        }
+        return static_cast<double>(hits) / static_cast<double>(kQueries * kTopK);
+    };
+
+    const double recall_no_rerank = runRecall(1);
+    const double recall_rerank8 = runRecall(8);
+
+    INFO("recall rerank=1: " << recall_no_rerank << ", rerank=8: " << recall_rerank8);
+    CHECK(recall_rerank8 > recall_no_rerank);
+    CHECK(recall_rerank8 >= 0.85);
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine basic",
@@ -1099,6 +1177,46 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
         CHECK(isAorC);
         CHECK(result.document_hash != "doc_group_B");
     }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend searchSimilar combined document_hash and candidate_hashes",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 20; ++i) {
+        const std::string docGroup = (i < 10) ? "doc_A" : "doc_B";
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(backend
+                    .insertVector(createVectorRecord("combo_" + std::to_string(i), emb, docGroup))
+                    .has_value());
+    }
+
+    auto query = createEmbedding(64, 5.0f);
+
+    std::unordered_set<std::string> bothGroups = {"doc_A", "doc_B"};
+    auto combined = backend.searchSimilar(query, 10, 0.0f, std::string("doc_A"), bothGroups, {});
+    REQUIRE(combined.has_value());
+    REQUIRE_FALSE(combined.value().empty());
+    for (const auto& r : combined.value()) {
+        CHECK(r.document_hash == "doc_A");
+    }
+
+    std::unordered_set<std::string> onlyB = {"doc_B"};
+    auto disjoint = backend.searchSimilar(query, 10, 0.0f, std::string("doc_A"), onlyB, {});
+    REQUIRE(disjoint.has_value());
+    CHECK(disjoint.value().empty());
+
+    auto exact = backend.searchSimilar(createEmbedding(64, 3.0f), 1, 0.9f, std::string("doc_A"),
+                                       bothGroups, {});
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().size() == 1);
+    CHECK(exact.value().front().chunk_id == "chunk_combo_2");
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,

@@ -171,7 +171,7 @@ inline void setOnnxShutdownMarker(bool enabled) {
 template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
 size_t
 adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& interfaceName,
-                     int interfaceVersion,
+                     uint32_t interfaceVersion,
                      std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
                      const std::function<bool(const AbiTableType*)>& validateTable = nullptr) {
     size_t adopted = 0;

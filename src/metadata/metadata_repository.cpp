@@ -337,7 +337,6 @@ Result<std::vector<DocumentInfo>> MetadataRepository::queryDocumentsBySpec(
 std::optional<DocumentInfo>
 MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::lookupPathCache");
-    flushPathCacheBuffer();
     auto snap = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
     if (!snap)
         return std::nullopt;
@@ -352,12 +351,35 @@ MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
 void MetadataRepository::storePathCache(const DocumentInfo& info) const {
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
-        pathCacheWriteBuffer_.pending.push_back(info);
+        pathCacheWriteBuffer_.pending.push_back(
+            PathCacheWriteBuffer::Op{.doc = info, .erasePath = {}, .erase = false});
     }
     auto pending = pathCacheWriteBuffer_.size.fetch_add(1, std::memory_order_relaxed) + 1;
     if (pending >= kPathCacheFlushThreshold) {
         flushPathCacheBuffer();
     }
+}
+
+void MetadataRepository::invalidatePathCache(const std::string& filePath) const {
+    invalidatePathCache(std::vector<std::string>{filePath});
+}
+
+void MetadataRepository::invalidatePathCache(const std::vector<std::string>& filePaths) const {
+    if (filePaths.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
+        for (const auto& path : filePaths) {
+            if (path.empty()) {
+                continue;
+            }
+            pathCacheWriteBuffer_.pending.push_back(
+                PathCacheWriteBuffer::Op{.doc = {}, .erasePath = path, .erase = true});
+        }
+    }
+    pathCacheWriteBuffer_.size.fetch_add(filePaths.size(), std::memory_order_relaxed);
+    flushPathCacheBuffer();
 }
 
 void MetadataRepository::ensurePathHitRingInitialized() const {
@@ -381,7 +403,9 @@ void MetadataRepository::recordPathHit(const std::string& normalizedPath) const 
 
 void MetadataRepository::flushPathCacheBuffer() const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::flushPathCacheBuffer");
-    std::vector<DocumentInfo> batch;
+    if (pathCacheWriteBuffer_.size.load(std::memory_order_acquire) == 0)
+        return;
+    std::vector<PathCacheWriteBuffer::Op> batch;
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
         if (pathCacheWriteBuffer_.pending.empty())
@@ -398,25 +422,36 @@ void MetadataRepository::flushPathCacheBuffer() const {
 
     const auto endSeq = hitSeq_.load(std::memory_order_relaxed);
     const std::size_t toFold = static_cast<std::size_t>(std::min<uint64_t>(hitRingSize_, endSeq));
-    for (std::size_t i = 0; i < toFold; ++i) {
-        const uint64_t h =
-            hitRing_[(endSeq - 1 - i) & hitRingMask_].load(std::memory_order_relaxed);
-        if (h == 0)
-            continue;
-        for (auto& kv : updated->data) {
-            const uint64_t kh = std::hash<std::string>{}(kv.first);
-            if (kh == h) {
-                kv.second.lastHitSeq = endSeq - i;
+    if (toFold > 0 && !updated->data.empty()) {
+        std::unordered_map<uint64_t, uint64_t> hitSeqByHash;
+        hitSeqByHash.reserve(toFold);
+        for (std::size_t i = 0; i < toFold; ++i) {
+            const uint64_t h =
+                hitRing_[(endSeq - 1 - i) & hitRingMask_].load(std::memory_order_relaxed);
+            if (h == 0)
+                continue;
+            hitSeqByHash.try_emplace(h, endSeq - i);
+        }
+        if (!hitSeqByHash.empty()) {
+            for (auto& kv : updated->data) {
+                const uint64_t kh = std::hash<std::string>{}(kv.first);
+                if (auto it = hitSeqByHash.find(kh); it != hitSeqByHash.end()) {
+                    kv.second.lastHitSeq = it->second;
+                }
             }
         }
     }
 
     uint64_t lastSeq = updated->buildSeq;
-    for (const auto& info : batch) {
+    for (const auto& op : batch) {
         const auto gseq = globalSeq_.fetch_add(1, std::memory_order_relaxed);
         lastSeq = gseq;
-        auto& entry = updated->data[info.filePath];
-        entry.doc = info;
+        if (op.erase) {
+            updated->data.erase(op.erasePath);
+            continue;
+        }
+        auto& entry = updated->data[op.doc.filePath];
+        entry.doc = op.doc;
         if (entry.insertedSeq == 0)
             entry.insertedSeq = gseq;
     }
@@ -2100,6 +2135,11 @@ void MetadataRepository::logInitializedCounters() const {
 }
 
 void MetadataRepository::debugCheckInitializedCounters() const {
+    // Runs only at the end of initializeCounters() — a quiescent point where
+    // every counter was just hydrated from the DB, so these invariants are
+    // race-free here. Stateless-CLI instances now hydrate lazily before the
+    // first write (ensureCountersInitialized), which removes the transient
+    // mismatch that previously made this a no-op.
     const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
     const auto indexed = cachedIndexedCount_.load(std::memory_order_relaxed);
     const auto extracted = cachedExtractedCount_.load(std::memory_order_relaxed);

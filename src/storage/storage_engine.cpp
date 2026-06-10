@@ -514,10 +514,6 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     }
 
     // Update statistics using saturating subtraction to prevent underflow
-    YAMS_DCHECK(pImpl->stats.totalBytes.load() >= static_cast<uint64_t>(fileSize),
-                "totalBytes counter should not underflow on remove");
-    YAMS_DCHECK(pImpl->stats.totalObjects.load() >= uint64_t{1},
-                "totalObjects counter should not underflow on remove");
     core::saturating_sub(pImpl->stats.totalObjects, uint64_t{1});
     core::saturating_sub(pImpl->stats.totalBytes, static_cast<uint64_t>(fileSize));
     pImpl->stats.deleteOperations.fetch_add(1);

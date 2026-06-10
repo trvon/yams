@@ -769,7 +769,10 @@ inline bool is_transport_failure(const yams::Error& err);
 
 namespace detail {
 
-inline std::string to_lower_copy(std::string value);
+inline std::string to_lower_copy(std::string value) {
+    return yams::common::asciiToLowerCopy(std::move(value));
+}
+
 inline std::string trim_copy(std::string_view sv);
 
 inline bool cli_perf_trace_enabled() {
@@ -798,10 +801,6 @@ inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds ela
     }
 }
 
-inline std::string to_lower_copy(std::string value) {
-    return yams::common::asciiToLowerCopy(std::move(value));
-}
-
 inline std::string trim_copy(std::string_view sv) {
     std::size_t start = 0;
     std::size_t end = sv.size();
@@ -819,7 +818,7 @@ inline bool is_socket_mode_forced_by_env() {
     if (raw == nullptr || *raw == '\0') {
         return false;
     }
-    auto mode = to_lower_copy(trim_copy(raw));
+    auto mode = yams::common::asciiToLowerCopy(trim_copy(raw));
     return mode == "0" || mode == "false" || mode == "off" || mode == "no" || mode == "socket" ||
            mode == "daemon";
 }
@@ -871,9 +870,9 @@ inline Result<void> ensure_socket_daemon_ready(
         effectiveSocket = &*resolvedSocket;
     }
 
-    // When the caller explicitly pins a daemon socket and disables auto-start, trust that target
-    // and let the actual request path surface any connect failure. This avoids an extra ping per
-    // CLI process on the hot path.
+    // When the caller explicitly pins a daemon socket and disables auto-start, trust that
+    // target and let the actual request path surface any connect failure. This avoids an extra
+    // ping per CLI process on the hot path.
     if (!cfg.autoStart && explicit_socket_without_autostart()) {
         cli_perf_trace("daemon_ready.skip_explicit_socket",
                        std::chrono::duration_cast<std::chrono::microseconds>(
@@ -936,7 +935,7 @@ inline bool cli_one_shot_enabled() {
     if (raw == nullptr || *raw == '\0') {
         return false;
     }
-    auto mode = detail::to_lower_copy(detail::trim_copy(raw));
+    auto mode = yams::common::asciiToLowerCopy(detail::trim_copy(raw));
     return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
 }
 

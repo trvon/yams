@@ -3238,11 +3238,8 @@ private:
         std::sort(scores.begin(), scores.end(), cmp);
 
         std::vector<VectorRecord> records;
-        records.reserve(k);
+        records.reserve(scores.size());
         for (const auto& [approxScore, idx] : scores) {
-            if (records.size() >= k) {
-                break;
-            }
             auto record_opt =
                 getVectorByRowidUnlocked(static_cast<int64_t>(it->second->rowids[idx]));
             if (!record_opt) {
@@ -3258,6 +3255,12 @@ private:
             }
             record_opt->relevance_score = similarity;
             records.push_back(std::move(*record_opt));
+        }
+        std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+            return a.relevance_score > b.relevance_score;
+        });
+        if (records.size() > k) {
+            records.resize(k);
         }
         return records;
     }
@@ -3371,7 +3374,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        source_chunk_ids, parent_document_hash, child_document_hashes,
        quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors
-WHERE embedding_dim = ?
+WHERE embedding_dim = ?1 AND (?2 IS NULL OR document_hash = ?2)
 ORDER BY rowid
 )sql";
 
@@ -3381,6 +3384,11 @@ ORDER BY rowid
         }
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(query_embedding.size()));
+        if (document_hash) {
+            sqlite3_bind_text(stmt, 2, document_hash->c_str(), -1, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_null(stmt, 2);
+        }
 
         // Dequantizer for quantized-primary rows (when float blob is absent)
         std::unique_ptr<TurboQuantMSE> bf_tq;
@@ -3398,22 +3406,119 @@ ORDER BY rowid
             }
         }
 
+        // Fast path (no metadata filters): score from the embedding column only,
+        // then materialize full records for the top-k winners. Metadata-filter
+        // queries need the parsed record per row, so they keep the slow path.
+        if (metadata_filters.empty()) {
+            const size_t dim = query_embedding.size();
+            float query_norm_sq = 0.0f;
+            for (size_t i = 0; i < dim; ++i) {
+                query_norm_sq += query_embedding[i] * query_embedding[i];
+            }
+            const float query_norm = std::sqrt(query_norm_sq);
+            // Fixed-size min-heap on similarity keeps memory O(k) and work
+            // O(N log k) instead of accumulating every scanned row.
+            const auto heap_cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+            std::vector<std::pair<float, int64_t>> scored;
+            scored.reserve(k + 1);
+            std::vector<float> dequant_buffer;
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                if (!candidate_hashes.empty()) {
+                    const auto* hash_text = sqlite3_column_text(stmt, 2);
+                    if (!hash_text ||
+                        !candidate_hashes.contains(reinterpret_cast<const char*>(hash_text))) {
+                        continue;
+                    }
+                }
+
+                const void* blob = sqlite3_column_blob(stmt, 3);
+                const int bytes = sqlite3_column_bytes(stmt, 3);
+                std::span<const float> embedding;
+                if (blob && bytes == static_cast<int>(dim * sizeof(float))) {
+                    embedding =
+                        std::span<const float>(static_cast<const float*>(blob), dim);
+                } else if (bf_tq) {
+                    const void* packed = sqlite3_column_blob(stmt, 23);
+                    const int packed_bytes = sqlite3_column_bytes(stmt, 23);
+                    if (!packed || packed_bytes <= 0) {
+                        continue;
+                    }
+                    std::vector<uint8_t> codes(
+                        static_cast<const uint8_t*>(packed),
+                        static_cast<const uint8_t*>(packed) + packed_bytes);
+                    dequant_buffer =
+                        vector_utils::packedDequantizeVector(codes, dim, bf_tq.get());
+                    if (dequant_buffer.size() != dim) {
+                        continue;
+                    }
+                    embedding = std::span<const float>(dequant_buffer);
+                } else {
+                    continue;
+                }
+
+                float norm_sq = 0.0f;
+                bool finite = true;
+                float dot = 0.0f;
+                for (size_t i = 0; i < dim; ++i) {
+                    const float v = embedding[i];
+                    if (!std::isfinite(v)) {
+                        finite = false;
+                        break;
+                    }
+                    norm_sq += v * v;
+                    dot += v * query_embedding[i];
+                }
+                if (!finite || norm_sq <= 1e-12f) {
+                    continue;
+                }
+
+                const float denom = std::sqrt(norm_sq) * query_norm;
+                const float similarity = denom > 0.0f ? dot / denom : 0.0f;
+                if (similarity < similarity_threshold) {
+                    continue;
+                }
+                if (scored.size() < k) {
+                    scored.emplace_back(similarity, sqlite3_column_int64(stmt, 0));
+                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
+                } else if (similarity > scored.front().first) {
+                    std::pop_heap(scored.begin(), scored.end(), heap_cmp);
+                    scored.back() = {similarity, sqlite3_column_int64(stmt, 0)};
+                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
+                }
+            }
+            sqlite3_finalize(stmt);
+
+            std::sort_heap(scored.begin(), scored.end(), heap_cmp);
+
+            std::vector<VectorRecord> records;
+            records.reserve(scored.size());
+            for (const auto& [similarity, rowid] : scored) {
+                auto record_opt = getVectorByRowidUnlocked(rowid);
+                if (!record_opt) {
+                    continue;
+                }
+                record_opt->relevance_score = similarity;
+                records.push_back(std::move(*record_opt));
+            }
+            return records;
+        }
+
         std::vector<std::pair<float, VectorRecord>> scored_results;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!candidate_hashes.empty()) {
+                const auto* hash_text = sqlite3_column_text(stmt, 2);
+                if (!hash_text ||
+                    !candidate_hashes.contains(reinterpret_cast<const char*>(hash_text))) {
+                    continue;
+                }
+            }
+
             auto record = recordFromStatement(stmt);
 
             // Dequantize if embedding is absent but quantized sidecar is present
             if (record.embedding.empty() && !record.quantized.packed_codes.empty() && bf_tq) {
                 record.embedding = vector_utils::packedDequantizeVector(
                     record.quantized.packed_codes, query_embedding.size(), bf_tq.get());
-            }
-
-            if (!candidate_hashes.empty() &&
-                candidate_hashes.find(record.document_hash) == candidate_hashes.end()) {
-                continue;
-            }
-            if (document_hash && record.document_hash != *document_hash) {
-                continue;
             }
 
             bool metadata_match = true;

@@ -14,6 +14,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/storage/corpus_stats.h>
 
 using namespace std::chrono;
 using namespace yams::metadata;
@@ -75,6 +76,133 @@ TEST_CASE("MetadataRepositoryCache: repeated exact path hits cache", "[unit][met
     CHECK((d2.sha256Hash == d1.sha256Hash));
 
     // Cleanup
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepositoryCache: mutations invalidate cached path entries",
+          "[unit][metadata][cache]") {
+    auto dbPath = tempDbPath("repo_cache_invalidate_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+    MetadataRepository repo(pool);
+
+    constexpr int kDocs = 40; // > flush threshold (32) so entries land in the snapshot
+    std::vector<int64_t> ids;
+    for (int i = 0; i < kDocs; ++i) {
+        auto path = "/cache/inv_" + std::to_string(i) + ".md";
+        auto id = repo.insertDocument(mk(path, "H" + std::to_string(i)));
+        REQUIRE(id.has_value());
+        ids.push_back(id.value());
+    }
+    for (int i = 0; i < kDocs; ++i) {
+        auto path = "/cache/inv_" + std::to_string(i) + ".md";
+        auto found = repo.findDocumentByExactPath(path);
+        REQUIRE(found.has_value());
+        REQUIRE(found.value().has_value());
+    }
+
+    SECTION("deleteDocument removes the cached entry") {
+        REQUIRE(repo.deleteDocument(ids[5]).has_value());
+        auto after = repo.findDocumentByExactPath("/cache/inv_5.md");
+        REQUIRE(after.has_value());
+        CHECK_FALSE(after.value().has_value());
+    }
+
+    SECTION("updateDocument refreshes the cached entry") {
+        auto current = repo.findDocumentByExactPath("/cache/inv_6.md");
+        REQUIRE(current.has_value());
+        REQUIRE(current.value().has_value());
+        auto doc = current.value().value();
+        doc.sha256Hash = "H6_updated";
+        REQUIRE(repo.updateDocument(doc).has_value());
+
+        auto after = repo.findDocumentByExactPath("/cache/inv_6.md");
+        REQUIRE(after.has_value());
+        REQUIRE(after.value().has_value());
+        CHECK((after.value()->sha256Hash == "H6_updated"));
+    }
+
+    SECTION("rename invalidates the old path") {
+        auto current = repo.findDocumentByExactPath("/cache/inv_7.md");
+        REQUIRE(current.has_value());
+        REQUIRE(current.value().has_value());
+        auto doc = current.value().value();
+        auto derived = computePathDerivedValues("/cache/renamed_7.md");
+        doc.filePath = "/cache/renamed_7.md";
+        doc.fileName = "renamed_7.md";
+        doc.pathPrefix = derived.pathPrefix;
+        doc.reversePath = derived.reversePath;
+        doc.pathHash = derived.pathHash;
+        doc.parentHash = derived.parentHash;
+        doc.pathDepth = derived.pathDepth;
+        REQUIRE(repo.updateDocument(doc).has_value());
+
+        auto oldPath = repo.findDocumentByExactPath("/cache/inv_7.md");
+        REQUIRE(oldPath.has_value());
+        CHECK_FALSE(oldPath.value().has_value());
+
+        auto newPath = repo.findDocumentByExactPath("/cache/renamed_7.md");
+        REQUIRE(newPath.has_value());
+        CHECK(newPath.value().has_value());
+    }
+
+    SECTION("deleteDocumentsBatch removes cached entries") {
+        REQUIRE(repo.deleteDocumentsBatch({ids[8], ids[9]}).has_value());
+        auto a = repo.findDocumentByExactPath("/cache/inv_8.md");
+        REQUIRE(a.has_value());
+        CHECK_FALSE(a.value().has_value());
+        auto b = repo.findDocumentByExactPath("/cache/inv_9.md");
+        REQUIRE(b.has_value());
+        CHECK_FALSE(b.value().has_value());
+    }
+
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepository: fresh instance over existing DB hydrates counters on first write",
+          "[unit][metadata][counters]") {
+    auto dbPath = tempDbPath("repo_counter_hydrate_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+
+    std::vector<int64_t> ids;
+    {
+        MetadataRepository primary(pool);
+        primary.initializeCounters();
+        for (int i = 0; i < 3; ++i) {
+            auto id = primary.insertDocument(
+                mk("/counters/doc_" + std::to_string(i) + ".md", "CH" + std::to_string(i)));
+            REQUIRE(id.has_value());
+            ids.push_back(id.value());
+        }
+        REQUIRE(primary
+                    .setMetadata(ids[0], "tag:primary", MetadataValue(std::string("true")))
+                    .has_value());
+    }
+
+    // Second instance over the same DB, attached without initializeCounters()
+    // — the stateless-CLI case. Tagging a previously untagged document bumps
+    // docsWithTags by +1; the counters must be hydrated from the DB first or
+    // the kv_ops invariant (docsWithTags <= docCount) fires against a
+    // still-zero document count (previous behavior: SIGABRT).
+    MetadataRepository fresh(pool);
+    auto setRes = fresh.setMetadata(ids[1], "tag:fresh", MetadataValue(std::string("true")));
+    REQUIRE(setRes.has_value());
+
+    auto count = fresh.getDocumentCount();
+    REQUIRE(count.has_value());
+    CHECK(count.value() == 3);
+
+    auto stats = fresh.getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().docCount == 3);
+    CHECK(stats.value().docsWithTags >= 1);
+    CHECK(stats.value().docsWithTags <= stats.value().docCount);
+
     pool.shutdown();
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);

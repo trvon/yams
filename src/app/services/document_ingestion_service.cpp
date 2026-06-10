@@ -3,10 +3,12 @@
 #include <yams/core/assert.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <boost/asio/awaitable.hpp>
@@ -291,49 +293,49 @@ DocumentIngestionService::addBatchAsync(const std::vector<AddOptions>& batch,
 
     const std::size_t concurrency = resolveBatchConcurrency(batch.size(), maxConcurrent);
     auto exec = co_await boost::asio::this_coro::executor;
-    std::vector<std::future<Result<yams::daemon::AddDocumentResponse>>> futures;
-    std::vector<std::size_t> indices;
-    futures.reserve(concurrency);
-    indices.reserve(concurrency);
-    boost::asio::steady_timer timer(exec);
 
-    for (std::size_t offset = 0; offset < batch.size();) {
-        const std::size_t waveSize = std::min<std::size_t>(concurrency, batch.size() - offset);
-        futures.clear();
-        indices.clear();
-
-        for (std::size_t i = 0; i < waveSize; ++i) {
-            const std::size_t index = offset + i;
-            indices.push_back(index);
-            futures.push_back(boost::asio::co_spawn(
-                exec,
-                [this, opts = batch[index]]() mutable
-                    -> boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>> {
-                    co_return co_await addViaDaemonAsync(opts);
-                },
-                boost::asio::use_future));
-        }
-
-        for (std::size_t i = 0; i < futures.size(); ++i) {
+    // Sliding-window worker pool: each worker pulls the next pending index as
+    // soon as its previous request completes, keeping `concurrency` requests
+    // in flight at all times. (The previous wave-barrier + 5 ms polling join
+    // quantized every wave to the poll interval and stalled on stragglers.)
+    auto nextIndex = std::make_shared<std::atomic<std::size_t>>(0);
+    auto worker = [this, &batch, &out, nextIndex]() -> boost::asio::awaitable<void> {
+        while (true) {
+            const std::size_t index = nextIndex->fetch_add(1, std::memory_order_relaxed);
+            if (index >= batch.size()) {
+                break;
+            }
             try {
-                while (futures[i].wait_for(std::chrono::milliseconds(0)) !=
-                       std::future_status::ready) {
-                    timer.expires_after(std::chrono::milliseconds(5));
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-                out.results[indices[i]] = futures[i].get();
+                out.results[index] = co_await addViaDaemonAsync(batch[index]);
             } catch (const std::exception& e) {
-                out.results[indices[i]] =
+                out.results[index] =
                     Error{ErrorCode::InternalError,
                           std::string("batch add failed with exception: ") + e.what()};
             } catch (...) {
-                out.results[indices[i]] =
+                out.results[index] =
                     Error{ErrorCode::InternalError, "batch add failed with unknown exception"};
             }
         }
+        co_return;
+    };
 
-        offset += waveSize;
-    }
+    co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
+                                         void(std::exception_ptr)>(
+        [exec, concurrency, worker](auto handler) {
+            using HandlerT = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
+            auto remaining = std::make_shared<std::atomic<std::size_t>>(concurrency);
+            for (std::size_t w = 0; w < concurrency; ++w) {
+                boost::asio::co_spawn(exec, worker,
+                                      [handlerPtr, remaining](std::exception_ptr) {
+                                          if (remaining->fetch_sub(
+                                                  1, std::memory_order_acq_rel) == 1) {
+                                              (*handlerPtr)(nullptr);
+                                          }
+                                      });
+            }
+        },
+        boost::asio::use_awaitable);
 
     for (const auto& r : out.results) {
         if (r)

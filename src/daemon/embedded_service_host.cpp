@@ -16,6 +16,9 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/system_executor.hpp>
 
+#include <atomic>
+#include <cstdlib>
+
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -114,8 +117,24 @@ public:
 
         const std::size_t threadCount = std::max<std::size_t>(1, options_.ioThreads);
         ioThreads_.reserve(threadCount);
-        for (std::size_t i = 0; i < threadCount; ++i) {
-            ioThreads_.emplace_back([ctx = ioContext_.get()]() { ctx->run(); });
+
+        // Barrier ensures every IO thread is running before we post any work.
+        // On Windows, std::thread can return before the thread has started
+        // executing; without this, early async work can execute on a
+        // not-yet-running executor and dereference null internal state.
+        // Uses an atomic counter rather than std::barrier to avoid
+        // TSan false positives in libc++'s barrier implementation.
+        {
+            std::atomic<std::size_t> threadsStarted{0};
+            for (std::size_t i = 0; i < threadCount; ++i) {
+                ioThreads_.emplace_back([ctx = ioContext_.get(), &threadsStarted]() {
+                    threadsStarted.fetch_add(1, std::memory_order_release);
+                    ctx->run();
+                });
+            }
+            while (threadsStarted.load(std::memory_order_acquire) < threadCount) {
+                std::this_thread::yield();
+            }
         }
 
         lifecycleFsm_.reset();
@@ -314,6 +333,35 @@ Result<std::shared_ptr<EmbeddedServiceHost>>
 EmbeddedServiceHost::getOrCreate(const Options& options) {
     static std::mutex sMutex;
     static std::unordered_map<std::string, std::weak_ptr<EmbeddedServiceHost>> sHosts;
+
+    // Register an atexit handler to drain the static map before CRT begins
+    // uncontrolled static destruction. On Windows in particular, static
+    // weak_ptr destruction during CRT exit can race with IOCP-backed
+    // coroutine frames that still hold shared_ptr references.
+    static const int sAtexitRegistered = []() {
+        std::atexit([]() {
+            // Collect live hosts under the lock, then shut them down outside
+            // it: shutdown() joins threads and runs arbitrary teardown, and
+            // holding sMutex across that would deadlock any thread that
+            // reaches getOrCreate() during exit.
+            std::vector<std::shared_ptr<EmbeddedServiceHost>> live;
+            {
+                std::lock_guard<std::mutex> lk(sMutex);
+                live.reserve(sHosts.size());
+                for (auto& [key, weak] : sHosts) {
+                    if (auto host = weak.lock()) {
+                        live.push_back(std::move(host));
+                    }
+                }
+                sHosts.clear();
+            }
+            for (auto& host : live) {
+                (void)host->shutdown();
+            }
+        });
+        return 0;
+    }();
+    (void)sAtexitRegistered;
 
     Options resolved = options;
     if (resolved.dataDir.empty()) {
