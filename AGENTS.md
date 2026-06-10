@@ -1,263 +1,97 @@
 ---
-description: YAMS-first repo agent supplement for Codex (engineering + bug-bounty)
+description: YAMS repo supplement — conventions, structure, and repo-scoped rules
 argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<start|checkpoint|complete>]
 ---
 
 # AGENTS.md (Repo Supplement)
 
-This file supplements `docs/prompts/PROMPT-eng-codex.md`.
-
-Use `docs/prompts/PROMPT-eng-codex.md` for the generic Codex/YAMS operating model.
-Use `docs/prompts/PROMPT-yams-cpp-workflow.md` for repo-specific C++ design/TDD/assertion/profiling flow.
-Use this file for YAMS repo specifics, local conventions, and repo-scoped safety.
+Operating model (retrieval contract, execution loop, metadata, handoff,
+ask-first list): `docs/prompts/PROMPT-eng-codex.md`. C++ design/TDD/assertion/
+profiling flow: `docs/prompts/PROMPT-yams-cpp-workflow.md`. This file holds
+only what is specific to this repository.
 
 ## Repo Intent
 
-- Primary use: software engineering on YAMS.
-- Secondary use: bug-bounty style security research workflows (scoped, non-destructive by default).
-- Persistent memory goal: use YAMS as distributed memory across sessions, agents, and handoffs.
-
-## Repo Priorities (Overrides / Additions)
-
-- Use YAMS retrieval before local file reads when recovering context or prior decisions.
-- Keep memory artifacts small and queryable (checkpoint code + short notes > long prose dumps).
-- Index work before `git push`, and before deleting files.
-- If blackboard tools are unavailable, continue with YAMS-only workflow without blocking.
-- Do not start discovery with local search/read tools when YAMS retrieval can narrow the target first.
+Engineering on YAMS itself, plus scoped non-destructive bug-bounty research.
+Dogfood YAMS as the distributed memory across sessions, agents, and handoffs —
+`yams grep`/`search`/`graph` before local discovery, always (see the retrieval
+contract in the prompt; the graph here is rich: function-level nodes with
+`calls`/`defined_in` edges, so "who uses X" is one `yams graph --explore`).
 
 ## CLI Philosophy
 
-- Prefer clean default behavior over feature flags and one-off environment variables.
-- Add a new env knob only when it materially improves usability, debugging, or performance.
-- When a behavior can be selected automatically and safely, prefer that over exposing another user-facing switch.
-- Temporary diagnostics are fine during investigation, but remove bloat once the product behavior is clear.
+- Clean default behavior over feature flags and one-off env vars.
+- Add an env knob only when it materially improves usability/debugging/perf.
+- Auto-select behavior when safe rather than exposing another switch.
+- Remove temporary diagnostics once product behavior is clear.
 
 ## Tuning Surfaces
 
-- Tuning lives in typed config, not env vars. New search / topology / daemon knobs go on the relevant config struct (`SearchEngineConfig`, `TopologyConfig`, etc.), with a `[search.topology]` / `[topology]` / `[…]` TOML key resolved through `ConfigResolver` (`include/yams/daemon/components/ConfigResolver.h`).
-- Benches, integration tests, and production callers drive behavior by setting the typed config field directly or by writing a per-test `config.toml` and passing it via `DaemonHarnessOptions::configPath` — never by introducing a fresh `YAMS_*` env var for a tuning knob.
-- Existing `YAMS_SEARCH_TOPOLOGY_*` / `YAMS_EMBED_*` env overlays are a test-only override atop the resolver; keep them working when touching the relevant code, but do not grow the surface.
-- Reaching for `std::getenv` when adding a new tunable is the warning sign — add the field, extend `resolveSearchTopology` (or a sibling resolver), and apply it in the manager.
-
-## Repo Agent ID
-
-- Canonical format: `opencode-<task-slug>`
-- Example: `opencode-list-snippet-hydration`
-
-## Required YAMS Metadata (Repo Standard)
-
-Attach to every `yams add`:
-
-- `task`: short task slug
-- `phase`: `start|checkpoint|complete`
-- `owner`: `opencode`
-- `source`: `code|note|decision|research|evidence`
-
-Recommended in this repo:
-
-- `mode`: `engineering|bug-bounty`
-- `agent_id`: `opencode-<task-slug>`
-- `status`: `open|blocked|done`
-
-Bug-bounty additions when applicable:
-
-- `target`: program/asset identifier
-- `scope`: in-scope surface label
-- `severity`: `low|medium|high|critical`
-- `repro`: reproducibility tag
-- `impact`: impact summary tag
-
-## YAMS-First Retrieval Behavior
-
-Use this order when you need context for reasoning:
-
-1. `yams search` / `yams grep` to discover artifacts
-2. `yams get` (or MCP `get`) to read selected artifacts
-3. Local file reads for implementation details only after YAMS retrieval
-
-Behavior rules:
-
-- Use YAMS retrieval before ad-hoc local `rg`, `Read`, `Glob`, `Grep`, `cat`, or broad bash exploration for prior knowledge.
-- For discovery or context-building tasks, start with `yams grep` and/or `yams search` before local search/read tools.
-- Local tools are for implementation detail after YAMS has identified likely artifacts.
-- If YAMS fails, returns no useful hits, or is unavailable, note that explicitly and then fall back.
-- Direct local read is allowed without prior YAMS retrieval only when the user gives an exact file path, or when reading files you already changed in the current turn.
-- Do not mark chunks as rejected unless explicit user/model feedback says so.
-- Treat `served - used` as weak negative signal (`not_used`), not hard rejection.
-
-Default retrieval choice:
-
-- Exact symbol/text/pattern: `yams grep`
-- Concept / prior work / decisions / history: `yams search`
-- Codebase navigation / blast-radius questions: `yams graph --explore <symbol-or-file>` first, then raw graph traversal if needed
-- Need artifact contents after retrieval: `yams get`
-- Need exact implementation detail in a known file: local `Read`
-
-Graph-navigation rules:
-
-- Treat `yams graph --explore "<symbol-or-file-or-query>"` as the preferred first hop when you need to understand callers/callees, includes/imports, symbol ownership, likely related tests, or neighboring implementation files.
-- Search and grep results now emit `graph_explore_hint`; follow that exact hint before broad local `rg` when it names a relevant file.
-- Use raw graph traversal for precise inspection: `yams graph --name <path> --depth 1|2`, `yams graph --node-key <key> -r <relation>`, `yams graph --relations`, `yams graph --list-types`, and `yams graph --list-type <type> --scope-cwd`.
-- Use topology views when choosing where to start in unfamiliar subsystems: `yams graph --topology-snapshots`, `yams graph --topology-clusters`, then `yams graph --cluster <cluster-id>` to inspect medoids/bridges/core files.
-- If `--explore` is unavailable or fails, fall back to `yams graph --name <path> --depth 1 --limit 50`, then local reads of the most relevant connected files.
-
-Reporting when retrieval is used:
-
-- Include `UsedContext: <chunk_ids or hashes>` when known.
-- Include `Citations: <artifact paths/hashes>` or `Citations: none`.
-- Preserve `trace_id` in logs/artifacts when available.
-
-## Blackboard Coordination (If Available)
-
-Registration first:
-
-```text
-bb_register_agent({ id: "opencode-<task-slug>", name: "OpenCode Agent", capabilities: ["yams", "code", "coordination"] })
-```
-
-Minimal coordination pattern:
-
-```text
-bb_search_findings({ query: "<keywords>" })
-bb_post_finding({ agent_id: "opencode-<task-slug>", topic: "other", title: "<title>", content: "<markdown>" })
-bb_create_task({ title: "<work item>", type: "fix", priority: 2, created_by: "opencode-<task-slug>" })
-bb_claim_task({ task_id: "<task-id>", agent_id: "opencode-<task-slug>" })
-bb_update_task({ task_id: "<task-id>", status: "working" })
-```
-
-Fallback:
-
-- If blackboard is unavailable, create a YAMS claim note and proceed.
-
-## Repo Search / Recovery Commands
-
-Common discovery commands:
-
-```bash
-yams grep "<pattern>" --cwd .
-yams search "$TASK" --limit 20
-yams search "task=$TASK" --type keyword --limit 20
-```
-
-Session recovery:
-
-```bash
-yams search "owner=opencode task=<task>" --type keyword --limit 50
-yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
-```
+- Tuning lives in typed config, not env vars: new search/topology/daemon knobs
+  go on the relevant config struct (`SearchEngineConfig`, `TopologyConfig`, …)
+  with a TOML key resolved through `ConfigResolver`
+  (`include/yams/daemon/components/ConfigResolver.h`).
+- Benches/tests/callers set the typed field directly or write a per-test
+  `config.toml` (`DaemonHarnessOptions::configPath`) — never a fresh `YAMS_*`
+  env var. Existing `YAMS_SEARCH_TOPOLOGY_*` / `YAMS_EMBED_*` overlays are
+  test-only; keep them working, do not grow them.
+- Reaching for `std::getenv` for a tunable is the warning sign.
 
 ## Repo Structure (Start Here)
 
-- CLI entry points and command wiring: `src/cli/`
-- Service layer and command handlers: `src/app/services/`
-- Search implementations (grep/semantic): `src/search/`
-- Metadata and storage indexing: `src/metadata/`
-- Storage engines/backends: `src/storage/`
-- Vector DB + embeddings: `src/vector/`
-- Daemon client/server/components: `src/daemon/`
-- MCP server implementation: `src/mcp/`
-- Tests: `tests/`
+- CLI entry points: `src/cli/` · services: `src/app/services/`
+- Search (grep/semantic): `src/search/` · metadata/indexing: `src/metadata/`
+- Storage engines: `src/storage/` · vector DB/embeddings: `src/vector/`
+- Daemon client/server/components: `src/daemon/` · MCP: `src/mcp/`
+- Tests: `tests/` · vendored libs: `third_party/` (own git repos)
 
-## Repo Conventions (Condensed)
+## Conventions (Condensed)
 
-- Formatting is enforced mechanically by `.clang-format` (LLVM base, 4-space, 100-col, attach braces).
-- C++ naming patterns:
-  - functions/variables: `camelCase`
-  - types: `PascalCase`
-  - constants: `kPascalCase`
-  - member fields: trailing `_`
-  - files: `snake_case`
-- Use `Result<T>` for fallible operations and explicit propagation.
-- Prefer `YAMS_HAS_*` feature gates from `include/yams/core/cpp23_features.hpp` over raw compiler checks.
+- Formatting is mechanical: `.clang-format` (LLVM base, 4-space, 100-col).
+- Naming: functions/vars `camelCase`; types `PascalCase`; constants
+  `kPascalCase`; members trailing `_`; files `snake_case`.
+- `Result<T>` for fallible operations, explicit propagation.
+- Prefer `YAMS_HAS_*` gates from `include/yams/core/cpp23_features.hpp`.
 
-## Engineering Quality Loop (C++ / Systems)
+## Engineering Quality Loop (C++)
 
-Use this loop before changing production C++ behavior:
-
-1. **Design the seam first**: name the observable behavior, the boundary you will change, and the smallest dependency seam needed to test it. Prefer ordinary dependency injection or a narrow helper extraction; use template/link seams only when runtime polymorphism would add unacceptable cost or churn.
-2. **Red before green**: add a focused Catch2 test that fails on the current code and asserts post-fix behavior through public or repository-stable APIs. For refactors, first preserve/characterize existing behavior.
-3. **Assertion policy**: keep recoverable failures in `Result<T>`/normal error handling. Use `YAMS_ASSERT`/`YAMS_PRECONDITION`/`YAMS_POSTCONDITION` for always-on invariants, `YAMS_DCHECK` for debug-only consistency checks, and keep assertion expressions side-effect free.
-4. **Refactor under tests**: make the smallest implementation change, then reduce duplication/complexity while tests stay green. Avoid broad rewrites unless the seam/test evidence justifies them.
-5. **Measure before optimizing**: for performance claims, define the workload and KPI, collect a baseline, choose the least invasive profiler/benchmark that answers the question, change one thing, and re-measure. Use `YAMS_*` profiling macros only where the measurement question is clear.
+1. Design the seam first: observable behavior, boundary, smallest testable seam.
+2. Red before green: failing Catch2 test through public/repo-stable APIs;
+   characterize existing behavior before refactors.
+3. Assertions: recoverable failures stay in `Result<T>`; `YAMS_ASSERT`/
+   `YAMS_PRECONDITION`/`YAMS_POSTCONDITION` for always-on invariants;
+   `YAMS_DCHECK` for debug-only consistency; expressions side-effect free.
+4. Refactor under green tests; no broad rewrites without seam/test evidence.
+5. Measure before optimizing: workload + KPI + baseline, change one thing,
+   re-measure. `YAMS_*` profiling macros only with a clear question.
 
 ## Testing Conventions
 
-- **Framework**: Catch2 (v3+). All test files end in `_catch2_test.cpp`.
-- **Test location**: `tests/unit/<subsystem>/` (e.g., `tests/unit/daemon/`).
-- **Build system**: Meson. Register test executables in `tests/meson.build`.
-- **Test targets**: Named without `_exe` suffix (e.g., `catch2_dynamic_cap_sentinel`).
-- **Compile**: `meson compile -C build/debug -j4 <target_name>`. Never run parallel `meson compile` commands — they contend for the build directory lock.
-- **Run**: `build/debug/tests/<target_name>` directly, or `meson test -C build/debug <test_name>`.
-- **YAMS_TESTING gate**: Test executables are compiled with `-DYAMS_TESTING=1`. Use `#ifdef YAMS_TESTING` in production headers to expose `testing_*` helpers (e.g., `testing_postIngestBudget`, `testing_notifyWakeup`).
-- **Isolation guards**: Use RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard` from TuneAdvisor). Reset atomics and overrides between test cases.
-- **Naming**: Descriptive file names reflecting the feature under test (e.g., `dynamic_cap_sentinel_catch2_test.cpp`, `health_check_isolation_catch2_test.cpp`).
-- **TDD workflow**: Design seam → write failing behavior test (red) → implement the minimum fix (green) → refactor while tests stay green. Tests should assert post-fix behavior and fail against pre-fix code.
-- **DynamicCap sentinel**: `UINT32_MAX` means "unset/no cap". `0` means "cap to zero concurrency". When resetting DynamicCaps in tests, use `UINT32_MAX` (requires `#include <climits>`), not `0`.
+- Catch2 v3; files end `_catch2_test.cpp`; live in `tests/unit/<subsystem>/`;
+  registered in `tests/meson.build`; targets named without `_exe`.
+- Compile: `meson compile -C build/debug -j4 <target>` — never run parallel
+  meson compiles (build-dir lock contention).
+- Run: `build/debug/tests/<target>` or `meson test -C build/debug <name>`.
+- `-DYAMS_TESTING=1` gates `testing_*` helpers in production headers.
+- RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard`); reset
+  atomics/overrides between cases.
+- DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
 
-## Repo Patterns To Reuse (High Signal)
+## Patterns To Reuse (High Signal)
 
-- `TuneAdvisor`: runtime knob pattern uses static inline atomics and relaxed ordering for advisory reads.
-- `InternalEventBus`: typed channels keyed by string names for daemon component coordination.
-- `ResourceGovernor`: check admission (`canAdmitWork`, `canScaleUp`, `canLoadModel`) before heavy work.
-- `profiling.h`: use `YAMS_*` profiling macros; no-op when Tracy is disabled.
-- Async daemon paths use Boost.Asio coroutines (`boost::asio::awaitable<...>`).
+- `TuneAdvisor`: static inline atomics, relaxed reads for advisory knobs.
+- `InternalEventBus`: typed channels keyed by string names.
+- `ResourceGovernor`: check admission before heavy work.
+- `profiling.h`: `YAMS_*` macros, no-op without Tracy.
+- Daemon async paths: Boost.Asio coroutines (`boost::asio::awaitable<…>`).
 
-## Bug-Bounty Rules (Repo Use)
+## Bug-Bounty (Repo Use)
 
-Apply when `mode=bug-bounty`:
-
-- Stay within stated scope and authorized targets.
-- Prefer read-only or low-impact validation first.
-- No persistence, destructive payloads, or data exfiltration.
-- Redact secrets, tokens, cookies, and personal data before `yams add`.
-- Index evidence as short reproducible notes (`source=evidence`) plus sanitized artifacts.
-
-## Ask-First Actions
-
-Always ask before:
-
-- `git push` (index in YAMS first)
-- deleting files (index in YAMS first)
-- installing new dependencies
-- high-impact security testing steps
-
-## Minimal Repo Handoff Template
-
-```text
-TASK: $TASK
-MODE: $MODE
-PHASE: $PHASE
-AGENT: opencode-$TASK
-
-CONTEXT FOUND:
-- Blackboard: <findings/tasks or unavailable>
-- YAMS: <artifact paths/hashes>
-
-ACTIONS:
-- <what changed and why>
-
-INDEXED:
-- <files/notes indexed or why indexing failed>
-- Metadata: mode=$MODE,task=$TASK,phase=$PHASE,owner=opencode,agent_id=opencode-$TASK
-
-NEXT:
-- <next step>
-
-USED_CONTEXT:
-- <chunk_ids/hashes if known; else unknown>
-
-CITATIONS:
-- <artifact names/hashes/paths or none>
-```
-
-## When Stuck
-
-- Ask one targeted clarifying question with a recommended default.
-- Post a blackboard finding if it helps future agents.
-- Prefer small, reversible changes over speculative rewrites.
+Scoped targets only; read-only/low-impact validation first; no persistence,
+destructive payloads, or exfiltration; redact secrets before `yams add`; index
+evidence as short reproducible notes (`source=evidence`).
 
 ## Keep This File Lean
 
-- Put generic agent behavior in `docs/prompts/PROMPT-eng-codex.md`.
-- Keep this file repo-specific.
-- Avoid copying session-specific skill catalogs into this file.
+Generic agent behavior belongs in `docs/prompts/PROMPT-eng-codex.md`. No
+session-specific skill catalogs here.

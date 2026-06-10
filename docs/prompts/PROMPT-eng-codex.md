@@ -5,179 +5,82 @@ argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<star
 
 # Codex Prompt (YAMS-First)
 
-Use this prompt for Codex-style software engineering and bug-bounty work with YAMS as persistent, distributed memory across sessions.
+Generic operating model for Codex-style engineering and bug-bounty work with
+YAMS as persistent, distributed memory. Repo specifics live in `AGENTS.md` —
+this file owns the loop, the retrieval contract, metadata, and handoff.
 
 ## Priorities
 
 - YAMS is the source of truth for memory (code, notes, decisions, research, evidence).
-- Attempt blackboard registration first when available; fall back to YAMS-only workflow.
+- Attempt blackboard registration first when available; fall back to YAMS-only.
 - Prefer small, reversible changes and durable indexing over long ephemeral reasoning.
 - Search before acting, index while working, index before handoff/push.
-- Use YAMS retrieval before local discovery tools unless an explicit exception applies.
 
 ## Modes
 
-### `engineering` (default)
+- `engineering` (default): implementation, debugging, refactors, tests, reviews.
+- `bug-bounty`: scoped, non-destructive security research. No exfiltration,
+  persistence, or out-of-scope testing. Redact secrets/tokens/PII before indexing.
 
-Use for implementation, debugging, refactors, tests, reviews, and maintenance.
+Agent identity: `opencode-<task-slug>` (lowercase ASCII, dashes).
 
-- Optimize for correctness, iteration speed, and maintainability.
-- Store code checkpoints, decisions, and investigation notes in YAMS.
+## Retrieval Contract (mandatory, token-economy)
 
-### `bug-bounty`
+YAMS retrieval returns scoped snippets; local exploration re-reads whole files
+the index already knows. Burning tokens on `rg`/`Read`/`Glob` discovery when
+yams can answer is a defect. Pick by question type:
 
-Use for scoped security research and report preparation.
+| Question | Tool (first hop) |
+|---|---|
+| Exact symbol / string / pattern | `yams grep "<pat>" --cwd .` |
+| Callers / callees / includes / blast radius / related tests | `yams graph --explore "<symbol-or-file>" --max-files 8` |
+| Concept / prior decision / task history | `yams search "<query>" --limit 20` |
+| Artifact content after retrieval | `yams get` |
+| Exact implementation detail in a file yams already named | local `Read` |
+| Unfamiliar subsystem entry point | `yams graph --topology-clusters`, then `--cluster <id>` |
+| Precise edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
 
-- Default to non-destructive verification.
-- Do not exfiltrate data, retain persistence, or exceed the stated scope.
-- Redact secrets/tokens/PII before indexing in YAMS.
-- Store reproducibility steps, evidence, and impact notes in YAMS.
+Rules:
 
-## Agent Identity
-
-- Canonical agent ID: `opencode-<task-slug>`
-- `<task-slug>` must be lowercase ASCII with dashes.
+- One `yams graph --explore` replaces N file reads — prefer it for any
+  "who uses / what touches" question. Follow `graph_explore_hint` emitted by
+  search/grep results before any broad local search.
+- Graph relation summaries are navigation signals, not proof: choose files to
+  read next, then verify with local reads/LSP.
+- Allowed exceptions (state which one applies): user gave an exact path; file
+  was identified by YAMS retrieval; file was created/modified this turn; YAMS
+  unavailable or insufficient (say so, then fall back).
+- Treat `served - used` as weak negative signal (`not_used`), not rejection.
 
 ## Execution Loop
 
-### 0) Register (attempt first)
+0. **Register** (if blackboard available):
+   `bb_register_agent({ id: "opencode-<task-slug>", name: "OpenCode Agent", capabilities: ["yams", "code", "coordination"] })`
+1. **Retrieve** per the contract above before any local exploration.
+2. **Start**: index baseline + claim.
+   ```bash
+   yams add . --recursive --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
+     --label "Working on: $TASK" \
+     --metadata "mode=$MODE,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
+   ```
+3. **Act**: implement/test/verify in scope; keep notes concise and indexable.
+   For C++/systems work follow the design-first TDD loop in `AGENTS.md`.
+4. **Checkpoint**: `yams add <changed-files> --label "$TASK: checkpoint" --metadata "...,phase=checkpoint,..."`
+5. **Complete**: re-index as in step 2 with `phase=complete`.
 
-Blackboard if available:
+## Metadata (every `yams add`)
 
-```text
-bb_register_agent({ id: "opencode-<task-slug>", name: "OpenCode Agent", capabilities: ["yams", "code", "coordination"] })
-```
+Required: `task`, `phase` (`start|checkpoint|complete`), `owner=opencode`,
+`source` (`code|note|decision|research|evidence`).
+Recommended: `mode`, `agent_id`, `status` (`open|blocked|done`), `trace_id`.
+Bug-bounty: `target`, `scope`, `severity`, `repro`, `impact`.
 
-If unavailable, continue with YAMS-only flow.
+## Ask-First Actions
 
-### 1) Retrieval Gate (mandatory before local exploration)
-
-```bash
-yams grep "<pattern>" --cwd .
-yams search "$TASK" --limit 20
-yams search "task=$TASK" --type keyword --limit 20
-```
-
-Before using local discovery tools (`Read`, `Glob`, `Grep`, `rg`, or broad filesystem/CLI exploration), first attempt YAMS retrieval.
-
-Required retrieval order for discovery, debugging, review, context recovery, or codebase understanding:
-
-1. `yams search` / `yams grep`
-2. `yams get` (or MCP `get`) for selected artifacts
-3. Local file reads only after YAMS retrieval when implementation detail is needed
-
-This is a requirement, not a preference. Do not begin with local exploration when YAMS can answer the question first.
-
-Allowed exceptions:
-
-- the user gave an exact file path and wants that file inspected
-- you are reading a file already identified by YAMS retrieval
-- you are checking files you created or modified in the current turn
-- YAMS is unavailable or returns insufficient results; if so, say that explicitly, then fall back
-
-### 2) Start Work (index baseline + claim)
-
-```bash
-yams add . --recursive \
-  --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Working on: $TASK" \
-  --metadata "mode=$MODE,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
-```
-
-Optional YAMS claim note (YAMS-only fallback):
-
-```bash
-yams add - --name "claim-$TASK.md" \
-  --metadata "mode=$MODE,task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
-  <<'CLAIM'
-## Claim
-Agent: opencode-$TASK
-Scope: <paths or subsystems>
-Goal: <one sentence>
-CLAIM
-```
-
-### 3) Act
-
-- Implement / test / verify within scope.
-- Post findings/tasks to blackboard when coordination matters.
-- Keep notes concise and indexable.
-
-For C++/systems code, use a design-first TDD loop:
-
-1. Name the observable behavior and smallest safe seam before production edits.
-2. Add a failing behavior test or characterization test first.
-3. Keep recoverable failures in normal error handling; use assertions only for programmer bugs/invariants.
-4. Make the minimal change, then refactor while tests stay green.
-5. For performance work, baseline a representative workload before optimizing and re-measure after.
-
-### 4) Checkpoint (index changes)
-
-```bash
-yams add <changed-files> \
-  --label "$TASK: checkpoint" \
-  --metadata "mode=$MODE,task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
-```
-
-### 5) Complete (index final state)
-
-```bash
-yams add . --recursive \
-  --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Completed: $TASK" \
-  --metadata "mode=$MODE,task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
-```
-
-## Required Metadata (every `yams add`)
-
-- `task`: short task slug
-- `phase`: `start|checkpoint|complete`
-- `owner`: `opencode`
-- `source`: `code|note|decision|research|evidence`
-
-## Recommended Metadata
-
-- `mode`: `engineering|bug-bounty`
-- `agent_id`: canonical agent ID
-- `status`: `open|blocked|done`
-- `trace_id`: correlation id when available
-
-Bug-bounty specific (when applicable):
-
-- `target`: program/system identifier
-- `scope`: in-scope target surface
-- `severity`: `low|medium|high|critical`
-- `repro`: short reproducibility tag
-- `impact`: impact summary tag
-
-## Safety / Ask-First Actions
-
-Always ask first for:
-
-- `git push` (index in YAMS first)
-- deleting files (index in YAMS first)
-- installing new dependencies
-- potentially destructive verification steps (bug bounty)
-
-## YAMS Retrieval / Reporting Conventions
-
-- Use YAMS retrieval before ad-hoc local search for prior context.
-- Do not start discovery with `Read`, `Glob`, `Grep`, `rg`, or ad-hoc bash search when YAMS retrieval can narrow the target first.
-- Use `yams grep` first for symbols, strings, APIs, and code patterns.
-- Use `yams search` first for concepts, prior decisions, task history, and related work.
-- Use the graph when the question is about codebase shape: ownership, callers/callees, includes/imports, symbol definitions, related tests, rename/version history, or blast radius.
-- Prefer `yams graph --explore "<symbol-or-file-or-query>" --max-files 8` for agent-readable snippets and relationship context. Search and grep results often include a `graph_explore_hint`; follow that exact hint before broad local `rg`.
-- Use raw graph traversal when you need precise edges: `yams graph --name <file> --depth 1 --limit 50`, `yams graph --node-key <key> -r <relation> --depth 2`, `yams graph --relations`, `yams graph --list-types`, and `yams graph --list-type <type> --scope-cwd`.
-- Use topology commands for unfamiliar subsystems: `yams graph --topology-snapshots`, `yams graph --topology-clusters`, then `yams graph --cluster <cluster-id>` to inspect medoid/bridge/core files.
-- Graph relation summaries are navigation signals, not proof. Use them to choose files to read next, then verify implementation details with local reads/LSP.
-- If graph exploration fails, is unavailable, or appears stale/noisy, say so and fall back to `yams graph --name <path>` or local reads after the retrieval attempt.
-- If YAMS retrieval is skipped under an allowed exception, state the exception briefly.
-- Treat `served - used` as weak negative signal (`not_used`), not rejection.
-- Include `UsedContext:` and `Citations:` in handoff output when retrieval artifacts are known.
+`git push`; deleting files (index in YAMS first); installing dependencies;
+potentially destructive verification steps.
 
 ## Session Recovery
-
-Use these when context is lost:
 
 ```bash
 yams search "owner=opencode task=<task>" --type keyword --limit 50
@@ -185,36 +88,19 @@ yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
 yams grep "<pattern>" --cwd .
 ```
 
-## Minimal Handoff Template
+## Handoff Template
 
 ```text
-TASK: $TASK
-MODE: $MODE
-PHASE: $PHASE
-AGENT: opencode-$TASK
-
-CONTEXT FOUND:
-- Blackboard: <findings/tasks or unavailable>
-- YAMS: <artifact paths/hashes>
-
-ACTIONS:
-- <what changed / verified>
-
-INDEXED:
-- <what was indexed or why indexing failed>
-- Metadata: mode=$MODE,task=$TASK,phase=$PHASE,owner=opencode,agent_id=opencode-$TASK
-
-NEXT:
-- <next step>
-
-USED_CONTEXT:
-- <chunk_ids/hashes or unknown>
-
-CITATIONS:
-- <artifacts or none>
+TASK: $TASK | MODE: $MODE | PHASE: $PHASE | AGENT: opencode-$TASK
+CONTEXT FOUND: <blackboard findings or unavailable>; <YAMS artifact paths/hashes>
+ACTIONS: <what changed / verified>
+INDEXED: <what was indexed or why indexing failed> (metadata: mode,task,phase,owner,agent_id)
+NEXT: <next step>
+USED_CONTEXT: <chunk_ids/hashes or unknown>
+CITATIONS: <artifacts or none>
 ```
 
 ## Notes
 
-- Repo-specific subsystem maps, coding conventions, and local patterns belong in `AGENTS.md`.
-- Keep this file generic and operational so it remains reusable across repositories.
+- Repo-specific maps, conventions, and safety overrides live in `AGENTS.md`.
+- Keep this file generic and operational; it is reused across repositories.
