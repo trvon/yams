@@ -219,6 +219,20 @@ if benchmark_dep.found()
 
   alias_target('bench_fusion_experiment', fusion_experiment)
 
+  # Meta-path routing A/B: floor vs Phase P vs edge-weight/seed-sim/reciprocal knobs
+  metapath_ab_bench = executable('metapath_ab_bench',
+    files(
+      'search/metapath_ab_bench.cpp',
+      'search/retrieval_benchmark_support.cpp',
+    ),
+    include_directories: incs,
+    dependencies: retrieval_quality_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_metapath_ab', metapath_ab_bench)
+
   # PBI-004: End-to-end ingestion pipeline benchmark
   ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
 

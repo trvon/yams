@@ -95,6 +95,7 @@ extern char** environ;
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
+#include "bench_utils.h"
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -2110,23 +2111,7 @@ std::string generateDocument(int clientId, int docIndex, size_t targetBytes) {
     return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ISO timestamp helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-std::string isoTimestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &tt);
-#else
-    gmtime_r(&tt, &tm);
-#endif
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
-}
+using yams::bench::isoTimestamp;
 
 std::string toLowerCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),

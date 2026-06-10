@@ -2590,6 +2590,62 @@ public:
         });
     }
 
+    void initializeEntityCountSnapshot() override {
+        if (!pool_) {
+            return;
+        }
+        auto result = pool_->withConnection([&](Database& db) -> Result<KGEntityCountSnapshot> {
+            auto stmtR = db.prepare(R"(
+                SELECT COUNT(*),
+                       SUM(CASE WHEN extractor = 'symbol_extractor_v1' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN extractor LIKE 'gliner%' THEN 1 ELSE 0 END)
+                FROM kg_doc_entities
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
+            const bool hasRow = stepResult.value();
+            if (!hasRow)
+                return KGEntityCountSnapshot{};
+
+            KGEntityCountSnapshot snap{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+
+            // Edge count
+            if (auto eStmtR = db.prepare("SELECT COUNT(*) FROM kg_edges")) {
+                auto eStmt = std::move(eStmtR).value();
+                if (auto eStep = eStmt.step(); eStep && eStep.value())
+                    snap.edgeCount = eStmt.getInt64(0);
+            }
+            // Alias count
+            if (auto aStmtR = db.prepare("SELECT COUNT(*) FROM kg_aliases")) {
+                auto aStmt = std::move(aStmtR).value();
+                if (auto aStep = aStmt.step(); aStep && aStep.value())
+                    snap.aliasCount = aStmt.getInt64(0);
+            }
+            return snap;
+        });
+        if (result) {
+            entityCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().totalCount, 0)),
+                std::memory_order_release);
+            nativeEntityCount_.store(static_cast<std::uint64_t>(std::max<std::int64_t>(
+                                         result.value().nativeSymbolCount, 0)),
+                                     std::memory_order_release);
+            nerEntityCount_.store(static_cast<std::uint64_t>(
+                                      std::max<std::int64_t>(result.value().nerEntityCount, 0)),
+                                  std::memory_order_release);
+            edgeCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().edgeCount, 0)),
+                std::memory_order_release);
+            aliasCount_.store(
+                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().aliasCount, 0)),
+                std::memory_order_release);
+        }
+    }
+
 private:
     struct EntityCountDelta {
         std::int64_t totalCount{0};
@@ -2646,62 +2702,6 @@ private:
         apply(nerEntityCount_, nerDelta);
         apply(edgeCount_, edgeDelta);
         apply(aliasCount_, aliasDelta);
-    }
-
-    void initializeEntityCountSnapshot() {
-        if (!pool_) {
-            return;
-        }
-        auto result = pool_->withConnection([&](Database& db) -> Result<KGEntityCountSnapshot> {
-            auto stmtR = db.prepare(R"(
-                SELECT COUNT(*),
-                       SUM(CASE WHEN extractor = 'symbol_extractor_v1' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN extractor LIKE 'gliner%' THEN 1 ELSE 0 END)
-                FROM kg_doc_entities
-            )");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            const bool hasRow = stepResult.value();
-            if (!hasRow)
-                return KGEntityCountSnapshot{};
-
-            KGEntityCountSnapshot snap{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
-
-            // Edge count
-            if (auto eStmtR = db.prepare("SELECT COUNT(*) FROM kg_edges")) {
-                auto eStmt = std::move(eStmtR).value();
-                if (auto eStep = eStmt.step(); eStep && eStep.value())
-                    snap.edgeCount = eStmt.getInt64(0);
-            }
-            // Alias count
-            if (auto aStmtR = db.prepare("SELECT COUNT(*) FROM kg_aliases")) {
-                auto aStmt = std::move(aStmtR).value();
-                if (auto aStep = aStmt.step(); aStep && aStep.value())
-                    snap.aliasCount = aStmt.getInt64(0);
-            }
-            return snap;
-        });
-        if (result) {
-            entityCount_.store(
-                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().totalCount, 0)),
-                std::memory_order_release);
-            nativeEntityCount_.store(static_cast<std::uint64_t>(std::max<std::int64_t>(
-                                         result.value().nativeSymbolCount, 0)),
-                                     std::memory_order_release);
-            nerEntityCount_.store(static_cast<std::uint64_t>(
-                                      std::max<std::int64_t>(result.value().nerEntityCount, 0)),
-                                  std::memory_order_release);
-            edgeCount_.store(
-                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().edgeCount, 0)),
-                std::memory_order_release);
-            aliasCount_.store(
-                static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().aliasCount, 0)),
-                std::memory_order_release);
-        }
     }
 
     ConnectionPool* readPool() const noexcept { return readPool_ ? readPool_ : pool_; }

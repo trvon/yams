@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include "../common/env_compat.h"
+#include "bench_utils.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 
@@ -31,26 +32,6 @@ struct TimingSample {
 bool envIsOne(const char* name) {
     const char* value = std::getenv(name);
     return value && std::string_view(value) == "1";
-}
-
-int readEnvInt(const char* name, int fallback, int minValue, int maxValue) {
-    const char* value = std::getenv(name);
-    if (!value || !*value) {
-        return fallback;
-    }
-    char* end = nullptr;
-    errno = 0;
-    long parsed = std::strtol(value, &end, 10);
-    if (errno != 0 || end == value || (end && *end != '\0')) {
-        return fallback;
-    }
-    if (parsed < static_cast<long>(minValue)) {
-        return minValue;
-    }
-    if (parsed > static_cast<long>(maxValue)) {
-        return maxValue;
-    }
-    return static_cast<int>(parsed);
 }
 
 std::optional<spdlog::level::level_enum> parseLogLevel(const std::string_view level) {
@@ -89,14 +70,8 @@ double meanMs(const std::vector<long long>& values) {
     return static_cast<double>(sum) / static_cast<double>(values.size());
 }
 
-long long percentileMs(std::vector<long long> values, int p) {
-    if (values.empty()) {
-        return 0;
-    }
-    std::sort(values.begin(), values.end());
-    const size_t idx = static_cast<size_t>((static_cast<double>(p) / 100.0) *
-                                           static_cast<double>(values.size() - 1));
-    return values[idx];
+long long percentileMs(const std::vector<long long>& values, int p) {
+    return yams::bench::percentileNearestRank(values, static_cast<double>(p) / 100.0);
 }
 
 } // namespace
@@ -117,9 +92,11 @@ int main() {
     const bool profileLoop = envIsOne("YAMS_DAEMON_BENCH_PROFILE_LOOP");
     const bool minThreads = envIsOne("YAMS_DAEMON_BENCH_MIN_THREADS");
     const int iterations =
-        readEnvInt("YAMS_DAEMON_BENCH_ITERATIONS", profileLoop ? 200 : 1, 1, 10000);
-    const int holdMs = readEnvInt("YAMS_DAEMON_BENCH_SLEEP_MS", profileLoop ? 0 : 50, 0, 5000);
-    const int maxTotalMs = readEnvInt("YAMS_DAEMON_BENCH_MAX_TOTAL_MS", 5000, 100, 300000);
+        yams::bench::readIntEnv("YAMS_DAEMON_BENCH_ITERATIONS", profileLoop ? 200 : 1, 1, 10000);
+    const int holdMs =
+        yams::bench::readIntEnv("YAMS_DAEMON_BENCH_SLEEP_MS", profileLoop ? 0 : 50, 0, 5000);
+    const int maxTotalMs =
+        yams::bench::readIntEnv("YAMS_DAEMON_BENCH_MAX_TOTAL_MS", 5000, 100, 300000);
 
     if (const char* ll = std::getenv("YAMS_DAEMON_BENCH_LOG_LEVEL"); ll && *ll) {
         if (auto parsedLevel = parseLogLevel(ll); parsedLevel.has_value()) {

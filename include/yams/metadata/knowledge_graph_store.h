@@ -227,6 +227,11 @@ public:
     virtual void updateEnqueueCounts(std::int64_t /*entities*/, std::int64_t /*edges*/,
                                      std::int64_t /*aliases*/) {}
 
+    // Re-sync entity count atomics from the backing database.
+    // Useful when the cache is stale and the overlay path needs
+    // fresh counts without a full document-table reconcile.
+    virtual void initializeEntityCountSnapshot() {}
+
     // -----------------------------------------------------------------------------
     // Nodes
     // -----------------------------------------------------------------------------

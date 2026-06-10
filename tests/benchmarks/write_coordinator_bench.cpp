@@ -35,6 +35,7 @@
 #include <spdlog/spdlog.h>
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_daemon_harness.h"
+#include "bench_utils.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
@@ -55,35 +56,18 @@ struct BenchConfig {
     std::string outputPath{"bench_results/write_coordinator.jsonl"};
 };
 
+using yams::bench::isoTimestamp;
+using yams::bench::readIntEnv;
+
 BenchConfig loadConfig() {
     BenchConfig cfg;
-    auto readInt = [](const char* name, int fallback, int minVal, int maxVal) {
-        const char* val = std::getenv(name);
-        if (!val || !*val)
-            return fallback;
-        char* end = nullptr;
-        long parsed = std::strtol(val, &end, 10);
-        if (end == nullptr || end == val || *end != '\0')
-            return fallback;
-        return static_cast<int>(std::clamp<long>(parsed, minVal, maxVal));
-    };
-    cfg.numFiles = readInt("YAMS_BENCH_NUM_FILES", 100, 1, 50000);
-    cfg.fileSizeBytes = readInt("YAMS_BENCH_FILE_SIZE_BYTES", 1024, 64, 1024 * 1024);
-    cfg.versionIterations = readInt("YAMS_BENCH_VERSION_ITERATIONS", 3, 1, 50);
-    cfg.repeat = readInt("YAMS_BENCH_REPEAT", 1, 1, 20);
+    cfg.numFiles = readIntEnv("YAMS_BENCH_NUM_FILES", 100, 1, 50000);
+    cfg.fileSizeBytes = readIntEnv("YAMS_BENCH_FILE_SIZE_BYTES", 1024, 64, 1024 * 1024);
+    cfg.versionIterations = readIntEnv("YAMS_BENCH_VERSION_ITERATIONS", 3, 1, 50);
+    cfg.repeat = readIntEnv("YAMS_BENCH_REPEAT", 1, 1, 20);
     if (const char* out = std::getenv("YAMS_BENCH_OUTPUT"))
         cfg.outputPath = out;
     return cfg;
-}
-
-std::string isoTimestamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    gmtime_r(&tt, &tm);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
 }
 
 void ensureOutputDir(const fs::path& path) {

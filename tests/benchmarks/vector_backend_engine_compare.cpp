@@ -13,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "bench_utils.h"
 #include <yams/vector/sqlite_vec_backend.h>
 
 using namespace yams::vector;
@@ -130,12 +131,7 @@ std::vector<size_t> bruteForceTopK(const std::vector<float>& query,
 }
 
 double percentile(std::vector<double> values, double p) {
-    if (values.empty()) {
-        return 0.0;
-    }
-    std::sort(values.begin(), values.end());
-    size_t idx = static_cast<size_t>(std::floor((values.size() - 1) * p));
-    return values[idx];
+    return yams::bench::percentileNearestRank(std::move(values), p);
 }
 
 EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
@@ -306,9 +302,8 @@ int main(int argc, char* argv[]) {
                     latencies.push_back(
                         std::chrono::duration<double, std::micro>(end - start).count());
                 }
-                const double mean =
-                    std::accumulate(latencies.begin(), latencies.end(), 0.0) /
-                    static_cast<double>(latencies.size());
+                const double mean = std::accumulate(latencies.begin(), latencies.end(), 0.0) /
+                                    static_cast<double>(latencies.size());
                 std::printf("candidates=%5.0f%% (%6zu docs)  mean=%8.1f us  p95=%8.1f us\n",
                             fraction * 100.0, n_candidates, mean, percentile(latencies, 0.95));
             }

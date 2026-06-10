@@ -37,12 +37,13 @@
 #include <string>
 #include <vector>
 
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/use_future.hpp>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include "../integration/daemon/test_daemon_harness.h"
+#include "bench_utils.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/cli/cli_sync.h>
@@ -56,18 +57,8 @@ using yams::test::DaemonHarness;
 
 namespace {
 
-int readIntEnv(const char* name, int fallback, int minVal, int maxVal) {
-    const char* val = std::getenv(name);
-    if (!val || !*val) {
-        return fallback;
-    }
-    char* end = nullptr;
-    long parsed = std::strtol(val, &end, 10);
-    if (end == nullptr || end == val || *end != '\0') {
-        return fallback;
-    }
-    return static_cast<int>(std::clamp<long>(parsed, minVal, maxVal));
-}
+using yams::bench::isoTimestamp;
+using yams::bench::readIntEnv;
 
 std::vector<int> readWindowsEnv() {
     std::vector<int> windows;
@@ -116,13 +107,7 @@ struct WindowResult {
 };
 
 double percentileUs(std::vector<double> values, double q) {
-    if (values.empty()) {
-        return 0.0;
-    }
-    std::sort(values.begin(), values.end());
-    const auto idx = std::min(values.size() - 1,
-                              static_cast<std::size_t>(q * static_cast<double>(values.size() - 1)));
-    return values[idx];
+    return yams::bench::percentileNearestRank(std::move(values), q);
 }
 
 WindowResult runWindow(const std::string& socketPath, int window, int totalDocs,
@@ -161,8 +146,8 @@ WindowResult runWindow(const std::string& socketPath, int window, int totalDocs,
                         break;
                     }
                     yams::daemon::AddDocumentRequest req;
-                    req.name = "pipeline_w" + std::to_string(window) + "_d" +
-                               std::to_string(doc) + ".md";
+                    req.name =
+                        "pipeline_w" + std::to_string(window) + "_d" + std::to_string(doc) + ".md";
                     req.content = generateContent(window, doc, docBytes);
                     req.tags = {"bench", "pipeline"};
 
@@ -191,10 +176,9 @@ WindowResult runWindow(const std::string& socketPath, int window, int totalDocs,
     result.elapsedSeconds = std::chrono::duration<double>(end - start).count();
     result.docsIngested = ok.load();
     result.failures = failed.load();
-    result.docsPerSec =
-        result.elapsedSeconds > 0.0
-            ? static_cast<double>(result.docsIngested) / result.elapsedSeconds
-            : 0.0;
+    result.docsPerSec = result.elapsedSeconds > 0.0
+                            ? static_cast<double>(result.docsIngested) / result.elapsedSeconds
+                            : 0.0;
     for (auto& worker : perWorker) {
         result.latenciesUs.insert(result.latenciesUs.end(), worker.values.begin(),
                                   worker.values.end());
@@ -208,16 +192,6 @@ void appendJsonLine(const fs::path& outputPath, const json& record) {
     }
     std::ofstream out(outputPath, std::ios::app);
     out << record.dump() << '\n';
-}
-
-std::string isoTimestamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    gmtime_r(&tt, &tm);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
 }
 
 } // namespace
@@ -260,8 +234,7 @@ TEST_CASE("Single-client pipelining: addBatchAsync window scaling",
 
         const auto start = std::chrono::steady_clock::now();
         auto fut = boost::asio::co_spawn(yams::daemon::GlobalIOContext::global_executor(),
-                                         ing.addBatchAsync(batch, window),
-                                         boost::asio::use_future);
+                                         ing.addBatchAsync(batch, window), boost::asio::use_future);
         const auto batchResult = fut.get();
         const auto elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

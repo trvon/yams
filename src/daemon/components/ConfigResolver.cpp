@@ -859,6 +859,65 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
     return policy;
 }
 
+ConfigResolver::MetaPathRoutingPolicy ConfigResolver::resolveMetaPathRoutingPolicy() {
+    MetaPathRoutingPolicy policy;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return policy;
+        }
+        const auto kv = parseSimpleTomlFlat(cfgPath);
+        const auto lookup = [&kv](std::string_view key) -> const std::string* {
+            auto it = kv.find(std::string(key));
+            return it != kv.end() ? &it->second : nullptr;
+        };
+
+        if (const auto* raw = lookup("search.meta_path.enable")) {
+            policy.enable = parseBoolValue(*raw);
+        }
+        if (const auto* raw = lookup("search.meta_path.use_edge_weights")) {
+            policy.useEdgeWeights = parseBoolValue(*raw);
+        }
+        if (const auto* raw = lookup("search.meta_path.reciprocal_only")) {
+            policy.reciprocalOnly = parseBoolValue(*raw);
+        }
+
+        const std::pair<std::string_view, std::optional<std::size_t>*> sizeKeys[] = {
+            {"search.meta_path.seed_k", &policy.seedK},
+            {"search.meta_path.hop_limit", &policy.hopLimit},
+        };
+        for (const auto& [key, slot] : sizeKeys) {
+            if (const auto* raw = lookup(key)) {
+                *slot = parseSize(*raw);
+            }
+        }
+
+        const std::pair<std::string_view, std::optional<float>*> floatKeys[] = {
+            {"search.meta_path.boost_alpha", &policy.boostAlpha},
+            {"search.meta_path.weight_sem", &policy.weightSem},
+            {"search.meta_path.weight_call", &policy.weightCall},
+            {"search.meta_path.weight_def", &policy.weightDef},
+            {"search.meta_path.weight_entity", &policy.weightEntity},
+            {"search.meta_path.min_seed_similarity", &policy.minSeedSimilarity},
+            {"search.meta_path.seed_similarity", &policy.seedSimilarity},
+        };
+        for (const auto& [key, slot] : floatKeys) {
+            if (const auto* raw = lookup(key)) {
+                try {
+                    *slot = std::stof(*raw);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for meta-path routing policy: {}", e.what());
+    }
+
+    return policy;
+}
+
 ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy() {
     TopologyEnginePolicy policy;
 

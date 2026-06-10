@@ -2164,9 +2164,10 @@ void MetadataRepository::debugCheckInitializedCounters() const {
 }
 
 void MetadataRepository::initializeCounters() {
-    if (countersInitialized_.exchange(true, std::memory_order_acquire)) {
-        return; // Already initialized
-    }
+    // Explicit calls always re-sync from the DB; once-only semantics live in
+    // ensureCountersInitialized(). Setting the flag before the queries below
+    // keeps the lazy write-path hook from recursing into this function.
+    countersInitialized_.store(true, std::memory_order_release);
 
     try {
         // Query actual counts from DB once at startup
@@ -2616,6 +2617,12 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             }
 
             if (countersPrimedForOverlay && age < kCorpusStatsOverlayTtl) {
+                // When the cache is explicitly stale, refresh KG entity counters
+                // from the DB before merging — in-memory atomics may have drifted
+                // from direct DB writes (e.g., addDocEntities via WriteBatch).
+                if (isStale && kgStore_) {
+                    kgStore_->initializeEntityCountSnapshot();
+                }
                 auto merged = mergeOnlineOverlay(*cachedCorpusStats_);
                 if (isStale || !docCountUnchanged) {
                     return merged;
@@ -2631,7 +2638,12 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     // ~5s and was previously gating the Search Engine build critical path.
     // The synthesized stats are marked stale so the next call after
     // kCorpusStatsOverlayTtl (5 min) promotes to a reconciled snapshot.
-    if (countersPrimedForOverlay && cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
+    // Only worthwhile on large corpora: the overlay is lossy (no pathDepthMin,
+    // approximated ratios), and below this size the reconcile is cheap, so
+    // small corpora (tests, fresh CLI stores) always get exact stats.
+    constexpr uint64_t kColdStartOverlayMinDocs = 4096;
+    if (countersPrimedForOverlay &&
+        cachedDocumentCount_.load(std::memory_order_relaxed) >= kColdStartOverlayMinDocs) {
         storage::CorpusStats baseline;
         auto merged = mergeOnlineOverlay(baseline);
         {

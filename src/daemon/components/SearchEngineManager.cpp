@@ -356,6 +356,29 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
+    // Meta-path routing (Phase P/Y graph-walk boost) is opt-in via [search.meta_path].
+    {
+        const auto mp = ConfigResolver::resolveMetaPathRoutingPolicy();
+        auto& cfg = opts.config;
+        cfg.enableMetaPathRouting = mp.enable.value_or(cfg.enableMetaPathRouting);
+        cfg.metaPathSeedK = mp.seedK.value_or(cfg.metaPathSeedK);
+        cfg.metaPathHopLimit = mp.hopLimit.value_or(cfg.metaPathHopLimit);
+        cfg.metaPathBoostAlpha = mp.boostAlpha.value_or(cfg.metaPathBoostAlpha);
+        cfg.metaPathWeightSem = mp.weightSem.value_or(cfg.metaPathWeightSem);
+        cfg.metaPathWeightCall = mp.weightCall.value_or(cfg.metaPathWeightCall);
+        cfg.metaPathWeightDef = mp.weightDef.value_or(cfg.metaPathWeightDef);
+        cfg.metaPathWeightEntity = mp.weightEntity.value_or(cfg.metaPathWeightEntity);
+        cfg.metaPathUseEdgeWeights = mp.useEdgeWeights.value_or(cfg.metaPathUseEdgeWeights);
+        cfg.metaPathMinSeedSimilarity =
+            mp.minSeedSimilarity.value_or(cfg.metaPathMinSeedSimilarity);
+        cfg.metaPathReciprocalOnly = mp.reciprocalOnly.value_or(cfg.metaPathReciprocalOnly);
+        cfg.metaPathSeedSimilarity = mp.seedSimilarity.value_or(cfg.metaPathSeedSimilarity);
+        if (cfg.enableMetaPathRouting) {
+            spdlog::info("SearchEngine meta-path routing enabled via config (seedK={}, alpha={})",
+                         cfg.metaPathSeedK, cfg.metaPathBoostAlpha);
+        }
+    }
+
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
         opts.config.vectorMaxResults = 0;
