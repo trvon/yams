@@ -337,7 +337,6 @@ Result<std::vector<DocumentInfo>> MetadataRepository::queryDocumentsBySpec(
 std::optional<DocumentInfo>
 MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::lookupPathCache");
-    flushPathCacheBuffer();
     auto snap = std::atomic_load_explicit(&pathCacheSnapshot_, std::memory_order_acquire);
     if (!snap)
         return std::nullopt;
@@ -381,6 +380,8 @@ void MetadataRepository::recordPathHit(const std::string& normalizedPath) const 
 
 void MetadataRepository::flushPathCacheBuffer() const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::flushPathCacheBuffer");
+    if (pathCacheWriteBuffer_.size.load(std::memory_order_acquire) == 0)
+        return;
     std::vector<DocumentInfo> batch;
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
@@ -398,15 +399,22 @@ void MetadataRepository::flushPathCacheBuffer() const {
 
     const auto endSeq = hitSeq_.load(std::memory_order_relaxed);
     const std::size_t toFold = static_cast<std::size_t>(std::min<uint64_t>(hitRingSize_, endSeq));
-    for (std::size_t i = 0; i < toFold; ++i) {
-        const uint64_t h =
-            hitRing_[(endSeq - 1 - i) & hitRingMask_].load(std::memory_order_relaxed);
-        if (h == 0)
-            continue;
-        for (auto& kv : updated->data) {
-            const uint64_t kh = std::hash<std::string>{}(kv.first);
-            if (kh == h) {
-                kv.second.lastHitSeq = endSeq - i;
+    if (toFold > 0 && !updated->data.empty()) {
+        std::unordered_map<uint64_t, uint64_t> hitSeqByHash;
+        hitSeqByHash.reserve(toFold);
+        for (std::size_t i = 0; i < toFold; ++i) {
+            const uint64_t h =
+                hitRing_[(endSeq - 1 - i) & hitRingMask_].load(std::memory_order_relaxed);
+            if (h == 0)
+                continue;
+            hitSeqByHash.try_emplace(h, endSeq - i);
+        }
+        if (!hitSeqByHash.empty()) {
+            for (auto& kv : updated->data) {
+                const uint64_t kh = std::hash<std::string>{}(kv.first);
+                if (auto it = hitSeqByHash.find(kh); it != hitSeqByHash.end()) {
+                    kv.second.lastHitSeq = it->second;
+                }
             }
         }
     }
