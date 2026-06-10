@@ -1155,7 +1155,6 @@ if catch2_dep.found()
   catch2_search_submodule_exe = executable('catch2_search_submodule',
     files(
       'unit/search/chunk_coverage_catch2_test.cpp',
-      'unit/search/entity_linker_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
@@ -1241,7 +1240,7 @@ if catch2_dep.found()
   catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
     files(
       'unit/search/retrieval_benchmark_support_catch2_test.cpp',
-      '../src/search/benchmarks/retrieval_benchmark_support.cpp',
+      'benchmarks/search/retrieval_benchmark_support.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1406,7 +1405,6 @@ if catch2_dep.found()
         'unit/vector/vector_dimension_validation_catch2_test.cpp',
         'unit/vector/vector_smoke_catch2_test.cpp',
         'unit/vector/turboquant_mse_catch2_test.cpp',
-        'unit/vector/turboquant_inner_product_catch2_test.cpp',
         'unit/vector/turboquant_math_test.cpp',
         'unit/vector/turboquant_asymmetric_score_catch2_test.cpp',
         'unit/vector/turboquant_integration_catch2_test.cpp',

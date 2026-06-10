@@ -158,6 +158,7 @@ srcs = [
   'model_loader.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
+  'embedding_provider_registry.cpp',
   'dim_resolver.cpp',
   'tokenizer.cpp',
   'turboquant.cpp',

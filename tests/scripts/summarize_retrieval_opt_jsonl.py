@@ -2,7 +2,7 @@
 """Summarize retrieval optimization JSONL artifacts.
 
 This script consumes one or more JSONL files produced by
-`src/search/benchmarks/retrieval_quality_bench.cpp` (optimization loop mode)
+`tests/benchmarks/search/retrieval_quality_bench.cpp` (optimization loop mode)
 and writes a normalized JSON summary focused on baseline selection.
 """
 

@@ -411,7 +411,7 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-s
     // After commit, increment/decrement must fail.
     // In dev/CI (DCHECK enabled): YAMS_DCHECK aborts — no catchable exception.
     // In release (NDEBUG): DCHECK compiles out, throw fires.
-#if defined(NDEBUG) || defined(YAMS_DISABLE_DCHECK)
+#if defined(YAMS_DISABLE_DCHECK) || (defined(NDEBUG) && !defined(YAMS_ENABLE_DCHECK))
     REQUIRE_THROWS_AS(txn->increment(hash, 1024), std::runtime_error);
     REQUIRE_THROWS_AS(txn->decrement(hash), std::runtime_error);
 #else

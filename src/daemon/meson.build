@@ -278,7 +278,7 @@ else
 endif
 
 yams_daemon_exe = executable('yams-daemon',
-  'daemon_main.cpp',
+  ['daemon_main.cpp'] + (tracy_enabled ? ['tracy_memory_hooks.cpp'] : []),
   dependencies: [
     yams_daemon_dep,
     cli11_dep,
