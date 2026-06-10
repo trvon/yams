@@ -920,7 +920,12 @@ private:
         std::make_shared<PathCacheSnapshot>()};
     std::size_t pathCacheCapacity_ = 1024;
     struct PathCacheWriteBuffer {
-        std::vector<DocumentInfo> pending;
+        struct Op {
+            DocumentInfo doc;
+            std::string erasePath;
+            bool erase{false};
+        };
+        std::vector<Op> pending;
         std::mutex mutex;
         std::atomic<std::size_t> size{0};
     };
@@ -1014,6 +1019,8 @@ private:
 
     std::optional<DocumentInfo> lookupPathCache(const std::string& normalizedPath) const;
     void storePathCache(const DocumentInfo& info) const;
+    void invalidatePathCache(const std::string& filePath) const;
+    void invalidatePathCache(const std::vector<std::string>& filePaths) const;
     void flushPathCacheBuffer() const;
     void recordPathHit(const std::string& normalizedPath) const;
     void ensurePathHitRingInitialized() const;

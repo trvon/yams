@@ -351,12 +351,35 @@ MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
 void MetadataRepository::storePathCache(const DocumentInfo& info) const {
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
-        pathCacheWriteBuffer_.pending.push_back(info);
+        pathCacheWriteBuffer_.pending.push_back(
+            PathCacheWriteBuffer::Op{.doc = info, .erasePath = {}, .erase = false});
     }
     auto pending = pathCacheWriteBuffer_.size.fetch_add(1, std::memory_order_relaxed) + 1;
     if (pending >= kPathCacheFlushThreshold) {
         flushPathCacheBuffer();
     }
+}
+
+void MetadataRepository::invalidatePathCache(const std::string& filePath) const {
+    invalidatePathCache(std::vector<std::string>{filePath});
+}
+
+void MetadataRepository::invalidatePathCache(const std::vector<std::string>& filePaths) const {
+    if (filePaths.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
+        for (const auto& path : filePaths) {
+            if (path.empty()) {
+                continue;
+            }
+            pathCacheWriteBuffer_.pending.push_back(
+                PathCacheWriteBuffer::Op{.doc = {}, .erasePath = path, .erase = true});
+        }
+    }
+    pathCacheWriteBuffer_.size.fetch_add(filePaths.size(), std::memory_order_relaxed);
+    flushPathCacheBuffer();
 }
 
 void MetadataRepository::ensurePathHitRingInitialized() const {
@@ -382,7 +405,7 @@ void MetadataRepository::flushPathCacheBuffer() const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::flushPathCacheBuffer");
     if (pathCacheWriteBuffer_.size.load(std::memory_order_acquire) == 0)
         return;
-    std::vector<DocumentInfo> batch;
+    std::vector<PathCacheWriteBuffer::Op> batch;
     {
         std::lock_guard<std::mutex> lock(pathCacheWriteBuffer_.mutex);
         if (pathCacheWriteBuffer_.pending.empty())
@@ -420,11 +443,15 @@ void MetadataRepository::flushPathCacheBuffer() const {
     }
 
     uint64_t lastSeq = updated->buildSeq;
-    for (const auto& info : batch) {
+    for (const auto& op : batch) {
         const auto gseq = globalSeq_.fetch_add(1, std::memory_order_relaxed);
         lastSeq = gseq;
-        auto& entry = updated->data[info.filePath];
-        entry.doc = info;
+        if (op.erase) {
+            updated->data.erase(op.erasePath);
+            continue;
+        }
+        auto& entry = updated->data[op.doc.filePath];
+        entry.doc = op.doc;
         if (entry.insertedSeq == 0)
             entry.insertedSeq = gseq;
     }

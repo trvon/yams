@@ -187,6 +187,7 @@ struct DeleteDocumentResult {
     bool indexedRemoved{false};
     bool embeddedRemoved{false};
     std::string removedExtension;
+    std::string removedFilePath;
     MetadataTagDelta metadataTagDelta{};
 };
 
@@ -198,6 +199,7 @@ struct DeleteDocumentsBatchResult {
     uint64_t indexedRemoved{0};
     uint64_t embeddedRemoved{0};
     std::unordered_map<std::string, int64_t> removedExtensionCounts;
+    std::vector<std::string> removedFilePaths;
     MetadataTagDelta metadataTagDelta{};
 };
 } // namespace
@@ -591,16 +593,17 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
         cachedPathDepthMax_.load(std::memory_order_relaxed);
     bool shouldRefreshPathDepthMax = false;
     uint64_t recomputedPathDepthMax = 0;
+    std::string priorFilePath;
 
-    return executeQuery<void>([&](Database& db) -> Result<void> {
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         int64_t priorFileSize = info.fileSize;
         std::string priorExtension = info.fileExtension;
         int priorPathDepth = info.pathDepth;
         bool priorContentExtracted = info.contentExtracted;
 
         auto priorStmt = db.prepareCached(
-            "SELECT file_size, file_extension, path_depth, content_extracted FROM documents "
-            "WHERE id = ?");
+            "SELECT file_size, file_extension, path_depth, content_extracted, file_path "
+            "FROM documents WHERE id = ?");
         if (priorStmt) {
             auto& stmt = *priorStmt.value();
             YAMS_TRY(stmt.bind(1, info.id));
@@ -609,6 +612,7 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                 priorExtension = stmt.getString(1);
                 priorPathDepth = stmt.getInt(2);
                 priorContentExtracted = stmt.getInt(3) != 0;
+                priorFilePath = stmt.getString(4);
             }
         }
 
@@ -677,6 +681,17 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
         }
         return Result<void>();
     });
+    if (result) {
+        std::vector<std::string> stale;
+        if (!priorFilePath.empty()) {
+            stale.push_back(priorFilePath);
+        }
+        if (info.filePath != priorFilePath) {
+            stale.push_back(info.filePath);
+        }
+        invalidatePathCache(stale);
+    }
+    return result;
 }
 
 Result<void> MetadataRepository::deleteDocument(int64_t id) {
@@ -701,6 +716,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             bool wasEmbedded = false;
             uint64_t priorFileSize = 0;
             std::string priorExtension;
+            std::string deletedFilePath;
             int priorPathDepth = 0;
             YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
             {
@@ -715,7 +731,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                        CASE WHEN EXISTS(
                            SELECT 1 FROM documents_fts WHERE rowid = d.id
                        ) THEN 1 ELSE 0 END,
-                       COALESCE(des.has_embedding, 0)
+                       COALESCE(des.has_embedding, 0),
+                       d.file_path
                 FROM documents d
                 LEFT JOIN document_embeddings_status des ON des.document_id = d.id
                 WHERE d.id = ?
@@ -731,6 +748,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                         priorPathDepth = stmt.getInt(3);
                         wasIndexed = stmt.getInt(4) != 0;
                         wasEmbedded = stmt.getInt(5) != 0;
+                        deletedFilePath = stmt.getString(6);
                     }
                 }
             }
@@ -760,6 +778,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 deleteResult.indexedRemoved = wasIndexed;
                 deleteResult.embeddedRemoved = wasEmbedded;
                 deleteResult.removedExtension = std::move(priorExtension);
+                deleteResult.removedFilePath = std::move(deletedFilePath);
                 deleteResult.metadataTagDelta = metadataTagDelta;
                 if (priorDepth == cachedPathDepthMaxBeforeMutation) {
                     YAMS_TRY_UNWRAP(recomputedMax, queryCurrentPathDepthMaxInDb(db));
@@ -807,7 +826,9 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
     applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
                           deleteResult.metadataTagDelta);
 
-
+    if (!deleteResult.removedFilePath.empty()) {
+        invalidatePathCache(deleteResult.removedFilePath);
+    }
 
     // Signal enumeration cache invalidation (document deletion cascades to metadata)
     metadataChangeCounter_.fetch_add(1, std::memory_order_release);
@@ -842,7 +863,8 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                    CASE WHEN EXISTS(
                        SELECT 1 FROM documents_fts WHERE rowid = d.id
                    ) THEN 1 ELSE 0 END,
-                   COALESCE(des.has_embedding, 0)
+                   COALESCE(des.has_embedding, 0),
+                   d.file_path
             FROM documents d
             LEFT JOIN document_embeddings_status des ON des.document_id = d.id
             WHERE d.id = ?
@@ -869,6 +891,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 bool wasEmbedded = false;
                 uint64_t priorFileSize = 0;
                 std::string priorExtension;
+                std::string priorFilePath;
                 int priorPathDepth = 0;
                 YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
 
@@ -893,6 +916,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                     priorPathDepth = checkStmt.getInt(4);
                     wasIndexed = checkStmt.getInt(5) != 0;
                     wasEmbedded = checkStmt.getInt(6) != 0;
+                    priorFilePath = checkStmt.getString(7);
                 }
 
                 // Delete document
@@ -920,6 +944,9 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                         metadataTagDelta.docsWithTagsDelta;
                     if (!priorExtension.empty()) {
                         batchResult.removedExtensionCounts[priorExtension] += 1;
+                    }
+                    if (!priorFilePath.empty()) {
+                        batchResult.removedFilePaths.push_back(std::move(priorFilePath));
                     }
                     if (wasExtracted) {
                         batchResult.extractedRemoved += 1;
@@ -976,6 +1003,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
                               batchResult.metadataTagDelta);
 
+        invalidatePathCache(batchResult.removedFilePaths);
 
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);

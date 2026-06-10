@@ -1180,6 +1180,46 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend searchSimilar combined document_hash and candidate_hashes",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    for (int i = 0; i < 20; ++i) {
+        const std::string docGroup = (i < 10) ? "doc_A" : "doc_B";
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(backend
+                    .insertVector(createVectorRecord("combo_" + std::to_string(i), emb, docGroup))
+                    .has_value());
+    }
+
+    auto query = createEmbedding(64, 5.0f);
+
+    std::unordered_set<std::string> bothGroups = {"doc_A", "doc_B"};
+    auto combined = backend.searchSimilar(query, 10, 0.0f, std::string("doc_A"), bothGroups, {});
+    REQUIRE(combined.has_value());
+    REQUIRE_FALSE(combined.value().empty());
+    for (const auto& r : combined.value()) {
+        CHECK(r.document_hash == "doc_A");
+    }
+
+    std::unordered_set<std::string> onlyB = {"doc_B"};
+    auto disjoint = backend.searchSimilar(query, 10, 0.0f, std::string("doc_A"), onlyB, {});
+    REQUIRE(disjoint.has_value());
+    CHECK(disjoint.value().empty());
+
+    auto exact = backend.searchSimilar(createEmbedding(64, 3.0f), 1, 0.9f, std::string("doc_A"),
+                                       bothGroups, {});
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().size() == 1);
+    CHECK(exact.value().front().chunk_id == "chunk_combo_2");
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend searchSimilar candidate_hashes empty returns all",
                  "[vector][backend][search][tiered][catch2]") {
     skipIfNeeded();

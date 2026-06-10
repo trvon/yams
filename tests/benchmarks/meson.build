@@ -457,6 +457,23 @@ if catch2_with_main_dep.found()
     install: false,
   )
 
+  # Single-client pipelining benchmark: in-flight window scaling on one
+  # client process. Quantifies the solo-vs-concurrent per-client throughput
+  # gap found in the 2026-06 scaling curve. Tagged [!benchmark].
+  single_client_pipeline_bench = executable('single_client_pipeline_bench',
+    files('single_client_pipeline_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+  alias_target('bench_single_client_pipeline', single_client_pipeline_bench)
+
   multi_client_bench_env = {
     'YAMS_TESTING': '1',
     'YAMS_DISABLE_VECTORS': '1',
