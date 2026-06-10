@@ -14,6 +14,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/storage/corpus_stats.h>
 
 using namespace std::chrono;
 using namespace yams::metadata;
@@ -156,6 +157,51 @@ TEST_CASE("MetadataRepositoryCache: mutations invalidate cached path entries",
         REQUIRE(b.has_value());
         CHECK_FALSE(b.value().has_value());
     }
+
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepository: fresh instance over existing DB hydrates counters on first write",
+          "[unit][metadata][counters]") {
+    auto dbPath = tempDbPath("repo_counter_hydrate_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+
+    std::vector<int64_t> ids;
+    {
+        MetadataRepository primary(pool);
+        primary.initializeCounters();
+        for (int i = 0; i < 3; ++i) {
+            auto id = primary.insertDocument(
+                mk("/counters/doc_" + std::to_string(i) + ".md", "CH" + std::to_string(i)));
+            REQUIRE(id.has_value());
+            ids.push_back(id.value());
+        }
+        REQUIRE(primary
+                    .setMetadata(ids[0], "tag:primary", MetadataValue(std::string("true")))
+                    .has_value());
+    }
+
+    // Second instance over the same DB, attached without initializeCounters()
+    // — the stateless-CLI case. Tagging a previously untagged document bumps
+    // docsWithTags by +1; the counters must be hydrated from the DB first or
+    // the kv_ops invariant (docsWithTags <= docCount) fires against a
+    // still-zero document count (previous behavior: SIGABRT).
+    MetadataRepository fresh(pool);
+    auto setRes = fresh.setMetadata(ids[1], "tag:fresh", MetadataValue(std::string("true")));
+    REQUIRE(setRes.has_value());
+
+    auto count = fresh.getDocumentCount();
+    REQUIRE(count.has_value());
+    CHECK(count.value() == 3);
+
+    auto stats = fresh.getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().docCount == 3);
+    CHECK(stats.value().docsWithTags >= 1);
+    CHECK(stats.value().docsWithTags <= stats.value().docCount);
 
     pool.shutdown();
     std::error_code ec;

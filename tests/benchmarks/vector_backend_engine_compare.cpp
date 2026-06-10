@@ -65,7 +65,7 @@ Config parseArgs(int argc, char* argv[]) {
         }
         if (arg == "--help") {
             std::printf("Usage: %s [--corpus=N] [--queries=N] [--dim=N] [--k=N] [--seed=N] "
-                        "[--spq-sweep]\n",
+                        "[--spq-sweep] [--filter-cell]\n",
                         argv[0]);
             std::exit(0);
         }

@@ -340,13 +340,24 @@ EmbeddedServiceHost::getOrCreate(const Options& options) {
     // coroutine frames that still hold shared_ptr references.
     static const int sAtexitRegistered = []() {
         std::atexit([]() {
-            std::lock_guard<std::mutex> lk(sMutex);
-            for (auto& [key, weak] : sHosts) {
-                if (auto host = weak.lock()) {
-                    (void)host->shutdown();
+            // Collect live hosts under the lock, then shut them down outside
+            // it: shutdown() joins threads and runs arbitrary teardown, and
+            // holding sMutex across that would deadlock any thread that
+            // reaches getOrCreate() during exit.
+            std::vector<std::shared_ptr<EmbeddedServiceHost>> live;
+            {
+                std::lock_guard<std::mutex> lk(sMutex);
+                live.reserve(sHosts.size());
+                for (auto& [key, weak] : sHosts) {
+                    if (auto host = weak.lock()) {
+                        live.push_back(std::move(host));
+                    }
                 }
+                sHosts.clear();
             }
-            sHosts.clear();
+            for (auto& host : live) {
+                (void)host->shutdown();
+            }
         });
         return 0;
     }();

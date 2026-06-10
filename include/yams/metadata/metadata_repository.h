@@ -747,6 +747,14 @@ public:
         return cachedEmbeddedCount_.load(std::memory_order_relaxed);
     }
     void initializeCounters(); // Called once during startup to sync with DB
+    /// Lazy hydration: ensures counters reflect the DB before the first
+    /// counter-mutating write on instances that never went through the
+    /// DatabaseManager startup path (stateless CLI, tests).
+    void ensureCountersInitialized() {
+        if (!countersInitialized_.load(std::memory_order_acquire)) {
+            initializeCounters();
+        }
+    }
 
     /// Warm the metadata value counts cache for common keys (best-effort, non-critical path)
     void warmValueCountsCache();
@@ -1191,6 +1199,7 @@ private:
 
     template <typename T>
     Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func) {
+        ensureCountersInitialized();
         if (current_metadata_op().empty()) {
             MetadataOpScope opScope("write_query");
             return executeQueryOnPool<T>(pool_, "write", func);

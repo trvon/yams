@@ -45,7 +45,16 @@ public:
      * @return Offset of first '\n', or size if not found
      * Null data with nonzero size is treated as no match.
      */
-    static size_t findNewline(const char* data, size_t size);
+    static inline size_t findNewline(const char* data, size_t size) {
+        if (size == 0 || data == nullptr) {
+            return size;
+        }
+        const void* result = std::memchr(data, '\n', size);
+        if (result == nullptr) {
+            return size;
+        }
+        return static_cast<size_t>(static_cast<const char*>(result) - data);
+    }
 
     /**
      * Check if buffer contains any newline characters (fast existence check)
@@ -55,7 +64,9 @@ public:
      * @return true if buffer contains '\n', false otherwise
      * Null data with nonzero size is treated as no match.
      */
-    static bool containsNewline(const char* data, size_t size);
+    static inline bool containsNewline(const char* data, size_t size) {
+        return findNewline(data, size) < size;
+    }
 
     /**
      * Count newlines in buffer (useful for line number calculations)

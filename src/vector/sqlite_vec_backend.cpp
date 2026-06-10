@@ -3416,7 +3416,11 @@ ORDER BY rowid
                 query_norm_sq += query_embedding[i] * query_embedding[i];
             }
             const float query_norm = std::sqrt(query_norm_sq);
+            // Fixed-size min-heap on similarity keeps memory O(k) and work
+            // O(N log k) instead of accumulating every scanned row.
+            const auto heap_cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
             std::vector<std::pair<float, int64_t>> scored;
+            scored.reserve(k + 1);
             std::vector<float> dequant_buffer;
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 if (!candidate_hashes.empty()) {
@@ -3473,17 +3477,21 @@ ORDER BY rowid
                 if (similarity < similarity_threshold) {
                     continue;
                 }
-                scored.emplace_back(similarity, sqlite3_column_int64(stmt, 0));
+                if (scored.size() < k) {
+                    scored.emplace_back(similarity, sqlite3_column_int64(stmt, 0));
+                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
+                } else if (similarity > scored.front().first) {
+                    std::pop_heap(scored.begin(), scored.end(), heap_cmp);
+                    scored.back() = {similarity, sqlite3_column_int64(stmt, 0)};
+                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
+                }
             }
             sqlite3_finalize(stmt);
 
-            const size_t count = std::min(k, scored.size());
-            std::partial_sort(scored.begin(), scored.begin() + count, scored.end(),
-                              [](const auto& a, const auto& b) { return a.first > b.first; });
-            scored.resize(count);
+            std::sort_heap(scored.begin(), scored.end(), heap_cmp);
 
             std::vector<VectorRecord> records;
-            records.reserve(count);
+            records.reserve(scored.size());
             for (const auto& [similarity, rowid] : scored) {
                 auto record_opt = getVectorByRowidUnlocked(rowid);
                 if (!record_opt) {
