@@ -429,7 +429,15 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
         }
     }
     if (timer) {
-        boost::asio::post(timer->get_executor(),
+        // NB: read the executor into a local BEFORE moving `timer` into the
+        // handler. Function-argument evaluation order is unspecified in C++,
+        // and MSVC evaluates the lambda capture (which moves `timer` to null)
+        // before `timer->get_executor()`, dereferencing a moved-from shared_ptr
+        // -> read from null+offset -> access violation. Left-to-right compilers
+        // (GCC/Clang on Linux) happened to evaluate get_executor() first, which
+        // is why this crash was Windows-only.
+        auto executor = timer->get_executor();
+        boost::asio::post(executor,
                           [timer = std::move(timer)]() mutable { (void)timer->cancel(); });
     }
 }
