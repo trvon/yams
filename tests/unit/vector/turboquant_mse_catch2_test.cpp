@@ -434,3 +434,16 @@ TEST_CASE_METHOD(TurboQuantMSEFixture, "TurboQuantMSE high dimensionality",
     INFO("MSE at dimension 3072: " << mse_val);
     REQUIRE(mse_val < 0.02); // Should still be low
 }
+
+TEST_CASE_METHOD(TurboQuantMSEFixture, "TurboQuantMSE empty input is 0, not NaN",
+                 "[turboquant][mse][edge][catch2]") {
+    // Two empty vectors satisfy the equal-length precondition; computeMSE must
+    // not divide by zero (0.0 / 0 == NaN).
+    TurboQuantConfig config;
+    config.dimension = 16;
+    TurboQuantMSE quantizer(config);
+
+    const double mse_val = quantizer.computeMSE({}, {});
+    REQUIRE_FALSE(std::isnan(mse_val));
+    REQUIRE(mse_val == 0.0);
+}

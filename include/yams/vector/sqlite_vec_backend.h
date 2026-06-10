@@ -58,8 +58,12 @@ public:
         size_t simeon_pq_centroids = 256;
         /// Training corpus size limit (>> k). 4096 provides good convergence.
         size_t simeon_pq_train_limit = 4096;
-        /// ADC rerank factor. Jégou et al 2011: fetch rerank_factor * k candidates
-        /// from compressed search then score exactly. 2-4 typical; 2 favors speed.
+        /// ADC rerank factor: fetch rerank_factor * k candidates from the
+        /// compressed scan, score them exactly, return the exact top-k.
+        /// Measured (2K vectors, 128d, m=32, k=10):
+        ///   rerank=2: recall@10 94.0% @ 1.0x latency (default)
+        ///   rerank=4: recall@10 99.4% @ 1.3x latency
+        ///   rerank=8: recall@10 100%  @ 1.6x latency
         size_t simeon_pq_rerank_factor = 2;
         uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
         bool suppress_search_index_builds =

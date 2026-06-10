@@ -8,8 +8,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #include <string>
 
 #include <sqlite3.h>
@@ -133,4 +135,82 @@ TEST_CASE_METHOD(PersistenceFixture,
 
     REQUIRE(tableExists(db, "simeon_pq_meta"));
     REQUIRE(tableExists(db, "simeon_pq_codes"));
+}
+
+TEST_CASE_METHOD(PersistenceFixture,
+                 "corrupt vec0 HNSW shadow tables degrade to rebuild on reopen",
+                 "[unit][vector][persistence][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    const auto dbPath = createTempDbPath();
+
+    auto makeRecord = [](size_t i) {
+        VectorRecord rec;
+        rec.chunk_id = "chunk_" + std::to_string(i);
+        rec.document_hash = "doc_" + std::to_string(i);
+        rec.content = "content " + std::to_string(i);
+        std::mt19937 rng(static_cast<uint32_t>(100 + i));
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        rec.embedding.resize(kDim);
+        float norm = 0.0f;
+        for (auto& v : rec.embedding) {
+            v = dist(rng);
+            norm += v * v;
+        }
+        norm = std::sqrt(norm);
+        for (auto& v : rec.embedding) {
+            v /= norm;
+        }
+        return rec;
+    };
+
+    std::vector<float> query;
+    {
+        SqliteVecBackend::Config cfg;
+        cfg.embedding_dim = kDim;
+        cfg.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend backend(cfg);
+
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(kDim).has_value());
+
+        std::vector<VectorRecord> records;
+        for (size_t i = 0; i < 64; ++i) {
+            records.push_back(makeRecord(i));
+        }
+        query = records[0].embedding;
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+        REQUIRE(backend.buildIndex().has_value());
+
+        auto results = backend.searchSimilar(query, 5);
+        REQUIRE(results.has_value());
+        REQUIRE_FALSE(results.value().empty());
+
+        sqlite3* db = backend.getDbHandle();
+        REQUIRE(db != nullptr);
+        const std::string shadow = "vectors_" + std::to_string(kDim) + "_hnsw_nodes";
+        if (tableExists(db, shadow.c_str())) {
+            std::string corrupt = "UPDATE \"" + shadow + "\" SET data = x'DEADBEEFDEADBEEF'";
+            char* err = nullptr;
+            REQUIRE(sqlite3_exec(db, corrupt.c_str(), nullptr, nullptr, &err) == SQLITE_OK);
+            sqlite3_free(err);
+        }
+        backend.close();
+    }
+
+    {
+        SqliteVecBackend::Config cfg;
+        cfg.embedding_dim = kDim;
+        cfg.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend backend(cfg);
+
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(kDim).has_value());
+
+        auto results = backend.searchSimilar(query, 5);
+        REQUIRE(results.has_value());
+        REQUIRE_FALSE(results.value().empty());
+        CHECK(results.value().front().chunk_id == "chunk_0");
+    }
 }

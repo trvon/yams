@@ -25,6 +25,8 @@ struct Config {
     size_t dim = 128;
     size_t k = 10;
     unsigned int seed = 42;
+    bool spq_sweep = false;
+    bool filter_cell = false;
 };
 
 struct EngineResult {
@@ -53,8 +55,17 @@ Config parseArgs(int argc, char* argv[]) {
             parse("--dim=", cfg.dim) || parse("--k=", cfg.k) || parse("--seed=", cfg.seed)) {
             continue;
         }
+        if (arg == "--spq-sweep") {
+            cfg.spq_sweep = true;
+            continue;
+        }
+        if (arg == "--filter-cell") {
+            cfg.filter_cell = true;
+            continue;
+        }
         if (arg == "--help") {
-            std::printf("Usage: %s [--corpus=N] [--queries=N] [--dim=N] [--k=N] [--seed=N]\n",
+            std::printf("Usage: %s [--corpus=N] [--queries=N] [--dim=N] [--k=N] [--seed=N] "
+                        "[--spq-sweep]\n",
                         argv[0]);
             std::exit(0);
         }
@@ -130,10 +141,17 @@ double percentile(std::vector<double> values, double p) {
 EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
                        const std::vector<std::vector<float>>& corpus,
                        const std::vector<std::vector<float>>& queries,
-                       const std::vector<std::vector<size_t>>& ground_truth) {
+                       const std::vector<std::vector<size_t>>& ground_truth,
+                       size_t spq_subquantizers = 0, size_t spq_rerank_factor = 0) {
     SqliteVecBackend::Config backend_cfg;
     backend_cfg.embedding_dim = cfg.dim;
     backend_cfg.search_engine = engine;
+    if (spq_subquantizers > 0) {
+        backend_cfg.simeon_pq_subquantizers = spq_subquantizers;
+    }
+    if (spq_rerank_factor > 0) {
+        backend_cfg.simeon_pq_rerank_factor = spq_rerank_factor;
+    }
 
     SqliteVecBackend backend(backend_cfg);
     auto init = backend.initialize(":memory:");
@@ -240,6 +258,78 @@ int main(int argc, char* argv[]) {
                     cfg.dim, cfg.k, cfg.seed);
         std::printf("note: corpus/query vectors are normalized, so cosine and L2 rankings are "
                     "comparable\n\n");
+
+        if (cfg.filter_cell) {
+            std::printf("filtered-search cell: exact-scan fallback latency by candidate "
+                        "fraction\n");
+            SqliteVecBackend::Config backend_cfg;
+            backend_cfg.embedding_dim = cfg.dim;
+            backend_cfg.search_engine = VectorSearchEngine::SimeonPqAdc;
+            SqliteVecBackend backend(backend_cfg);
+            if (!backend.initialize(":memory:")) {
+                throw std::runtime_error("init failed");
+            }
+            if (!backend.createTables(cfg.dim)) {
+                throw std::runtime_error("createTables failed");
+            }
+            std::vector<VectorRecord> records;
+            records.reserve(corpus.size());
+            for (size_t i = 0; i < corpus.size(); ++i) {
+                VectorRecord rec;
+                rec.chunk_id = "chunk_" + std::to_string(i);
+                rec.document_hash = "doc_" + std::to_string(i);
+                rec.embedding = corpus[i];
+                rec.content = "benchmark content " + std::to_string(i);
+                records.push_back(std::move(rec));
+            }
+            if (!backend.insertVectorsBatch(records)) {
+                throw std::runtime_error("insert failed");
+            }
+
+            for (double fraction : {0.01, 0.10, 0.50}) {
+                const size_t n_candidates =
+                    std::max<size_t>(1, static_cast<size_t>(fraction * cfg.corpus));
+                std::unordered_set<std::string> candidates;
+                for (size_t i = 0; i < n_candidates; ++i) {
+                    candidates.insert("doc_" + std::to_string(i));
+                }
+
+                std::vector<double> latencies;
+                latencies.reserve(queries.size());
+                for (const auto& q : queries) {
+                    const auto start = std::chrono::steady_clock::now();
+                    auto result = backend.searchSimilar(q, cfg.k, 0.0f, std::nullopt, candidates);
+                    const auto end = std::chrono::steady_clock::now();
+                    if (!result) {
+                        throw std::runtime_error(result.error().message);
+                    }
+                    latencies.push_back(
+                        std::chrono::duration<double, std::micro>(end - start).count());
+                }
+                const double mean =
+                    std::accumulate(latencies.begin(), latencies.end(), 0.0) /
+                    static_cast<double>(latencies.size());
+                std::printf("candidates=%5.0f%% (%6zu docs)  mean=%8.1f us  p95=%8.1f us\n",
+                            fraction * 100.0, n_candidates, mean, percentile(latencies, 0.95));
+            }
+            return 0;
+        }
+
+        if (cfg.spq_sweep) {
+            std::printf("simeon-pq sweep: subquantizers x rerank_factor\n");
+            for (size_t m : {8UL, 16UL, 32UL, 64UL}) {
+                if (cfg.dim % m != 0) {
+                    continue;
+                }
+                for (size_t rerank : {2UL, 4UL, 8UL}) {
+                    auto result = runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries,
+                                            ground_truth, m, rerank);
+                    std::printf("m=%-3zu rerank=%zu ", m, rerank);
+                    printResult(result, cfg.k);
+                }
+            }
+            return 0;
+        }
 
         const auto spq =
             runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);

@@ -573,6 +573,7 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
 
     // Use RetrievalService to resolve by name via helper-resolved daemon transport.
     yams::daemon::ClientConfig daemonCfg;
+    daemonCfg.executor = getExecutor();
     if (cli_ && cli_->hasExplicitDataDir()) {
         daemonCfg.dataDir = cli_->getDataPath();
     }

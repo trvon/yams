@@ -169,6 +169,7 @@ public:
             }
 
             yams::daemon::ClientConfig daemonCfg;
+            daemonCfg.executor = getExecutor();
             if (cli_->hasExplicitDataDir()) {
                 daemonCfg.dataDir = cli_->getDataPath();
             }

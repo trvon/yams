@@ -492,6 +492,12 @@ double TurboQuantMSE::computeMSE(const std::vector<float>& original,
     YAMS_PRECONDITION(original.size() == reconstructed.size(),
                       "TurboQuant::computeMSE expects vectors of equal length");
 
+    // Two empty vectors satisfy the equal-length precondition, so guard the
+    // divisor: the MSE over zero elements is 0, not 0.0 / 0 (NaN).
+    if (original.empty()) {
+        return 0.0;
+    }
+
     double mse = 0.0;
     for (size_t i = 0; i < original.size(); ++i) {
         double diff = static_cast<double>(original[i]) - static_cast<double>(reconstructed[i]);
@@ -1186,7 +1192,11 @@ float sampleBeta(std::mt19937& rng, float alpha, float beta) {
     float x1 = gamma_alpha(rng);
     float x2 = gamma_beta(rng);
 
-    return x1 / (x1 + x2);
+    // Both gamma draws can underflow to 0 (small shape params / float underflow),
+    // making x1/(x1+x2) a 0/0 NaN that would corrupt the sample. Fall back to the
+    // distribution midpoint when the sum vanishes.
+    const float sum = x1 + x2;
+    return sum > 0.0f ? x1 / sum : 0.5f;
 }
 
 } // namespace yams::vector

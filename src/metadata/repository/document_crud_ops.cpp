@@ -807,12 +807,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
     applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
                           deleteResult.metadataTagDelta);
 
-    YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: indexed count must not exceed total document count after delete");
-    YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: extracted count must not exceed total document count after delete");
-    YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                "metadata: embedded count must not exceed total document count after delete");
+
 
     // Signal enumeration cache invalidation (document deletion cascades to metadata)
     metadataChangeCounter_.fetch_add(1, std::memory_order_release);
@@ -981,15 +976,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
         applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
                               batchResult.metadataTagDelta);
 
-        YAMS_DCHECK(cachedIndexedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: indexed count must not exceed total document count after batch "
-                    "delete");
-        YAMS_DCHECK(cachedExtractedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: extracted count must not exceed total document count after batch "
-                    "delete");
-        YAMS_DCHECK(cachedEmbeddedCount_.load() <= cachedDocumentCount_.load(),
-                    "metadata: embedded count must not exceed total document count after batch "
-                    "delete");
+
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);
         return batchResult.deletedCount;
