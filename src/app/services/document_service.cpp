@@ -85,10 +85,12 @@ indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataReposit
 
     constexpr size_t kMinTermLength = 2;
 
-    // Helper to add term if long enough
+    // Collect terms and write them in one transaction: each addSymSpellTerm
+    // autocommits the term plus all its delete-variants individually.
+    std::vector<std::string> terms;
     auto addTerm = [&](std::string_view term) {
         if (term.length() >= kMinTermLength) {
-            repo->addSymSpellTerm(term);
+            terms.emplace_back(term);
         }
     };
 
@@ -103,6 +105,10 @@ indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataReposit
         if (ext.length() > 1) {     // Has extension beyond just "."
             addTerm(ext.substr(1)); // Skip the leading dot
         }
+    }
+
+    if (!terms.empty()) {
+        repo->addSymSpellTerms(terms);
     }
 }
 

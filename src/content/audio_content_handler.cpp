@@ -4,10 +4,9 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <ranges>
+#include <limits>
 #include <regex>
 #include <string>
-#include <unordered_set>
 #include <yams/common/format.h>
 #include <yams/content/audio_content_handler.h>
 
@@ -37,6 +36,17 @@ consteval auto createAudioExtensions() {
 constexpr auto audioMimeTypes = createAudioMimeTypes();
 constexpr auto audioExtensions = createAudioExtensions();
 
+template <typename T> bool readExact(std::istream& stream, T& value) {
+    constexpr auto expected = static_cast<std::streamsize>(sizeof(T));
+    stream.read(reinterpret_cast<char*>(&value), expected);
+    return stream.gcount() == expected && stream.good();
+}
+
+bool readBytes(std::istream& stream, char* data, std::streamsize size) {
+    stream.read(data, size);
+    return stream.gcount() == size && stream.good();
+}
+
 // Native ID3v1 parser for fallback
 struct ID3v1Tag {
     char title[30];
@@ -64,10 +74,17 @@ extractID3v1(const std::filesystem::path& path) {
         return std::nullopt;
 
     // Seek to 128 bytes before end
-    file.seekg(-128, std::ios::end);
+    file.seekg(0, std::ios::end);
+    const auto end = file.tellg();
+    if (end < static_cast<std::streamoff>(sizeof(ID3v1Tag))) {
+        return std::nullopt;
+    }
+    file.seekg(-static_cast<std::streamoff>(sizeof(ID3v1Tag)), std::ios::end);
 
     ID3v1Tag tag{};
-    file.read(reinterpret_cast<char*>(&tag), sizeof(tag));
+    if (!readExact(file, tag)) {
+        return std::nullopt;
+    }
 
     if (std::strncmp(tag.title, "TAG", 3) != 0) {
         return std::nullopt; // No ID3v1 tag
@@ -76,7 +93,9 @@ extractID3v1(const std::filesystem::path& path) {
     std::unordered_map<std::string, std::string> metadata;
 
     auto cleanString = [](const char* str, size_t maxLen) -> std::string {
-        std::string result(str, std::min(strlen(str), maxLen));
+        const auto* end = static_cast<const char*>(std::memchr(str, '\0', maxLen));
+        const size_t len = end ? static_cast<size_t>(end - str) : maxLen;
+        std::string result(str, len);
         // Trim whitespace
         result.erase(result.find_last_not_of(" \t\r\n") + 1);
         return result;
@@ -104,35 +123,49 @@ extractID3v1(const std::filesystem::path& path) {
     if (!file)
         return std::nullopt;
 
-    char riff[4], wave[4];
-    uint32_t fileSize, fmtSize;
+    char riff[4]{};
+    char wave[4]{};
+    uint32_t fileSize = 0;
+    uint32_t fmtSize = 0;
     uint16_t audioFormat = 0, channels = 0, bitsPerSample = 0;
     uint32_t sampleRate = 0, byteRate = 0;
 
-    file.read(riff, 4);
-    file.read(reinterpret_cast<char*>(&fileSize), 4);
-    file.read(wave, 4);
+    if (!readBytes(file, riff, 4) || !readExact(file, fileSize) || !readBytes(file, wave, 4)) {
+        return std::nullopt;
+    }
 
     if (std::strncmp(riff, "RIFF", 4) != 0 || std::strncmp(wave, "WAVE", 4) != 0) {
         return std::nullopt;
     }
 
     // Find fmt chunk
-    char chunk[4];
-    while (file.read(chunk, 4)) {
-        file.read(reinterpret_cast<char*>(&fmtSize), 4);
+    char chunk[4]{};
+    bool foundFmt = false;
+    while (readBytes(file, chunk, 4)) {
+        if (!readExact(file, fmtSize)) {
+            return std::nullopt;
+        }
 
         if (std::strncmp(chunk, "fmt ", 4) == 0) {
-            file.read(reinterpret_cast<char*>(&audioFormat), 2);
-            file.read(reinterpret_cast<char*>(&channels), 2);
-            file.read(reinterpret_cast<char*>(&sampleRate), 4);
-            file.read(reinterpret_cast<char*>(&byteRate), 4);
-            file.seekg(2, std::ios::cur); // skip block align
-            file.read(reinterpret_cast<char*>(&bitsPerSample), 2);
+            if (fmtSize < 16 || !readExact(file, audioFormat) || !readExact(file, channels) ||
+                !readExact(file, sampleRate) || !readExact(file, byteRate)) {
+                return std::nullopt;
+            }
+            uint16_t blockAlign = 0;
+            if (!readExact(file, blockAlign) || !readExact(file, bitsPerSample)) {
+                return std::nullopt;
+            }
+            foundFmt = true;
             break;
-        } else {
-            file.seekg(fmtSize, std::ios::cur);
         }
+        file.seekg(static_cast<std::streamoff>(fmtSize), std::ios::cur);
+        if (!file) {
+            return std::nullopt;
+        }
+    }
+
+    if (!foundFmt) {
+        return std::nullopt;
     }
 
     AudioMetadata metadata;
@@ -142,10 +175,19 @@ extractID3v1(const std::filesystem::path& path) {
 
     // Calculate approximate duration
     if (sampleRate > 0 && channels > 0 && bitsPerSample > 0) {
-        const auto dataSize = std::filesystem::file_size(path) - 44; // Approximate
-        metadata.durationSeconds =
-            static_cast<double>(dataSize) / (sampleRate * channels * bitsPerSample / 8);
-        metadata.bitrate = static_cast<uint32_t>((dataSize * 8) / metadata.durationSeconds);
+        const auto totalSize = std::filesystem::file_size(path);
+        if (totalSize > 44) {
+            const auto dataSize = totalSize - 44; // Approximate
+            const uint64_t bytesPerSecond =
+                byteRate > 0 ? byteRate
+                             : (static_cast<uint64_t>(sampleRate) * channels * bitsPerSample / 8);
+            if (bytesPerSecond > 0) {
+                metadata.durationSeconds =
+                    static_cast<double>(dataSize) / static_cast<double>(bytesPerSecond);
+                metadata.bitrate = static_cast<uint32_t>(
+                    std::min<uint64_t>(std::numeric_limits<uint32_t>::max(), bytesPerSecond * 8));
+            }
+        }
     }
 
     return metadata;
@@ -161,7 +203,8 @@ extractUsingFFProbe(const std::filesystem::path& path) {
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
         char buffer[4096];
         std::string result;
-        while (fgets(buffer, sizeof(buffer), pipe)) {
+        constexpr int bufferSize = static_cast<int>(sizeof(buffer));
+        while (fgets(buffer, bufferSize, pipe)) {
             result += buffer;
         }
         pclose(pipe);
@@ -258,7 +301,13 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
 
             // Audio properties
             audioMeta.durationSeconds = props->lengthInSeconds();
-            audioMeta.bitrate = props->bitrate() * 1000; // TagLib returns kbps
+            const auto bitrateKbps = std::max(props->bitrate(), 0);
+            uint64_t bitrateBps = 0;
+            if (__builtin_mul_overflow(static_cast<uint64_t>(bitrateKbps), 1000ULL, &bitrateBps)) {
+                bitrateBps = std::numeric_limits<uint32_t>::max();
+            }
+            audioMeta.bitrate = static_cast<uint32_t>(
+                std::min<uint64_t>(std::numeric_limits<uint32_t>::max(), bitrateBps));
             audioMeta.sampleRate = props->sampleRate();
             audioMeta.channels = static_cast<uint8_t>(props->channels());
 
@@ -469,7 +518,7 @@ std::vector<std::string> getExtensionsForFormat(AudioFormat format) {
 std::optional<double> estimateDuration(size_t fileSize, uint32_t bitrate) {
     if (bitrate == 0)
         return std::nullopt;
-    return static_cast<double>(fileSize * 8) / bitrate;
+    return static_cast<double>(fileSize) * 8.0 / static_cast<double>(bitrate);
 }
 
 bool isMetadataComplete(const ExtendedAudioMetadata& metadata) {

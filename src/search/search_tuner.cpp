@@ -607,6 +607,15 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.graphCommunityWeight = config.graphCommunityWeight;
     params_.kgMaxResults = config.kgMaxResults;
     params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
+    params_.enableMetaPathRouting = config.enableMetaPathRouting;
+    params_.metaPathSeedK = config.metaPathSeedK;
+    params_.metaPathHopLimit = config.metaPathHopLimit;
+    params_.metaPathBoostAlpha = config.metaPathBoostAlpha;
+    params_.metaPathWeightSem = config.metaPathWeightSem;
+    params_.metaPathWeightCall = config.metaPathWeightCall;
+    params_.metaPathWeightDef = config.metaPathWeightDef;
+    params_.metaPathWeightEntity = config.metaPathWeightEntity;
+    params_.metaPathWeightBlob = config.metaPathWeightBlob;
     const bool preserveExplicitGraphConfig =
         !stats_.hasKnowledgeGraph() &&
         (config.enableGraphRerank || config.kgWeight > 0.0f || config.graphRerankWeight > 0.0f ||

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 #include <chrono>
 #include <ostream>

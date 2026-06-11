@@ -4023,6 +4023,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.skippedComponents = std::move(skipped);
     response.usedEarlyTermination = false;
     if (workingConfig.includeComponentTiming) {
+        componentTiming.merge(response.componentTimingMicros);
         response.componentTimingMicros = std::move(componentTiming);
     }
     response.isDegraded =

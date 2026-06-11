@@ -388,8 +388,22 @@ generateAggressiveFtsFallbackClauses(const std::string& query, size_t maxClauses
         }
     }
 
-    for (size_t i = 0; i < rankedTokens.size() && i < 6 && clauses.size() < maxClauses; ++i) {
-        addClause(rankedTokens[i].token.normalized, 0.55f);
+    // Single OR probe replaces one FTS round-trip per token: same docs, same
+    // 0.55 penalty, but ranked by bm25 across the merged set in one pass.
+    if (!rankedTokens.empty() && clauses.size() < maxClauses) {
+        std::string orClause;
+        size_t orTerms = 0;
+        for (size_t i = 0; i < rankedTokens.size() && i < 6; ++i) {
+            if (orTerms > 0) {
+                orClause += " OR ";
+            }
+            orClause += rankedTokens[i].token.normalized;
+            ++orTerms;
+        }
+        if (orTerms > 1) {
+            orClause = "(" + orClause + ")";
+        }
+        addClause(std::move(orClause), 0.55f);
     }
 
     return clauses;

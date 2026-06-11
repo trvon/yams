@@ -57,23 +57,29 @@ std::vector<int32_t> OnnxTextPreprocessor::truncateTokens(const std::vector<int3
     if (tokens.size() <= max_length) {
         return tokens;
     }
+    if (max_length == 0 || tokens.empty()) {
+        return {};
+    }
 
     std::vector<int32_t> truncated;
     truncated.reserve(max_length);
-    if (!tokens.empty()) {
-        truncated.push_back(tokens[0]);
+    truncated.push_back(tokens[0]);
+
+    if (max_length == 1) {
+        return truncated;
     }
 
-    size_t content_length = max_length - 2;
-    if (tokens.size() > 2) {
+    const size_t content_length = max_length - 2;
+    if (content_length > 0 && tokens.size() > 2) {
+        const size_t lastContentIndex = tokens.size() - 1;
+        const size_t endOffset = std::min(content_length + 1, lastContentIndex);
+        const auto endDistance = static_cast<std::vector<int32_t>::difference_type>(endOffset);
         auto start_it = tokens.begin() + 1;
-        auto end_it = tokens.begin() + std::min(content_length + 1, tokens.size() - 1);
+        auto end_it = tokens.begin() + endDistance;
         truncated.insert(truncated.end(), start_it, end_it);
     }
 
-    if (tokens.size() > 1) {
-        truncated.push_back(getSpecialTokenId(config_.model_settings.sep_token));
-    }
+    truncated.push_back(getSpecialTokenId(config_.model_settings.sep_token));
     return truncated;
 }
 

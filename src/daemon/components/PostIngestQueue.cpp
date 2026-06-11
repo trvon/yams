@@ -2797,6 +2797,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
             }
 
+            const auto deferredEntityCount = batch->deferredDocEntities.size();
             try {
                 if (writeCoordinator_) {
                     auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
@@ -2807,7 +2808,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
                               nlEntities.size(), hash.substr(0, 12));
             } catch (const std::exception& e) {
-                deferredDocEntityQueueFailures_.fetch_add(batch->deferredDocEntities.size(),
+                deferredDocEntityQueueFailures_.fetch_add(deferredEntityCount,
                                                           std::memory_order_relaxed);
                 spdlog::warn("[PostIngestQueue] Failed to queue NL entities for KG: {}", e.what());
             }

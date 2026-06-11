@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -479,10 +480,26 @@ public:
             // Process query
             auto processed_query = query_processor_->processQuery(request.query);
 
-            // Convert to SearchParams
+            // Convert to SearchParams with checked pagination arithmetic.
+            constexpr auto maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+            if (request.page == 0 || request.results_per_page == 0 ||
+                request.results_per_page > maxInt) {
+                return Result<SearchResponse>(
+                    Error{ErrorCode::InvalidArgument, "Invalid pagination parameters"});
+            }
+            const size_t pageIndex = request.page - 1;
+            if (pageIndex > maxInt / request.results_per_page) {
+                return Result<SearchResponse>(
+                    Error{ErrorCode::InvalidArgument, "Pagination offset is too large"});
+            }
+            size_t offset = 0;
+            if (__builtin_mul_overflow(pageIndex, request.results_per_page, &offset)) {
+                return Result<SearchResponse>(
+                    Error{ErrorCode::InvalidArgument, "Pagination offset is too large"});
+            }
             search::SearchParams searchParams;
             searchParams.limit = static_cast<int>(request.results_per_page);
-            searchParams.offset = static_cast<int>((request.page - 1) * request.results_per_page);
+            searchParams.offset = static_cast<int>(offset);
             // TODO: Convert API filters to SearchParams filters
 
             // Perform search

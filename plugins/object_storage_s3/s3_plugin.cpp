@@ -22,6 +22,7 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <regex>
@@ -34,9 +35,26 @@ namespace yams::storage {
 
 namespace {
 
+static bool checkedMulSize(size_t lhs, size_t rhs, size_t& out) {
+    if (__builtin_mul_overflow(lhs, rhs, &out)) {
+        return false;
+    }
+    return true;
+}
+
+static bool checkedSubSize(size_t lhs, size_t rhs, size_t& out) {
+    if (__builtin_sub_overflow(lhs, rhs, &out)) {
+        return false;
+    }
+    return true;
+}
+
 static size_t writeCb(void* contents, size_t size, size_t nmemb, void* userp) {
     auto* out = static_cast<std::vector<uint8_t>*>(userp);
-    size_t total = size * nmemb;
+    size_t total = 0;
+    if (!checkedMulSize(size, nmemb, total) || total == 0) {
+        return 0;
+    }
     auto* bytes = static_cast<uint8_t*>(contents);
     out->insert(out->end(), bytes, bytes + total);
     return total;
@@ -50,8 +68,14 @@ struct ReadData {
 
 static size_t readCb(void* buffer, size_t size, size_t nmemb, void* userp) {
     auto* rd = static_cast<ReadData*>(userp);
-    size_t cap = size * nmemb;
-    size_t remain = rd->size - rd->offset;
+    size_t cap = 0;
+    if (!checkedMulSize(size, nmemb, cap) || cap == 0 || rd->offset > rd->size) {
+        return 0;
+    }
+    size_t remain = 0;
+    if (!checkedSubSize(rd->size, rd->offset, remain)) {
+        return 0;
+    }
     size_t toCopy = std::min(cap, remain);
     if (toCopy > 0) {
         std::memcpy(buffer, rd->data + rd->offset, toCopy);
@@ -65,13 +89,17 @@ static std::string percentEncodeRfc3986(const std::string& s, bool preserveSlash
     static const char* unreserved =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
     std::string out;
-    out.reserve(s.size() * 3);
+    size_t reserveSize = 0;
+    if (!checkedMulSize(s.size(), 3, reserveSize)) {
+        reserveSize = std::numeric_limits<size_t>::max();
+    }
+    out.reserve(reserveSize);
     for (unsigned char c : s) {
-        if (std::strchr(unreserved, c) || (preserveSlash && c == '/')) {
-            out.push_back((char)c);
+        if (std::strchr(unreserved, static_cast<int>(c)) || (preserveSlash && c == '/')) {
+            out.push_back(static_cast<char>(c));
         } else {
             char buf[4];
-            std::snprintf(buf, sizeof(buf), "%%%02X", c);
+            std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned int>(c));
             out.append(buf);
         }
     }
@@ -296,11 +324,11 @@ public:
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
             std::string out;
             for (unsigned char c : s) {
-                if (std::strchr(unreserved, c)) {
-                    out.push_back((char)c);
+                if (std::strchr(unreserved, static_cast<int>(c))) {
+                    out.push_back(static_cast<char>(c));
                 } else {
                     char buf[4];
-                    std::snprintf(buf, sizeof(buf), "%%%02X", c);
+                    std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned int>(c));
                     out.append(buf);
                 }
             }
@@ -711,7 +739,9 @@ static int s3_create(const char* config_json, void** out_backend) {
                         cfg.credentials[k] = v.get<std::string>();
                 }
             }
-        } catch (...) {
+        } catch (const std::exception&) {
+            delete backend;
+            return YAMS_PLUGIN_ERR_INVALID;
         }
     }
     auto r = backend->initialize(cfg);

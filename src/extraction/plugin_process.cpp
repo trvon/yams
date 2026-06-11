@@ -33,6 +33,12 @@ std::string_view span_to_string_view(std::span<const std::byte> data) {
     return {reinterpret_cast<const char*>(data.data()), data.size()};
 }
 
+std::string strerrorCopy(int errorNumber) {
+    static std::mutex strerrorMutex;
+    std::lock_guard<std::mutex> lock(strerrorMutex);
+    return std::string(std::strerror(errorNumber)); // NOLINT(concurrency-mt-unsafe)
+}
+
 #ifdef _WIN32
 std::wstring escape_arg(const std::string& arg) {
     std::wstring warg = std::wstring(arg.begin(), arg.end());
@@ -185,10 +191,23 @@ PluginProcess::Impl::~Impl() {
 }
 
 void PluginProcess::Impl::setup_pipes() {
-    int stdin_pipe[2], stdout_pipe[2], stderr_pipe[2];
+    int stdin_pipe[2] = {-1, -1};
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+
+    auto closePair = [](int (&fds)[2]) {
+        if (fds[0] >= 0)
+            close(fds[0]);
+        if (fds[1] >= 0)
+            close(fds[1]);
+    };
 
     if (pipe(stdin_pipe) < 0 || pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
-        throw std::runtime_error("Failed to create pipes: " + std::string(strerror(errno)));
+        const auto message = strerrorCopy(errno);
+        closePair(stdin_pipe);
+        closePair(stdout_pipe);
+        closePair(stderr_pipe);
+        throw std::runtime_error("Failed to create pipes: " + message);
     }
 
     // Set non-blocking on read ends
@@ -209,10 +228,9 @@ void PluginProcess::Impl::spawn_process() {
     // Create a pipe to detect exec failures. The write end has FD_CLOEXEC set,
     // so if exec succeeds, the pipe is automatically closed and the parent sees EOF.
     // If exec fails, the child writes the errno to the pipe before exiting.
-    int exec_status_pipe[2];
+    int exec_status_pipe[2] = {-1, -1};
     if (pipe(exec_status_pipe) < 0) {
-        throw std::runtime_error("Failed to create exec status pipe: " +
-                                 std::string(strerror(errno)));
+        throw std::runtime_error("Failed to create exec status pipe: " + strerrorCopy(errno));
     }
     // Set FD_CLOEXEC on the write end - this is the key to detecting exec failures
     fcntl(exec_status_pipe[1], F_SETFD, FD_CLOEXEC);
@@ -222,7 +240,7 @@ void PluginProcess::Impl::spawn_process() {
     if (pid < 0) {
         close(exec_status_pipe[0]);
         close(exec_status_pipe[1]);
-        throw std::runtime_error("fork() failed: " + std::string(strerror(errno)));
+        throw std::runtime_error("fork() failed: " + strerrorCopy(errno));
     }
 
     if (pid == 0) {
@@ -261,7 +279,7 @@ void PluginProcess::Impl::spawn_process() {
         // Set environment variables
         for (const auto& [key, value] : config_.env) {
             if (!key.starts_with("__YAMS_")) {
-                setenv(key.c_str(), value.c_str(), 1);
+                (void)setenv(key.c_str(), value.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
             }
         }
 
@@ -294,13 +312,28 @@ void PluginProcess::Impl::spawn_process() {
     ssize_t n = read(exec_status_pipe[0], &exec_error, sizeof(exec_error));
     close(exec_status_pipe[0]);
 
+    if (n < 0) {
+        state_.store(ProcessState::Failed, std::memory_order_release);
+        throw std::runtime_error("failed to read exec status pipe: " + strerrorCopy(errno));
+    }
+
     if (n > 0) {
         // exec failed - reap the zombie child
-        int status;
-        waitpid(pid, &status, 0);
-        exit_code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        int status = 0;
+        const pid_t waited = waitpid(pid, &status, 0);
+        if (waited == pid) {
+            if (WIFEXITED(status)) {
+                exit_code_ = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                exit_code_ = 128 + WTERMSIG(status);
+            } else {
+                exit_code_ = 127;
+            }
+        } else {
+            exit_code_ = 127;
+        }
         state_.store(ProcessState::Failed, std::memory_order_release);
-        throw std::runtime_error("exec failed: " + std::string(strerror(exec_error)) +
+        throw std::runtime_error("exec failed: " + strerrorCopy(exec_error) +
                                  " (executable: " + config_.executable.string() + ")");
     }
     // n == 0 means EOF, exec succeeded
@@ -396,8 +429,8 @@ size_t PluginProcess::Impl::write_stdin(std::span<const std::byte> data) {
             state_.store(ProcessState::Terminated, std::memory_order_release);
             return 0;
         }
-        spdlog::error("PluginProcess: Failed to write to stdin: {} (errno: {})", strerror(errno),
-                      errno);
+        spdlog::error("PluginProcess: Failed to write to stdin: {} (errno: {})",
+                      strerrorCopy(errno), errno);
         return 0;
     }
 

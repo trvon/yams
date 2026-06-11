@@ -7,7 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 #ifdef _WIN32
 #include <windows.h>

@@ -29,6 +29,7 @@ namespace yamsfmt = fmt;
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -39,6 +40,30 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+namespace {
+
+std::string formatLocalTime(std::time_t value, const char* format) {
+    static std::mutex timeMutex;
+    std::tm tm{};
+    {
+        std::lock_guard<std::mutex> lock(timeMutex);
+        if (const std::tm* local = std::localtime(&value)) { // NOLINT(concurrency-mt-unsafe)
+            tm = *local;
+        } else {
+            return {};
+        }
+    }
+
+    char buffer[100]{};
+    if (std::strftime(buffer, sizeof(buffer), format, &tm) == 0) {
+        return {};
+    }
+    return std::string(buffer);
+}
+
+} // namespace
+
 class ListCommand : public ICommand {
 public:
     std::string getName() const override { return "list"; }
@@ -714,12 +739,9 @@ private:
 
                 // Format timestamp
                 std::time_t tt = version.indexedTimestamp;
-                std::tm* tm = std::localtime(&tt);
-                char timeBuffer[32];
-                std::strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M", tm);
+                std::string timeDisplay = formatLocalTime(tt, "%Y-%m-%d %H:%M");
 
-                table.add_row(
-                    {versionNum, snapDisplay, hashDisplay, sizeStr, std::string(timeBuffer)});
+                table.add_row({versionNum, snapDisplay, hashDisplay, sizeStr, timeDisplay});
             }
 
             // Render table using ui_helpers
@@ -1021,10 +1043,7 @@ private:
 
         std::string getFormattedDate() const {
             auto time_t = std::chrono::system_clock::to_time_t(info.indexedTime);
-            std::tm* tm = std::localtime(&time_t);
-            char buffer[100];
-            std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", tm);
-            return std::string(buffer);
+            return formatLocalTime(time_t, "%Y-%m-%d %H:%M:%S");
         }
 
         std::string getRelativeTime() const {
@@ -1037,7 +1056,7 @@ private:
                 return std::to_string(diff.count() / 60) + "m ago";
             } else if (diff.count() < 86400) {
                 return std::to_string(diff.count() / 3600) + "h ago";
-            } else if (diff.count() < 86400 * 7) {
+            } else if (diff.count() < 86400LL * 7LL) {
                 return std::to_string(diff.count() / 86400) + "d ago";
             } else {
                 return getFormattedDate();

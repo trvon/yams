@@ -17,6 +17,10 @@ namespace yamsfmt = fmt;
 
 namespace yams::chunking {
 
+namespace {
+constexpr uint64_t kDefaultRabinPolynomial = 0x3DA3358B4DC173ULL;
+}
+
 // Precomputed polynomial powers for Rabin fingerprinting
 struct RabinTables {
     std::array<uint64_t, 256> outTable{};
@@ -51,14 +55,18 @@ private:
         uint64_t v;
     };
     static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
+        if (poly.v == 0) {
+            return 0;
+        }
         uint64_t result = 1;
         base %= poly.v;
         while (exp.v > 0) {
             if (exp.v & 1) {
-                result = (result * base) % poly.v;
+                result =
+                    static_cast<uint64_t>((static_cast<unsigned __int128>(result) * base) % poly.v);
             }
             exp.v >>= 1;
-            base = (base * base) % poly.v;
+            base = static_cast<uint64_t>((static_cast<unsigned __int128>(base) * base) % poly.v);
         }
         return result;
     }
@@ -72,7 +80,13 @@ struct RabinChunker::Impl {
 };
 
 RabinChunker::RabinChunker(ChunkingConfig config)
-    : pImpl(std::make_unique<Impl>(config.polynomial)), config_(std::move(config)) {
+    : pImpl(std::make_unique<Impl>(config.polynomial != 0 ? config.polynomial
+                                                          : kDefaultRabinPolynomial)),
+      config_(std::move(config)) {
+    if (config_.polynomial == 0) {
+        spdlog::warn("RabinChunker polynomial was zero; using default polynomial");
+        config_.polynomial = kDefaultRabinPolynomial;
+    }
     spdlog::debug("Created RabinChunker with target chunk size: {}", config_.targetChunkSize);
 }
 
@@ -198,7 +212,11 @@ std::vector<Chunk> RabinChunker::chunkFile(const std::filesystem::path& path) {
 
     // Get file size
     file.seekg(0, std::ios::end);
-    size_t fileSize = file.tellg();
+    const auto endPos = file.tellg();
+    if (endPos < std::streampos{0}) {
+        throw std::runtime_error("Failed to determine file size");
+    }
+    size_t fileSize = static_cast<size_t>(endPos);
     file.seekg(0, std::ios::beg);
 
     // Read entire file into memory (for now - streaming version would be better for large files)

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <yams/app/services/graph_context_service.hpp>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 #include <nlohmann/json.hpp>
 #include <filesystem>

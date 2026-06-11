@@ -7,7 +7,7 @@
 #include <string_view>
 #include <unordered_set>
 
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 #include <yams/metadata/path_utils.h>
 
 namespace yams::cli {

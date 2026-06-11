@@ -294,6 +294,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     metadata::ConnectionPoolConfig dbPoolCfg;
     dbPoolCfg.minConnections = 1;
     dbPoolCfg.maxConnections = 1;
+    dbPoolCfg.busyTimeout = std::chrono::milliseconds(5000);
 
     std::shared_ptr<metadata::ConnectionPool> writePool;
     {

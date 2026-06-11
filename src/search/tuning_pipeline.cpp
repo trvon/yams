@@ -118,6 +118,15 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.graphCoverageSignalWeight = config.graphCoverageSignalWeight;
     params.graphPathSignalWeight = config.graphPathSignalWeight;
     params.graphCorroborationFloor = config.graphCorroborationFloor;
+    params.enableMetaPathRouting = config.enableMetaPathRouting;
+    params.metaPathSeedK = config.metaPathSeedK;
+    params.metaPathHopLimit = config.metaPathHopLimit;
+    params.metaPathBoostAlpha = config.metaPathBoostAlpha;
+    params.metaPathWeightSem = config.metaPathWeightSem;
+    params.metaPathWeightCall = config.metaPathWeightCall;
+    params.metaPathWeightDef = config.metaPathWeightDef;
+    params.metaPathWeightEntity = config.metaPathWeightEntity;
+    params.metaPathWeightBlob = config.metaPathWeightBlob;
     params.conceptExtractionBackend = config.conceptExtractionBackend;
     return params;
 }

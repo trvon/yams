@@ -7,9 +7,12 @@
 #include "zpdf.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <future>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -218,16 +221,22 @@ TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int n
         return doc->extractAll();
     }
 
-    // Open per-thread documents and distribute pages
-    const int pagesPerThread = (totalPages + numThreads - 1) / numThreads;
+    // Open per-thread documents and distribute pages.
+    const auto totalPages64 = static_cast<std::int64_t>(totalPages);
+    const auto numThreads64 = static_cast<std::int64_t>(numThreads);
+    const auto pagesPerThread64 = (totalPages64 + numThreads64 - 1) / numThreads64;
+    if (pagesPerThread64 <= 0 || pagesPerThread64 > static_cast<std::int64_t>(totalPages))
+        return {};
     std::vector<std::future<std::pair<int, std::string>>> futures;
     futures.reserve(static_cast<size_t>(numThreads));
 
-    for (int t = 0; t < numThreads; ++t) {
-        const int startPage = t * pagesPerThread;
-        const int endPage = std::min(startPage + pagesPerThread, totalPages);
-        if (startPage >= totalPages)
+    for (std::int64_t t = 0; t < numThreads64; ++t) {
+        const auto startPage64 = t * pagesPerThread64;
+        const auto endPage64 = std::min(startPage64 + pagesPerThread64, totalPages64);
+        if (startPage64 >= totalPages64)
             break;
+        const int startPage = static_cast<int>(startPage64);
+        const int endPage = static_cast<int>(endPage64);
 
         futures.push_back(std::async(
             std::launch::async, [data, startPage, endPage]() -> std::pair<int, std::string> {

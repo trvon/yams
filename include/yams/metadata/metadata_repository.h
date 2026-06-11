@@ -345,6 +345,11 @@ public:
     fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
                 const std::optional<std::vector<int64_t>>& docIds = std::nullopt) = 0;
     virtual void addSymSpellTerm(std::string_view term, int64_t frequency = 1) = 0;
+    virtual void addSymSpellTerms(const std::vector<std::string>& terms) {
+        for (const auto& term : terms) {
+            addSymSpellTerm(term);
+        }
+    }
 
     // Bulk operations
     virtual Result<std::optional<DocumentInfo>>
@@ -629,6 +634,7 @@ public:
      * @param frequency How many times this term appears (default 1)
      */
     void addSymSpellTerm(std::string_view term, int64_t frequency = 1) override;
+    void addSymSpellTerms(const std::vector<std::string>& terms) override;
 
     /**
      * @brief Initialize SymSpell index (creates schema if needed)

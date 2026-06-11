@@ -1287,7 +1287,8 @@ MetadataRepository::getSemanticDuplicateGroupsForDocuments(std::span<const int64
                 if (!hasRow)
                     break;
                 auto group = mapSemanticDuplicateGroupRow(groupStmt);
-                groupsById.emplace(group.id, SemanticDuplicateGroupDetail{std::move(group), {}});
+                const auto groupId = group.id;
+                groupsById.emplace(groupId, SemanticDuplicateGroupDetail{std::move(group), {}});
             }
 
             if (groupsById.empty()) {
@@ -2282,7 +2283,8 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
                 info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
                 info.extractionError = stmt.getString(12);
 
-                result[info.sha256Hash] = std::move(info);
+                auto hash = info.sha256Hash;
+                result.emplace(std::move(hash), std::move(info));
             }
 
             return result;
@@ -3026,6 +3028,12 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
         return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
     }
 
+    // Pooled connections get synchronous=NORMAL from ConnectionPool; this
+    // dedicated handle would otherwise run at SQLite's default FULL and fsync
+    // every autocommitted dictionary write.
+    (void)db->execute("PRAGMA synchronous = NORMAL");
+    (void)db->execute("PRAGMA busy_timeout = 5000");
+
     // Initialize schema (idempotent - creates tables if not exist)
     auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
     if (!schemaResult) {
@@ -3059,6 +3067,32 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
     std::lock_guard<std::mutex> lock(symspellInitMutex_);
     if (symspellIndex_) {
         symspellIndex_->addTerm(term, frequency);
+    }
+}
+
+void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms) {
+    if (terms.empty()) {
+        return;
+    }
+
+    auto initResult = ensureSymSpellInitialized();
+    if (!initResult) {
+        spdlog::warn("SymSpell not initialized, skipping {} terms: {}", terms.size(),
+                     initResult.error().message);
+        return;
+    }
+
+    std::vector<std::pair<std::string, int64_t>> batch;
+    batch.reserve(terms.size());
+    for (const auto& term : terms) {
+        if (!term.empty()) {
+            batch.emplace_back(term, 1);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(symspellInitMutex_);
+    if (symspellIndex_ && !batch.empty()) {
+        symspellIndex_->addTermsBatch(batch);
     }
 }
 
