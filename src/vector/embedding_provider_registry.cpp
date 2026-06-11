@@ -1,6 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <future>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -52,7 +54,10 @@ static Result<T> awaitDaemonCall(MakeAwaitable&& make, std::chrono::milliseconds
             if (!completed->exchange(true)) {
                 try {
                     shared_promise->set_value(Error{ErrorCode::Timeout, "daemon call timeout"});
+                } catch (const std::exception& ex) {
+                    spdlog::debug("Ignoring timeout promise completion race: {}", ex.what());
                 } catch (...) {
+                    spdlog::debug("Ignoring timeout promise completion race");
                 }
             }
             return Error{ErrorCode::Timeout, "daemon call timeout"};
@@ -206,12 +211,16 @@ private:
 };
 
 static std::map<std::string, EmbeddingProviderFactory> g_embeddingProviders;
+static std::mutex g_embeddingProvidersMutex;
+static std::once_flag g_defaultProvidersOnce;
 
 void registerEmbeddingProvider(const std::string& name, EmbeddingProviderFactory factory) {
-    g_embeddingProviders[name] = factory;
+    std::lock_guard lock(g_embeddingProvidersMutex);
+    g_embeddingProviders[name] = std::move(factory);
 }
 
 std::vector<std::string> getRegisteredEmbeddingProviders() {
+    std::lock_guard lock(g_embeddingProvidersMutex);
     std::vector<std::string> names;
     for (const auto& [name, _] : g_embeddingProviders) {
         names.push_back(name);
@@ -219,9 +228,9 @@ std::vector<std::string> getRegisteredEmbeddingProviders() {
     return names;
 }
 
-std::unique_ptr<IEmbeddingProvider> createEmbeddingProvider(const std::string& preferredProvider) {
-    static bool initialized = false;
-    if (!initialized) {
+namespace {
+void ensureDefaultEmbeddingProvidersRegistered() {
+    std::call_once(g_defaultProvidersOnce, [] {
         registerEmbeddingProvider("Mock", &createMockEmbeddingProvider);
         registerEmbeddingProvider("ONNX", []() -> std::unique_ptr<IEmbeddingProvider> {
             return std::make_unique<DaemonClientEmbeddingProvider>();
@@ -229,33 +238,46 @@ std::unique_ptr<IEmbeddingProvider> createEmbeddingProvider(const std::string& p
         registerEmbeddingProvider("DaemonClient", []() -> std::unique_ptr<IEmbeddingProvider> {
             return std::make_unique<DaemonClientEmbeddingProvider>();
         });
-        initialized = true;
+    });
+}
+
+std::optional<EmbeddingProviderFactory> findEmbeddingProviderFactory(const std::string& name) {
+    std::lock_guard lock(g_embeddingProvidersMutex);
+    auto it = g_embeddingProviders.find(name);
+    if (it == g_embeddingProviders.end()) {
+        return std::nullopt;
     }
+    return it->second;
+}
+} // namespace
+
+std::unique_ptr<IEmbeddingProvider> createEmbeddingProvider(const std::string& preferredProvider) {
+    ensureDefaultEmbeddingProvidersRegistered();
 
     if (!preferredProvider.empty()) {
-        auto it = g_embeddingProviders.find(preferredProvider);
-        if (it != g_embeddingProviders.end()) {
-            return it->second();
+        auto factory = findEmbeddingProviderFactory(preferredProvider);
+        if (factory) {
+            return (*factory)();
         }
         spdlog::warn("Preferred embedding provider '{}' not found", preferredProvider);
     }
 
-    if (auto it = g_embeddingProviders.find("ONNX"); it != g_embeddingProviders.end()) {
-        auto provider = it->second();
+    if (auto factory = findEmbeddingProviderFactory("ONNX")) {
+        auto provider = (*factory)();
         if (provider && provider->isAvailable()) {
             return provider;
         }
     }
 
-    if (auto it = g_embeddingProviders.find("DaemonClient"); it != g_embeddingProviders.end()) {
-        auto provider = it->second();
+    if (auto factory = findEmbeddingProviderFactory("DaemonClient")) {
+        auto provider = (*factory)();
         if (provider && provider->isAvailable()) {
             return provider;
         }
     }
 
-    if (auto it = g_embeddingProviders.find("Mock"); it != g_embeddingProviders.end()) {
-        return it->second();
+    if (auto factory = findEmbeddingProviderFactory("Mock")) {
+        return (*factory)();
     }
 
     spdlog::error("No embedding providers available");

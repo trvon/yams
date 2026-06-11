@@ -115,7 +115,7 @@ walkOneHopMetaPath(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore
             if (seedSims) {
                 dstScore[e.dstNodeId] += e.weight * seedSim;
             } else {
-                dstScore.try_emplace(e.dstNodeId, 1.0F);
+                dstScore[e.dstNodeId] += 1.0F;
             }
         }
     }

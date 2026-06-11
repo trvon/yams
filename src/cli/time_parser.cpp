@@ -103,11 +103,11 @@ TimeParser::parseRelative(const std::string& relativeStr) {
             return std::nullopt;
     }
 
-    unsigned long long hours = 0;
     const auto maxHours = static_cast<unsigned long long>(std::chrono::hours::max().count());
-    if (multiplier == 0 || __builtin_mul_overflow(value, multiplier, &hours) || hours > maxHours) {
+    if (multiplier == 0 || value > maxHours / multiplier) {
         return std::nullopt;
     }
+    const unsigned long long hours = value * multiplier;
 
     auto now = std::chrono::system_clock::now();
     return now - std::chrono::hours(static_cast<std::chrono::hours::rep>(hours));

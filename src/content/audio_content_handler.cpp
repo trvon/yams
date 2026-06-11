@@ -302,12 +302,11 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
             // Audio properties
             audioMeta.durationSeconds = props->lengthInSeconds();
             const auto bitrateKbps = std::max(props->bitrate(), 0);
-            uint64_t bitrateBps = 0;
-            if (__builtin_mul_overflow(static_cast<uint64_t>(bitrateKbps), 1000ULL, &bitrateBps)) {
+            uint64_t bitrateBps = static_cast<uint64_t>(bitrateKbps) * 1000ULL;
+            if (bitrateBps > std::numeric_limits<uint32_t>::max()) {
                 bitrateBps = std::numeric_limits<uint32_t>::max();
             }
-            audioMeta.bitrate = static_cast<uint32_t>(
-                std::min<uint64_t>(std::numeric_limits<uint32_t>::max(), bitrateBps));
+            audioMeta.bitrate = static_cast<uint32_t>(bitrateBps);
             audioMeta.sampleRate = props->sampleRate();
             audioMeta.channels = static_cast<uint8_t>(props->channels());
 

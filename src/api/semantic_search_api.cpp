@@ -492,11 +492,7 @@ public:
                 return Result<SearchResponse>(
                     Error{ErrorCode::InvalidArgument, "Pagination offset is too large"});
             }
-            size_t offset = 0;
-            if (__builtin_mul_overflow(pageIndex, request.results_per_page, &offset)) {
-                return Result<SearchResponse>(
-                    Error{ErrorCode::InvalidArgument, "Pagination offset is too large"});
-            }
+            const size_t offset = pageIndex * request.results_per_page;
             search::SearchParams searchParams;
             searchParams.limit = static_cast<int>(request.results_per_page);
             searchParams.offset = static_cast<int>(offset);

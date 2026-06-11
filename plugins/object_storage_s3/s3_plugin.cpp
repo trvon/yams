@@ -36,16 +36,18 @@ namespace yams::storage {
 namespace {
 
 static bool checkedMulSize(size_t lhs, size_t rhs, size_t& out) {
-    if (__builtin_mul_overflow(lhs, rhs, &out)) {
+    if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
         return false;
     }
+    out = lhs * rhs;
     return true;
 }
 
 static bool checkedSubSize(size_t lhs, size_t rhs, size_t& out) {
-    if (__builtin_sub_overflow(lhs, rhs, &out)) {
+    if (rhs > lhs) {
         return false;
     }
+    out = lhs - rhs;
     return true;
 }
 
@@ -90,10 +92,9 @@ static std::string percentEncodeRfc3986(const std::string& s, bool preserveSlash
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
     std::string out;
     size_t reserveSize = 0;
-    if (!checkedMulSize(s.size(), 3, reserveSize)) {
-        reserveSize = std::numeric_limits<size_t>::max();
+    if (checkedMulSize(s.size(), 3, reserveSize)) {
+        out.reserve(reserveSize);
     }
-    out.reserve(reserveSize);
     for (unsigned char c : s) {
         if (std::strchr(unreserved, static_cast<int>(c)) || (preserveSlash && c == '/')) {
             out.push_back(static_cast<char>(c));
