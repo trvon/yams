@@ -1766,25 +1766,37 @@ public:
             if (req.acceptCompressed) {
                 auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
                 if (!bytesResult) {
-                    return Error{bytesResult.error().code, "Document content not found"};
+                    if (doc.size == 0) {
+                        doc.content.emplace();
+                        markUncompressed(doc, 0);
+                    } else {
+                        return Error{bytesResult.error().code, "Document content not found"};
+                    }
+                } else {
+                    auto data = std::move(bytesResult.value());
+                    auto payloadResult =
+                        makeCompressedPayload(std::span<const std::byte>(data.data(), data.size()));
+                    if (!payloadResult) {
+                        return payloadResult.error();
+                    }
+                    auto payload = std::move(payloadResult.value());
+                    doc.content.emplace(std::move(payload.blob));
+                    applyCompressionMetadata(doc, payload.header);
                 }
-                auto data = std::move(bytesResult.value());
-                auto payloadResult =
-                    makeCompressedPayload(std::span<const std::byte>(data.data(), data.size()));
-                if (!payloadResult) {
-                    return payloadResult.error();
-                }
-                auto payload = std::move(payloadResult.value());
-                doc.content.emplace(std::move(payload.blob));
-                applyCompressionMetadata(doc, payload.header);
             } else {
                 auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
                 if (!bytesResult) {
-                    return Error{bytesResult.error().code, "Document content not found"};
+                    if (doc.size == 0) {
+                        doc.content.emplace();
+                        markUncompressed(doc, 0);
+                    } else {
+                        return Error{bytesResult.error().code, "Document content not found"};
+                    }
+                } else {
+                    auto data = std::move(bytesResult.value());
+                    doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
+                    markUncompressed(doc, static_cast<uint64_t>(data.size()));
                 }
-                auto data = std::move(bytesResult.value());
-                doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
-                markUncompressed(doc, static_cast<uint64_t>(data.size()));
             }
         }
 

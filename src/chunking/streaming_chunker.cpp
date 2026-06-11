@@ -11,7 +11,34 @@ namespace yams::chunking {
 
 namespace {
 constexpr uint64_t kDefaultStreamingRabinPolynomial = 0x3DA3358B4DC173ULL;
+
+uint64_t addMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
+    if (mod == 0) {
+        return 0;
+    }
+    lhs %= mod;
+    rhs %= mod;
+    return lhs >= mod - rhs ? lhs - (mod - rhs) : lhs + rhs;
 }
+
+uint64_t multiplyMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
+    if (mod == 0) {
+        return 0;
+    }
+    uint64_t result = 0;
+    lhs %= mod;
+    while (rhs != 0) {
+        if ((rhs & 1U) != 0) {
+            result = addMod(result, lhs, mod);
+        }
+        rhs >>= 1U;
+        if (rhs != 0) {
+            lhs = addMod(lhs, lhs, mod);
+        }
+    }
+    return result;
+}
+} // namespace
 
 // Rabin fingerprinting tables (local to streaming chunker to avoid unity ODR conflicts)
 struct StreamingRabinTables {
@@ -54,11 +81,10 @@ private:
         base %= poly.v;
         while (exp.v > 0) {
             if (exp.v & 1) {
-                result =
-                    static_cast<uint64_t>((static_cast<unsigned __int128>(result) * base) % poly.v);
+                result = multiplyMod(result, base, poly.v);
             }
             exp.v >>= 1;
-            base = static_cast<uint64_t>((static_cast<unsigned __int128>(base) * base) % poly.v);
+            base = multiplyMod(base, base, poly.v);
         }
         return result;
     }

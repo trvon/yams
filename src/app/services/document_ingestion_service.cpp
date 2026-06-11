@@ -1,6 +1,5 @@
 #include <yams/app/services/document_ingestion_service.h>
 
-#include <yams/core/assert.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -18,6 +17,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
+#include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -319,20 +319,17 @@ DocumentIngestionService::addBatchAsync(const std::vector<AddOptions>& batch,
         co_return;
     };
 
-    co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                         void(std::exception_ptr)>(
+    co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable), void()>(
         [exec, concurrency, worker](auto handler) {
             using HandlerT = std::decay_t<decltype(handler)>;
             auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
             auto remaining = std::make_shared<std::atomic<std::size_t>>(concurrency);
             for (std::size_t w = 0; w < concurrency; ++w) {
-                boost::asio::co_spawn(exec, worker,
-                                      [handlerPtr, remaining](std::exception_ptr) {
-                                          if (remaining->fetch_sub(
-                                                  1, std::memory_order_acq_rel) == 1) {
-                                              (*handlerPtr)(nullptr);
-                                          }
-                                      });
+                boost::asio::co_spawn(exec, worker, [handlerPtr, remaining](std::exception_ptr) {
+                    if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        (*handlerPtr)();
+                    }
+                });
             }
         },
         boost::asio::use_awaitable);
