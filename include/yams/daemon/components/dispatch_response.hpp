@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 namespace yams::daemon::dispatch {

@@ -2,10 +2,12 @@
 // Copyright 2025 YAMS Contributors
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <optional>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -13,8 +15,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <boost/asio/io_context.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
@@ -59,6 +63,21 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     info.contentExtracted = true;
     info.extractionStatus = ExtractionStatus::Success;
     return info;
+}
+
+BatchContentEntry makeBatchContentEntry(int64_t documentId, std::string title,
+                                        std::string contentText,
+                                        std::string mimeType = "text/plain",
+                                        std::string extractionMethod = "test",
+                                        std::string language = "en") {
+    BatchContentEntry entry;
+    entry.documentId = documentId;
+    entry.title = std::move(title);
+    entry.contentText = std::move(contentText);
+    entry.mimeType = std::move(mimeType);
+    entry.extractionMethod = std::move(extractionMethod);
+    entry.language = std::move(language);
+    return entry;
 }
 
 TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[metadata][path]") {
@@ -2443,6 +2462,81 @@ TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fall
     CHECK((keywordResult.value().totalCount == 0));
 }
 
+TEST_CASE(
+    "MetadataRepository: concurrent SymSpell writes use coordinator without blocking fuzzy reads",
+    "[unit][metadata][repository][symspell]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath(
+        "/notes/symspell_lock_storm.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEF");
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE((insertResult.has_value()));
+    const auto docId = insertResult.value();
+
+    const std::string indexedTerm = "symstormtarget";
+    const std::string contentText = std::string("The ") + indexedTerm;
+    REQUIRE((fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain")
+                 .has_value()));
+
+    boost::asio::io_context io;
+    yams::daemon::WriteCoordinator::Config config;
+    config.maxBatchSize = 8;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 512;
+    auto repoRef =
+        std::shared_ptr<MetadataRepository>(fix.repository_.get(), [](MetadataRepository*) {});
+    yams::daemon::WriteCoordinator coordinator(io, {}, repoRef, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < 4; ++worker) {
+        workers.emplace_back([&coordinator, worker, indexedTerm] {
+            for (int i = 0; i < 50; ++i) {
+                auto batch = std::make_unique<yams::daemon::WriteBatch>();
+                batch->source = "test/symspell_lock_storm";
+                (void)worker;
+                (void)i;
+                batch->ops.emplace_back(yams::daemon::AddSymSpellTermsOp{{indexedTerm}});
+                coordinator.enqueue(std::move(batch));
+            }
+        });
+    }
+    for (int worker = 0; worker < 4; ++worker) {
+        workers.emplace_back([&] {
+            for (int i = 0; i < 50; ++i) {
+                auto result = fix.repository_->fuzzySearch(indexedTerm, 0.6f, 5);
+                if (!result || result.value().results.empty()) {
+                    failed.store(true, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    auto flushResult = coordinator.flush(std::chrono::seconds{10});
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+
+    REQUIRE((flushResult.has_value()));
+    CHECK_FALSE((failed.load(std::memory_order_relaxed)));
+    CHECK((coordinator.getStats().symSpellTermsAdded >= 200));
+
+    auto fuzzyResult = fix.repository_->fuzzySearch("symstormtargat", 0.6f, 10);
+    REQUIRE((fuzzyResult.has_value()));
+    REQUIRE((fuzzyResult.value().results.size() == 1));
+    CHECK((fuzzyResult.value().results.front().document.id == docId));
+}
+
 TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
@@ -3279,8 +3373,7 @@ TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-
     auto docId = insertResult.value();
 
     // First batch insert — transitions to extracted+indexed
-    std::vector<BatchContentEntry> entries = {
-        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    std::vector<BatchContentEntry> entries = {makeBatchContentEntry(docId, "Title", "Content")};
     auto batch1 = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batch1.has_value()));
 
@@ -3325,7 +3418,7 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
 
     // Pre-extract doc1 via batchInsertContentAndIndex so it has extraction_status='Success'
     std::vector<BatchContentEntry> preEntries = {
-        {id1.value(), "Title 1", "Content 1", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title 1", "Content 1")};
     auto preResult = fix.repository_->batchInsertContentAndIndex(preEntries);
     REQUIRE((preResult.has_value()));
 
@@ -3334,8 +3427,8 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
 
     // Now batch both: doc1 (already extracted) + doc2 (fresh)
     std::vector<BatchContentEntry> entries = {
-        {id1.value(), "Title 1 updated", "Content 1 updated", "text/plain", "test", "en"},
-        {id2.value(), "Title 2", "Content 2", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title 1 updated", "Content 1 updated"),
+        makeBatchContentEntry(id2.value(), "Title 2", "Content 2")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3501,8 +3594,7 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
     });
 
     // Batch insert should clear the error
-    std::vector<BatchContentEntry> entries = {
-        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    std::vector<BatchContentEntry> entries = {makeBatchContentEntry(docId, "Title", "Content")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3680,7 +3772,7 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
     REQUIRE((id1.has_value()));
 
     std::vector<BatchContentEntry> entries = {
-        {id1.value(), "Title", "Has content", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title", "Has content")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3735,7 +3827,7 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
     // Insert large content (10KB)
     std::string largeContent(10000, 'x');
     std::vector<BatchContentEntry> entries = {
-        {insertResult.value(), "Title", largeContent, "text/plain", "test", "en"}};
+        makeBatchContentEntry(insertResult.value(), "Title", largeContent)};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 

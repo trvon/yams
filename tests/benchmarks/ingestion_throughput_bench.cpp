@@ -25,6 +25,7 @@
 #include <unordered_set>
 
 #include "../integration/daemon/test_daemon_harness.h"
+#include "bench_utils.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/cli/cli_sync.h>
@@ -231,19 +232,7 @@ BenchConfig loadConfig(const fs::path& configPath) {
     return cfg;
 }
 
-std::string isoTimestamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    gmtime_s(&tm, &tt);
-#else
-    gmtime_r(&tt, &tm);
-#endif
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
-}
+using yams::bench::isoTimestamp;
 
 std::vector<std::string> splitCsv(const std::string& csv) {
     std::vector<std::string> tokens;

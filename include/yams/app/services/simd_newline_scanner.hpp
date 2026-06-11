@@ -24,16 +24,10 @@ namespace app {
 namespace services {
 
 /**
- * SIMD-optimized newline scanner for grep performance
+ * Newline scanner for grep performance
  *
- * Provides 4-8x faster newline detection compared to memchr() by using:
- * - SSE2 (128-bit) on x86_64: 16 bytes per instruction
- * - AVX2 (256-bit) on modern x86: 32 bytes per instruction
- * - NEON (128-bit) on ARM/aarch64: 16 bytes per instruction
- *
- * Falls back to scalar memchr() on platforms without SIMD support.
- *
- * Based on ripgrep's bstr crate and Daniel Lemire's SIMD memchr techniques.
+ * Uses memchr() / scalar scanning: benchmarks show memchr is faster than
+ * custom SIMD implementations for single-byte search on modern CPUs.
  */
 class SimdNewlineScanner {
 public:
@@ -79,35 +73,8 @@ public:
     static size_t countNewlines(const char* data, size_t size);
 
 private:
-#if defined(YAMS_SIMD_AVX2)
-    static size_t findNewlineAVX2(const char* data, size_t size);
-    static size_t countNewlinesAVX2(const char* data, size_t size);
-#endif
-
-#if defined(YAMS_SIMD_SSE2)
-    static size_t findNewlineSSE2(const char* data, size_t size);
-    static size_t countNewlinesSSE2(const char* data, size_t size);
-#endif
-
-#if defined(YAMS_SIMD_NEON)
-    static size_t findNewlineNEON(const char* data, size_t size);
-    static size_t countNewlinesNEON(const char* data, size_t size);
-#endif
-
     static size_t findNewlineScalar(const char* data, size_t size);
     static size_t countNewlinesScalar(const char* data, size_t size);
-
-    // Count set bits in a bitmask (for counting newlines)
-    static inline int popcount(uint32_t mask) {
-#if defined(__POPCNT__)
-        return __builtin_popcount(mask);
-#else
-        // Software fallback
-        mask = mask - ((mask >> 1) & 0x55555555);
-        mask = (mask & 0x33333333) + ((mask >> 2) & 0x33333333);
-        return static_cast<int>((((mask + (mask >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24);
-#endif
-    }
 };
 
 } // namespace services

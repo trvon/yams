@@ -11,15 +11,19 @@
 #include <variant>
 #include <vector>
 
-#include <boost/asio/awaitable.hpp>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 
 #include <yams/core/types.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+
+namespace boost::asio {
+template <typename T, typename Executor> class awaitable;
+} // namespace boost::asio
 
 namespace yams::metadata {
 class MetadataRepository;
@@ -147,6 +151,9 @@ struct UpsertSymbolExtractionStateOp {
 struct InsertRelationshipOp {
     metadata::DocumentRelationship relationship;
 };
+struct AddSymSpellTermsOp {
+    std::vector<std::string> terms;
+};
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
@@ -156,7 +163,7 @@ using WriteOp =
                  InsertDocumentOp, UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
                  UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp,
-                 InsertRelationshipOp>;
+                 InsertRelationshipOp, AddSymSpellTermsOp>;
 
 struct WriteBatch {
     std::string source;
@@ -230,6 +237,7 @@ public:
         std::uint64_t embeddingStatusesUpdated = 0;
         std::uint64_t symbolExtractionStatesUpdated = 0;
         std::uint64_t relationshipsInserted = 0;
+        std::uint64_t symSpellTermsAdded = 0;
         std::uint64_t nodesUpserted = 0;
         std::uint64_t nodesDeleted = 0;
         std::uint64_t edgesAdded = 0;
@@ -269,7 +277,7 @@ public:
     Stats getStats() const;
 
 private:
-    boost::asio::awaitable<void> writerLoop();
+    boost::asio::awaitable<void, boost::asio::any_io_executor> writerLoop();
     Result<void> applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, UpsertNodesOp& op,
                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
@@ -306,6 +314,7 @@ private:
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
     Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
+    Result<void> applyMetadataOp(AddSymSpellTermsOp& op);
 
     void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,

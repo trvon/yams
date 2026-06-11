@@ -202,6 +202,123 @@ struct DeleteDocumentsBatchResult {
     std::vector<std::string> removedFilePaths;
     MetadataTagDelta metadataTagDelta{};
 };
+
+Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const DocumentInfo& info,
+                                                           bool hasPathIndexing) {
+    std::string sql =
+        "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
+        "file_size, sha256_hash, mime_type, created_time, modified_time, "
+        "indexed_time, content_extracted, extraction_status, extraction_error";
+    if (hasPathIndexing) {
+        sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
+    }
+    sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+    if (hasPathIndexing) {
+        sql += ", ?, ?, ?, ?, ?";
+    }
+    sql += ")";
+
+    YAMS_TRY_UNWRAP(stmtResult, db.prepareCached(sql));
+    auto& stmt = *stmtResult;
+
+    if (hasPathIndexing) {
+        YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                              info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
+                              info.indexedTime, info.contentExtracted ? 1 : 0,
+                              ExtractionStatusUtils::toString(info.extractionStatus),
+                              info.extractionError, info.pathPrefix, info.reversePath,
+                              info.pathHash, info.parentHash, info.pathDepth));
+    } else {
+        YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                              info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
+                              info.indexedTime, info.contentExtracted ? 1 : 0,
+                              ExtractionStatusUtils::toString(info.extractionStatus),
+                              info.extractionError));
+    }
+
+    YAMS_TRY(stmt.execute());
+
+    if (db.changes() > 0) {
+        const int64_t docId = db.lastInsertRowId();
+        spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash, docId);
+        return std::pair<int64_t, bool>{docId, true};
+    }
+
+    YAMS_TRY_UNWRAP(checkStmtResult,
+                    db.prepareCached("SELECT id FROM documents WHERE sha256_hash = ?"));
+    auto& checkStmt = *checkStmtResult;
+    YAMS_TRY(checkStmt.reset());
+    YAMS_TRY(checkStmt.clearBindings());
+    YAMS_TRY(checkStmt.bind(1, info.sha256Hash));
+    YAMS_TRY_UNWRAP(stepRes, checkStmt.step());
+    if (!stepRes) {
+        return Error{ErrorCode::DatabaseError,
+                     "Document insert ignored but existing record not found"};
+    }
+    const int64_t docId = checkStmt.getInt64(0);
+    spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash, docId);
+    return std::pair<int64_t, bool>{docId, false};
+}
+
+Result<MetadataTagDelta>
+applyDocumentMetadataWrites(Database& db,
+                            const std::vector<repository::MetadataWriteEntry>& dedupedWrites,
+                            int64_t docId) {
+    if (dedupedWrites.empty()) {
+        return MetadataTagDelta{};
+    }
+    auto writesForDoc = dedupedWrites;
+    for (auto& [writeDocId, key, value] : writesForDoc) {
+        (void)key;
+        (void)value;
+        writeDocId = docId;
+    }
+    return repository::upsertMetadataWritesWithTagDelta(db, writesForDoc);
+}
+
+Result<void> upsertTreeSnapshotRow(Database& db, const TreeSnapshotRecord& snapshot) {
+    auto metaOrEmpty = [&](const char* key) -> std::string {
+        auto it = snapshot.metadata.find(key);
+        return it != snapshot.metadata.end() ? it->second : std::string{};
+    };
+
+    YAMS_TRY_UNWRAP(snapStmtResult, db.prepareCached(R"(
+                INSERT INTO tree_snapshots (
+                    snapshot_id, created_at, directory_path, tree_root_hash,
+                    snapshot_label, git_commit, git_branch, git_remote, files_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_id) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    directory_path = excluded.directory_path,
+                    tree_root_hash = excluded.tree_root_hash,
+                    snapshot_label = excluded.snapshot_label,
+                    git_commit = excluded.git_commit,
+                    git_branch = excluded.git_branch,
+                    git_remote = excluded.git_remote,
+                    files_count = excluded.files_count
+            )"));
+    auto& snapStmt = *snapStmtResult;
+    YAMS_TRY(snapStmt.reset());
+    YAMS_TRY(snapStmt.clearBindings());
+
+    auto bindTextOrNull = [&](int index, const std::string& value) -> Result<void> {
+        if (value.empty()) {
+            return snapStmt.bind(index, nullptr);
+        }
+        return snapStmt.bind(index, value);
+    };
+
+    YAMS_TRY(snapStmt.bind(1, snapshot.snapshotId));
+    YAMS_TRY(snapStmt.bind(2, static_cast<int64_t>(snapshot.createdTime)));
+    YAMS_TRY(bindTextOrNull(3, metaOrEmpty("directory_path")));
+    YAMS_TRY(bindTextOrNull(4, snapshot.rootTreeHash));
+    YAMS_TRY(bindTextOrNull(5, metaOrEmpty("snapshot_label")));
+    YAMS_TRY(bindTextOrNull(6, metaOrEmpty("git_commit")));
+    YAMS_TRY(bindTextOrNull(7, metaOrEmpty("git_branch")));
+    YAMS_TRY(bindTextOrNull(8, metaOrEmpty("git_remote")));
+    YAMS_TRY(snapStmt.bind(9, static_cast<int64_t>(snapshot.fileCount)));
+    return snapStmt.execute();
+}
 } // namespace
 
 // Document operations
@@ -337,150 +454,17 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 }
             });
 
-            std::string sql =
-                "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
-                "file_size, sha256_hash, mime_type, created_time, modified_time, "
-                "indexed_time, content_extracted, extraction_status, extraction_error";
+            YAMS_TRY_UNWRAP(inserted,
+                            insertOrLookupDocumentRow(db, info, hasPathIndexing_));
+            const auto [docId, insertedNewDocument] = inserted;
 
-            if (hasPathIndexing_) {
-                sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
-            }
-
-            sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
-            if (hasPathIndexing_) {
-                sql += ", ?, ?, ?, ?, ?";
-            }
-            sql += ")";
-
-            YAMS_TRY_UNWRAP(stmtResult, db.prepareCached(sql));
-            auto& stmt = *stmtResult;
-
-            if (hasPathIndexing_) {
-                YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension,
-                                      info.fileSize, info.sha256Hash, info.mimeType,
-                                      info.createdTime, info.modifiedTime, info.indexedTime,
-                                      info.contentExtracted ? 1 : 0,
-                                      ExtractionStatusUtils::toString(info.extractionStatus),
-                                      info.extractionError, info.pathPrefix, info.reversePath,
-                                      info.pathHash, info.parentHash, info.pathDepth));
-            } else {
-                YAMS_TRY(stmt.bindAll(
-                    info.filePath, info.fileName, info.fileExtension, info.fileSize,
-                    info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
-                    info.indexedTime, info.contentExtracted ? 1 : 0,
-                    ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError));
-            }
-
-            YAMS_TRY(stmt.execute());
-
-            const int changes = db.changes();
-            int64_t docId;
-            bool insertedNewDocument = false;
-
-            if (changes > 0) {
-                docId = db.lastInsertRowId();
-                insertedNewDocument = true;
-                spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash,
-                              docId);
-            } else {
-                YAMS_TRY_UNWRAP(checkStmtResult,
-                                db.prepareCached("SELECT id FROM documents WHERE sha256_hash = ?"));
-                auto& stmt2 = *checkStmtResult;
-                YAMS_TRY(stmt2.reset());
-                YAMS_TRY(stmt2.clearBindings());
-                YAMS_TRY(stmt2.bind(1, info.sha256Hash));
-                YAMS_TRY_UNWRAP(stepRes, stmt2.step());
-                if (!stepRes) {
-                    return Error{ErrorCode::DatabaseError,
-                                 "Document insert ignored but existing record not found"};
-                }
-                docId = stmt2.getInt64(0);
-                spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash,
-                              docId);
-            }
-
-            MetadataTagDelta metadataTagDelta{};
+            YAMS_TRY_UNWRAP(metadataTagDelta,
+                            applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
             const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
-
-            if (!dedupedMetadataWrites.empty()) {
-                auto writesForDoc = dedupedMetadataWrites;
-                for (auto& [writeDocId, key, value] : writesForDoc) {
-                    (void)key;
-                    (void)value;
-                    writeDocId = docId;
-                }
-                YAMS_TRY_UNWRAP(delta,
-                                repository::upsertMetadataWritesWithTagDelta(db, writesForDoc));
-                metadataTagDelta = delta;
-            }
 
             if (snapshot) {
                 snapshot->ingestDocumentId = docId;
-
-                const std::string directoryPath = snapshot->metadata.count("directory_path")
-                                                      ? snapshot->metadata.at("directory_path")
-                                                      : "";
-                const std::string snapshotLabel = snapshot->metadata.count("snapshot_label")
-                                                      ? snapshot->metadata.at("snapshot_label")
-                                                      : "";
-                const std::string gitCommit = snapshot->metadata.count("git_commit")
-                                                  ? snapshot->metadata.at("git_commit")
-                                                  : "";
-                const std::string gitBranch = snapshot->metadata.count("git_branch")
-                                                  ? snapshot->metadata.at("git_branch")
-                                                  : "";
-                std::string gitRemote;
-                if (auto it = snapshot->metadata.find("git_remote");
-                    it != snapshot->metadata.end()) {
-                    gitRemote.append(it->second);
-                }
-
-                YAMS_TRY_UNWRAP(snapStmtResult, db.prepareCached(R"(
-                INSERT INTO tree_snapshots (
-                    snapshot_id, created_at, directory_path, tree_root_hash,
-                    snapshot_label, git_commit, git_branch, git_remote, files_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(snapshot_id) DO UPDATE SET
-                    created_at = excluded.created_at,
-                    directory_path = excluded.directory_path,
-                    tree_root_hash = excluded.tree_root_hash,
-                    snapshot_label = excluded.snapshot_label,
-                    git_commit = excluded.git_commit,
-                    git_branch = excluded.git_branch,
-                    git_remote = excluded.git_remote,
-                    files_count = excluded.files_count
-            )"));
-                auto& snapStmt = *snapStmtResult;
-                YAMS_TRY(snapStmt.reset());
-                YAMS_TRY(snapStmt.clearBindings());
-                YAMS_TRY(snapStmt.bind(1, snapshot->snapshotId));
-                YAMS_TRY(snapStmt.bind(2, static_cast<int64_t>(snapshot->createdTime)));
-                if (directoryPath.empty())
-                    YAMS_TRY(snapStmt.bind(3, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(3, directoryPath));
-                if (snapshot->rootTreeHash.empty())
-                    YAMS_TRY(snapStmt.bind(4, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(4, snapshot->rootTreeHash));
-                if (snapshotLabel.empty())
-                    YAMS_TRY(snapStmt.bind(5, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(5, snapshotLabel));
-                if (gitCommit.empty())
-                    YAMS_TRY(snapStmt.bind(6, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(6, gitCommit));
-                if (gitBranch.empty())
-                    YAMS_TRY(snapStmt.bind(7, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(7, gitBranch));
-                if (gitRemote.empty())
-                    YAMS_TRY(snapStmt.bind(8, nullptr));
-                else
-                    YAMS_TRY(snapStmt.bind(8, gitRemote));
-                YAMS_TRY(snapStmt.bind(9, static_cast<int64_t>(snapshot->fileCount)));
-                YAMS_TRY(snapStmt.execute());
+                YAMS_TRY(upsertTreeSnapshotRow(db, *snapshot));
             }
 
             YAMS_TRY(commitOrRollback(db));

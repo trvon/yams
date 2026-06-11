@@ -58,7 +58,7 @@ bool isLikelyCompressed(std::span<const std::byte> data) {
     }
 
     // Check for common compressed file signatures
-    const auto* bytes = static_cast<const uint8_t*>(static_cast<const void*>(data.data()));
+    const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
 
     // gzip
     if (data.size() >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B) {
@@ -67,7 +67,8 @@ bool isLikelyCompressed(std::span<const std::byte> data) {
 
     // zlib
     if (data.size() >= 2) {
-        const uint16_t header = (bytes[0] << 8) | bytes[1];
+        const uint16_t header = static_cast<uint16_t>((static_cast<uint16_t>(bytes[0]) << 8U) |
+                                                      static_cast<uint16_t>(bytes[1]));
         if ((header & 0x0F00) == 0x0800 && header % 31 == 0) {
             return true;
         }
@@ -181,9 +182,8 @@ size_t estimateCompressionRatio(std::span<const std::byte> data, CompressionAlgo
 }
 
 Result<std::string> getCompressionStats(const CompressionResult& result) {
-    const double ratio = result.originalSize > 0 ? static_cast<double>(result.originalSize) /
-                                                       static_cast<double>(result.compressedSize)
-                                                 : 0.0;
+    const double ratio = result.ratio();
+    const double reductionPercent = result.originalSize > 0 ? result.spaceSaved() * 100.0 : 0.0;
 
     const double throughputMBps =
         result.duration.count() > 0 ? (static_cast<double>(result.originalSize) / (1024 * 1024)) /
@@ -212,7 +212,7 @@ Result<std::string> getCompressionStats(const CompressionResult& result) {
                        "Compression time: {}μs\n"
                        "Throughput: {:.2f} MB/s",
                        algorithmName, result.level, result.originalSize, result.compressedSize,
-                       ratio, (1.0 - 1.0 / ratio) * 100, result.duration.count(), throughputMBps);
+                       ratio, reductionPercent, result.duration.count(), throughputMBps);
 }
 
 const char* algorithmName(CompressionAlgorithm algorithm) noexcept {

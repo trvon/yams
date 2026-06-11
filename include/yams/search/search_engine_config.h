@@ -150,6 +150,11 @@ struct SearchEngineConfig {
     float metaPathWeightDef{0.5f};    // doc — contains — symbol — defined_in — doc
     float metaPathWeightEntity{0.3f}; // doc — kg_doc_entities — node — kg_doc_entities — doc
     float metaPathWeightBlob{0.2f};   // doc — blob — doc (dedup)
+    bool metaPathUseEdgeWeights{false};    // weight hits by edge.weight * seed similarity
+    float metaPathMinSeedSimilarity{0.0f}; // skip boost when best seed sim is below this
+    bool metaPathReciprocalOnly{false};    // keep only dst docs with a reverse edge to a seed
+    float metaPathSeedSimilarity{0.7f};    // seed-search cosine floor; must match the embedding
+                                           // backend's cosine scale or no seeds survive
 
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;

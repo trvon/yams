@@ -27,14 +27,14 @@ inline std::optional<std::string> docHashFromNodeKey(const std::string& nodeKey)
 
 // Walk one meta-path of shape: seed_doc → (relation_out) → intermediate
 //                              → (relation_in via getEdgesTo) → other_doc.
-// Returns map<doc_hash, count> of how many seeds each candidate is reachable from.
+// Returns map<doc_hash, score> (binary 1.0 per reachable candidate).
 // `relationOut` and `relationIn` may be the same (e.g., "calls" both ways for symmetric)
 // or different (e.g., "contains" forward, "defined_in" inverse).
-std::unordered_map<std::string, std::size_t>
+std::unordered_map<std::string, float>
 walkTwoHopMetaPath(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
                    const std::vector<std::int64_t>& seedNodeIds, std::string_view relationOut,
                    std::string_view relationInverse, std::size_t hopLimit) {
-    std::unordered_map<std::string, std::size_t> hits;
+    std::unordered_map<std::string, float> hits;
     if (!kgStore || seedNodeIds.empty() || hopLimit == 0) {
         return hits;
     }
@@ -81,18 +81,20 @@ walkTwoHopMetaPath(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore
             continue; // skip self
         }
         if (auto h = docHashFromNodeKey(node.nodeKey)) {
-            hits[*h] += 1;
+            hits[*h] += 1.0F;
         }
     }
     return hits;
 }
 
 // One-hop meta-path: seed → (relation) → other_doc (when other_doc is the dst).
-std::unordered_map<std::string, std::size_t>
+std::unordered_map<std::string, float>
 walkOneHopMetaPath(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
                    const std::vector<std::int64_t>& seedNodeIds, std::string_view relation,
-                   std::size_t hopLimit) {
-    std::unordered_map<std::string, std::size_t> hits;
+                   std::size_t hopLimit,
+                   const std::unordered_map<std::int64_t, float>* seedSims = nullptr,
+                   bool reciprocalOnly = false) {
+    std::unordered_map<std::string, float> hits;
     if (!kgStore || seedNodeIds.empty() || hopLimit == 0) {
         return hits;
     }
@@ -100,34 +102,66 @@ walkOneHopMetaPath(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore
     if (!edgesRes) {
         return hits;
     }
-    std::unordered_set<std::int64_t> dstIds;
-    for (const auto& [_, edges] : edgesRes.value()) {
+    std::unordered_map<std::int64_t, float> dstScore;
+    for (const auto& [src, edges] : edgesRes.value()) {
+        const float seedSim = [&] {
+            if (!seedSims) {
+                return 1.0F;
+            }
+            auto it = seedSims->find(src);
+            return it != seedSims->end() ? it->second : 0.0F;
+        }();
         for (const auto& e : edges) {
-            dstIds.insert(e.dstNodeId);
+            if (seedSims) {
+                dstScore[e.dstNodeId] += e.weight * seedSim;
+            } else {
+                dstScore[e.dstNodeId] += 1.0F;
+            }
         }
     }
-    if (dstIds.empty()) {
+    if (dstScore.empty()) {
         return hits;
     }
-    std::vector<std::int64_t> dstVec(dstIds.begin(), dstIds.end());
+    const std::unordered_set<std::int64_t> seedSet(seedNodeIds.begin(), seedNodeIds.end());
+    std::vector<std::int64_t> dstVec;
+    dstVec.reserve(dstScore.size());
+    for (const auto& [id, _] : dstScore) {
+        dstVec.push_back(id);
+    }
+    if (reciprocalOnly) {
+        std::unordered_set<std::int64_t> reciprocal;
+        if (auto backRes = kgStore->getEdgesFromBatch(dstVec, relation, hopLimit)) {
+            for (const auto& [src, edges] : backRes.value()) {
+                for (const auto& e : edges) {
+                    if (seedSet.contains(e.dstNodeId)) {
+                        reciprocal.insert(src);
+                        break;
+                    }
+                }
+            }
+        }
+        std::erase_if(dstVec, [&](std::int64_t id) { return !reciprocal.contains(id); });
+        if (dstVec.empty()) {
+            return hits;
+        }
+    }
     auto nodesRes = kgStore->getNodesByIds(dstVec);
     if (!nodesRes) {
         return hits;
     }
-    const std::unordered_set<std::int64_t> seedSet(seedNodeIds.begin(), seedNodeIds.end());
     for (const auto& node : nodesRes.value()) {
         if (seedSet.contains(node.id)) {
             continue;
         }
         if (auto h = docHashFromNodeKey(node.nodeKey)) {
-            hits[*h] += 1;
+            hits[*h] += dstScore[node.id];
         }
     }
     return hits;
 }
 
 void mergeHitsAsBoost(MetaPathRoutingResult& result,
-                      const std::unordered_map<std::string, std::size_t>& hits, float weight,
+                      const std::unordered_map<std::string, float>& hits, float weight,
                       std::size_t seedCount, std::size_t* hitCounter) {
     if (weight <= 0.0F || seedCount == 0 || hits.empty()) {
         return;
@@ -136,11 +170,11 @@ void mergeHitsAsBoost(MetaPathRoutingResult& result,
         *hitCounter += hits.size();
     }
     const float invSeeds = 1.0F / static_cast<float>(seedCount);
-    for (const auto& [hash, count] : hits) {
+    for (const auto& [hash, score] : hits) {
         // sqrt-damped cover-fraction: a doc covered by all seeds gets weight√1=1,
         // a doc covered by 1 of K seeds gets √(1/K). Damping prevents single-seed
         // noise from dominating.
-        const float frac = static_cast<float>(count) * invSeeds;
+        const float frac = score * invSeeds;
         const float damped = std::sqrt(std::clamp(frac, 0.0F, 1.0F));
         result.docBoost[hash] += weight * damped;
     }
@@ -161,9 +195,10 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
         return result;
     }
 
-    // Gather seeds from dense vector search.
+    // Over-fetch: only DOCUMENT-level rows survive the filter below.
     vector::VectorSearchParams params;
-    params.k = config.metaPathSeedK;
+    params.k = config.metaPathSeedK * 4;
+    params.similarity_threshold = config.metaPathSeedSimilarity;
     auto seedRecs = vectorDb->search(queryEmbedding, params);
     if (seedRecs.empty()) {
         return result;
@@ -172,6 +207,8 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
     std::vector<std::int64_t> seedNodeIds;
     seedNodeIds.reserve(config.metaPathSeedK);
     std::unordered_set<std::string> seedHashes;
+    std::unordered_map<std::int64_t, float> seedSims;
+    float maxSeedSim = 0.0F;
     for (const auto& rec : seedRecs) {
         if (rec.level != vector::EmbeddingLevel::DOCUMENT || rec.document_hash.empty()) {
             continue;
@@ -183,7 +220,10 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
         if (!nodeRes || !nodeRes.value().has_value()) {
             continue;
         }
-        seedNodeIds.push_back(nodeRes.value()->id);
+        const auto nodeId = nodeRes.value()->id;
+        seedNodeIds.push_back(nodeId);
+        seedSims[nodeId] = rec.relevance_score;
+        maxSeedSim = std::max(maxSeedSim, rec.relevance_score);
         if (seedNodeIds.size() >= config.metaPathSeedK) {
             break;
         }
@@ -192,12 +232,17 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
     if (seedNodeIds.empty()) {
         return result;
     }
+    if (config.metaPathMinSeedSimilarity > 0.0F && maxSeedSim < config.metaPathMinSeedSimilarity) {
+        return result;
+    }
 
     const std::size_t hopK = std::max<std::size_t>(1, config.metaPathHopLimit);
 
     // M_sem: doc — semantic_neighbor — doc (1-hop, dst is a doc node)
     if (config.metaPathWeightSem > 0.0F) {
-        auto hits = walkOneHopMetaPath(kgStore, seedNodeIds, "semantic_neighbor", hopK);
+        auto hits = walkOneHopMetaPath(kgStore, seedNodeIds, "semantic_neighbor", hopK,
+                                       config.metaPathUseEdgeWeights ? &seedSims : nullptr,
+                                       config.metaPathReciprocalOnly);
         mergeHitsAsBoost(result, hits, config.metaPathWeightSem, seedNodeIds.size(),
                          &result.semHits);
     }
@@ -235,7 +280,7 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
                         std::vector<std::int64_t> calleeVec(callees.begin(), callees.end());
                         auto definedIn = kgStore->getEdgesFromBatch(calleeVec, "defined_in", hopK);
                         if (definedIn) {
-                            std::unordered_map<std::string, std::size_t> callHits;
+                            std::unordered_map<std::string, float> callHits;
                             std::unordered_set<std::int64_t> dstDocIds;
                             for (const auto& [_, edges] : definedIn.value()) {
                                 for (const auto& e : edges) {
@@ -254,7 +299,7 @@ computeMetaPathBoosts(const std::vector<float>& queryEmbedding,
                                             continue;
                                         }
                                         if (auto h = docHashFromNodeKey(node.nodeKey)) {
-                                            callHits[*h] += 1;
+                                            callHits[*h] += 1.0F;
                                         }
                                     }
                                 }

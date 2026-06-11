@@ -327,8 +327,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             }
         }
 
-        spdlog::info("FTS5 search for '{}': succeeded={} results={}", query.substr(0, 50),
-                     ftsSearchSucceeded, results.results.size());
+        spdlog::debug("FTS5 search for '{}': succeeded={} results={}", query.substr(0, 50),
+                      ftsSearchSucceeded, results.results.size());
 
         if (!ftsSearchSucceeded) {
             // Keep repository search keyword-only. Fuzzy fallback is orchestrated by the

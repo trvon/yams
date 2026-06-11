@@ -1,9 +1,8 @@
 #include <yams/common/fs_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_db.h>
 #include <yams/storage/storage_engine.h>
-
-#include "reference_db.cpp" // Include DB wrappers
 
 #include <spdlog/spdlog.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT

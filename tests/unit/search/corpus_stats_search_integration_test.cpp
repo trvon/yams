@@ -61,10 +61,17 @@ TEST_CASE("CorpusStats Search Integration - Windows skip",
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <map>
 #include <memory>
+#include <numeric>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace yams;
@@ -319,6 +326,51 @@ MIT License
 Copyright (c) 2025
 )",
                        {"legal"});
+    }
+
+    void populateStageTimingCorpus(std::size_t docCount) {
+        static constexpr const char* kCodeTerms[] = {"parser",   "tokenizer", "scheduler",
+                                                     "allocator", "mutex",    "buffer",
+                                                     "hashmap",  "iterator",  "callback",
+                                                     "socket"};
+        static constexpr const char* kProseTerms[] = {
+            "installation",    "configuration", "indexing",  "retrieval",   "permissions",
+            "troubleshooting", "deployment",    "migration", "performance", "tutorial"};
+        for (std::size_t i = 0; i < docCount; ++i) {
+            const std::size_t idx = i / 2;
+            if (i % 2 == 0) {
+                const std::string a = kCodeTerms[idx % 10];
+                const std::string b = kCodeTerms[(idx + 3) % 10];
+                const std::string suffix = std::to_string(i);
+                std::string path = "src/" + a + "/" + b + "_" + suffix + ".cpp";
+                std::string content = "#include <memory>\n#include \"" + a +
+                                      ".hpp\"\n\nclass " + a + "_" + suffix +
+                                      " {\npublic:\n    Result<" + b + "> process_" + b +
+                                      "(const std::string& input);\n    void reset_" + a +
+                                      "();\nprivate:\n    std::shared_ptr<" + b + "> " + b +
+                                      "_;\n    std::mutex " + a + "_mutex_;\n};\n\nResult<" + b +
+                                      "> " + a + "_" + suffix + "::process_" + b +
+                                      "(const std::string& input) {\n    auto handle = acquire_" +
+                                      a + "(input);\n    return dispatch(handle, " + b +
+                                      "_);\n}\n";
+                createCodeDocument(path, content, {"cpp", "source", a});
+            } else {
+                const std::string a = kProseTerms[idx % 10];
+                const std::string b = kProseTerms[(idx + 7) % 10];
+                const std::string suffix = std::to_string(i);
+                std::string path = "docs/" + a + "/" + b + "_" + suffix + ".md";
+                std::string content =
+                    "# " + a + " guide " + suffix + "\n\nThis section covers " + a +
+                    " and how it interacts with " + b + ".\n\n## Overview\n\nThe " + a +
+                    " workflow requires careful " + b +
+                    " before rollout. Operators should review the " + a +
+                    " checklist and validate " + b +
+                    " settings.\n\n## Steps\n\n1. Prepare the environment for " + a +
+                    ".\n2. Verify " + b + " prerequisites.\n3. Run the " + a +
+                    " procedure and record results.\n";
+                createDocument(path, content, {"docs", a});
+            }
+        }
     }
 
     // Access to repository for direct stats queries
@@ -739,6 +791,112 @@ TEST_CASE("community detection: neutral query does not set community_override",
     // Timing key still present (detection always runs when tuner is set).
     const auto& timing = result.value().componentTimingMicros;
     REQUIRE(timing.count("community_detection") > 0);
+}
+
+TEST_CASE("search stage latency decomposition", "[.][stage-timing]") {
+    CorpusStatsSearchFixture fix;
+    constexpr std::size_t kDocCount = 300;
+    fix.populateStageTimingCorpus(kDocCount);
+
+    SearchEngineConfig config;
+    config.textWeight = 0.50f;
+    config.pathTreeWeight = 0.20f;
+    config.tagWeight = 0.15f;
+    config.metadataWeight = 0.05f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.includeComponentTiming = true;
+    config.enableParallelExecution = false;
+
+    auto engine = createSearchEngine(fix.metadataRepo(), nullptr, nullptr, nullptr, config);
+    REQUIRE(engine != nullptr);
+
+    struct StageQuery {
+        std::string text;
+        std::vector<std::string> tags;
+    };
+    const std::vector<StageQuery> queries = {
+        {"parser tokenizer", {}},
+        {"mutex buffer handle", {}},
+        {"process_buffer input", {}},
+        {"scheduler callback dispatch", {}},
+        {"hashmap iterator", {"cpp"}},
+        {"socket handle acquire", {}},
+        {"Result process input", {}},
+        {"reset_parser", {}},
+        {"shared_ptr allocator", {}},
+        {"dispatch handle callback", {"parser"}},
+        {"installation guide", {}},
+        {"configuration checklist rollout", {}},
+        {"indexing workflow overview", {}},
+        {"retrieval performance settings", {}},
+        {"troubleshooting deployment", {"docs"}},
+        {"migration prerequisites", {}},
+        {"permissions validate settings", {}},
+        {"tutorial steps prepare environment", {}},
+        {"performance review operators", {}},
+        {"deployment procedure record results", {"deployment"}},
+    };
+
+    for (int warm = 0; warm < 3; ++warm) {
+        auto r = engine->searchWithResponse("parser installation overview", {});
+        REQUIRE(r.has_value());
+    }
+
+    std::map<std::string, std::vector<int64_t>> samples;
+    std::vector<int64_t> wallMicros;
+    for (const auto& q : queries) {
+        SearchParams params;
+        params.tags = q.tags;
+        const auto t0 = std::chrono::steady_clock::now();
+        auto result = engine->searchWithResponse(q.text, params);
+        const auto t1 = std::chrono::steady_clock::now();
+        REQUIRE(result.has_value());
+        wallMicros.push_back(
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        for (const auto& [name, micros] : result.value().componentTimingMicros) {
+            samples[name].push_back(micros);
+        }
+    }
+
+    REQUIRE_FALSE(samples.empty());
+    REQUIRE(samples.count("text") > 0);
+    REQUIRE(samples.count("query_routing") > 0);
+
+    auto mean = [](const std::vector<int64_t>& v) {
+        return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+    };
+    auto p95 = [](std::vector<int64_t> v) {
+        std::sort(v.begin(), v.end());
+        return static_cast<double>(v[std::min(v.size() - 1, (v.size() * 95) / 100)]);
+    };
+
+    double meanSum = 0.0;
+    for (const auto& [name, vals] : samples)
+        meanSum += mean(vals);
+
+    std::vector<std::pair<std::string, double>> rows;
+    rows.reserve(samples.size());
+    for (const auto& [name, vals] : samples)
+        rows.emplace_back(name, mean(vals));
+    std::sort(rows.begin(), rows.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::ostringstream out;
+    out << "\n| component | n | mean (us) | p95 (us) | share |\n";
+    out << "|---|---|---|---|---|\n";
+    out << std::fixed << std::setprecision(1);
+    for (const auto& [name, m] : rows) {
+        const auto& vals = samples.at(name);
+        out << "| " << name << " | " << vals.size() << " | " << m << " | " << p95(vals) << " | "
+            << (meanSum > 0.0 ? 100.0 * m / meanSum : 0.0) << "% |\n";
+    }
+    const double wallMean = mean(wallMicros);
+    out << "\nwall mean (us): " << wallMean << ", wall p95 (us): " << p95(wallMicros)
+        << ", attributed share of wall: "
+        << (wallMean > 0.0 ? 100.0 * meanSum / wallMean : 0.0) << "%\n";
+    std::cout << out.str() << std::endl;
 }
 
 #endif // Windows skip

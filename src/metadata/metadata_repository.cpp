@@ -1287,7 +1287,8 @@ MetadataRepository::getSemanticDuplicateGroupsForDocuments(std::span<const int64
                 if (!hasRow)
                     break;
                 auto group = mapSemanticDuplicateGroupRow(groupStmt);
-                groupsById.emplace(group.id, SemanticDuplicateGroupDetail{std::move(group), {}});
+                const auto groupId = group.id;
+                groupsById.emplace(groupId, SemanticDuplicateGroupDetail{std::move(group), {}});
             }
 
             if (groupsById.empty()) {
@@ -2164,9 +2165,10 @@ void MetadataRepository::debugCheckInitializedCounters() const {
 }
 
 void MetadataRepository::initializeCounters() {
-    if (countersInitialized_.exchange(true, std::memory_order_acquire)) {
-        return; // Already initialized
-    }
+    // Explicit calls always re-sync from the DB; once-only semantics live in
+    // ensureCountersInitialized(). Setting the flag before the queries below
+    // keeps the lazy write-path hook from recursing into this function.
+    countersInitialized_.store(true, std::memory_order_release);
 
     try {
         // Query actual counts from DB once at startup
@@ -2281,7 +2283,8 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
                 info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
                 info.extractionError = stmt.getString(12);
 
-                result[info.sha256Hash] = std::move(info);
+                auto hash = info.sha256Hash;
+                result.emplace(std::move(hash), std::move(info));
             }
 
             return result;
@@ -2616,6 +2619,12 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             }
 
             if (countersPrimedForOverlay && age < kCorpusStatsOverlayTtl) {
+                // When the cache is explicitly stale, refresh KG entity counters
+                // from the DB before merging — in-memory atomics may have drifted
+                // from direct DB writes (e.g., addDocEntities via WriteBatch).
+                if (isStale && kgStore_) {
+                    kgStore_->initializeEntityCountSnapshot();
+                }
                 auto merged = mergeOnlineOverlay(*cachedCorpusStats_);
                 if (isStale || !docCountUnchanged) {
                     return merged;
@@ -2631,7 +2640,12 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     // ~5s and was previously gating the Search Engine build critical path.
     // The synthesized stats are marked stale so the next call after
     // kCorpusStatsOverlayTtl (5 min) promotes to a reconciled snapshot.
-    if (countersPrimedForOverlay && cachedDocumentCount_.load(std::memory_order_relaxed) > 0) {
+    // Only worthwhile on large corpora: the overlay is lossy (no pathDepthMin,
+    // approximated ratios), and below this size the reconcile is cheap, so
+    // small corpora (tests, fresh CLI stores) always get exact stats.
+    constexpr uint64_t kColdStartOverlayMinDocs = 4096;
+    if (countersPrimedForOverlay &&
+        cachedDocumentCount_.load(std::memory_order_relaxed) >= kColdStartOverlayMinDocs) {
         storage::CorpusStats baseline;
         auto merged = mergeOnlineOverlay(baseline);
         {
@@ -3001,10 +3015,10 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
     // SymSpellSearch stores a raw sqlite3* pointer and assumes it remains valid
     // for its entire lifetime. Do not satisfy that lifetime by permanently
     // leasing a pooled connection: single-connection pools would be starved for
-    // the rest of the process. Instead open a small dedicated handle to the same
-    // metadata DB.
+    // the rest of the process. The persistent lookup handle is read-only; writes
+    // are short-lived and routed through WriteCoordinator/addSymSpellTerms().
     auto db = std::make_unique<Database>();
-    auto openResult = db->open(pool_.dbPath(), ConnectionMode::Create);
+    auto openResult = db->open(pool_.dbPath(), ConnectionMode::ReadOnly);
     if (!openResult) {
         return openResult.error();
     }
@@ -3014,16 +3028,19 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
         return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
     }
 
-    // Initialize schema (idempotent - creates tables if not exist)
-    auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
-    if (!schemaResult) {
-        spdlog::error("SymSpell schema initialization failed: {}", schemaResult.error().message);
-        return schemaResult;
-    }
+    (void)db->execute("PRAGMA busy_timeout = 5000");
 
-    // Create the search index instance
-    symspellDb_ = std::move(db);
-    symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
+    // Create the read-only search index instance. Schema creation is a write and
+    // stays on the write path below; migrations normally create these tables.
+    try {
+        symspellDb_ = std::move(db);
+        symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb, 2, 7, true);
+    } catch (const std::exception& ex) {
+        symspellDb_.reset();
+        symspellIndex_.reset();
+        return Error{ErrorCode::DatabaseError,
+                     std::string("Failed to initialize read-only SymSpell index: ") + ex.what()};
+    }
     symspellInitialized_.store(true, std::memory_order_release);
 
     spdlog::info("SymSpell fuzzy search index initialized");
@@ -3031,22 +3048,63 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
 }
 
 void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequency) {
-    if (term.empty()) {
+    if (term.empty() || frequency <= 0) {
         return;
     }
 
-    // Ensure initialized (lazy init on first term add)
-    auto initResult = ensureSymSpellInitialized();
-    if (!initResult) {
-        spdlog::warn("SymSpell not initialized, skipping term '{}': {}", term,
-                     initResult.error().message);
+    std::string ownedTerm(term);
+    auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
+        sqlite3* rawDb = db.rawHandle();
+        if (!rawDb) {
+            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+        }
+        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+        if (!schemaResult) {
+            return schemaResult.error();
+        }
+        search::SymSpellSearch writer(rawDb);
+        writer.addTerm(ownedTerm, frequency);
+        return Result<void>();
+    });
+
+    if (!result) {
+        spdlog::warn("SymSpell term write failed for '{}': {}", ownedTerm, result.error().message);
+    }
+}
+
+void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms) {
+    if (terms.empty()) {
         return;
     }
 
-    // Serialize use of the raw sqlite-backed SymSpell instance with initialization/shutdown.
-    std::lock_guard<std::mutex> lock(symspellInitMutex_);
-    if (symspellIndex_) {
-        symspellIndex_->addTerm(term, frequency);
+    std::vector<std::pair<std::string, int64_t>> batch;
+    batch.reserve(terms.size());
+    for (const auto& term : terms) {
+        if (!term.empty()) {
+            batch.emplace_back(term, 1);
+        }
+    }
+    if (batch.empty()) {
+        return;
+    }
+
+    auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
+        sqlite3* rawDb = db.rawHandle();
+        if (!rawDb) {
+            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+        }
+        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+        if (!schemaResult) {
+            return schemaResult.error();
+        }
+        search::SymSpellSearch writer(rawDb);
+        writer.addTermsBatch(batch);
+        return Result<void>();
+    });
+
+    if (!result) {
+        spdlog::warn("SymSpell term batch write failed for {} terms: {}", batch.size(),
+                     result.error().message);
     }
 }
 

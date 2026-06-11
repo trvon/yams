@@ -18,6 +18,9 @@ namespace fs = std::filesystem;
 using yams::vector::createTokenizer;
 using yams::vector::HuggingFaceTokenizer;
 
+// Catch2 assertion macros can look like chained comparisons to clang-tidy.
+// NOLINTBEGIN(bugprone-chained-comparison)
+
 // ---------------------------------------------------------------------------
 // Helper: write a string to a file in a temp directory
 // ---------------------------------------------------------------------------
@@ -463,6 +466,42 @@ TEST_CASE("Tokenizer: load fails on JSON with no vocab", "[tokenizer][edge][catc
     CHECK(!tok.isLoaded());
 }
 
+TEST_CASE("Tokenizer: load rejects negative WordPiece token ids", "[tokenizer][edge][catch2]") {
+    TempDir tmp;
+    auto path = tmp.writeFile("tokenizer.json", R"({
+      "model": { "type": "WordPiece", "vocab": { "bad": -1, "[UNK]": 0 } }
+    })");
+
+    HuggingFaceTokenizer tok;
+    CHECK(!tok.load(path.string()));
+    CHECK(!tok.isLoaded());
+}
+
+TEST_CASE("Tokenizer: load rejects invalid added token ids", "[tokenizer][edge][catch2]") {
+    TempDir tmp;
+    auto path = tmp.writeFile("tokenizer.json", R"({
+      "model": { "type": "WordPiece", "vocab": { "[UNK]": 0 } },
+      "added_tokens": [
+        { "id": -3, "content": "[BAD]", "special": true }
+      ]
+    })");
+
+    HuggingFaceTokenizer tok;
+    CHECK(!tok.load(path.string()));
+    CHECK(!tok.isLoaded());
+}
+
+TEST_CASE("Tokenizer: load rejects excessively large token ids", "[tokenizer][edge][catch2]") {
+    TempDir tmp;
+    auto path = tmp.writeFile("tokenizer.json", R"({
+      "model": { "type": "WordPiece", "vocab": { "[UNK]": 0, "too_big": 1000001 } }
+    })");
+
+    HuggingFaceTokenizer tok;
+    CHECK(!tok.load(path.string()));
+    CHECK(!tok.isLoaded());
+}
+
 // ===========================================================================
 // SECTION 4 — Factory function
 // ===========================================================================
@@ -606,3 +645,5 @@ TEST_CASE("Special tokens: unloaded tokenizer returns empty from encodeWithSpeci
     CHECK(tok.encodeWithSpecialTokens("hello").empty());
     CHECK(tok.encodeWithSpecialTokens("hello", "world").empty());
 }
+
+// NOLINTEND(bugprone-chained-comparison)

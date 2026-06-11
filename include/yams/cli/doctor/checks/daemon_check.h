@@ -1,7 +1,7 @@
 #pragma once
 #include <optional>
 #include <ostream>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 namespace yams::cli {
 class YamsCLI;

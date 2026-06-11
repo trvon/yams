@@ -11,10 +11,13 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
-#include <random>
+#include <limits>
+#include <mutex>
 #include <thread>
 
 // Include generated protobuf headers
@@ -23,6 +26,64 @@ namespace yamsfmt = fmt;
 #endif
 
 namespace yams::manifest {
+
+namespace {
+
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+std::optional<uint32_t> checkedU32(std::size_t value) {
+    if (value > std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<uint32_t>(value);
+}
+
+template <typename T> void appendPod(std::vector<std::byte>& out, const T& value) {
+    const auto* begin = reinterpret_cast<const std::byte*>(&value);
+    out.insert(out.end(), begin, begin + sizeof(T));
+}
+
+bool appendString(std::vector<std::byte>& out, const std::string& value) {
+    auto length = checkedU32(value.size());
+    if (!length) {
+        return false;
+    }
+    appendPod(out, *length);
+    const auto* begin = reinterpret_cast<const std::byte*>(value.data());
+    out.insert(out.end(), begin, begin + value.size());
+    return true;
+}
+
+template <typename T> bool readPod(std::span<const std::byte> data, std::size_t& offset, T& out) {
+    if (offset > data.size() || data.size() - offset < sizeof(T)) {
+        return false;
+    }
+    std::memcpy(&out, data.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    return true;
+}
+
+bool readString(std::span<const std::byte> data, std::size_t& offset, std::string& out) {
+    uint32_t length = 0;
+    if (!readPod(data, offset, length)) {
+        return false;
+    }
+    if (offset > data.size() || data.size() - offset < length) {
+        return false;
+    }
+    out.assign(reinterpret_cast<const char*>(data.data() + offset), length);
+    offset += length;
+    return true;
+}
+
+} // namespace
 
 // Internal implementation details
 struct ManifestManager::Impl {
@@ -201,59 +262,50 @@ Result<std::vector<std::byte>> ManifestManager::serialize(const Manifest& manife
 
         // Version (4 bytes)
         uint32_t version = manifest.version;
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&version),
-                      reinterpret_cast<const std::byte*>(&version) + 4);
+        appendPod(result, version);
 
         // File hash length + hash
-        uint32_t hashLen = manifest.fileHash.length();
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&hashLen),
-                      reinterpret_cast<const std::byte*>(&hashLen) + 4);
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(manifest.fileHash.data()),
-                      reinterpret_cast<const std::byte*>(manifest.fileHash.data()) + hashLen);
+        if (!appendString(result, manifest.fileHash)) {
+            return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        }
 
         // File size (8 bytes)
         uint64_t fileSize = manifest.fileSize;
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&fileSize),
-                      reinterpret_cast<const std::byte*>(&fileSize) + 8);
+        appendPod(result, fileSize);
 
         // Original name length + name
-        uint32_t nameLen = manifest.originalName.length();
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&nameLen),
-                      reinterpret_cast<const std::byte*>(&nameLen) + 4);
-        result.insert(result.end(),
-                      reinterpret_cast<const std::byte*>(manifest.originalName.data()),
-                      reinterpret_cast<const std::byte*>(manifest.originalName.data()) + nameLen);
+        if (!appendString(result, manifest.originalName)) {
+            return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        }
 
         // MIME type length + type
-        uint32_t mimeLen = manifest.mimeType.length();
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&mimeLen),
-                      reinterpret_cast<const std::byte*>(&mimeLen) + 4);
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(manifest.mimeType.data()),
-                      reinterpret_cast<const std::byte*>(manifest.mimeType.data()) + mimeLen);
+        if (!appendString(result, manifest.mimeType)) {
+            return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        }
 
         // Number of chunks (4 bytes)
-        uint32_t numChunks = manifest.chunks.size();
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(&numChunks),
-                      reinterpret_cast<const std::byte*>(&numChunks) + 4);
+        if (manifest.chunks.size() > config_.maxChunksPerManifest) {
+            return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        }
+        auto numChunks = checkedU32(manifest.chunks.size());
+        if (!numChunks) {
+            return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+        }
+        appendPod(result, *numChunks);
 
         // Chunks data
         for (const auto& chunk : manifest.chunks) {
             // Hash length + hash
-            uint32_t chunkHashLen = chunk.hash.length();
-            result.insert(result.end(), reinterpret_cast<const std::byte*>(&chunkHashLen),
-                          reinterpret_cast<const std::byte*>(&chunkHashLen) + 4);
-            result.insert(result.end(), reinterpret_cast<const std::byte*>(chunk.hash.data()),
-                          reinterpret_cast<const std::byte*>(chunk.hash.data()) + chunkHashLen);
+            if (!appendString(result, chunk.hash)) {
+                return Result<std::vector<std::byte>>(ErrorCode::InvalidArgument);
+            }
 
-            // Offset and size (8 bytes each)
-            result.insert(result.end(), reinterpret_cast<const std::byte*>(&chunk.offset),
-                          reinterpret_cast<const std::byte*>(&chunk.offset) + 8);
-            result.insert(result.end(), reinterpret_cast<const std::byte*>(&chunk.size),
-                          reinterpret_cast<const std::byte*>(&chunk.size) + 8);
+            // Offset and size
+            appendPod(result, chunk.offset);
+            appendPod(result, chunk.size);
 
-            // Flags (4 bytes)
-            result.insert(result.end(), reinterpret_cast<const std::byte*>(&chunk.flags),
-                          reinterpret_cast<const std::byte*>(&chunk.flags) + 4);
+            // Flags
+            appendPod(result, chunk.flags);
         }
 
         spdlog::debug("Serialized manifest with {} chunks using fallback binary format",
@@ -359,70 +411,58 @@ Result<Manifest> ManifestManager::deserialize(std::span<const std::byte> data) c
         return Result<Manifest>(std::move(manifest));
 #else
         // Fallback binary deserialization
-        if (processedData.size() <
-            16) { // Minimum size for magic + version + hash length + file size
+        if (processedData.size() < 4) {
             return Result<Manifest>(ErrorCode::CorruptedData);
         }
 
+        std::span<const std::byte> bytes(processedData.data(), processedData.size());
         size_t offset = 0;
 
         // Check magic header
-        if (memcmp(processedData.data(), "YAMS", 4) != 0) {
+        if (processedData.size() - offset < 4 ||
+            std::memcmp(processedData.data(), "YAMS", 4) != 0) {
             return Result<Manifest>(ErrorCode::CorruptedData);
         }
         offset += 4;
 
         // Read version
-        uint32_t version;
-        memcpy(&version, processedData.data() + offset, 4);
-        offset += 4;
+        uint32_t version = 0;
+        if (!readPod(bytes, offset, version)) {
+            return Result<Manifest>(ErrorCode::CorruptedData);
+        }
 
         // Read file hash
-        uint32_t hashLen;
-        memcpy(&hashLen, processedData.data() + offset, 4);
-        offset += 4;
-
-        if (offset + hashLen > processedData.size()) {
+        std::string fileHash;
+        if (!readString(bytes, offset, fileHash)) {
             return Result<Manifest>(ErrorCode::CorruptedData);
         }
-
-        std::string fileHash(reinterpret_cast<const char*>(processedData.data() + offset), hashLen);
-        offset += hashLen;
 
         // Read file size
-        uint64_t fileSize;
-        memcpy(&fileSize, processedData.data() + offset, 8);
-        offset += 8;
+        uint64_t fileSize = 0;
+        if (!readPod(bytes, offset, fileSize)) {
+            return Result<Manifest>(ErrorCode::CorruptedData);
+        }
 
         // Read original name
-        uint32_t nameLen;
-        memcpy(&nameLen, processedData.data() + offset, 4);
-        offset += 4;
-
-        if (offset + nameLen > processedData.size()) {
+        std::string originalName;
+        if (!readString(bytes, offset, originalName)) {
             return Result<Manifest>(ErrorCode::CorruptedData);
         }
-
-        std::string originalName(reinterpret_cast<const char*>(processedData.data() + offset),
-                                 nameLen);
-        offset += nameLen;
 
         // Read MIME type
-        uint32_t mimeLen;
-        memcpy(&mimeLen, processedData.data() + offset, 4);
-        offset += 4;
-
-        if (offset + mimeLen > processedData.size()) {
+        std::string mimeType;
+        if (!readString(bytes, offset, mimeType)) {
             return Result<Manifest>(ErrorCode::CorruptedData);
         }
 
-        std::string mimeType(reinterpret_cast<const char*>(processedData.data() + offset), mimeLen);
-        offset += mimeLen;
-
         // Read number of chunks
-        uint32_t numChunks;
-        memcpy(&numChunks, processedData.data() + offset, 4);
-        offset += 4;
+        uint32_t numChunks = 0;
+        if (!readPod(bytes, offset, numChunks)) {
+            return Result<Manifest>(ErrorCode::CorruptedData);
+        }
+        if (numChunks > config_.maxChunksPerManifest) {
+            return Result<Manifest>(ErrorCode::CorruptedData);
+        }
 
         // Create manifest
         Manifest manifest;
@@ -435,33 +475,16 @@ Result<Manifest> ManifestManager::deserialize(std::span<const std::byte> data) c
 
         // Read chunks
         for (uint32_t i = 0; i < numChunks; ++i) {
-            if (offset + 4 > processedData.size()) {
-                return Result<Manifest>(ErrorCode::CorruptedData);
-            }
-
-            // Read chunk hash length
-            uint32_t chunkHashLen;
-            memcpy(&chunkHashLen, processedData.data() + offset, 4);
-            offset += 4;
-
-            if (offset + chunkHashLen + 8 + 8 + 4 > processedData.size()) {
-                return Result<Manifest>(ErrorCode::CorruptedData);
-            }
-
-            // Read chunk data
             ChunkRef chunk;
-            chunk.hash = std::string(reinterpret_cast<const char*>(processedData.data() + offset),
-                                     chunkHashLen);
-            offset += chunkHashLen;
-
-            memcpy(&chunk.offset, processedData.data() + offset, 8);
-            offset += 8;
-            memcpy(&chunk.size, processedData.data() + offset, 8);
-            offset += 8;
-            memcpy(&chunk.flags, processedData.data() + offset, 4);
-            offset += 4;
-
+            if (!readString(bytes, offset, chunk.hash) || !readPod(bytes, offset, chunk.offset) ||
+                !readPod(bytes, offset, chunk.size) || !readPod(bytes, offset, chunk.flags)) {
+                return Result<Manifest>(ErrorCode::CorruptedData);
+            }
             manifest.chunks.push_back(std::move(chunk));
+        }
+
+        if (!manifest.isValid()) {
+            return Result<Manifest>(ErrorCode::ManifestInvalid);
         }
 
         // Add to cache
@@ -623,12 +646,12 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
     const std::size_t totalChunks = manifest.chunks.size();
     // Prefetch window size: default to half the system cores; allow override via env
     std::size_t prefetch = std::max<std::size_t>(1, std::thread::hardware_concurrency() / 2);
-    if (const char* s = std::getenv("YAMS_RECONSTRUCT_PREFETCH")) {
-        try {
-            long v = std::strtol(s, nullptr, 10);
-            if (v > 0 && v <= 64)
-                prefetch = static_cast<std::size_t>(v);
-        } catch (...) {
+    if (auto s = getenvCopy("YAMS_RECONSTRUCT_PREFETCH")) {
+        char* end = nullptr;
+        errno = 0;
+        long v = std::strtol(s->c_str(), &end, 10);
+        if (errno == 0 && end != s->c_str() && end != nullptr && *end == '\0' && v > 0 && v <= 64) {
+            prefetch = static_cast<std::size_t>(v);
         }
     }
     // Clamp to a reasonable upper bound

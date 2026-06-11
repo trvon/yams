@@ -58,6 +58,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include "../common/test_helpers_catch2.h"
+#include "bench_utils.h"
 #include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
@@ -138,35 +139,9 @@ struct LatencySummary {
     double maxUs{0.0};
 };
 
-int readIntEnv(const char* name, int fallback, int minVal, int maxVal) {
-    const char* val = std::getenv(name);
-    if (!val || !*val) {
-        return fallback;
-    }
-    char* end = nullptr;
-    long parsed = std::strtol(val, &end, 10);
-    if (end == nullptr || end == val || *end != '\0') {
-        return fallback;
-    }
-    return static_cast<int>(std::clamp<long>(parsed, minVal, maxVal));
-}
-
-bool readBoolEnv(const char* name, bool fallback) {
-    const char* val = std::getenv(name);
-    if (!val || !*val) {
-        return fallback;
-    }
-    std::string s(val);
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    if (s == "1" || s == "true" || s == "yes" || s == "on") {
-        return true;
-    }
-    if (s == "0" || s == "false" || s == "no" || s == "off") {
-        return false;
-    }
-    return fallback;
-}
+using yams::bench::isoTimestamp;
+using yams::bench::readBoolEnv;
+using yams::bench::readIntEnv;
 
 std::pair<int, std::string> readWriteModeEnv() {
     const char* val = std::getenv("YAMS_BENCH_WRITE_MODE");
@@ -226,16 +201,6 @@ BenchConfig loadConfig() {
     cfg.writeMode = writeMode;
     cfg.writeModeName = std::move(writeModeName);
     return cfg;
-}
-
-std::string isoTimestamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    gmtime_r(&tt, &tm);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
 }
 
 void ensureOutputDir(const fs::path& path) {

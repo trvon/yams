@@ -80,6 +80,21 @@ public:
         std::optional<std::size_t> featureSmoothingHops;
     };
 
+    struct MetaPathRoutingPolicy {
+        std::optional<bool> enable;
+        std::optional<std::size_t> seedK;
+        std::optional<std::size_t> hopLimit;
+        std::optional<float> boostAlpha;
+        std::optional<float> weightSem;
+        std::optional<float> weightCall;
+        std::optional<float> weightDef;
+        std::optional<float> weightEntity;
+        std::optional<bool> useEdgeWeights;
+        std::optional<float> minSeedSimilarity;
+        std::optional<bool> reciprocalOnly;
+        std::optional<float> seedSimilarity;
+    };
+
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
     // by default; opt-in via [topology.tuner] in TOML. Reward weights default
     // to the Phase G plan values when not overridden.
@@ -390,6 +405,18 @@ public:
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+
+    /**
+     * @brief Resolve meta-path routing (Phase P/Y graph-walk boost) from config file.
+     *
+     * Reads from config.toml:
+     * - search.meta_path.enable = true|false
+     * - search.meta_path.seed_k = N
+     * - search.meta_path.hop_limit = N
+     * - search.meta_path.boost_alpha = float
+     * - search.meta_path.weight_sem / weight_call / weight_def / weight_entity = float
+     */
+    static MetaPathRoutingPolicy resolveMetaPathRoutingPolicy();
 
     /**
      * @brief Resolve topology cluster-engine selection from config file.

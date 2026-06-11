@@ -9,6 +9,37 @@
 
 namespace yams::chunking {
 
+namespace {
+constexpr uint64_t kDefaultStreamingRabinPolynomial = 0x3DA3358B4DC173ULL;
+
+uint64_t addMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
+    if (mod == 0) {
+        return 0;
+    }
+    lhs %= mod;
+    rhs %= mod;
+    return lhs >= mod - rhs ? lhs - (mod - rhs) : lhs + rhs;
+}
+
+uint64_t multiplyMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
+    if (mod == 0) {
+        return 0;
+    }
+    uint64_t result = 0;
+    lhs %= mod;
+    while (rhs != 0) {
+        if ((rhs & 1U) != 0) {
+            result = addMod(result, lhs, mod);
+        }
+        rhs >>= 1U;
+        if (rhs != 0) {
+            lhs = addMod(lhs, lhs, mod);
+        }
+    }
+    return result;
+}
+} // namespace
+
 // Rabin fingerprinting tables (local to streaming chunker to avoid unity ODR conflicts)
 struct StreamingRabinTables {
     std::array<uint64_t, 256> outTable{};
@@ -43,14 +74,17 @@ private:
         uint64_t v;
     };
     static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
+        if (poly.v == 0) {
+            return 0;
+        }
         uint64_t result = 1;
         base %= poly.v;
         while (exp.v > 0) {
             if (exp.v & 1) {
-                result = (result * base) % poly.v;
+                result = multiplyMod(result, base, poly.v);
             }
             exp.v >>= 1;
-            base = (base * base) % poly.v;
+            base = multiplyMod(base, base, poly.v);
         }
         return result;
     }
@@ -64,7 +98,13 @@ struct StreamingChunker::Impl {
 };
 
 StreamingChunker::StreamingChunker(ChunkingConfig config)
-    : pImpl(std::make_unique<Impl>(config.polynomial)), config_(std::move(config)) {
+    : pImpl(std::make_unique<Impl>(config.polynomial != 0 ? config.polynomial
+                                                          : kDefaultStreamingRabinPolynomial)),
+      config_(std::move(config)) {
+    if (config_.polynomial == 0) {
+        spdlog::warn("StreamingChunker polynomial was zero; using default polynomial");
+        config_.polynomial = kDefaultStreamingRabinPolynomial;
+    }
     YAMS_PRECONDITION(config_.windowSize > 0, "StreamingChunker windowSize must be positive");
     spdlog::debug("Created StreamingChunker with target chunk size: {}", config_.targetChunkSize);
 }
@@ -81,12 +121,25 @@ void StreamingChunker::updateRabinHash(RabinState& state, std::byte newByte) {
         state.initialized = true;
     }
 
+    size_t windowSize = config_.windowSize;
+    if (windowSize == 0) {
+        windowSize = 1;
+    } else if (windowSize > state.window.size()) {
+        windowSize = state.window.size();
+    }
+    if (state.windowPos >= windowSize) {
+        state.windowPos = 0;
+    }
+
     // Remove oldest byte from window
     std::byte oldByte = state.window[state.windowPos];
 
     // Update window
     state.window[state.windowPos] = newByte;
-    state.windowPos = (state.windowPos + 1) % config_.windowSize;
+    ++state.windowPos;
+    if (state.windowPos >= windowSize) {
+        state.windowPos = 0;
+    }
 
     // Update hash using precomputed tables
     uint64_t oldHash = pImpl->tables->outTable[static_cast<uint8_t>(oldByte)];

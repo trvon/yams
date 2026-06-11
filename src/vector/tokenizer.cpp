@@ -16,6 +16,13 @@ namespace yams::vector {
 
 namespace {
 
+constexpr int kMaxTokenizerId = 1'000'000;
+constexpr size_t kMaxTokenizerEntries = static_cast<size_t>(kMaxTokenizerId) + 1;
+
+bool isValidTokenId(int id) {
+    return id >= 0 && id <= kMaxTokenizerId;
+}
+
 /// Extract the first SpecialToken id string from a TemplateProcessing template array.
 /// Walks `single` or `pair` arrays looking for {"SpecialToken": {"id": "..."}}.
 std::string extractSpecialTokenId(const nlohmann::json& templateArray, bool first) {
@@ -77,6 +84,10 @@ bool HuggingFaceTokenizer::load(const std::string& path) {
         if (json.contains("model") && json["model"].contains("vocab")) {
             const auto& vocab = json["model"]["vocab"];
             if (vocab.is_array()) {
+                if (vocab.size() > kMaxTokenizerEntries) {
+                    spdlog::warn("Tokenizer vocab has too many entries: {}", vocab.size());
+                    return false;
+                }
                 // Unigram / SentencePiece format: array of [token, score]
                 isUnigram_ = true;
                 idToToken_.reserve(vocab.size());
@@ -97,11 +108,16 @@ bool HuggingFaceTokenizer::load(const std::string& path) {
                     if (!idVal.is_number())
                         continue;
                     int id = idVal.get<int>();
-                    vocab_[token] = id;
-                    if (id >= static_cast<int>(idToToken_.size())) {
-                        idToToken_.resize(id + 1);
+                    if (!isValidTokenId(id)) {
+                        spdlog::warn("Tokenizer vocab entry '{}' has invalid id {}", token, id);
+                        return false;
                     }
-                    idToToken_[id] = token;
+                    const auto index = static_cast<size_t>(id);
+                    vocab_[token] = id;
+                    if (index >= idToToken_.size()) {
+                        idToToken_.resize(index + 1);
+                    }
+                    idToToken_[index] = token;
                 }
             }
         }
@@ -112,11 +128,16 @@ bool HuggingFaceTokenizer::load(const std::string& path) {
                 if (token.contains("content") && token.contains("id")) {
                     std::string content = token["content"].get<std::string>();
                     int id = token["id"].get<int>();
-                    vocab_[content] = id;
-                    if (id >= static_cast<int>(idToToken_.size())) {
-                        idToToken_.resize(id + 1);
+                    if (!isValidTokenId(id)) {
+                        spdlog::warn("Tokenizer added token '{}' has invalid id {}", content, id);
+                        return false;
                     }
-                    idToToken_[id] = content;
+                    const auto index = static_cast<size_t>(id);
+                    vocab_[content] = id;
+                    if (index >= idToToken_.size()) {
+                        idToToken_.resize(index + 1);
+                    }
+                    idToToken_[index] = content;
                     bool isSpecial = token.value("special", false);
                     if (isSpecial ||
                         (!content.empty() && (content[0] == '[' || content[0] == '<'))) {

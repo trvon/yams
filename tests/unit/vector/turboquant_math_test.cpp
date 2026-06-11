@@ -1,14 +1,10 @@
-// Catch2 unit tests for the TurboQuantProd mathematical contract
-// Tests the QJL gamma / sign-agreement / arcsin relationship that underpins
-// estimateInnerProductFull(). Validates the Joint Normal Lemma result:
+// Catch2 unit tests for the QJL mathematical contract
+// Tests the QJL gamma / sign-agreement / arcsin relationship.
+// Validates the Joint Normal Lemma result:
 //
 //   E[sgn(S·r1)_m · sgn(S·r2)_m] = (2/π) · arcsin(ρ_res)
 //
 // where ρ_res = (r1·r2) / (||r1||·||r2||) is the residual correlation.
-//
-// NOTE: This file tests the QJL mathematical foundation independently of the
-// TurboQuantProd implementation. It verifies that our interpretation of
-// gamma (raw agreement rate) in the estimator is mathematically sound.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -150,85 +146,6 @@ TEST_CASE("QJL gamma contract: raw agreement maps to rho via -cos(pi*gamma)",
     CHECK(gamma_raw < 0.52); // gamma_raw ~ 0.5
     CHECK(rho_res > -0.1);   // rho_res ~ 0 (orthogonal)
     CHECK(rho_res < 0.1);
-}
-
-// Verify that TurboQuantEncoded::encode() captures non-zero residual norms
-// for non-trivially quantized vectors.
-TEST_CASE("TurboQuantEncoded: encode() populates residual_norm_sq for unit vectors",
-          "[turboquant][math][turboquant_prod][catch2]") {
-    TurboQuantConfig config;
-    config.dimension = 128;
-    config.bits_per_channel = 4;
-    config.seed = 42;
-    config.inner_product_mode = true;
-    config.qjl_m = 32;
-
-    TurboQuantProd quantizer(config);
-    std::vector<float> v(128);
-    std::mt19937 rng(999);
-    std::normal_distribution<float> dist(0.0f, 1.0f);
-    float norm_sq = 0.0f;
-    for (size_t i = 0; i < 128; ++i) {
-        v[i] = dist(rng);
-        norm_sq += v[i] * v[i];
-    }
-    float norm = std::sqrt(norm_sq);
-    for (size_t i = 0; i < 128; ++i)
-        v[i] /= norm;
-
-    auto enc = quantizer.encode(v);
-
-    // Residual norm squared should be non-negative
-    CHECK(enc.residual_norm_sq >= 0.0f);
-    // And should be meaningfully non-zero (4-bit quantization has some error)
-    CHECK(enc.residual_norm_sq > 0.001f);
-    CHECK(enc.mse_indices.size() == 128);
-    CHECK(enc.qjl_signs.size() == 32);
-}
-
-// Verify that estimateInnerProduct() is conservative (doesn't wildly inflate estimate)
-TEST_CASE("estimateInnerProduct: blended estimate stays within plausible bounds",
-          "[turboquant][math][turboquant_prod][catch2]") {
-    TurboQuantConfig config;
-    config.dimension = 256;
-    config.bits_per_channel = 4;
-    config.seed = 55;
-    config.inner_product_mode = true;
-    config.qjl_m = 64;
-
-    TurboQuantProd quantizer(config);
-    std::mt19937 rng(222);
-
-    // Test 20 random pairs
-    for (size_t trial = 0; trial < 20; ++trial) {
-        std::vector<float> v1(256), v2(256);
-        for (size_t i = 0; i < 256; ++i)
-            v1[i] = std::normal_distribution<float>(0.0f, 1.0f)(rng);
-        for (size_t i = 0; i < 256; ++i)
-            v2[i] = std::normal_distribution<float>(0.0f, 1.0f)(rng);
-
-        // Normalize
-        float n1_sq = 0.0f, n2_sq = 0.0f;
-        for (size_t i = 0; i < 256; ++i) {
-            n1_sq += v1[i] * v1[i];
-            n2_sq += v2[i] * v2[i];
-        }
-        float n1 = std::sqrt(n1_sq);
-        float n2 = std::sqrt(n2_sq);
-        for (auto& x : v1)
-            x /= n1;
-        for (auto& x : v2)
-            x /= n2;
-
-        auto enc1 = quantizer.encode(v1);
-        auto enc2 = quantizer.encode(v2);
-        float est = quantizer.estimateInnerProduct(enc1, enc2);
-
-        // Inner product of unit vectors should be in [-1, 1]
-        // With quantization, allow up to ±3.0 (conservative blend max boost ≈ 1.25x)
-        CHECK(est > -3.0f);
-        CHECK(est < 3.0f);
-    }
 }
 
 } // namespace

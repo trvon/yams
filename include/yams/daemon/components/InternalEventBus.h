@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_requests.h>
 #include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {

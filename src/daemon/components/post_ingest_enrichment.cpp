@@ -19,6 +19,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 
 #include <simeon/corpus_adapter.hpp>
 
@@ -39,12 +40,15 @@
 
 namespace yams::daemon {
 
-// Forward-declare shared helpers defined in PostIngestQueue.cpp
 namespace {
-extern bool isHighValueGraphType(std::string_view normalizedType);
-} // namespace
 
-namespace {
+bool isHighValueGraphType(std::string_view normalizedType) {
+    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
+           normalizedType == "disease" || normalizedType == "chemical" ||
+           normalizedType == "drug" || normalizedType == "pathway" ||
+           normalizedType == "biological_process" || normalizedType == "biomarker" ||
+           normalizedType == "anatomy" || normalizedType == "organism";
+}
 
 // ---------------------------------------------------------------------------
 // Enrichment-stage utilities (enrichment-only, not shared with extraction)
@@ -274,8 +278,10 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     auto r = graphComponent_->onDocumentsIngestedBatch(ctxs);
     double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    if (!r)
-        spdlog::error("[PostIngestQueue] KG batch failed: {}", r.error().message);
+    if (!r) {
+        spdlog::error("[PostIngestQueue] KG batch failed after {:.2f}ms: {}", ms,
+                      r.error().message);
+    }
 }
 
 void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
@@ -325,11 +331,13 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.batchMode = true;
-    cfg.batchSizeFn = [this] -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         return adaptiveStageBatchSize(
             kgQueueDepth(), std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize()), 32u);
     };
-    cfg.batchProcessFn = [this](auto&& jobs) { processKnowledgeGraphBatch(std::move(jobs)); };
+    cfg.batchProcessFn = [this](auto&& jobs) {
+        processKnowledgeGraphBatch(std::forward<decltype(jobs)>(jobs));
+    };
     co_await pressureLimitedPoll(std::move(ch), std::move(cfg));
 }
 
@@ -411,11 +419,13 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.batchMode = true;
-    cfg.batchSizeFn = [this] -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         return adaptiveStageBatchSize(
             symbolQueueDepth(), std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize()), 16u);
     };
-    cfg.batchProcessFn = [this](auto&& jobs) { processSymbolExtractionBatch(std::move(jobs)); };
+    cfg.batchProcessFn = [this](auto&& jobs) {
+        processSymbolExtractionBatch(std::forward<decltype(jobs)>(jobs));
+    };
     co_await pressureLimitedPoll(std::move(ch), std::move(cfg));
 }
 
@@ -485,11 +495,13 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
     cfg.batchMode = true;
-    cfg.batchSizeFn = [this] -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         return adaptiveStageBatchSize(
             entityQueueDepth(), std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize()), 16u);
     };
-    cfg.batchProcessFn = [this](auto&& jobs) { processEntityExtractionBatch(std::move(jobs)); };
+    cfg.batchProcessFn = [this](auto&& jobs) {
+        processEntityExtractionBatch(std::forward<decltype(jobs)>(jobs));
+    };
     co_await pressureLimitedPoll(std::move(ch), std::move(cfg));
 }
 
@@ -596,7 +608,9 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     p.erase("_dst_key");
                     des.push_back({hs ? sk + "@snap:" + sid : sk, hs ? dk + "@snap:" + sid : dk,
                                    e.relation, e.weight, p.dump()});
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    spdlog::debug("[PostIngestQueue] Skipping malformed KG edge properties: {}",
+                                  e.what());
                 }
             }
             std::vector<metadata::KGAlias> das;
@@ -687,13 +701,15 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](auto& j) -> std::string { return j.hash; };
-    cfg.isCapableFn = [this] -> bool { return hasTitleExtractor(); };
+    cfg.isCapableFn = [this]() -> bool { return hasTitleExtractor(); };
     cfg.batchMode = true;
-    cfg.batchSizeFn = [this] -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         return adaptiveStageBatchSize(
             titleQueueDepth(), std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize()), 32u);
     };
-    cfg.batchProcessFn = [this](auto&& jobs) { processTitleExtractionBatch(std::move(jobs)); };
+    cfg.batchProcessFn = [this](auto&& jobs) {
+        processTitleExtractionBatch(std::forward<decltype(jobs)>(jobs));
+    };
     cfg.wakeTimer = titleWakeTimer_;
     co_await pressureLimitedPoll(std::move(ch), std::move(cfg));
 }
@@ -1022,7 +1038,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
 
             {
-                auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+                gs_processed_.fetch_add(1, std::memory_order_relaxed);
                 gs_totalEntities_ += nl.size();
                 gs_highValueEntities_ +=
                     std::count_if(ers.begin(), ers.end(), [](auto& x) { return x.hv; });
@@ -1037,8 +1053,9 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                              static_cast<std::int64_t>(batch->aliases.size()));
                 if (meta_)
                     meta_->signalCorpusStatsStale();
-                writeCoordinator_->enqueue(makeWriteBatchFromDeferredKGBatch(
-                    std::move(batch), "PostIngestQueue::nlEntityKg/" + batch->sourceFile));
+                auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
+                writeCoordinator_->enqueue(
+                    makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source)));
             }
         }
         auto d = std::chrono::steady_clock::now() - t0;

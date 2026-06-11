@@ -77,18 +77,14 @@ using yams::features::string_starts_with;
 // Extract searchable terms from a document for fuzzy search indexing.
 // Extracts: filename stem (without extension) and file extension.
 // Terms shorter than 2 characters are skipped to reduce noise.
-inline void
-indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataRepository>& repo,
-                                 const metadata::DocumentInfo& info) {
-    if (!repo)
-        return;
-
+inline std::vector<std::string>
+collectDocumentTermsForFuzzySearch(const metadata::DocumentInfo& info) {
     constexpr size_t kMinTermLength = 2;
 
-    // Helper to add term if long enough
+    std::vector<std::string> terms;
     auto addTerm = [&](std::string_view term) {
         if (term.length() >= kMinTermLength) {
-            repo->addSymSpellTerm(term);
+            terms.emplace_back(term);
         }
     };
 
@@ -104,6 +100,27 @@ indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataReposit
             addTerm(ext.substr(1)); // Skip the leading dot
         }
     }
+
+    return terms;
+}
+
+inline void enqueueDocumentTermsForFuzzySearch(daemon::WriteCoordinator* writeCoordinator,
+                                               const metadata::DocumentInfo& info) {
+    if (!writeCoordinator) {
+        spdlog::debug("WriteCoordinator unavailable; skipping SymSpell terms for {}",
+                      info.filePath);
+        return;
+    }
+
+    auto terms = collectDocumentTermsForFuzzySearch(info);
+    if (terms.empty()) {
+        return;
+    }
+
+    auto batch = std::make_unique<daemon::WriteBatch>();
+    batch->source = "doc_svc/symspell";
+    batch->ops.emplace_back(daemon::AddSymSpellTermsOp{std::move(terms)});
+    writeCoordinator->enqueue(std::move(batch));
 }
 
 inline void addTagPairsToMap(const std::vector<std::string>& tags,
@@ -1531,11 +1548,16 @@ public:
                     }
                 }
 
-                // Index document terms for fuzzy search (best-effort)
+                // Index document terms for fuzzy search through the centralized writer lane
+                // (best-effort; lookup remains read-only).
                 try {
-                    indexDocumentTermsForFuzzySearch(ctx_.metadataRepo, info);
-                } catch (...) {
-                    // Non-fatal: fuzzy search indexing is opportunistic
+                    auto* writeCoord = (ctx_.service_manager)
+                                           ? ctx_.service_manager->getWriteCoordinator()
+                                           : nullptr;
+                    enqueueDocumentTermsForFuzzySearch(writeCoord, info);
+                } catch (const std::exception& ex) {
+                    spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", info.filePath,
+                                  ex.what());
                 }
 
                 // Synchronously persist extracted text for direct text adds so sync callers can
@@ -1744,25 +1766,37 @@ public:
             if (req.acceptCompressed) {
                 auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
                 if (!bytesResult) {
-                    return Error{bytesResult.error().code, "Document content not found"};
+                    if (doc.size == 0) {
+                        doc.content.emplace();
+                        markUncompressed(doc, 0);
+                    } else {
+                        return Error{bytesResult.error().code, "Document content not found"};
+                    }
+                } else {
+                    auto data = std::move(bytesResult.value());
+                    auto payloadResult =
+                        makeCompressedPayload(std::span<const std::byte>(data.data(), data.size()));
+                    if (!payloadResult) {
+                        return payloadResult.error();
+                    }
+                    auto payload = std::move(payloadResult.value());
+                    doc.content.emplace(std::move(payload.blob));
+                    applyCompressionMetadata(doc, payload.header);
                 }
-                auto data = std::move(bytesResult.value());
-                auto payloadResult =
-                    makeCompressedPayload(std::span<const std::byte>(data.data(), data.size()));
-                if (!payloadResult) {
-                    return payloadResult.error();
-                }
-                auto payload = std::move(payloadResult.value());
-                doc.content.emplace(std::move(payload.blob));
-                applyCompressionMetadata(doc, payload.header);
             } else {
                 auto bytesResult = ctx_.store->retrieveBytes(resolvedHash);
                 if (!bytesResult) {
-                    return Error{bytesResult.error().code, "Document content not found"};
+                    if (doc.size == 0) {
+                        doc.content.emplace();
+                        markUncompressed(doc, 0);
+                    } else {
+                        return Error{bytesResult.error().code, "Document content not found"};
+                    }
+                } else {
+                    auto data = std::move(bytesResult.value());
+                    doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
+                    markUncompressed(doc, static_cast<uint64_t>(data.size()));
                 }
-                auto data = std::move(bytesResult.value());
-                doc.content.emplace(reinterpret_cast<const char*>(data.data()), data.size());
-                markUncompressed(doc, static_cast<uint64_t>(data.size()));
             }
         }
 

@@ -3,11 +3,37 @@
 #include <cctype>
 #include <ctime>
 #include <iomanip>
+#include <mutex>
 #include <regex>
 #include <sstream>
 #include <yams/cli/time_parser.h>
 
 namespace yams::cli {
+
+namespace {
+
+std::mutex& timeConversionMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::tm gmtimeCopy(const std::time_t& time) {
+    std::lock_guard<std::mutex> lock(timeConversionMutex());
+    if (const std::tm* tm = std::gmtime(&time)) { // NOLINT(concurrency-mt-unsafe)
+        return *tm;
+    }
+    return {};
+}
+
+std::tm localtimeCopy(const std::time_t& time) {
+    std::lock_guard<std::mutex> lock(timeConversionMutex());
+    if (const std::tm* tm = std::localtime(&time)) { // NOLINT(concurrency-mt-unsafe)
+        return *tm;
+    }
+    return {};
+}
+
+} // namespace
 
 Result<std::chrono::system_clock::time_point> TimeParser::parse(const std::string& timeStr) {
     if (timeStr.empty()) {
@@ -48,25 +74,43 @@ TimeParser::parseRelative(const std::string& relativeStr) {
         return std::nullopt;
     }
 
-    int value = std::stoi(match[1].str());
-    char unit = std::tolower(match[2].str()[0]);
+    unsigned long long value = 0;
+    try {
+        value = std::stoull(match[1].str());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    char unit = static_cast<char>(std::tolower(static_cast<unsigned char>(match[2].str()[0])));
 
-    auto now = std::chrono::system_clock::now();
-
+    unsigned long long multiplier = 0;
     switch (unit) {
         case 'h': // hours
-            return now - std::chrono::hours(value);
+            multiplier = 1;
+            break;
         case 'd': // days
-            return now - std::chrono::hours(value * 24);
+            multiplier = 24;
+            break;
         case 'w': // weeks
-            return now - std::chrono::hours(value * 24 * 7);
+            multiplier = 24ULL * 7ULL;
+            break;
         case 'm': // months (approximate as 30 days)
-            return now - std::chrono::hours(value * 24 * 30);
+            multiplier = 24ULL * 30ULL;
+            break;
         case 'y': // years (approximate as 365 days)
-            return now - std::chrono::hours(value * 24 * 365);
+            multiplier = 24ULL * 365ULL;
+            break;
         default:
             return std::nullopt;
     }
+
+    const auto maxHours = static_cast<unsigned long long>(std::chrono::hours::max().count());
+    if (multiplier == 0 || value > maxHours / multiplier) {
+        return std::nullopt;
+    }
+    const unsigned long long hours = value * multiplier;
+
+    auto now = std::chrono::system_clock::now();
+    return now - std::chrono::hours(static_cast<std::chrono::hours::rep>(hours));
 }
 
 std::optional<std::chrono::system_clock::time_point>
@@ -180,7 +224,7 @@ TimeParser::parseNatural(const std::string& naturalStr) {
 
 std::string TimeParser::formatISO8601(const std::chrono::system_clock::time_point& tp) {
     auto time_t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm = *std::gmtime(&time_t);
+    std::tm tm = gmtimeCopy(time_t);
 
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
@@ -228,13 +272,15 @@ std::string TimeParser::formatRelative(const std::chrono::system_clock::time_poi
             auto days = std::chrono::duration_cast<std::chrono::hours>(diff).count() / 24;
             return std::to_string(days) + " days ago";
         } else if (diff < std::chrono::hours(24 * 30)) {
-            auto weeks = std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24 * 7);
+            auto weeks = std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24L * 7L);
             return std::to_string(weeks) + " week" + (weeks == 1 ? "" : "s") + " ago";
         } else if (diff < std::chrono::hours(24 * 365)) {
-            auto months = std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24 * 30);
+            auto months =
+                std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24L * 30L);
             return std::to_string(months) + " month" + (months == 1 ? "" : "s") + " ago";
         } else {
-            auto years = std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24 * 365);
+            auto years =
+                std::chrono::duration_cast<std::chrono::hours>(diff).count() / (24L * 365L);
             return std::to_string(years) + " year" + (years == 1 ? "" : "s") + " ago";
         }
     }
@@ -243,7 +289,7 @@ std::string TimeParser::formatRelative(const std::chrono::system_clock::time_poi
 std::chrono::system_clock::time_point
 TimeParser::startOfDay(const std::chrono::system_clock::time_point& tp) {
     auto time_t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm = *std::localtime(&time_t);
+    std::tm tm = localtimeCopy(time_t);
     tm.tm_hour = 0;
     tm.tm_min = 0;
     tm.tm_sec = 0;
@@ -253,7 +299,7 @@ TimeParser::startOfDay(const std::chrono::system_clock::time_point& tp) {
 std::chrono::system_clock::time_point
 TimeParser::endOfDay(const std::chrono::system_clock::time_point& tp) {
     auto time_t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm = *std::localtime(&time_t);
+    std::tm tm = localtimeCopy(time_t);
     tm.tm_hour = 23;
     tm.tm_min = 59;
     tm.tm_sec = 59;

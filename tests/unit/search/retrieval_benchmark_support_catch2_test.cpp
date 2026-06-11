@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "src/search/benchmarks/retrieval_benchmark_support.h"
+#include "tests/benchmarks/search/retrieval_benchmark_support.h"
 #include "tests/common/test_helpers_catch2.h"
 
 #include <algorithm>

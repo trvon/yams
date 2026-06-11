@@ -1,7 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 #include <boost/asio/awaitable.hpp>
 

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <csignal>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -51,8 +52,10 @@ bool assertionFires(std::function<void()> fn) {
         return false;
     }
     if (pid == 0) {
-        // Child: suppress assertion diagnostic noise on stderr during tests.
-        // The test only cares about the exit signal.
+        // Child: Catch2's fatal-condition handlers are inherited across fork
+        // and would intercept SIGABRT; restore the default so the child dies
+        // by signal. Also suppress assertion diagnostic noise on stderr.
+        signal(SIGABRT, SIG_DFL);
         fn();
         _exit(0); // should not reach here if assertion fired
     }
@@ -321,7 +324,7 @@ TEST_CASE("YAMS_DCHECK fires in debug build", "[assert][dcheck]") {
 
     // In debug: fires.  In release (NDEBUG): does not fire.
     // We can't test both in one binary, so we assert the debug behavior.
-#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
+#if !defined(YAMS_DISABLE_DCHECK) && (defined(YAMS_ENABLE_DCHECK) || !defined(NDEBUG))
     CHECK(fired);
 #else
     CHECK_FALSE(fired);
@@ -384,7 +387,7 @@ TEST_CASE("YAMS_DCHECK fires on refcount increment after commit", "[assert][refc
     SKIP("fork() not available on Windows");
 #else
     const bool fired = assertionFires([]() { trigger_refcount_increment_after_commit_dcheck(); });
-#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
+#if !defined(YAMS_DISABLE_DCHECK) && (defined(YAMS_ENABLE_DCHECK) || !defined(NDEBUG))
     CHECK(fired);
 #else
     CHECK_FALSE(fired);
@@ -397,7 +400,7 @@ TEST_CASE("YAMS_DCHECK fires on refcount decrement after commit", "[assert][refc
     SKIP("fork() not available on Windows");
 #else
     const bool fired = assertionFires([]() { trigger_refcount_decrement_after_commit_dcheck(); });
-#if !defined(NDEBUG) && !defined(YAMS_DISABLE_DCHECK)
+#if !defined(YAMS_DISABLE_DCHECK) && (defined(YAMS_ENABLE_DCHECK) || !defined(NDEBUG))
     CHECK(fired);
 #else
     CHECK_FALSE(fired);

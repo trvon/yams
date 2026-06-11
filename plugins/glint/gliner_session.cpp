@@ -9,7 +9,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <numeric>
+#include <limits>
+#include <mutex>
 #include <unordered_map>
 
 // Conditionally include ONNX Runtime
@@ -20,6 +21,22 @@
 namespace yams::glint {
 
 namespace fs = std::filesystem;
+
+constexpr int kMaxTokenizerId = 1'000'000;
+constexpr size_t kMaxTokenizerEntries = static_cast<size_t>(kMaxTokenizerId) + 1;
+
+bool isValidTokenId(int id) {
+    return id >= 0 && id <= kMaxTokenizerId;
+}
+
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
 
 // ============================================================================
 // Word Splitting Implementation (matches GLiNER's WhitespaceTokenSplitter)
@@ -176,15 +193,22 @@ public:
                     for (const auto& token : json["added_tokens"]) {
                         if (token.contains("id") && token["id"].is_number()) {
                             int id = token["id"].get<int>();
-                            if (id >= 0) {
-                                max_added_token_id =
-                                    std::max(max_added_token_id, static_cast<size_t>(id));
+                            if (!isValidTokenId(id)) {
+                                spdlog::warn("[Glint] tokenizer added token has invalid id {}", id);
+                                return false;
                             }
+                            max_added_token_id =
+                                std::max(max_added_token_id, static_cast<size_t>(id));
                         }
                     }
                 }
 
                 if (vocab.is_array()) {
+                    if (vocab.size() > kMaxTokenizerEntries) {
+                        spdlog::warn("[Glint] tokenizer vocab has too many entries: {}",
+                                     vocab.size());
+                        return false;
+                    }
                     // Unigram/SentencePiece format: vocab is array of [token, score] pairs
                     // Index in array is the token ID
                     is_unigram_ = true;
@@ -208,11 +232,17 @@ public:
                     for (auto& [token, id_val] : vocab.items()) {
                         if (id_val.is_number()) {
                             int id = id_val.get<int>();
-                            vocab_[token] = id;
-                            if (id >= static_cast<int>(id_to_token_.size())) {
-                                id_to_token_.resize(id + 1);
+                            if (!isValidTokenId(id)) {
+                                spdlog::warn("[Glint] tokenizer vocab entry '{}' has invalid id {}",
+                                             token, id);
+                                return false;
                             }
-                            id_to_token_[id] = token;
+                            const auto index = static_cast<size_t>(id);
+                            vocab_[token] = id;
+                            if (index >= id_to_token_.size()) {
+                                id_to_token_.resize(index + 1);
+                            }
+                            id_to_token_[index] = token;
                         }
                     }
                     spdlog::info("[Glint] Loaded WordPiece tokenizer with {} tokens",
@@ -226,11 +256,17 @@ public:
                     if (token.contains("content") && token.contains("id")) {
                         std::string content = token["content"].get<std::string>();
                         int id = token["id"].get<int>();
-                        vocab_[content] = id;
-                        if (id >= static_cast<int>(id_to_token_.size())) {
-                            id_to_token_.resize(id + 1);
+                        if (!isValidTokenId(id)) {
+                            spdlog::warn("[Glint] tokenizer added token '{}' has invalid id {}",
+                                         content, id);
+                            return false;
                         }
-                        id_to_token_[id] = content;
+                        const auto index = static_cast<size_t>(id);
+                        vocab_[content] = id;
+                        if (index >= id_to_token_.size()) {
+                            id_to_token_.resize(index + 1);
+                        }
+                        id_to_token_[index] = content;
 
                         // Track special tokens
                         bool is_special = token.value("special", false);
@@ -454,11 +490,9 @@ public:
     /// Search order: YAMS_GLINT_MODEL_PATH env, YAMS_DATA_DIR, YAMS_STORAGE,
     /// ~/.local/share/yams, /Volumes/picaso/yams (dev), /opt/homebrew/share/yams
     static std::string discover_model_path() {
-        if (const char* env_path = std::getenv("YAMS_GLINT_MODEL_PATH")) {
-            if (fs::exists(env_path)) {
-                spdlog::info("[Glint] Using model from YAMS_GLINT_MODEL_PATH: {}", env_path);
-                return env_path;
-            }
+        if (auto envPath = getenvCopy("YAMS_GLINT_MODEL_PATH"); envPath && fs::exists(*envPath)) {
+            spdlog::info("[Glint] Using model from YAMS_GLINT_MODEL_PATH: {}", *envPath);
+            return *envPath;
         }
 
         const std::vector<std::string> model_names = {
@@ -698,7 +732,9 @@ private:
         // IMPORTANT: Only the FIRST subword token of each word gets the word index;
         // continuation subwords get 0 (matching Python's token_level=False default)
         for (size_t i = 0; i < num_words; ++i) {
-            const int64_t text_word_idx = static_cast<int64_t>(i + 1); // 1-based indexing
+            constexpr auto kMaxWordIndex =
+                static_cast<size_t>(std::numeric_limits<int64_t>::max() - 1);
+            const int64_t text_word_idx = static_cast<int64_t>(std::min(i, kMaxWordIndex)) + 1;
             if (tokenizer_.is_loaded()) {
                 auto word_ids = tokenizer_.encode(words[i].text);
                 for (size_t j = 0; j < word_ids.size(); ++j) {

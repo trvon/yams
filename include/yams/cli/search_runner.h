@@ -8,7 +8,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/ipc/ipc_protocol_responses.h>
 
 namespace yams::cli::search_runner {
 

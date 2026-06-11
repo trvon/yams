@@ -24,7 +24,8 @@ void MCPServer::ensureUiResourcesInitialized() {
             r.mimeType = mcpAppsMimeType_.empty() ? "text/html;profile=mcp-app" : mcpAppsMimeType_;
             r.htmlContent = std::move(html);
             r.meta = json::object();
-            uiResources_.emplace(r.uri, std::move(r));
+            auto resourceUri = r.uri;
+            uiResources_.emplace(std::move(resourceUri), std::move(r));
         };
 
         // Minimal placeholder UI templates (hosts render in sandboxed iframe).
