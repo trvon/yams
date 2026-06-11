@@ -65,6 +65,21 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     return info;
 }
 
+BatchContentEntry makeBatchContentEntry(int64_t documentId, std::string title,
+                                        std::string contentText,
+                                        std::string mimeType = "text/plain",
+                                        std::string extractionMethod = "test",
+                                        std::string language = "en") {
+    BatchContentEntry entry;
+    entry.documentId = documentId;
+    entry.title = std::move(title);
+    entry.contentText = std::move(contentText);
+    entry.mimeType = std::move(mimeType);
+    entry.extractionMethod = std::move(extractionMethod);
+    entry.language = std::move(language);
+    return entry;
+}
+
 TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[metadata][path]") {
     DocumentInfo info;
     info.filePath = "/tmp/../tmp/yams/path-note.md";
@@ -3358,8 +3373,7 @@ TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-
     auto docId = insertResult.value();
 
     // First batch insert — transitions to extracted+indexed
-    std::vector<BatchContentEntry> entries = {
-        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    std::vector<BatchContentEntry> entries = {makeBatchContentEntry(docId, "Title", "Content")};
     auto batch1 = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batch1.has_value()));
 
@@ -3404,7 +3418,7 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
 
     // Pre-extract doc1 via batchInsertContentAndIndex so it has extraction_status='Success'
     std::vector<BatchContentEntry> preEntries = {
-        {id1.value(), "Title 1", "Content 1", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title 1", "Content 1")};
     auto preResult = fix.repository_->batchInsertContentAndIndex(preEntries);
     REQUIRE((preResult.has_value()));
 
@@ -3413,8 +3427,8 @@ TEST_CASE("batchInsertContentAndIndex: mixed fresh and already-extracted batch",
 
     // Now batch both: doc1 (already extracted) + doc2 (fresh)
     std::vector<BatchContentEntry> entries = {
-        {id1.value(), "Title 1 updated", "Content 1 updated", "text/plain", "test", "en"},
-        {id2.value(), "Title 2", "Content 2", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title 1 updated", "Content 1 updated"),
+        makeBatchContentEntry(id2.value(), "Title 2", "Content 2")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3580,8 +3594,7 @@ TEST_CASE("batchInsertContentAndIndex: clears extraction_error",
     });
 
     // Batch insert should clear the error
-    std::vector<BatchContentEntry> entries = {
-        {docId, "Title", "Content", "text/plain", "test", "en"}};
+    std::vector<BatchContentEntry> entries = {makeBatchContentEntry(docId, "Title", "Content")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3759,7 +3772,7 @@ TEST_CASE("batchGetDocumentsWithContentPreview: mixed with and without content",
     REQUIRE((id1.has_value()));
 
     std::vector<BatchContentEntry> entries = {
-        {id1.value(), "Title", "Has content", "text/plain", "test", "en"}};
+        makeBatchContentEntry(id1.value(), "Title", "Has content")};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
@@ -3814,7 +3827,7 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
     // Insert large content (10KB)
     std::string largeContent(10000, 'x');
     std::vector<BatchContentEntry> entries = {
-        {insertResult.value(), "Title", largeContent, "text/plain", "test", "en"}};
+        makeBatchContentEntry(insertResult.value(), "Title", largeContent)};
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
 
