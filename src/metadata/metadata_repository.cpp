@@ -3015,10 +3015,10 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
     // SymSpellSearch stores a raw sqlite3* pointer and assumes it remains valid
     // for its entire lifetime. Do not satisfy that lifetime by permanently
     // leasing a pooled connection: single-connection pools would be starved for
-    // the rest of the process. Instead open a small dedicated handle to the same
-    // metadata DB.
+    // the rest of the process. The persistent lookup handle is read-only; writes
+    // are short-lived and routed through WriteCoordinator/addSymSpellTerms().
     auto db = std::make_unique<Database>();
-    auto openResult = db->open(pool_.dbPath(), ConnectionMode::Create);
+    auto openResult = db->open(pool_.dbPath(), ConnectionMode::ReadOnly);
     if (!openResult) {
         return openResult.error();
     }
@@ -3028,22 +3028,19 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
         return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
     }
 
-    // Pooled connections get synchronous=NORMAL from ConnectionPool; this
-    // dedicated handle would otherwise run at SQLite's default FULL and fsync
-    // every autocommitted dictionary write.
-    (void)db->execute("PRAGMA synchronous = NORMAL");
     (void)db->execute("PRAGMA busy_timeout = 5000");
 
-    // Initialize schema (idempotent - creates tables if not exist)
-    auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
-    if (!schemaResult) {
-        spdlog::error("SymSpell schema initialization failed: {}", schemaResult.error().message);
-        return schemaResult;
+    // Create the read-only search index instance. Schema creation is a write and
+    // stays on the write path below; migrations normally create these tables.
+    try {
+        symspellDb_ = std::move(db);
+        symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb, 2, 7, true);
+    } catch (const std::exception& ex) {
+        symspellDb_.reset();
+        symspellIndex_.reset();
+        return Error{ErrorCode::DatabaseError,
+                     std::string("Failed to initialize read-only SymSpell index: ") + ex.what()};
     }
-
-    // Create the search index instance
-    symspellDb_ = std::move(db);
-    symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
     symspellInitialized_.store(true, std::memory_order_release);
 
     spdlog::info("SymSpell fuzzy search index initialized");
@@ -3051,34 +3048,32 @@ Result<void> MetadataRepository::ensureSymSpellInitialized() {
 }
 
 void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequency) {
-    if (term.empty()) {
+    if (term.empty() || frequency <= 0) {
         return;
     }
 
-    // Ensure initialized (lazy init on first term add)
-    auto initResult = ensureSymSpellInitialized();
-    if (!initResult) {
-        spdlog::warn("SymSpell not initialized, skipping term '{}': {}", term,
-                     initResult.error().message);
-        return;
-    }
+    std::string ownedTerm(term);
+    auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
+        sqlite3* rawDb = db.rawHandle();
+        if (!rawDb) {
+            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+        }
+        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+        if (!schemaResult) {
+            return schemaResult.error();
+        }
+        search::SymSpellSearch writer(rawDb);
+        writer.addTerm(ownedTerm, frequency);
+        return Result<void>();
+    });
 
-    // Serialize use of the raw sqlite-backed SymSpell instance with initialization/shutdown.
-    std::lock_guard<std::mutex> lock(symspellInitMutex_);
-    if (symspellIndex_) {
-        symspellIndex_->addTerm(term, frequency);
+    if (!result) {
+        spdlog::warn("SymSpell term write failed for '{}': {}", ownedTerm, result.error().message);
     }
 }
 
 void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms) {
     if (terms.empty()) {
-        return;
-    }
-
-    auto initResult = ensureSymSpellInitialized();
-    if (!initResult) {
-        spdlog::warn("SymSpell not initialized, skipping {} terms: {}", terms.size(),
-                     initResult.error().message);
         return;
     }
 
@@ -3089,10 +3084,27 @@ void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms)
             batch.emplace_back(term, 1);
         }
     }
+    if (batch.empty()) {
+        return;
+    }
 
-    std::lock_guard<std::mutex> lock(symspellInitMutex_);
-    if (symspellIndex_ && !batch.empty()) {
-        symspellIndex_->addTermsBatch(batch);
+    auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
+        sqlite3* rawDb = db.rawHandle();
+        if (!rawDb) {
+            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+        }
+        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+        if (!schemaResult) {
+            return schemaResult.error();
+        }
+        search::SymSpellSearch writer(rawDb);
+        writer.addTermsBatch(batch);
+        return Result<void>();
+    });
+
+    if (!result) {
+        spdlog::warn("SymSpell term batch write failed for {} terms: {}", batch.size(),
+                     result.error().message);
     }
 }
 

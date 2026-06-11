@@ -68,7 +68,8 @@ public:
      * @param maxEditDistance Maximum edit distance for lookups (default 2)
      * @param prefixLength Prefix length for optimization (default 7)
      */
-    explicit SymSpellSearch(sqlite3* db, int maxEditDistance = 2, int prefixLength = 7);
+    explicit SymSpellSearch(sqlite3* db, int maxEditDistance = 2, int prefixLength = 7,
+                            bool readOnly = false);
 
     ~SymSpellSearch();
 

@@ -1,15 +1,14 @@
-#include <spdlog/spdlog.h>
 #include <symspell/symspell.hpp>
 #include <symspell/symspell_sqlite.hpp>
 #include <yams/search/symspell_search.h>
 
 namespace yams::search {
 
-SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLength)
+SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLength, bool readOnly)
     : maxEditDistance_(maxEditDistance), prefixLength_(prefixLength) {
     symspell_ = std::make_unique<symspell::SymSpell>(
-        std::make_unique<symspell::SQLiteStore>(db, maxEditDistance, prefixLength), maxEditDistance,
-        prefixLength);
+        std::make_unique<symspell::SQLiteStore>(db, maxEditDistance, prefixLength, readOnly),
+        maxEditDistance, prefixLength);
 }
 
 SymSpellSearch::~SymSpellSearch() = default;
@@ -97,7 +96,7 @@ void SymSpellSearch::clear() {
     std::unique_lock lock(mutex_);
     // Would need to execute DELETE FROM symspell_terms; DELETE FROM symspell_deletes;
     // For now, this is a placeholder - full implementation needs db access
-    spdlog::warn("SymSpellSearch::clear() not fully implemented");
+    // Placeholder: full implementation needs direct SQL access to purge the backing tables.
 }
 
 } // namespace yams::search

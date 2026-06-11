@@ -319,7 +319,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
                                   std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
-                                  std::is_same_v<T, InsertRelationshipOp>) {
+                                  std::is_same_v<T, InsertRelationshipOp> ||
+                                  std::is_same_v<T, AddSymSpellTermsOp>) {
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
@@ -361,7 +362,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
-                                      std::is_same_v<T, InsertRelationshipOp>) {
+                                      std::is_same_v<T, InsertRelationshipOp> ||
+                                      std::is_same_v<T, AddSymSpellTermsOp>) {
                             return;
                         } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp> ||
                                              std::is_same_v<T, AddDeferredDocEntitiesOp> ||
@@ -461,7 +463,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         Result<void> r;
                         if constexpr (std::is_same_v<T, InsertDocumentOp> ||
                                       std::is_same_v<T, UpsertTreeSnapshotOp> ||
-                                      std::is_same_v<T, InsertRelationshipOp>) {
+                                      std::is_same_v<T, InsertRelationshipOp> ||
+                                      std::is_same_v<T, AddSymSpellTermsOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
                             if (concrete.hashes.empty())
@@ -1042,6 +1045,20 @@ Result<void> WriteCoordinator::applyMetadataOp(InsertRelationshipOp& op) {
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.relationshipsInserted++;
+    }
+    return Result<void>();
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(AddSymSpellTermsOp& op) {
+    if (!meta_)
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (op.terms.empty())
+        return Result<void>();
+    const auto termCount = op.terms.size();
+    meta_->addSymSpellTerms(op.terms);
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.symSpellTermsAdded += termCount;
     }
     return Result<void>();
 }
