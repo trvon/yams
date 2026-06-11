@@ -350,6 +350,20 @@ public:
             addSymSpellTerm(term);
         }
     }
+    virtual void addSymSpellTerms(const std::vector<std::pair<std::string, int64_t>>& terms) {
+        for (const auto& [term, frequency] : terms) {
+            addSymSpellTerm(term, frequency);
+        }
+    }
+    virtual Result<void> tryAddSymSpellTerms(const std::vector<std::string>& terms) {
+        addSymSpellTerms(terms);
+        return Result<void>();
+    }
+    virtual Result<void>
+    tryAddSymSpellTerms(const std::vector<std::pair<std::string, int64_t>>& terms) {
+        addSymSpellTerms(terms);
+        return Result<void>();
+    }
 
     // Bulk operations
     virtual Result<std::optional<DocumentInfo>>
@@ -635,6 +649,10 @@ public:
      */
     void addSymSpellTerm(std::string_view term, int64_t frequency = 1) override;
     void addSymSpellTerms(const std::vector<std::string>& terms) override;
+    void addSymSpellTerms(const std::vector<std::pair<std::string, int64_t>>& terms) override;
+    Result<void> tryAddSymSpellTerms(const std::vector<std::string>& terms) override;
+    Result<void>
+    tryAddSymSpellTerms(const std::vector<std::pair<std::string, int64_t>>& terms) override;
 
     /**
      * @brief Initialize SymSpell index (creates schema if needed)
@@ -912,6 +930,7 @@ private:
     mutable std::unique_ptr<Database> symspellDb_;
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
     mutable std::atomic<bool> symspellInitialized_{false};
+    mutable std::atomic<bool> symspellSchemaReady_{false};
 
     struct PathCacheEntry {
         std::string path;

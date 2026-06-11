@@ -1222,6 +1222,23 @@ inline bool extensionSupportsEntityProviders(
     return false;
 }
 
+void enqueueWithBackpressure(yams::daemon::WriteCoordinator& coordinator,
+                             std::unique_ptr<yams::daemon::WriteBatch> batch,
+                             std::string_view what) {
+    constexpr int kMaxRetryRounds = 40;
+    constexpr auto kRetryDelay = std::chrono::milliseconds(50);
+    for (int round = 0; round < kMaxRetryRounds; ++round) {
+        if (coordinator.tryEnqueue(batch)) {
+            return;
+        }
+        std::this_thread::sleep_for(kRetryDelay);
+    }
+    spdlog::warn("[PostIngestQueue] WriteCoordinator queue full after {}ms backoff; forcing "
+                 "enqueue of {}",
+                 kMaxRetryRounds * kRetryDelay.count(), what);
+    coordinator.enqueue(std::move(batch));
+}
+
 } // namespace
 
 std::variant<PostIngestQueue::PreparedMetadataEntry, PostIngestQueue::ExtractionFailure>
@@ -2040,7 +2057,8 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 }
 
                 if (writeCoordinator_) {
-                    writeCoordinator_->tryEnqueue(wb);
+                    enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
+                                            "entity extraction KG batch");
                     totalNodesInserted += batchNodesInserted;
                     totalEdgesInserted += batchEdgesQueued;
                     totalAliasesInserted += batchAliasesQueued;
@@ -2316,7 +2334,8 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                         wb->source = "PostIngestQueue::titleExtraction/title";
                         wb->ops.emplace_back(SetMetadataBatchOp{
                             {{docId, "title", metadata::MetadataValue(newTitle)}}});
-                        writeCoordinator_->tryEnqueue(wb);
+                        enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
+                                                "title extraction update");
                     } else {
                         updateRes = Error{ErrorCode::InvalidState, "WriteCoordinator unavailable"};
                     }
@@ -2803,7 +2822,8 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
                     auto wb =
                         makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
-                    writeCoordinator_->tryEnqueue(wb);
+                    enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
+                                            "NL entity KG batch");
                 }
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
                               nlEntities.size(), hash.substr(0, 12));
@@ -3075,23 +3095,41 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
 
         const auto contentWriteStart = std::chrono::steady_clock::now();
-        metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
-        auto batchResult = meta_->batchInsertContentAndIndex(entries);
+        constexpr std::size_t kMaxContentEntriesPerTxn = 128;
+        std::vector<PreparedMetadataEntry> committed;
+        committed.reserve(successes.size());
+        {
+            metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
+            for (std::size_t off = 0; off < entries.size(); off += kMaxContentEntriesPerTxn) {
+                const auto end = std::min(entries.size(), off + kMaxContentEntriesPerTxn);
+                std::vector<metadata::BatchContentEntry> chunk(
+                    std::make_move_iterator(entries.begin() + static_cast<long>(off)),
+                    std::make_move_iterator(entries.begin() + static_cast<long>(end)));
+                auto batchResult = meta_->batchInsertContentAndIndex(chunk);
+                if (!batchResult) {
+                    spdlog::error("[PostIngestQueue] Batch DB write failed for {} documents: {}",
+                                  chunk.size(), batchResult.error().message);
+                    if (batchResult.error().message.find("database is locked") !=
+                        std::string::npos) {
+                        TuneAdvisor::reportDbLockError();
+                    }
+                    for (std::size_t i = off; i < end; ++i) {
+                        failures.push_back(ExtractionFailure{successes[i].documentId,
+                                                             successes[i].hash,
+                                                             batchResult.error().message});
+                    }
+                } else {
+                    for (std::size_t i = off; i < end; ++i) {
+                        committed.push_back(std::move(successes[i]));
+                    }
+                }
+            }
+        }
+        successes = std::move(committed);
         recordTiming("commit_content_index", contentWriteStart);
-        if (!batchResult) {
-            spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
-                          batchResult.error().message);
-            if (batchResult.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            for (const auto& prepared : successes) {
-                failures.push_back(ExtractionFailure{prepared.documentId, prepared.hash,
-                                                     batchResult.error().message});
-            }
-            successes.clear();
-        } else {
+        if (!successes.empty()) {
             spdlog::debug("[PostIngestQueue] Batch DB write succeeded for {} documents",
-                          entries.size());
+                          successes.size());
             std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> titleUpdates;
             titleUpdates.reserve(successes.size());
             for (const auto& prepared : successes) {
@@ -3115,11 +3153,8 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                         }
                     }
                     if (!wb->ops.empty()) {
-                        if (!writeCoordinator_->tryEnqueue(wb)) {
-                            spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while "
-                                         "enqueuing title metadata; forcing enqueue");
-                            writeCoordinator_->enqueue(std::move(wb));
-                        }
+                        enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
+                                                "title metadata");
                     } else {
                         spdlog::debug("[PostIngestQueue] Skipping empty title metadata batch");
                     }
@@ -3155,11 +3190,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                     UpdateRepairStatusOp{std::move(failedHashes), metadata::RepairStatus::Failed});
             }
             if (!wb->ops.empty()) {
-                if (!writeCoordinator_->tryEnqueue(wb)) {
-                    spdlog::warn("[PostIngestQueue] WriteCoordinator queue full while enqueuing "
-                                 "extraction failures; forcing enqueue");
-                    writeCoordinator_->enqueue(std::move(wb));
-                }
+                enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "extraction failures");
             }
         } else {
             spdlog::warn("[PostIngestQueue] WriteCoordinator unavailable; cannot mark {} "

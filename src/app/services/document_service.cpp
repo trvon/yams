@@ -1337,6 +1337,7 @@ public:
 
             // Single-transaction insert: document + metadata + snapshot in one
             // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
+            metadata::MetadataOpScope metadataScope("app_store_document");
             auto ins =
                 ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
             if (ins) {

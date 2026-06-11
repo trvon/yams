@@ -3073,10 +3073,15 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
 }
 
 void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms) {
-    if (terms.empty()) {
-        return;
-    }
+    (void)tryAddSymSpellTerms(terms);
+}
 
+void MetadataRepository::addSymSpellTerms(
+    const std::vector<std::pair<std::string, int64_t>>& terms) {
+    (void)tryAddSymSpellTerms(terms);
+}
+
+Result<void> MetadataRepository::tryAddSymSpellTerms(const std::vector<std::string>& terms) {
     std::vector<std::pair<std::string, int64_t>> batch;
     batch.reserve(terms.size());
     for (const auto& term : terms) {
@@ -3084,28 +3089,52 @@ void MetadataRepository::addSymSpellTerms(const std::vector<std::string>& terms)
             batch.emplace_back(term, 1);
         }
     }
-    if (batch.empty()) {
-        return;
-    }
+    return tryAddSymSpellTerms(batch);
+}
 
-    auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
-        sqlite3* rawDb = db.rawHandle();
-        if (!rawDb) {
-            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+Result<void>
+MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string, int64_t>>& terms) {
+    std::vector<std::pair<std::string, int64_t>> filtered;
+    filtered.reserve(terms.size());
+    for (const auto& [term, frequency] : terms) {
+        if (!term.empty() && frequency > 0) {
+            filtered.emplace_back(term, frequency);
         }
-        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
-        if (!schemaResult) {
-            return schemaResult.error();
-        }
-        search::SymSpellSearch writer(rawDb);
-        writer.addTermsBatch(batch);
+    }
+    if (filtered.empty()) {
         return Result<void>();
-    });
-
-    if (!result) {
-        spdlog::warn("SymSpell term batch write failed for {} terms: {}", batch.size(),
-                     result.error().message);
     }
+
+    constexpr std::size_t kTermsPerChunk = 512;
+
+    for (std::size_t offset = 0; offset < filtered.size(); offset += kTermsPerChunk) {
+        const std::size_t end = std::min(filtered.size(), offset + kTermsPerChunk);
+        std::vector<std::pair<std::string, int64_t>> chunk(filtered.begin() + offset,
+                                                           filtered.begin() + end);
+        auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
+            sqlite3* rawDb = db.rawHandle();
+            if (!rawDb) {
+                return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+            }
+            if (!symspellSchemaReady_.load(std::memory_order_acquire)) {
+                auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+                if (!schemaResult) {
+                    return schemaResult.error();
+                }
+                symspellSchemaReady_.store(true, std::memory_order_release);
+            }
+            search::SymSpellSearch writer(rawDb);
+            writer.addTermsBatch(chunk);
+            return Result<void>();
+        });
+
+        if (!result) {
+            spdlog::warn("SymSpell term batch write failed for {} terms: {}", chunk.size(),
+                         result.error().message);
+            return result.error();
+        }
+    }
+    return Result<void>();
 }
 
 // =============================================================================

@@ -2537,6 +2537,110 @@ TEST_CASE(
     CHECK((fuzzyResult.value().results.front().document.id == docId));
 }
 
+TEST_CASE("MetadataRepository: coordinator coalesces duplicate SymSpell terms preserving "
+          "frequency",
+          "[unit][metadata][repository][symspell]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath(
+        "/notes/symspell_coalesce.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE70");
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE((insertResult.has_value()));
+    const auto docId = insertResult.value();
+
+    const std::string indexedTerm = "coalescestormtarget";
+    const std::string contentText = std::string("The ") + indexedTerm;
+    REQUIRE((fix.repository_->indexDocumentContent(docId, doc.fileName, contentText, "text/plain")
+                 .has_value()));
+
+    boost::asio::io_context io;
+    yams::daemon::WriteCoordinator::Config config;
+    config.maxBatchSize = 8;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 512;
+    auto repoRef =
+        std::shared_ptr<MetadataRepository>(fix.repository_.get(), [](MetadataRepository*) {});
+    yams::daemon::WriteCoordinator coordinator(io, {}, repoRef, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    constexpr std::uint64_t kDuplicateBatches = 300;
+    for (std::uint64_t i = 0; i < kDuplicateBatches; ++i) {
+        auto batch = std::make_unique<yams::daemon::WriteBatch>();
+        batch->source = "test/symspell_coalesce";
+        batch->ops.emplace_back(yams::daemon::AddSymSpellTermsOp{{indexedTerm}});
+        coordinator.enqueue(std::move(batch));
+    }
+
+    auto flushResult = coordinator.flush(std::chrono::seconds{10});
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+
+    REQUIRE((flushResult.has_value()));
+    CHECK((coordinator.getStats().symSpellTermsAdded == kDuplicateBatches));
+
+    auto fuzzyResult = fix.repository_->fuzzySearch("coalescestormtargat", 0.6f, 10);
+    REQUIRE((fuzzyResult.has_value()));
+    REQUIRE((fuzzyResult.value().results.size() == 1));
+    CHECK((fuzzyResult.value().results.front().document.id == docId));
+}
+
+TEST_CASE("MetadataRepository: SymSpell terms spanning write chunk boundaries are all indexed",
+          "[unit][metadata][repository][symspell]") {
+    MetadataRepositoryFixture fix;
+
+    struct Target {
+        std::string term;
+        std::string typo;
+        std::string path;
+        std::string hashSuffix;
+        int64_t docId = 0;
+    };
+    std::vector<Target> targets = {
+        {"alphachunkzero", "alphachunkzera", "/notes/chunk_alpha.txt", "71", 0},
+        {"betachunkmiddle", "betachunkmiddel", "/notes/chunk_beta.txt", "72", 0},
+        {"gammachunklast", "gammachunklasd", "/notes/chunk_gamma.txt", "73", 0},
+    };
+
+    for (auto& target : targets) {
+        auto doc = makeDocumentWithPath(
+            target.path,
+            std::string("EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE") +
+                target.hashSuffix);
+        auto insertResult = fix.repository_->insertDocument(doc);
+        REQUIRE((insertResult.has_value()));
+        target.docId = insertResult.value();
+        const std::string contentText = std::string("The ") + target.term;
+        REQUIRE((fix.repository_
+                     ->indexDocumentContent(target.docId, doc.fileName, contentText, "text/plain")
+                     .has_value()));
+    }
+
+    constexpr std::size_t kTotalTerms = 520;
+    std::vector<std::pair<std::string, int64_t>> termPairs;
+    termPairs.reserve(kTotalTerms);
+    for (std::size_t i = 0; i < kTotalTerms; ++i) {
+        termPairs.emplace_back("fillerchunkterm" + std::to_string(i), 1);
+    }
+    termPairs[0] = {targets[0].term, 1};
+    termPairs[511] = {targets[1].term, 1};
+    termPairs[519] = {targets[2].term, 1};
+
+    auto addTermsResult = fix.repository_->tryAddSymSpellTerms(termPairs);
+    REQUIRE((addTermsResult.has_value()));
+
+    for (const auto& target : targets) {
+        auto fuzzyResult = fix.repository_->fuzzySearch(target.typo, 0.6f, 10);
+        REQUIRE((fuzzyResult.has_value()));
+        REQUIRE((fuzzyResult.value().results.size() == 1));
+        CHECK((fuzzyResult.value().results.front().document.id == target.docId));
+    }
+}
+
 TEST_CASE("MetadataRepository: search sanitizes snippet UTF-8", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 

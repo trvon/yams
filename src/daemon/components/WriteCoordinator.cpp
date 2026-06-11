@@ -52,12 +52,19 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     batch->enqueueTime = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
+        if (stop_.load(std::memory_order_acquire)) {
+            spdlog::warn("[WriteCoordinator] Dropping batch from '{}' after shutdown requested",
+                         batch->source);
+            return;
+        }
         if (pendingBatches_.size() >= config_.channelCapacity) {
             spdlog::warn("[WriteCoordinator] Queue full ({} batches), applying backpressure",
                          pendingBatches_.size());
         }
         pendingBatches_.push_back(std::move(batch));
-        std::lock_guard<std::mutex> slock(statsMutex_);
+    }
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.batchesEnqueued++;
     }
     wakeWriter();
@@ -68,15 +75,16 @@ bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
         return false;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        if (pendingBatches_.size() >= config_.channelCapacity) {
+        if (stop_.load(std::memory_order_acquire) ||
+            pendingBatches_.size() >= config_.channelCapacity) {
             return false;
         }
         batch->enqueueTime = std::chrono::steady_clock::now();
         pendingBatches_.push_back(std::move(batch));
-        {
-            std::lock_guard<std::mutex> slock(statsMutex_);
-            stats_.batchesEnqueued++;
-        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.batchesEnqueued++;
     }
     wakeWriter();
     return true;
@@ -105,8 +113,9 @@ Result<void> WriteCoordinator::flush(std::chrono::milliseconds timeout) {
     }
     auto deadline = std::chrono::steady_clock::now() + timeout;
     std::unique_lock<std::mutex> lock(queueMutex_);
-    bool drained = drainCv_.wait_until(
-        lock, deadline, [this] { return pendingBatches_.empty() && inFlight_.load() == 0; });
+    bool drained = drainCv_.wait_until(lock, deadline, [this] {
+        return pendingBatches_.empty() && inFlight_.load(std::memory_order_acquire) == 0;
+    });
     if (!drained) {
         return Error{ErrorCode::Timeout, "WriteCoordinator::flush timed out"};
     }
@@ -210,12 +219,14 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
     spdlog::info("[WriteCoordinator] Writer loop started");
     auto pollTimer = wakeTimer_;
 
-    while (!stop_.load()) {
+    while (true) {
         std::vector<std::unique_ptr<WriteBatch>> batchesToProcess;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (stop_.load() && pendingBatches_.empty())
+            if (stop_.load(std::memory_order_acquire) && pendingBatches_.empty() &&
+                inFlight_.load(std::memory_order_acquire) == 0) {
                 break;
+            }
 
             std::size_t effectiveMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
             if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
@@ -223,13 +234,13 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
             std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
+                inFlight_.store(count, std::memory_order_release);
                 batchesToProcess.reserve(count);
                 for (std::size_t i = 0; i < count; ++i)
                     batchesToProcess.push_back(std::move(pendingBatches_[i]));
                 pendingBatches_.erase(pendingBatches_.begin(),
                                       pendingBatches_.begin() + static_cast<long>(count));
-                if (pendingBatches_.empty())
-                    drainCv_.notify_all();
+                drainCv_.notify_all();
             }
         }
 
@@ -247,7 +258,6 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             continue;
         }
 
-        inFlight_.store(batchesToProcess.size());
         spdlog::debug("[WriteCoordinator] Processing {} batches", batchesToProcess.size());
         auto result = applyBatches(batchesToProcess);
         if (!result) {
@@ -257,10 +267,10 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
             spdlog::warn("[WriteCoordinator] Batch apply failed: {}", result.error().message);
         }
-        inFlight_.store(0);
         bool hasPendingAfterApply = false;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
+            inFlight_.store(0, std::memory_order_release);
             hasPendingAfterApply = !pendingBatches_.empty();
             drainCv_.notify_all();
         }
@@ -285,15 +295,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     const auto applyStart = std::chrono::steady_clock::now();
 
-    auto stopped = [this]() { return stop_.load(std::memory_order_acquire); };
-
     for (const auto& batch : batches) {
         if (!batch)
             continue;
-        if (stopped()) {
-            spdlog::info("[WriteCoordinator] applyBatches aborted (stop requested)");
-            return Result<void>();
-        }
         const auto waitMs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(applyStart - batch->enqueueTime)
                 .count());
@@ -333,7 +337,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     std::unordered_map<std::string, std::int64_t> nodeKeyToId;
     std::optional<Error> firstOpError;
 
-    if (hasKgOps && kg_ && !stopped()) {
+    if (hasKgOps && kg_) {
         auto batchResult = kg_->beginWriteBatch();
         if (!batchResult) {
             spdlog::error("[WriteCoordinator] beginWriteBatch failed: {}",
@@ -382,11 +386,13 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                          r.error().message);
                         } else {
                             sourceOps++;
-                            std::lock_guard<std::mutex> lock(statsMutex_);
-                            stats_.opsApplied++;
                         }
                     },
                     op);
+            }
+            if (sourceOps > 0) {
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.opsApplied += sourceOps;
             }
             const auto sourceApplyMs =
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -415,7 +421,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
-    if (hasMetaOps && meta_ && !stopped()) {
+    if (hasMetaOps && meta_) {
         struct RepairStatusGroup {
             std::string source;
             metadata::RepairStatus status;
@@ -439,6 +445,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         std::unordered_map<std::string, RepairStatusGroup> repairStatusBySourceAndStatus;
         std::unordered_map<std::string, EmbeddingStatusGroup> embeddingStatusBySourceAndState;
         std::unordered_map<std::string, ExtractionStatusGroup> extractionStatusBySource;
+        std::unordered_map<std::string, std::unordered_map<std::string, std::int64_t>>
+            symspellTermsBySource;
 
         auto recordMetaApply = [&](const std::string& source, std::uint64_t sourceOps,
                                    std::uint64_t sourceApplyMs, bool sourceError) {
@@ -464,8 +472,18 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         if constexpr (std::is_same_v<T, InsertDocumentOp> ||
                                       std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, AddSymSpellTermsOp>) {
+                                      std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
                             r = applyMetadataOp(concrete);
+                        } else if constexpr (std::is_same_v<T, AddSymSpellTermsOp>) {
+                            if (concrete.terms.empty())
+                                return;
+                            auto& termFreqs = symspellTermsBySource[batch->source];
+                            for (auto& term : concrete.terms) {
+                                if (!term.empty())
+                                    termFreqs[std::move(term)]++;
+                            }
+                            concrete.terms.clear();
+                            return;
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
                             if (concrete.hashes.empty())
                                 return;
@@ -532,12 +550,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                                 std::make_move_iterator(concrete.hashes.end()));
                             concrete.hashes.clear();
                             return;
-                        } else if constexpr (std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
-                            r = applyMetadataOp(concrete);
-                            if (!r &&
-                                r.error().message.find("database is locked") != std::string::npos) {
-                                return;
-                            }
                         } else {
                             return;
                         }
@@ -547,117 +559,157 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                          batch->source, r.error().message);
                         } else {
                             sourceOps++;
-                            std::lock_guard<std::mutex> lock(statsMutex_);
-                            stats_.opsApplied++;
                         }
                     },
                     op);
+            }
+            if (sourceOps > 0) {
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.opsApplied += sourceOps;
             }
             const auto sourceApplyMs =
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - sourceStart)
                                                .count());
             recordMetaApply(batch->source, sourceOps, sourceApplyMs, sourceError);
-            if (stopped()) {
-                spdlog::info("[WriteCoordinator] applyBatches meta scan aborted (stop requested)");
-                return Result<void>();
-            }
         }
 
+        const auto chunkMax = std::max<std::size_t>(1, config_.maxCoalescedOpsPerApply);
+
         for (auto& [_, group] : extractionStatusBySource) {
-            if (stopped()) {
-                spdlog::info("[WriteCoordinator] applyBatches extraction coalesce aborted "
-                             "(stop requested)");
-                return Result<void>();
+            for (std::size_t off = 0; off < group.updates.size(); off += chunkMax) {
+                const auto end = std::min(group.updates.size(), off + chunkMax);
+                std::vector<metadata::ExtractionStatusUpdate> chunk(
+                    std::make_move_iterator(group.updates.begin() + static_cast<long>(off)),
+                    std::make_move_iterator(group.updates.begin() + static_cast<long>(end)));
+                const auto sourceStart = std::chrono::steady_clock::now();
+                const auto updateCount = static_cast<std::uint64_t>(chunk.size());
+                metadata::MetadataOpScope opScope("wc_extraction_status_batch");
+                auto r = meta_->batchUpdateDocumentExtractionStatuses(chunk);
+                const auto sourceApplyMs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sourceStart)
+                        .count());
+                if (!r) {
+                    spdlog::warn(
+                        "[WriteCoordinator] coalesced extraction-status op '{}' failed: {}",
+                        group.source, r.error().message);
+                } else {
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.opsApplied += updateCount;
+                    stats_.extractionStatusesUpdated += updateCount;
+                }
+                recordMetaApply(group.source, updateCount, sourceApplyMs, !r);
             }
-            if (group.updates.empty()) {
-                continue;
-            }
-            const auto sourceStart = std::chrono::steady_clock::now();
-            const auto updateCount = static_cast<std::uint64_t>(group.updates.size());
-            auto r = meta_->batchUpdateDocumentExtractionStatuses(group.updates);
-            const auto sourceApplyMs =
-                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - sourceStart)
-                                               .count());
-            if (!r) {
-                spdlog::warn("[WriteCoordinator] coalesced extraction-status op '{}' failed: {}",
-                             group.source, r.error().message);
-            } else {
-                std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied += updateCount;
-                stats_.extractionStatusesUpdated += updateCount;
-            }
-            recordMetaApply(group.source, updateCount, sourceApplyMs, !r);
         }
 
         for (auto& [source, entries] : metadataBySource) {
-            if (stopped()) {
-                spdlog::info(
-                    "[WriteCoordinator] applyBatches meta coalesce aborted (stop requested)");
-                return Result<void>();
+            for (std::size_t off = 0; off < entries.size(); off += chunkMax) {
+                const auto end = std::min(entries.size(), off + chunkMax);
+                const auto sourceStart = std::chrono::steady_clock::now();
+                SetMetadataBatchOp op{
+                    std::vector<std::tuple<std::int64_t, std::string, metadata::MetadataValue>>(
+                        std::make_move_iterator(entries.begin() + static_cast<long>(off)),
+                        std::make_move_iterator(entries.begin() + static_cast<long>(end)))};
+                const auto entryCount = static_cast<std::uint64_t>(op.entries.size());
+                auto r = applyMetadataOp(op);
+                const auto sourceApplyMs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sourceStart)
+                        .count());
+                if (!r) {
+                    spdlog::warn("[WriteCoordinator] coalesced meta op '{}' failed: {}", source,
+                                 r.error().message);
+                } else {
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.opsApplied += entryCount;
+                }
+                recordMetaApply(source, entryCount, sourceApplyMs, !r);
             }
-            const auto sourceStart = std::chrono::steady_clock::now();
-            const auto entryCount = static_cast<std::uint64_t>(entries.size());
-            SetMetadataBatchOp op{std::move(entries)};
-            auto r = applyMetadataOp(op);
-            const auto sourceApplyMs =
-                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - sourceStart)
-                                               .count());
-            if (!r) {
-                spdlog::warn("[WriteCoordinator] coalesced meta op '{}' failed: {}", source,
-                             r.error().message);
-            } else {
-                std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied += entryCount;
-            }
-            recordMetaApply(source, entryCount, sourceApplyMs, !r);
         }
 
         for (auto& [_, group] : repairStatusBySourceAndStatus) {
-            if (group.hashes.empty()) {
-                continue;
+            for (std::size_t off = 0; off < group.hashes.size(); off += chunkMax) {
+                const auto end = std::min(group.hashes.size(), off + chunkMax);
+                const auto sourceStart = std::chrono::steady_clock::now();
+                UpdateRepairStatusOp op{
+                    std::vector<std::string>(
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(off)),
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
+                    group.status};
+                const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
+                auto r = applyMetadataOp(op);
+                const auto sourceApplyMs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sourceStart)
+                        .count());
+                if (!r) {
+                    spdlog::warn("[WriteCoordinator] coalesced repair-status op '{}' failed: {}",
+                                 group.source, r.error().message);
+                } else {
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.opsApplied += hashCount;
+                }
+                recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
             }
-            const auto sourceStart = std::chrono::steady_clock::now();
-            const auto hashCount = static_cast<std::uint64_t>(group.hashes.size());
-            UpdateRepairStatusOp op{std::move(group.hashes), group.status};
-            auto r = applyMetadataOp(op);
-            const auto sourceApplyMs =
-                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - sourceStart)
-                                               .count());
-            if (!r) {
-                spdlog::warn("[WriteCoordinator] coalesced repair-status op '{}' failed: {}",
-                             group.source, r.error().message);
-            } else {
-                std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied += hashCount;
-            }
-            recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
         }
 
         for (auto& [_, group] : embeddingStatusBySourceAndState) {
-            if (group.hashes.empty()) {
+            for (std::size_t off = 0; off < group.hashes.size(); off += chunkMax) {
+                const auto end = std::min(group.hashes.size(), off + chunkMax);
+                const auto sourceStart = std::chrono::steady_clock::now();
+                UpdateEmbeddingStatusByHashesOp op{
+                    std::vector<std::string>(
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(off)),
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
+                    group.embedded, group.modelName};
+                const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
+                auto r = applyMetadataOp(op);
+                const auto sourceApplyMs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sourceStart)
+                        .count());
+                if (!r) {
+                    spdlog::warn("[WriteCoordinator] coalesced embedding-status op '{}' failed: {}",
+                                 group.source, r.error().message);
+                } else {
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.opsApplied += hashCount;
+                }
+                recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
+            }
+        }
+
+        for (auto& [source, termFreqs] : symspellTermsBySource) {
+            if (termFreqs.empty()) {
                 continue;
             }
             const auto sourceStart = std::chrono::steady_clock::now();
-            const auto hashCount = static_cast<std::uint64_t>(group.hashes.size());
-            UpdateEmbeddingStatusByHashesOp op{std::move(group.hashes), group.embedded,
-                                               std::move(group.modelName)};
-            auto r = applyMetadataOp(op);
+            std::vector<std::pair<std::string, std::int64_t>> termPairs;
+            termPairs.reserve(termFreqs.size());
+            std::uint64_t termAddCount = 0;
+            for (auto& [term, freq] : termFreqs) {
+                termPairs.emplace_back(term, freq);
+                termAddCount += static_cast<std::uint64_t>(freq);
+            }
+            Result<void> r;
+            {
+                metadata::MetadataOpScope opScope("wc_symspell_terms");
+                r = meta_->tryAddSymSpellTerms(termPairs);
+            }
             const auto sourceApplyMs =
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - sourceStart)
                                                .count());
             if (!r) {
-                spdlog::warn("[WriteCoordinator] coalesced embedding-status op '{}' failed: {}",
-                             group.source, r.error().message);
+                spdlog::warn("[WriteCoordinator] coalesced SymSpell op '{}' failed: {}", source,
+                             r.error().message);
             } else {
                 std::lock_guard<std::mutex> lock(statsMutex_);
-                stats_.opsApplied += hashCount;
+                stats_.opsApplied += termAddCount;
+                stats_.symSpellTermsAdded += termAddCount;
             }
-            recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
+            recordMetaApply(source, termAddCount, sourceApplyMs, !r);
         }
     }
 
@@ -935,6 +987,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 Result<void> WriteCoordinator::applyMetadataOp(InsertDocumentOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    metadata::MetadataOpScope opScope("wc_insert_document");
     metadata::TreeSnapshotRecord* snapshotPtr =
         op.snapshot.has_value() ? &op.snapshot.value() : nullptr;
     auto r = meta_->insertDocumentWithMetadata(op.info, op.tags, snapshotPtr);
@@ -954,6 +1007,7 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateRepairStatusOp& op) {
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
     if (op.hashes.empty())
         return Result<void>();
+    metadata::MetadataOpScope opScope("wc_repair_status_batch");
     auto r = meta_->batchUpdateDocumentRepairStatuses(op.hashes, op.status);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -965,6 +1019,7 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateRepairStatusOp& op) {
 Result<void> WriteCoordinator::applyMetadataOp(UpsertTreeSnapshotOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    metadata::MetadataOpScope opScope("wc_tree_snapshot");
     auto r = meta_->upsertTreeSnapshot(op.record);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -978,6 +1033,7 @@ Result<void> WriteCoordinator::applyMetadataOp(SetMetadataBatchOp& op) {
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
     if (op.entries.empty())
         return Result<void>();
+    metadata::MetadataOpScope opScope("wc_set_metadata_batch");
     auto r = meta_->setMetadataBatch(op.entries);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -989,6 +1045,7 @@ Result<void> WriteCoordinator::applyMetadataOp(SetMetadataBatchOp& op) {
 Result<void> WriteCoordinator::applyMetadataOp(UpdateExtractionStatusOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    metadata::MetadataOpScope opScope("wc_extraction_status");
     auto r = meta_->updateDocumentExtractionStatus(op.documentId, op.contentExtracted, op.status,
                                                    op.error);
     if (r) {
@@ -1001,6 +1058,7 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateExtractionStatusOp& op) {
 Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    metadata::MetadataOpScope opScope("wc_embedding_status");
     auto r = meta_->updateDocumentEmbeddingStatusByHash(op.hash, op.embedded, op.modelName);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -1014,6 +1072,7 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& 
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
     if (op.hashes.empty())
         return Result<void>();
+    metadata::MetadataOpScope opScope("wc_embedding_status_batch");
     auto r =
         meta_->batchUpdateDocumentEmbeddingStatusByHashes(op.hashes, op.embedded, op.modelName);
     if (r) {
@@ -1039,6 +1098,7 @@ Result<void> WriteCoordinator::applyMetadataOp(UpsertSymbolExtractionStateOp& op
 Result<void> WriteCoordinator::applyMetadataOp(InsertRelationshipOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    metadata::MetadataOpScope opScope("wc_insert_relationship");
     auto r = meta_->insertRelationship(op.relationship);
     if (!r)
         return r.error();
@@ -1054,8 +1114,12 @@ Result<void> WriteCoordinator::applyMetadataOp(AddSymSpellTermsOp& op) {
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
     if (op.terms.empty())
         return Result<void>();
+    metadata::MetadataOpScope opScope("wc_symspell_terms");
     const auto termCount = op.terms.size();
-    meta_->addSymSpellTerms(op.terms);
+    auto r = meta_->tryAddSymSpellTerms(op.terms);
+    if (!r) {
+        return r.error();
+    }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.symSpellTermsAdded += termCount;

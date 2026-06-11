@@ -210,6 +210,7 @@ public:
         std::size_t maxBatchSize = 50;
         std::chrono::milliseconds maxBatchDelayMs{100};
         std::size_t channelCapacity = 1000;
+        std::size_t maxCoalescedOpsPerApply = 512;
     };
 
     struct Stats {
