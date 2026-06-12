@@ -1337,6 +1337,7 @@ public:
 
             // Single-transaction insert: document + metadata + snapshot in one
             // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
+            metadata::MetadataOpScope metadataScope("app_store_document");
             auto ins =
                 ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
             if (ins) {
@@ -1360,7 +1361,14 @@ public:
                                 if (verRes && verRes.value().has_value()) {
                                     try {
                                         maxVersion = verRes.value().value().asInteger();
+                                    } catch (const std::exception& ex) {
+                                        spdlog::debug(
+                                            "Ignoring invalid prior version metadata for {}: {}",
+                                            prior.id, ex.what());
                                     } catch (...) {
+                                        spdlog::debug(
+                                            "Ignoring invalid prior version metadata for {}",
+                                            prior.id);
                                     }
                                 }
                             }
@@ -1384,7 +1392,14 @@ public:
                                             int64_t v = verRes.value().value().asInteger();
                                             if (v > maxVersion)
                                                 maxVersion = v;
+                                        } catch (const std::exception& ex) {
+                                            spdlog::debug("Ignoring invalid candidate version "
+                                                          "metadata for {}: {}",
+                                                          d.id, ex.what());
                                         } catch (...) {
+                                            spdlog::debug("Ignoring invalid candidate version "
+                                                          "metadata for {}",
+                                                          d.id);
                                         }
                                     }
                                     if (prevLatestId.has_value())
@@ -1429,7 +1444,11 @@ public:
                                                                 docId, std::nullopt);
                         }
                     }
+                } catch (const std::exception& ex) {
+                    spdlog::debug("Failed to update versioning metadata for {}: {}", info.filePath,
+                                  ex.what());
                 } catch (...) {
+                    spdlog::debug("Failed to update versioning metadata for {}", info.filePath);
                 }
 
                 // Update path tree for this document (best-effort, separate txn)
@@ -1440,8 +1459,13 @@ public:
                         spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
                                       treeRes.error().message);
                     }
+                } catch (const std::exception& ex) {
+                    // Non-fatal: path tree update is opportunistic
+                    spdlog::debug("Exception updating path tree for {}: {}", info.filePath,
+                                  ex.what());
                 } catch (...) {
                     // Non-fatal: path tree update is opportunistic
+                    spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
                 }
 
                 // Keep the lightweight corpus graph in sync for single-document stores so
@@ -2457,50 +2481,106 @@ public:
                 resp.hash = *pendingContentHash;
             }
         } else {
-            for (const auto& [k, v] : req.keyValues) {
-                auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
-                if (!u) {
-                    errors.push_back("Failed to update metadata: " + k);
-                } else {
-                    count++;
+            auto applyIndividually = [&]() {
+                for (const auto& [k, v] : req.keyValues) {
+                    auto u =
+                        ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
+                    if (!u) {
+                        errors.push_back("Failed to update metadata: " + k);
+                    } else {
+                        count++;
+                    }
                 }
-            }
 
+                for (const auto& p : req.pairs) {
+                    auto pos = p.find('=');
+                    if (pos == std::string::npos) {
+                        continue;
+                    }
+                    std::string k = p.substr(0, pos);
+                    std::string v = p.substr(pos + 1);
+                    auto u =
+                        ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
+                    if (!u) {
+                        errors.push_back("Failed to update metadata: " + k);
+                    } else {
+                        count++;
+                    }
+                }
+
+                for (const auto& tag : req.addTags) {
+                    auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
+                                                            metadata::MetadataValue(tag));
+                    if (!u) {
+                        errors.push_back("Failed to add tag: " + tag);
+                    } else {
+                        resp.tagsAdded++;
+                    }
+                }
+
+                for (const auto& tag : req.removeTags) {
+                    if (!currentTagSet.contains(tag)) {
+                        continue;
+                    }
+                    auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
+                                                            metadata::MetadataValue(""));
+                    if (!u) {
+                        errors.push_back("Failed to remove tag: " + tag);
+                    } else {
+                        resp.tagsRemoved++;
+                    }
+                }
+            };
+
+            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
+            metadataEntries.reserve(static_cast<std::size_t>(req.keyValues.size() +
+                                                             req.pairs.size() + req.addTags.size() +
+                                                             req.removeTags.size()));
+            std::size_t batchUpdateCount = 0;
+            std::size_t batchTagsAdded = 0;
+            std::size_t batchTagsRemoved = 0;
+
+            for (const auto& [k, v] : req.keyValues) {
+                metadataEntries.emplace_back(target.id, k, metadata::MetadataValue(v));
+                batchUpdateCount++;
+            }
             for (const auto& p : req.pairs) {
                 auto pos = p.find('=');
-                if (pos == std::string::npos)
+                if (pos == std::string::npos) {
                     continue;
-                std::string k = p.substr(0, pos);
-                std::string v = p.substr(pos + 1);
-                auto u = ctx_.metadataRepo->setMetadata(target.id, k, metadata::MetadataValue(v));
-                if (!u) {
-                    errors.push_back("Failed to update metadata: " + k);
-                } else {
-                    count++;
                 }
+                metadataEntries.emplace_back(target.id, p.substr(0, pos),
+                                             metadata::MetadataValue(p.substr(pos + 1)));
+                batchUpdateCount++;
             }
-
             for (const auto& tag : req.addTags) {
-                auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
-                                                        metadata::MetadataValue(tag));
-                if (!u) {
-                    errors.push_back("Failed to add tag: " + tag);
-                } else {
-                    resp.tagsAdded++;
-                }
+                metadataEntries.emplace_back(target.id, "tag:" + tag, metadata::MetadataValue(tag));
+                batchTagsAdded++;
             }
-
             for (const auto& tag : req.removeTags) {
                 if (!currentTagSet.contains(tag)) {
                     continue;
                 }
-                auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
-                                                        metadata::MetadataValue(""));
-                if (!u) {
-                    errors.push_back("Failed to remove tag: " + tag);
+                metadataEntries.emplace_back(target.id, "tag:" + tag, metadata::MetadataValue(""));
+                batchTagsRemoved++;
+            }
+
+            if (metadataEntries.size() > 1) {
+                metadata::MetadataOpScope metadataScope("app_document_update_metadata_non_atomic");
+                auto metadataResult = ctx_.metadataRepo->setMetadataBatch(metadataEntries);
+                if (metadataResult) {
+                    count += batchUpdateCount;
+                    resp.tagsAdded += batchTagsAdded;
+                    resp.tagsRemoved += batchTagsRemoved;
                 } else {
-                    resp.tagsRemoved++;
+                    spdlog::debug(
+                        "DocumentService: non-atomic metadata batch failed for doc {}: {}; "
+                        "falling back to per-entry writes",
+                        target.id, metadataResult.error().message);
+                    applyIndividually();
                 }
+            } else {
+                applyIndividually();
             }
         }
 

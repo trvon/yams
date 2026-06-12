@@ -210,6 +210,7 @@ public:
         std::size_t maxBatchSize = 50;
         std::chrono::milliseconds maxBatchDelayMs{100};
         std::size_t channelCapacity = 1000;
+        std::size_t maxCoalescedOpsPerApply = 512;
     };
 
     struct Stats {
@@ -271,6 +272,9 @@ public:
 
     void start();
     void shutdown();
+    [[nodiscard]] bool isShuttingDown() const noexcept {
+        return stop_.load(std::memory_order_acquire);
+    }
 
     std::size_t queuedBatches() const;
     std::size_t inFlight() const { return inFlight_.load(); }

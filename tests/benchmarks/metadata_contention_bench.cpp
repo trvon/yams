@@ -18,7 +18,8 @@
 //   YAMS_BENCH_METADATA_BATCH        - setMetadataBatch entries per write op (default: 8)
 //   YAMS_BENCH_STATUS_BATCH          - repair-status hashes per write op (default: 64)
 //   YAMS_BENCH_READ_BATCH            - getMetadataForDocuments ids per read op (default: 16)
-//   YAMS_BENCH_CHECKPOINT_EVERY_MS   - TRUNCATE checkpoint cadence, 0 disables (default: 500)
+//   YAMS_BENCH_CHECKPOINT_EVERY_MS   - checkpoint cadence, 0 disables (default: 500)
+//   YAMS_BENCH_CHECKPOINT_MODE       - truncate|passive checkpoint type (default: truncate)
 //   YAMS_BENCH_DB_BUSY_TIMEOUT_MS    - SQLite busy timeout (default: 100)
 //   YAMS_BENCH_DUAL_POOL             - 1 => separate read-only pool, 0 => single pool (default: 1)
 //   YAMS_BENCH_EXTERNAL_LOCKER       - 1 => separate writer periodically holds BEGIN IMMEDIATE
@@ -95,6 +96,8 @@ struct BenchConfig {
     int statusBatchSize{64};
     int readBatchSize{16};
     int checkpointEveryMs{500};
+    std::string checkpointModeName{"truncate"};
+    bool checkpointTruncate{true};
     int dbBusyTimeoutMs{100};
     bool dualPool{true};
     bool externalLocker{false};
@@ -113,6 +116,26 @@ struct OpStats {
     std::vector<int64_t> latenciesUs;
 };
 
+struct CheckpointContextStats {
+    uint64_t samples{0};
+    std::uintmax_t maxWalBytesBefore{0};
+    std::uintmax_t maxWalBytesAfter{0};
+    uint64_t maxWalFramesBefore{0};
+    uint64_t maxWalFramesAfter{0};
+    uint64_t maxWriteSlowHoldersBefore{0};
+    uint64_t maxWriteSlowHoldersAfter{0};
+    uint64_t maxReadSlowHoldersBefore{0};
+    uint64_t maxReadSlowHoldersAfter{0};
+    uint64_t maxWriteHolderMicrosBefore{0};
+    uint64_t maxWriteHolderMicrosAfter{0};
+    uint64_t maxReadHolderMicrosBefore{0};
+    uint64_t maxReadHolderMicrosAfter{0};
+    uint64_t maxWriteWaitingBefore{0};
+    uint64_t maxWriteWaitingAfter{0};
+    uint64_t maxReadWaitingBefore{0};
+    uint64_t maxReadWaitingAfter{0};
+};
+
 struct WorkerStats {
     OpStats writes;
     OpStats insertWrites;
@@ -126,6 +149,7 @@ struct WorkerStats {
     OpStats extractionWrites;
     OpStats reads;
     OpStats checkpoints;
+    CheckpointContextStats checkpointContext;
     OpStats longReads;
     OpStats externalLocks;
 };
@@ -142,6 +166,24 @@ struct LatencySummary {
 using yams::bench::isoTimestamp;
 using yams::bench::readBoolEnv;
 using yams::bench::readIntEnv;
+
+std::pair<bool, std::string> readCheckpointModeEnv() {
+    const char* val = std::getenv("YAMS_BENCH_CHECKPOINT_MODE");
+    if (!val || !*val) {
+        return {true, "truncate"};
+    }
+    std::string s(val);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (s == "passive") {
+        return {false, "passive"};
+    }
+    if (s == "truncate") {
+        return {true, "truncate"};
+    }
+    spdlog::warn("Unknown YAMS_BENCH_CHECKPOINT_MODE='{}'; using truncate", s);
+    return {true, "truncate"};
+}
 
 std::pair<int, std::string> readWriteModeEnv() {
     const char* val = std::getenv("YAMS_BENCH_WRITE_MODE");
@@ -189,6 +231,9 @@ BenchConfig loadConfig() {
     cfg.statusBatchSize = readIntEnv("YAMS_BENCH_STATUS_BATCH", 64, 1, 1024);
     cfg.readBatchSize = readIntEnv("YAMS_BENCH_READ_BATCH", 16, 1, 256);
     cfg.checkpointEveryMs = readIntEnv("YAMS_BENCH_CHECKPOINT_EVERY_MS", 500, 0, 60000);
+    auto [checkpointTruncate, checkpointModeName] = readCheckpointModeEnv();
+    cfg.checkpointTruncate = checkpointTruncate;
+    cfg.checkpointModeName = std::move(checkpointModeName);
     cfg.dbBusyTimeoutMs = readIntEnv("YAMS_BENCH_DB_BUSY_TIMEOUT_MS", 100, 0, 30000);
     cfg.dualPool = readBoolEnv("YAMS_BENCH_DUAL_POOL", true);
     cfg.externalLocker = readBoolEnv("YAMS_BENCH_EXTERNAL_LOCKER", false);
@@ -216,6 +261,29 @@ std::uintmax_t walBytes(const fs::path& dbPath) {
         return 0;
     }
     return fs::file_size(walPath, ec);
+}
+
+uint64_t estimateWalFrames(std::uintmax_t bytes, uint64_t pageSize) {
+    constexpr uint64_t kWalHeaderBytes = 32;
+    constexpr uint64_t kWalFrameHeaderBytes = 24;
+    if (pageSize == 0 || bytes <= kWalHeaderBytes) {
+        return 0;
+    }
+    return static_cast<uint64_t>((bytes - kWalHeaderBytes) / (pageSize + kWalFrameHeaderBytes));
+}
+
+uint64_t queryPageSize(Database& db) {
+    auto stmtResult = db.prepare("PRAGMA page_size");
+    if (!stmtResult) {
+        return 4096;
+    }
+    auto& stmt = stmtResult.value();
+    auto step = stmt.step();
+    if (!step || !step.value()) {
+        return 4096;
+    }
+    const auto value = stmt.getInt64(0);
+    return value > 0 ? static_cast<uint64_t>(value) : 4096;
 }
 
 DocumentInfo makeDocument(const fs::path& root, int writerId, uint64_t seq) {
@@ -275,6 +343,34 @@ void mergeOpStats(OpStats& dst, const OpStats& src) {
     }
 }
 
+void mergeCheckpointContext(CheckpointContextStats& dst, const CheckpointContextStats& src) {
+    dst.samples += src.samples;
+    dst.maxWalBytesBefore = std::max(dst.maxWalBytesBefore, src.maxWalBytesBefore);
+    dst.maxWalBytesAfter = std::max(dst.maxWalBytesAfter, src.maxWalBytesAfter);
+    dst.maxWalFramesBefore = std::max(dst.maxWalFramesBefore, src.maxWalFramesBefore);
+    dst.maxWalFramesAfter = std::max(dst.maxWalFramesAfter, src.maxWalFramesAfter);
+    dst.maxWriteSlowHoldersBefore =
+        std::max(dst.maxWriteSlowHoldersBefore, src.maxWriteSlowHoldersBefore);
+    dst.maxWriteSlowHoldersAfter =
+        std::max(dst.maxWriteSlowHoldersAfter, src.maxWriteSlowHoldersAfter);
+    dst.maxReadSlowHoldersBefore =
+        std::max(dst.maxReadSlowHoldersBefore, src.maxReadSlowHoldersBefore);
+    dst.maxReadSlowHoldersAfter =
+        std::max(dst.maxReadSlowHoldersAfter, src.maxReadSlowHoldersAfter);
+    dst.maxWriteHolderMicrosBefore =
+        std::max(dst.maxWriteHolderMicrosBefore, src.maxWriteHolderMicrosBefore);
+    dst.maxWriteHolderMicrosAfter =
+        std::max(dst.maxWriteHolderMicrosAfter, src.maxWriteHolderMicrosAfter);
+    dst.maxReadHolderMicrosBefore =
+        std::max(dst.maxReadHolderMicrosBefore, src.maxReadHolderMicrosBefore);
+    dst.maxReadHolderMicrosAfter =
+        std::max(dst.maxReadHolderMicrosAfter, src.maxReadHolderMicrosAfter);
+    dst.maxWriteWaitingBefore = std::max(dst.maxWriteWaitingBefore, src.maxWriteWaitingBefore);
+    dst.maxWriteWaitingAfter = std::max(dst.maxWriteWaitingAfter, src.maxWriteWaitingAfter);
+    dst.maxReadWaitingBefore = std::max(dst.maxReadWaitingBefore, src.maxReadWaitingBefore);
+    dst.maxReadWaitingAfter = std::max(dst.maxReadWaitingAfter, src.maxReadWaitingAfter);
+}
+
 void mergeWorkerStats(WorkerStats& dst, const WorkerStats& src) {
     mergeOpStats(dst.writes, src.writes);
     mergeOpStats(dst.insertWrites, src.insertWrites);
@@ -288,6 +384,7 @@ void mergeWorkerStats(WorkerStats& dst, const WorkerStats& src) {
     mergeOpStats(dst.extractionWrites, src.extractionWrites);
     mergeOpStats(dst.reads, src.reads);
     mergeOpStats(dst.checkpoints, src.checkpoints);
+    mergeCheckpointContext(dst.checkpointContext, src.checkpointContext);
     mergeOpStats(dst.longReads, src.longReads);
     mergeOpStats(dst.externalLocks, src.externalLocks);
 }
@@ -337,6 +434,26 @@ json poolStatsJson(const ConnectionPool::Stats& stats) {
                 {"max_holder_micros", stats.maxHolderMicros}};
 }
 
+json checkpointContextJson(const CheckpointContextStats& stats) {
+    return json{{"samples", stats.samples},
+                {"max_wal_bytes_before", stats.maxWalBytesBefore},
+                {"max_wal_bytes_after", stats.maxWalBytesAfter},
+                {"max_wal_frames_before_est", stats.maxWalFramesBefore},
+                {"max_wal_frames_after_est", stats.maxWalFramesAfter},
+                {"max_write_slow_holder_count_before", stats.maxWriteSlowHoldersBefore},
+                {"max_write_slow_holder_count_after", stats.maxWriteSlowHoldersAfter},
+                {"max_read_slow_holder_count_before", stats.maxReadSlowHoldersBefore},
+                {"max_read_slow_holder_count_after", stats.maxReadSlowHoldersAfter},
+                {"max_write_holder_micros_before", stats.maxWriteHolderMicrosBefore},
+                {"max_write_holder_micros_after", stats.maxWriteHolderMicrosAfter},
+                {"max_read_holder_micros_before", stats.maxReadHolderMicrosBefore},
+                {"max_read_holder_micros_after", stats.maxReadHolderMicrosAfter},
+                {"max_write_waiting_before", stats.maxWriteWaitingBefore},
+                {"max_write_waiting_after", stats.maxWriteWaitingAfter},
+                {"max_read_waiting_before", stats.maxReadWaitingBefore},
+                {"max_read_waiting_after", stats.maxReadWaitingAfter}};
+}
+
 void appendJsonLine(const fs::path& outputPath, const json& record) {
     ensureOutputDir(outputPath);
     std::ofstream out(outputPath, std::ios::app);
@@ -361,6 +478,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
     spdlog::info("  statusBatchSize:    {}", cfg.statusBatchSize);
     spdlog::info("  readBatchSize:      {}", cfg.readBatchSize);
     spdlog::info("  checkpointEveryMs:  {}", cfg.checkpointEveryMs);
+    spdlog::info("  checkpointMode:     {}", cfg.checkpointModeName);
     spdlog::info("  dbBusyTimeoutMs:    {}", cfg.dbBusyTimeoutMs);
     spdlog::info("  dualPool:           {}", cfg.dualPool);
     spdlog::info("  externalLocker:     {}", cfg.externalLocker);
@@ -439,6 +557,9 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
             paths.push_back(doc.filePath);
         }
 
+        const auto walPageSize = writePool.withConnection(
+            [&](Database& db) -> yams::Result<uint64_t> { return queryPageSize(db); });
+        REQUIRE(walPageSize.has_value());
         const auto walBefore = walBytes(dbPath);
         std::chrono::steady_clock::time_point start;
         std::chrono::steady_clock::time_point deadline;
@@ -963,12 +1084,73 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                         std::chrono::steady_clock::now() >= deadline) {
                         break;
                     }
+                    const auto walBytesBefore = walBytes(dbPath);
+                    const auto writeStatsBefore = writePool.getStats();
+                    const auto readStatsBefore =
+                        readPool ? std::optional<ConnectionPool::Stats>(readPool->getStats())
+                                 : std::nullopt;
                     const auto t0 = std::chrono::steady_clock::now();
-                    MetadataOpScope op("bench_checkpoint_truncate");
-                    auto result = repo.checkpointWalTruncate();
+                    MetadataOpScope op(cfg.checkpointTruncate ? "bench_checkpoint_truncate"
+                                                              : "bench_checkpoint_passive");
+                    auto result = cfg.checkpointTruncate ? repo.checkpointWalTruncate()
+                                                         : repo.checkpointWal();
                     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                                         std::chrono::steady_clock::now() - t0)
                                         .count();
+                    const auto walBytesAfter = walBytes(dbPath);
+                    const auto writeStatsAfter = writePool.getStats();
+                    const auto readStatsAfter =
+                        readPool ? std::optional<ConnectionPool::Stats>(readPool->getStats())
+                                 : std::nullopt;
+                    local.checkpointContext.samples++;
+                    local.checkpointContext.maxWalBytesBefore =
+                        std::max(local.checkpointContext.maxWalBytesBefore, walBytesBefore);
+                    local.checkpointContext.maxWalBytesAfter =
+                        std::max(local.checkpointContext.maxWalBytesAfter, walBytesAfter);
+                    local.checkpointContext.maxWalFramesBefore =
+                        std::max(local.checkpointContext.maxWalFramesBefore,
+                                 estimateWalFrames(walBytesBefore, walPageSize.value()));
+                    local.checkpointContext.maxWalFramesAfter =
+                        std::max(local.checkpointContext.maxWalFramesAfter,
+                                 estimateWalFrames(walBytesAfter, walPageSize.value()));
+                    local.checkpointContext.maxWriteSlowHoldersBefore =
+                        std::max(local.checkpointContext.maxWriteSlowHoldersBefore,
+                                 writeStatsBefore.slowHolderCount);
+                    local.checkpointContext.maxWriteSlowHoldersAfter =
+                        std::max(local.checkpointContext.maxWriteSlowHoldersAfter,
+                                 writeStatsAfter.slowHolderCount);
+                    local.checkpointContext.maxWriteHolderMicrosBefore =
+                        std::max(local.checkpointContext.maxWriteHolderMicrosBefore,
+                                 writeStatsBefore.maxHolderMicros);
+                    local.checkpointContext.maxWriteHolderMicrosAfter =
+                        std::max(local.checkpointContext.maxWriteHolderMicrosAfter,
+                                 writeStatsAfter.maxHolderMicros);
+                    local.checkpointContext.maxWriteWaitingBefore =
+                        std::max(local.checkpointContext.maxWriteWaitingBefore,
+                                 static_cast<uint64_t>(writeStatsBefore.waitingRequests));
+                    local.checkpointContext.maxWriteWaitingAfter =
+                        std::max(local.checkpointContext.maxWriteWaitingAfter,
+                                 static_cast<uint64_t>(writeStatsAfter.waitingRequests));
+                    if (readStatsBefore && readStatsAfter) {
+                        local.checkpointContext.maxReadSlowHoldersBefore =
+                            std::max(local.checkpointContext.maxReadSlowHoldersBefore,
+                                     readStatsBefore->slowHolderCount);
+                        local.checkpointContext.maxReadSlowHoldersAfter =
+                            std::max(local.checkpointContext.maxReadSlowHoldersAfter,
+                                     readStatsAfter->slowHolderCount);
+                        local.checkpointContext.maxReadHolderMicrosBefore =
+                            std::max(local.checkpointContext.maxReadHolderMicrosBefore,
+                                     readStatsBefore->maxHolderMicros);
+                        local.checkpointContext.maxReadHolderMicrosAfter =
+                            std::max(local.checkpointContext.maxReadHolderMicrosAfter,
+                                     readStatsAfter->maxHolderMicros);
+                        local.checkpointContext.maxReadWaitingBefore =
+                            std::max(local.checkpointContext.maxReadWaitingBefore,
+                                     static_cast<uint64_t>(readStatsBefore->waitingRequests));
+                        local.checkpointContext.maxReadWaitingAfter =
+                            std::max(local.checkpointContext.maxReadWaitingAfter,
+                                     static_cast<uint64_t>(readStatsAfter->waitingRequests));
+                    }
                     noteResult(local.checkpoints, result.has_value(),
                                result ? std::nullopt
                                       : std::optional<std::string_view>(result.error().message),
@@ -1040,6 +1222,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"status_batch_size", cfg.statusBatchSize},
                     {"read_batch_size", cfg.readBatchSize},
                     {"checkpoint_every_ms", cfg.checkpointEveryMs},
+                    {"checkpoint_mode", cfg.checkpointModeName},
                     {"db_busy_timeout_ms", cfg.dbBusyTimeoutMs},
                     {"external_locker", cfg.externalLocker},
                     {"external_lock_hold_ms", cfg.externalLockHoldMs},
@@ -1048,6 +1231,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"write_mode", cfg.writeModeName},
                     {"wal_bytes_before", walBefore},
                     {"wal_bytes_after", walAfter},
+                    {"wal_page_size", walPageSize.value()},
                     {"writes", latencyJson(aggregate.writes)},
                     {"insert_document_writes", latencyJson(aggregate.insertWrites)},
                     {"metadata_single_writes", latencyJson(aggregate.metadataSingleWrites)},
@@ -1060,6 +1244,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"extraction_status_writes", latencyJson(aggregate.extractionWrites)},
                     {"reads", latencyJson(aggregate.reads)},
                     {"checkpoints", latencyJson(aggregate.checkpoints)},
+                    {"checkpoint_context", checkpointContextJson(aggregate.checkpointContext)},
                     {"long_reads", latencyJson(aggregate.longReads)},
                     {"external_locks", latencyJson(aggregate.externalLocks)},
                     {"write_pool", poolStatsJson(writePoolStats)}};

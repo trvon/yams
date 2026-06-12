@@ -668,6 +668,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_write_coordinator_exe = executable('catch2_write_coordinator',
+    files('unit/daemon/write_coordinator_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_service_manager_exe = executable('catch2_service_manager',
     files('unit/daemon/service_manager_catch2_test.cpp'),
     include_directories: incs,
@@ -2600,6 +2609,13 @@ if catch2_dep.found()
 
   test('embedding_lifecycle', catch2_embedding_lifecycle_exe,
     suite: ['catch2', 'unit', 'daemon', 'embedding-lifecycle'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('write_coordinator', catch2_write_coordinator_exe,
+    suite: ['catch2', 'unit', 'daemon', 'write-coordinator'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false

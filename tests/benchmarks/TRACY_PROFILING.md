@@ -38,6 +38,33 @@ meson setup build --buildtype=release
 
 ## Running Benchmarks with Tracy
 
+### Programmatic capture status
+
+YAMS can programmatically emit Tracy zones and plots from benchmark code via `YAMS_*` macros in `include/yams/profiling.h`. Saving a `.tracy` trace file is a separate Tracy-tool concern: it requires either the GUI/profiler or a headless capture tool from the Tracy distribution. This was not standardized earlier because local installs expose different tool names and flags (`Tracy`, `tracy-profiler`, `capture`, `tracy-capture`, etc.).
+
+First, record the local Tracy tooling status:
+
+```bash
+scripts/check_tracy_capture.sh bench_results/tracy_capture_status.json
+```
+
+Use the wrapper below for repeatable benchmark execution. If a headless capture tool is available, pass its exact invocation through environment variables:
+
+```bash
+# Runs the benchmark and, when configured, starts a Tracy capture process first.
+YAMS_TRACY_CAPTURE_CMD=/path/to/tracy/capture \
+YAMS_TRACY_CAPTURE_ARGS='-o bench_results/write_coordinator.tracy' \
+YAMS_BENCH_NUM_FILES=1000 \
+YAMS_BENCH_REPEAT=3 \
+scripts/run_tracy_benchmark.sh write_coordinator_bench
+```
+
+If no capture tool is configured, the status artifact will report `"status": "gui-only"`. Start `tracy-profiler` / Tracy GUI first and run:
+
+```bash
+scripts/run_tracy_benchmark.sh write_coordinator_bench
+```
+
 ### 1. Start Tracy Server First
 
 Launch the Tracy GUI on port 8086 (default):

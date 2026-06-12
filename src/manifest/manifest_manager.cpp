@@ -18,7 +18,9 @@ namespace yamsfmt = fmt;
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <thread>
+#include <type_traits>
 
 // Include generated protobuf headers
 #ifdef YAMS_USE_PROTOBUF
@@ -46,8 +48,10 @@ std::optional<uint32_t> checkedU32(std::size_t value) {
 }
 
 template <typename T> void appendPod(std::vector<std::byte>& out, const T& value) {
-    const auto* begin = reinterpret_cast<const std::byte*>(&value);
-    out.insert(out.end(), begin, begin + sizeof(T));
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "appendPod requires a trivially copyable type");
+    const auto bytes = std::as_bytes(std::span<const T, 1>{&value, 1});
+    out.insert(out.end(), bytes.begin(), bytes.end());
 }
 
 bool appendString(std::vector<std::byte>& out, const std::string& value) {
@@ -56,8 +60,8 @@ bool appendString(std::vector<std::byte>& out, const std::string& value) {
         return false;
     }
     appendPod(out, *length);
-    const auto* begin = reinterpret_cast<const std::byte*>(value.data());
-    out.insert(out.end(), begin, begin + value.size());
+    const auto bytes = std::as_bytes(std::span{value.data(), value.size()});
+    out.insert(out.end(), bytes.begin(), bytes.end());
     return true;
 }
 
@@ -257,8 +261,8 @@ Result<std::vector<std::byte>> ManifestManager::serialize(const Manifest& manife
 
         // Magic header: "YAMS" + version
         const uint8_t magic[] = {'Y', 'A', 'M', 'S'};
-        result.insert(result.end(), reinterpret_cast<const std::byte*>(magic),
-                      reinterpret_cast<const std::byte*>(magic) + 4);
+        const auto magicBytes = std::as_bytes(std::span{magic});
+        result.insert(result.end(), magicBytes.begin(), magicBytes.end());
 
         // Version (4 bytes)
         uint32_t version = manifest.version;

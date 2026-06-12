@@ -8,18 +8,49 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/CheckpointManager.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
 
 #include <boost/asio/io_context.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
 namespace {
+
+class CountingMetadataRepository : public yams::metadata::MetadataRepository {
+public:
+    explicit CountingMetadataRepository(yams::metadata::ConnectionPool& pool)
+        : yams::metadata::MetadataRepository(pool) {}
+
+    yams::Result<void> checkpointWal() override {
+        ++passiveCalls;
+        return {};
+    }
+
+    yams::Result<void> checkpointWalTruncate() override {
+        ++truncateCalls;
+        return {};
+    }
+
+    int passiveCalls{0};
+    int truncateCalls{0};
+};
+
+void createSparseFile(const std::filesystem::path& path, std::uint64_t sizeBytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out.seekp(static_cast<std::streamoff>(sizeBytes - 1));
+    const char byte = '\0';
+    out.write(&byte, 1);
+    REQUIRE(out.good());
+}
 
 struct CheckpointManagerFixture {
     std::shared_ptr<boost::asio::io_context> io;
@@ -88,14 +119,14 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager construction and s
     }
 
     SECTION("initial counters are zero") {
-        CHECK(mgr.vectorCheckpointCount() == 0);
-        CHECK(mgr.hotzoneCheckpointCount() == 0);
-        CHECK(mgr.checkpointErrorCount() == 0);
+        CHECK((mgr.vectorCheckpointCount() == 0));
+        CHECK((mgr.hotzoneCheckpointCount() == 0));
+        CHECK((mgr.checkpointErrorCount() == 0));
     }
 
     SECTION("stats are initially zero") {
-        CHECK(mgr.lastVectorCheckpointEpoch() == 0);
-        CHECK(mgr.lastHotzoneCheckpointEpoch() == 0);
+        CHECK((mgr.lastVectorCheckpointEpoch() == 0));
+        CHECK((mgr.lastHotzoneCheckpointEpoch() == 0));
     }
 }
 
@@ -149,9 +180,9 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager manual checkpoint"
 
         bool result = mgr.checkpointNow();
         CHECK(result);
-        CHECK(mgr.vectorCheckpointCount() == 0);
-        CHECK(mgr.hotzoneCheckpointCount() == 0);
-        CHECK(mgr.checkpointErrorCount() == 0);
+        CHECK((mgr.vectorCheckpointCount() == 0));
+        CHECK((mgr.hotzoneCheckpointCount() == 0));
+        CHECK((mgr.checkpointErrorCount() == 0));
     }
 
     SECTION("checkpoint with hotzone enabled succeeds") {
@@ -172,14 +203,80 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager manual checkpoint"
         for (int i = 0; i < 5; ++i) {
             CHECK(mgr.checkpointNow());
         }
-        CHECK(mgr.checkpointErrorCount() == 0);
+        CHECK((mgr.checkpointErrorCount() == 0));
     }
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager routine checkpoint is passive",
+                 "[daemon][components][checkpoint][catch2]") {
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 1;
+    poolConfig.enableWAL = true;
+    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
+    REQUIRE(pool.initialize().has_value());
+    CountingMetadataRepository repository(pool);
+
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.metadataRepository = &repository;
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+
+    CHECK((repository.passiveCalls == 1));
+    CHECK((repository.truncateCalls == 0));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager watermark checkpoint truncates WAL",
+                 "[daemon][components][checkpoint][catch2]") {
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 1;
+    poolConfig.enableWAL = true;
+    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
+    REQUIRE(pool.initialize().has_value());
+    CountingMetadataRepository repository(pool);
+
+    constexpr std::uint64_t kWatermarkBytes = 256ULL * 1024ULL * 1024ULL;
+    createSparseFile(tempDir / "yams.db-wal", kWatermarkBytes + 1);
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.metadataRepository = &repository;
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+
+    CHECK((repository.passiveCalls == 0));
+    CHECK((repository.truncateCalls == 1));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager shutdown truncates WAL",
+                 "[daemon][components][checkpoint][catch2]") {
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 1;
+    poolConfig.enableWAL = true;
+    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
+    REQUIRE(pool.initialize().has_value());
+    CountingMetadataRepository repository(pool);
+
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.metadataRepository = &repository;
+    CheckpointManager mgr(cfg, deps);
+    mgr.start();
+    std::this_thread::sleep_for(50ms);
+
+    mgr.stop();
+
+    CHECK((repository.truncateCalls == 1));
 }
 
 TEST_CASE("CheckpointManager config defaults", "[daemon][components][checkpoint][catch2]") {
     CheckpointManager::Config cfg;
 
-    CHECK(cfg.checkpoint_interval.count() == 300);
-    CHECK(cfg.vector_index_insert_threshold == 1000);
+    CHECK((cfg.checkpoint_interval.count() == 300));
+    CHECK((cfg.vector_index_insert_threshold == 1000));
     CHECK_FALSE(cfg.enable_hotzone_persistence);
 }

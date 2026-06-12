@@ -39,6 +39,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/profiling.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -89,11 +90,17 @@ struct CoordinatorSnapshot {
     std::uint64_t opsApplied{0};
     std::uint64_t commitErrors{0};
     std::uint64_t documentsInserted{0};
+    std::uint64_t repairStatusesUpdated{0};
     std::uint64_t metadataEntriesSet{0};
+    std::uint64_t extractionStatusesUpdated{0};
+    std::uint64_t embeddingStatusesUpdated{0};
+    std::uint64_t symbolExtractionStatesUpdated{0};
     std::uint64_t relationshipsInserted{0};
+    std::uint64_t symSpellTermsAdded{0};
     std::uint64_t nodesUpserted{0};
     std::uint64_t edgesAdded{0};
     std::uint64_t maxBatchQueueWaitMs{0};
+    std::uint64_t maxBatchExcessQueueWaitMs{0};
     std::uint64_t maxBatchApplyMs{0};
     std::vector<WriteCoordinator::Stats::Hotspot> hotSources;
 
@@ -104,11 +111,17 @@ struct CoordinatorSnapshot {
         snap.opsApplied = s.opsApplied;
         snap.commitErrors = s.commitErrors;
         snap.documentsInserted = s.documentsInserted;
+        snap.repairStatusesUpdated = s.repairStatusesUpdated;
         snap.metadataEntriesSet = s.metadataEntriesSet;
+        snap.extractionStatusesUpdated = s.extractionStatusesUpdated;
+        snap.embeddingStatusesUpdated = s.embeddingStatusesUpdated;
+        snap.symbolExtractionStatesUpdated = s.symbolExtractionStatesUpdated;
         snap.relationshipsInserted = s.relationshipsInserted;
+        snap.symSpellTermsAdded = s.symSpellTermsAdded;
         snap.nodesUpserted = s.nodesUpserted;
         snap.edgesAdded = s.edgesAdded;
         snap.maxBatchQueueWaitMs = s.maxBatchQueueWaitMs;
+        snap.maxBatchExcessQueueWaitMs = s.maxBatchExcessQueueWaitMs;
         snap.maxBatchApplyMs = s.maxBatchApplyMs;
         snap.hotSources = s.hotSources;
         return snap;
@@ -121,11 +134,18 @@ struct CoordinatorSnapshot {
         d.opsApplied = opsApplied - prev.opsApplied;
         d.commitErrors = commitErrors - prev.commitErrors;
         d.documentsInserted = documentsInserted - prev.documentsInserted;
+        d.repairStatusesUpdated = repairStatusesUpdated - prev.repairStatusesUpdated;
         d.metadataEntriesSet = metadataEntriesSet - prev.metadataEntriesSet;
+        d.extractionStatusesUpdated = extractionStatusesUpdated - prev.extractionStatusesUpdated;
+        d.embeddingStatusesUpdated = embeddingStatusesUpdated - prev.embeddingStatusesUpdated;
+        d.symbolExtractionStatesUpdated =
+            symbolExtractionStatesUpdated - prev.symbolExtractionStatesUpdated;
         d.relationshipsInserted = relationshipsInserted - prev.relationshipsInserted;
+        d.symSpellTermsAdded = symSpellTermsAdded - prev.symSpellTermsAdded;
         d.nodesUpserted = nodesUpserted - prev.nodesUpserted;
         d.edgesAdded = edgesAdded - prev.edgesAdded;
         d.maxBatchQueueWaitMs = maxBatchQueueWaitMs;
+        d.maxBatchExcessQueueWaitMs = maxBatchExcessQueueWaitMs;
         d.maxBatchApplyMs = maxBatchApplyMs;
         d.hotSources = hotSources;
         return d;
@@ -138,11 +158,17 @@ struct CoordinatorSnapshot {
             {"ops_applied", opsApplied},
             {"commit_errors", commitErrors},
             {"documents_inserted", documentsInserted},
+            {"repair_statuses_updated", repairStatusesUpdated},
             {"metadata_entries_set", metadataEntriesSet},
+            {"extraction_statuses_updated", extractionStatusesUpdated},
+            {"embedding_statuses_updated", embeddingStatusesUpdated},
+            {"symbol_extraction_states_updated", symbolExtractionStatesUpdated},
             {"relationships_inserted", relationshipsInserted},
+            {"symspell_terms_added", symSpellTermsAdded},
             {"nodes_upserted", nodesUpserted},
             {"edges_added", edgesAdded},
             {"max_batch_queue_wait_ms", maxBatchQueueWaitMs},
+            {"max_batch_excess_queue_wait_ms", maxBatchExcessQueueWaitMs},
             {"max_batch_apply_ms", maxBatchApplyMs},
         };
         if (!hotSources.empty()) {
@@ -155,6 +181,7 @@ struct CoordinatorSnapshot {
                     {"errors", hs.errors},
                     {"total_queue_wait_ms", hs.totalQueueWaitMs},
                     {"max_queue_wait_ms", hs.maxQueueWaitMs},
+                    {"max_excess_queue_wait_ms", hs.maxExcessQueueWaitMs},
                     {"total_apply_ms", hs.totalApplyMs},
                     {"max_apply_ms", hs.maxApplyMs},
                 });
@@ -177,6 +204,8 @@ void sleepMs(int ms) {
 } // namespace
 
 TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-coordinator]") {
+    YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator");
+    YAMS_SET_THREAD_NAME("bench-write-coordinator");
     const auto cfg = loadConfig();
 
     spdlog::info("=== WriteCoordinator Benchmark ===");
@@ -191,6 +220,9 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
     REQUIRE(outFile.is_open());
 
     for (int rep = 0; rep < cfg.repeat; ++rep) {
+        YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::repeat");
+        YAMS_FRAME_MARK_NAMED("write_coordinator_repeat");
+        YAMS_PLOT("bench.write_coordinator.repeat", static_cast<int64_t>(rep));
         spdlog::info("--- Repeat {}/{} ---", rep + 1, cfg.repeat);
 
         DaemonHarness::Options harnessOpts;
@@ -202,11 +234,11 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
         REQUIRE(harness.start(30s));
 
         auto* daemon = harness.daemon();
-        REQUIRE(daemon != nullptr);
+        REQUIRE((daemon != nullptr));
         auto* sm = daemon->getServiceManager();
-        REQUIRE(sm != nullptr);
+        REQUIRE((sm != nullptr));
         auto* wc = sm->getWriteCoordinator();
-        REQUIRE(wc != nullptr);
+        REQUIRE((wc != nullptr));
 
         // Create temp directory with test files
         fs::path workDir = harness.rootDir() / "work";
@@ -244,6 +276,8 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 1: Cold ingest (first-time, no versioning) ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::cold_ingest");
+            YAMS_PLOT("bench.write_coordinator.files", static_cast<int64_t>(cfg.numFiles));
             spdlog::info("Phase 1: cold ingest {} files", cfg.numFiles);
             auto snapBefore = CoordinatorSnapshot::from(wc->getStats());
 
@@ -285,10 +319,13 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 2: Version churn (re-ingest same paths) ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::version_churn");
             spdlog::info("Phase 2: version churn ({} iterations of {} files)",
                          cfg.versionIterations, cfg.numFiles);
 
             for (int vi = 0; vi < cfg.versionIterations; ++vi) {
+                YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::version_iteration");
+                YAMS_PLOT("bench.write_coordinator.version_iter", static_cast<int64_t>(vi));
                 // Write new content to the same files
                 for (int i = 0; i < cfg.numFiles; ++i) {
                     auto content = randomContent(static_cast<std::size_t>(cfg.fileSizeBytes), rng);
@@ -337,6 +374,7 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 3: Final coordinator summary ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::final_stats");
             sleepMs(500);
             wc->flush(60s);
 

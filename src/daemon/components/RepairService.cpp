@@ -1592,6 +1592,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now());
+                metadata::MetadataOpScope opScope("repair_attempt_update");
                 (void)meta->updateDocument(doc);
             }
 
@@ -1702,6 +1703,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now());
+                metadata::MetadataOpScope opScope("repair_attempt_update");
                 (void)meta->updateDocument(doc);
             }
 
@@ -1825,6 +1827,7 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
         result.skipped = orphanedIds.size();
         result.message = "Would clean " + std::to_string(orphanedIds.size()) + " orphans";
     } else {
+        metadata::MetadataOpScope opScope("repair_orphan_cleanup");
         auto batchResult = meta->deleteDocumentsBatch(orphanedIds);
         if (batchResult) {
             result.succeeded = batchResult.value();
@@ -1942,6 +1945,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                 const bool newIsText = detector.isTextMimeType(mimeType);
                 doc.mimeType = std::move(mimeType);
 
+                metadata::MetadataOpScope opScope("repair_mime_update");
                 if (meta->updateDocument(doc)) {
                     if (oldWasText && !newIsText) {
                         (void)meta->deleteContent(id);
@@ -2047,10 +2051,13 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         doc.filePath = std::move(filename);
         doc.fileExtension = std::move(ext);
 
-        if (auto up = meta->updateDocument(doc); up) {
-            result.succeeded++;
-        } else {
-            result.failed++;
+        {
+            metadata::MetadataOpScope opScope("repair_download_url_update");
+            if (auto up = meta->updateDocument(doc); up) {
+                result.succeeded++;
+            } else {
+                result.failed++;
+            }
         }
 
         try {
@@ -2145,6 +2152,7 @@ RepairOperationResult RepairService::applySemanticDedupe(const RepairRequest& re
         if (req.dryRun) {
             result.skipped += toDelete.size();
         } else {
+            metadata::MetadataOpScope opScope("repair_dedupe_delete");
             if (!toDelete.empty()) {
                 auto batchDelete = meta->deleteDocumentsBatch(toDelete);
                 if (batchDelete) {
@@ -2902,6 +2910,7 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                     effectiveMime = bestEffortMimeForDocument(d, store);
                     auto updated = d;
                     updated.mimeType = effectiveMime;
+                    metadata::MetadataOpScope opScope("repair_mime_update");
                     (void)meta->updateDocument(updated);
                 }
 

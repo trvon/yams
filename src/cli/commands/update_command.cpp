@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <sstream>
+#include <tuple>
 #include <yams/cli/commands/update_command.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -346,23 +347,19 @@ Result<void> UpdateCommand::executeLocal() {
     size_t successCount = 0;
     size_t failureCount = 0;
 
+    struct ParsedMetadataUpdate {
+        std::string key;
+        std::string value;
+        bool verboseEcho{false};
+    };
+    std::vector<ParsedMetadataUpdate> parsedUpdates;
+    parsedUpdates.reserve(metadata_.size() + 1);
+
     for (const auto& kv : metadata_) {
         auto pos = kv.find('=');
         if (pos != std::string::npos) {
-            std::string key = kv.substr(0, pos);
-            std::string value = kv.substr(pos + 1);
-
-            // Set the metadata
-            auto setResult = metadataRepo->setMetadata(docId, key, metadata::MetadataValue(value));
-            if (setResult) {
-                successCount++;
-                if (verbose_ || (cli_ && cli_->getVerbose())) {
-                    std::cout << "Set " << key << " = " << value << std::endl;
-                }
-            } else {
-                failureCount++;
-                spdlog::warn("Failed to set metadata {}: {}", key, setResult.error().message);
-            }
+            parsedUpdates.push_back(
+                ParsedMetadataUpdate{kv.substr(0, pos), kv.substr(pos + 1), true});
         } else {
             spdlog::warn("Invalid metadata format: {} (expected key=value)", kv);
             failureCount++;
@@ -378,8 +375,9 @@ Result<void> UpdateCommand::executeLocal() {
                 std::stringstream ss(s);
                 std::string item;
                 while (std::getline(ss, item, ',')) {
-                    if (!item.empty())
+                    if (!item.empty()) {
                         all.push_back(item);
+                    }
                 }
             }
         };
@@ -390,24 +388,62 @@ Result<void> UpdateCommand::executeLocal() {
             std::stringstream ss(s);
             std::string item;
             while (std::getline(ss, item, ',')) {
-                if (!item.empty())
+                if (!item.empty()) {
                     all.push_back(std::string("-") + item);
+                }
             }
         }
         if (!all.empty()) {
             std::string joined;
             for (size_t i = 0; i < all.size(); ++i) {
-                if (i)
+                if (i) {
                     joined += ",";
+                }
                 joined += all[i];
             }
-            auto setResult =
-                metadataRepo->setMetadata(docId, "tags", metadata::MetadataValue(joined));
-            if (setResult)
-                successCount++;
-            else
-                failureCount++;
+            parsedUpdates.push_back(ParsedMetadataUpdate{"tags", std::move(joined), false});
         }
+    }
+
+    auto recordSuccess = [&](const ParsedMetadataUpdate& update) {
+        successCount++;
+        if (update.verboseEcho && (verbose_ || (cli_ && cli_->getVerbose()))) {
+            std::cout << "Set " << update.key << " = " << update.value << std::endl;
+        }
+    };
+    auto applyIndividually = [&]() {
+        for (const auto& update : parsedUpdates) {
+            auto setResult =
+                metadataRepo->setMetadata(docId, update.key, metadata::MetadataValue(update.value));
+            if (setResult) {
+                recordSuccess(update);
+            } else {
+                failureCount++;
+                spdlog::warn("Failed to set metadata {}: {}", update.key,
+                             setResult.error().message);
+            }
+        }
+    };
+
+    if (parsedUpdates.size() > 1) {
+        std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> entries;
+        entries.reserve(parsedUpdates.size());
+        for (const auto& update : parsedUpdates) {
+            entries.emplace_back(docId, update.key, metadata::MetadataValue(update.value));
+        }
+        auto batchResult = metadataRepo->setMetadataBatch(entries);
+        if (batchResult) {
+            for (const auto& update : parsedUpdates) {
+                recordSuccess(update);
+            }
+        } else {
+            spdlog::debug("UpdateCommand: local metadata batch failed for doc {}: {}; falling back "
+                          "to per-entry writes",
+                          docId, batchResult.error().message);
+            applyIndividually();
+        }
+    } else {
+        applyIndividually();
     }
 
     // Output results
@@ -442,8 +478,14 @@ void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
             hash_ = args[++i];
         } else if (args[i] == "--name" && i + 1 < args.size()) {
             name_ = args[++i];
+        } else if ((args[i] == "--metadata" || args[i] == "-m") && i + 1 < args.size()) {
+            metadata_.push_back(args[++i]);
+        } else if (args[i] == "--tags" && i + 1 < args.size()) {
+            add_tags_.push_back(args[++i]);
+        } else if (args[i] == "--remove-tags" && i + 1 < args.size()) {
+            remove_tags_.push_back(args[++i]);
         } else if (args[i] == "--key" && i + 1 < args.size()) {
-            if (i + 2 < args.size() && args[i + 2] == "--value") {
+            if (i + 3 < args.size() && args[i + 2] == "--value") {
                 metadata_.push_back(args[i + 1] + "=" + args[i + 3]);
                 i += 3;
             }
@@ -528,12 +570,16 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
     std::string nm = name;
     try {
         if (!nm.empty() && nm.front() == '~') {
-            if (const char* home = std::getenv("HOME")) {
+            if (const char* home = std::getenv("HOME")) { // NOLINT(concurrency-mt-unsafe)
                 nm = std::string(home) + nm.substr(1);
             }
         }
+    } catch (const std::exception& ex) {
+        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Update: failed to expand home in '{}': {}", name, ex.what());
     } catch (...) {
         // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Update: failed to expand home in '{}'", name);
     }
 
     // Glob shortcut: resolve via glob-to-SQL conversion directly
@@ -559,10 +605,11 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
                 const metadata::DocumentInfo* chosen = &docs[0];
                 if (latest_ || oldest_) {
                     for (const auto& d : docs) {
-                        if (oldest_ && d.indexedTime < chosen->indexedTime)
+                        const bool betterMatch = oldest_ ? d.indexedTime < chosen->indexedTime
+                                                         : d.indexedTime > chosen->indexedTime;
+                        if (betterMatch) {
                             chosen = &d;
-                        else if (latest_ && d.indexedTime > chosen->indexedTime)
-                            chosen = &d;
+                        }
                     }
                 }
                 return chosen->sha256Hash;
@@ -635,8 +682,12 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
         std::string stem = nm;
         try {
             stem = std::filesystem::path(nm).stem().string();
+        } catch (const std::exception& ex) {
+            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Update: failed to derive stem for '{}': {}", nm, ex.what());
         } catch (...) {
             // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Update: failed to derive stem for '{}'", nm);
         }
         lr = tryList(std::string("%/") + stem + "%");
     }

@@ -29,6 +29,25 @@ if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
 
+# std::stacktrace is optional diagnostic sugar for assertion failures. Some
+# libstdc++ releases expose the header/feature macro but keep the implementation
+# in an extra experimental library; that compiles but fails final executable
+# links. Probe compile+link, not just header availability.
+_stacktrace_probe = '''
+#include <stacktrace>
+int main() {
+  auto trace = std::stacktrace::current();
+  return static_cast<int>(trace.size());
+}
+'''
+if cpp.links(_stacktrace_probe, name: 'std::stacktrace compile+link')
+  add_project_arguments('-DYAMS_CORE_HAS_STACKTRACE=1', language: 'cpp')
+  message('std::stacktrace diagnostics enabled')
+else
+  add_project_arguments('-DYAMS_CORE_HAS_STACKTRACE=0', language: 'cpp')
+  message('std::stacktrace diagnostics disabled: stacktrace did not link')
+endif
+
 if host_machine.system() == 'windows'
   add_project_arguments('-D_WIN32_WINNT=0x0A00', language: 'cpp')
   add_project_arguments('-D_CRT_SECURE_NO_WARNINGS', language: 'cpp')

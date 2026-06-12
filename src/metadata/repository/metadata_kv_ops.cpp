@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -75,8 +76,8 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
             }
         });
 
-        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(
-                                   db, entries, pendingTagKeysByDoc));
+        YAMS_TRY_UNWRAP(
+            delta, repository::upsertMetadataWritesWithTagDelta(db, entries, pendingTagKeysByDoc));
         YAMS_TRY(commitOrRollback(db));
         committed = true;
         return delta;
@@ -95,14 +96,35 @@ Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::stri
 
 Result<void> MetadataRepository::setMetadataBatch(
     const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::setMetadataBatch");
+    YAMS_PLOT("metadata_repo::set_metadata_batch_entries", static_cast<int64_t>(entries.size()));
     if (entries.empty()) {
         return Result<void>();
     }
 
+    const bool traceMetadataBatch = metadata_trace_enabled();
+    const auto overallStart = std::chrono::steady_clock::now();
+    auto phaseStart = overallStart;
     const auto dedupedEntries = repository::deduplicateMetadataWrites(entries);
+    const auto dedupUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - phaseStart)
+                             .count();
+    phaseStart = std::chrono::steady_clock::now();
     const auto pendingTagKeysByDoc = repository::collectPendingTagKeysByDoc(dedupedEntries);
+    const auto collectTagsUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - phaseStart)
+                                   .count();
+
+    int64_t beginUs = 0;
+    int64_t upsertUs = 0;
+    int64_t commitUs = 0;
+    const auto executeStart = std::chrono::steady_clock::now();
     auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
+        auto txnPhaseStart = std::chrono::steady_clock::now();
         YAMS_TRY(repository::beginTransaction(db));
+        beginUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - txnPhaseStart)
+                      .count();
         bool committed = false;
         auto rollback = scope_exit([&] {
             if (!committed) {
@@ -110,12 +132,23 @@ Result<void> MetadataRepository::setMetadataBatch(
             }
         });
 
-        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(
-                                   db, dedupedEntries, pendingTagKeysByDoc));
+        txnPhaseStart = std::chrono::steady_clock::now();
+        YAMS_TRY_UNWRAP(delta, repository::upsertMetadataWritesWithTagDelta(db, dedupedEntries,
+                                                                            pendingTagKeysByDoc));
+        upsertUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - txnPhaseStart)
+                       .count();
+        txnPhaseStart = std::chrono::steady_clock::now();
         YAMS_TRY(repository::commitOrRollback(db));
+        commitUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - txnPhaseStart)
+                       .count();
         committed = true;
         return delta;
     });
+    const auto executeUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - executeStart)
+                               .count();
 
     if (!result) {
         return result.error();
@@ -125,6 +158,16 @@ Result<void> MetadataRepository::setMetadataBatch(
     applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
                           result.value());
     metadataChangeCounter_.fetch_add(dedupedEntries.size(), std::memory_order_release);
+    if (traceMetadataBatch) {
+        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - overallStart)
+                                 .count();
+        spdlog::info("MetadataRepository::setMetadataBatch phases entries={} deduped={} tags={} "
+                     "dedup_us={} collect_tags_us={} execute_us={} begin_us={} upsert_us={} "
+                     "commit_us={} total_us={}",
+                     entries.size(), dedupedEntries.size(), pendingTagKeysByDoc.size(), dedupUs,
+                     collectTagsUs, executeUs, beginUs, upsertUs, commitUs, totalUs);
+    }
     return {};
 }
 

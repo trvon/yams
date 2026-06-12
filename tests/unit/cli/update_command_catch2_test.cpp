@@ -120,12 +120,12 @@ TEST_CASE("UpdateCommand - execute updates metadata by hash", "[cli][update][cat
     const auto result = command.execute();
 
     REQUIRE(result.has_value());
-    CHECK(capture.str().find("Document metadata updated successfully!") != std::string::npos);
+    CHECK((capture.str().find("Document metadata updated successfully!") != std::string::npos));
 
     auto metadata = fixture.repo->getMetadata(docId, "author");
     REQUIRE(metadata.has_value());
     REQUIRE(metadata.value().has_value());
-    CHECK(metadata.value()->asString() == "Alice");
+    CHECK((metadata.value()->asString() == "Alice"));
 }
 
 TEST_CASE("UpdateCommand - parseArguments captures key and value pairs", "[cli][update][catch2]") {
@@ -149,5 +149,61 @@ TEST_CASE("UpdateCommand - parseArguments captures key and value pairs", "[cli][
     auto metadata = fixture.repo->getMetadata(doc.value()->id, "category");
     REQUIRE(metadata.has_value());
     REQUIRE(metadata.value().has_value());
-    CHECK(metadata.value()->asString() == "notes");
+    CHECK((metadata.value()->asString() == "notes"));
+}
+
+TEST_CASE("UpdateCommand - parseArguments ignores missing value after key",
+          "[cli][update][catch2]") {
+    UpdateCommandFixture fixture;
+    fixture.insertTestDocument("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                               "missing-value.txt");
+
+    UpdateCommand command(fixture.repo, nullptr);
+    command.parseArguments({"--hash",
+                            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                            "--key", "category", "--value"});
+
+    CaptureStdout capture;
+    const auto result = command.execute();
+    REQUIRE(result.has_value());
+    CHECK((capture.str().find("Metadata updated: 0") != std::string::npos));
+}
+
+TEST_CASE("UpdateCommand - local path batches multiple metadata and tag updates",
+          "[cli][update][catch2]") {
+    UpdateCommandFixture fixture;
+    const auto docId = fixture.insertTestDocument(
+        "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface", "batch-test.txt");
+
+    UpdateCommand command(fixture.repo, nullptr);
+    command.parseArguments(
+        {"--hash", "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface", "--metadata",
+         "author=Alice", "--metadata", "category=notes", "--metadata", "topic=systems",
+         "--metadata", "invalidpair", "--tags", "fresh,cli", "--remove-tags", "old"});
+
+    CaptureStdout capture;
+    const auto result = command.execute();
+    REQUIRE(result.has_value());
+    CHECK((capture.str().find("Metadata updated: 4") != std::string::npos));
+    CHECK((capture.str().find("Metadata failed: 1") != std::string::npos));
+
+    auto author = fixture.repo->getMetadata(docId, "author");
+    REQUIRE(author.has_value());
+    REQUIRE(author.value().has_value());
+    CHECK((author.value()->asString() == "Alice"));
+
+    auto category = fixture.repo->getMetadata(docId, "category");
+    REQUIRE(category.has_value());
+    REQUIRE(category.value().has_value());
+    CHECK((category.value()->asString() == "notes"));
+
+    auto topic = fixture.repo->getMetadata(docId, "topic");
+    REQUIRE(topic.has_value());
+    REQUIRE(topic.value().has_value());
+    CHECK((topic.value()->asString() == "systems"));
+
+    auto tags = fixture.repo->getMetadata(docId, "tags");
+    REQUIRE(tags.has_value());
+    REQUIRE(tags.value().has_value());
+    CHECK((tags.value()->asString() == "fresh,cli,-old"));
 }
