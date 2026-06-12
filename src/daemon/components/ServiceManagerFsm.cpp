@@ -290,6 +290,28 @@ void ServiceManagerFsm::dispatch(const ServiceManagerStoppedEvent& ev) noexcept 
     dispatchNoThrow(sharedMutex(), cv_, ev);
 }
 
+bool ServiceManagerFsm::completeShutdown() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(sharedMutex());
+        auto& state = detail::ServiceManagerMachine::snap.state;
+        if (state != ServiceManagerState::ShuttingDown && state != ServiceManagerState::Stopped) {
+            detail::ServiceManagerMachine::dispatch(ShutdownEvent{});
+        }
+        if (state == ServiceManagerState::ShuttingDown) {
+            detail::ServiceManagerMachine::dispatch(ServiceManagerStoppedEvent{});
+        }
+        if (isTerminal(state)) {
+            cv_.notify_all();
+        }
+        return state == ServiceManagerState::Stopped;
+    } catch (const std::exception& e) {
+        spdlog::debug("[ServiceManagerFSM] completeShutdown swallowed exception: {}", e.what());
+    } catch (...) {
+        spdlog::debug("[ServiceManagerFSM] completeShutdown swallowed unknown exception");
+    }
+    return false;
+}
+
 bool ServiceManagerFsm::canInitializeVectors() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(sharedMutex());

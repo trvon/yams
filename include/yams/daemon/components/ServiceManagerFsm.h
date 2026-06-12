@@ -62,6 +62,10 @@ public:
     void dispatch(const InitializationFailedEvent&) noexcept;
     void dispatch(const ShutdownEvent&) noexcept;
     void dispatch(const ServiceManagerStoppedEvent&) noexcept;
+    // Race-safe shutdown finalizer for daemon/service-manager teardown. The tinyfsm backend stores
+    // process-wide state, so concurrent ServiceManagerFsm construction in tests or same-process
+    // retries can reset the shared state between shutdown start and shutdown completion.
+    [[nodiscard]] bool completeShutdown() noexcept;
 
     bool canInitializeVectors() const noexcept;
     bool canBuildSearchEngine() const noexcept;

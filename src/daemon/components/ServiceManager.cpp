@@ -1491,14 +1491,12 @@ void ServiceManager::shutdown() {
         std::chrono::steady_clock::now() - shutdownStart);
     spdlog::info("[ServiceManager] Shutdown complete ({}ms total)", shutdownDuration.count());
 
-    try {
-        serviceFsm_.dispatch(ServiceManagerStoppedEvent{});
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
+    const bool fsmStopped = serviceFsm_.completeShutdown();
+    if (!fsmStopped) {
+        spdlog::warn("[ServiceManager] Failed to complete ServiceManager FSM shutdown");
     }
 
-    YAMS_ASSERT(serviceFsm_.snapshot().state == ServiceManagerState::Stopped,
-                "ServiceManager FSM must reach Stopped at shutdown completion");
+    YAMS_ASSERT(fsmStopped, "ServiceManager FSM must reach Stopped at shutdown completion");
     setOnnxShutdownMarker(false);
 }
 
