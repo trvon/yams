@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.17.0](https://github.com/trvon/yams/compare/v0.16.2...v0.17.0) (2026-06-12)
+
+
+### Added
+
+* daemon stability fixes, vector search optimizations, and docs refresh ([#46](https://github.com/trvon/yams/issues/46)) ([9cb6421](https://github.com/trvon/yams/commit/9cb6421593db03d944a2dde5db91d7fe42a67351))
+* **daemon:** shutdown hardening + test helper linkage fixes ([#44](https://github.com/trvon/yams/issues/44)) ([7076e4b](https://github.com/trvon/yams/commit/7076e4b283401d8deb0331caf1995c4ca4ba3a29))
+
+
+### Fixed
+
+* **cli:** improve graph-guided grep ([5ff4b72](https://github.com/trvon/yams/commit/5ff4b720f34ea0fbd3885ff9b264bdefaf827674))
+* **daemon:** tolerate FSM shutdown reset race ([e469dec](https://github.com/trvon/yams/commit/e469dec2ca2c86ef28b8477cbdd1788ae446673b))
+* harden CI and metadata stability ([#48](https://github.com/trvon/yams/issues/48)) ([771deeb](https://github.com/trvon/yams/commit/771deebc840d89bbe6001a721122a47e69d5dddc))
+
+
+### Performance
+
+* **metadata:** profile write-path batching ([#49](https://github.com/trvon/yams/issues/49)) ([651e8c8](https://github.com/trvon/yams/commit/651e8c8132f82ae57977de74e0392eefb94e9763))
+
 ## [0.16.2](https://github.com/trvon/yams/compare/v0.16.1...v0.16.2) (2026-06-01)
 
 
