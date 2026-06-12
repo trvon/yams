@@ -1,6 +1,7 @@
-#include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <string_view>
+#include <tuple>
+#include <vector>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/metadata/versioning_util.h>
@@ -8,11 +9,36 @@
 namespace yams::metadata {
 
 static bool versioningEnabled() {
-    if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) {
+    if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) { // NOLINT(concurrency-mt-unsafe)
         std::string_view v(env);
         return !(v == "0" || v == "false" || v == "FALSE");
     }
     return true;
+}
+
+static void applyVersioningMetadataWrites(
+    MetadataRepository& repo,
+    const std::vector<std::tuple<int64_t, std::string, MetadataValue>>& entries) {
+    if (entries.empty()) {
+        return;
+    }
+
+    if (entries.size() > 1) {
+        auto batchResult = repo.setMetadataBatch(entries);
+        if (batchResult) {
+            return;
+        }
+        spdlog::debug("Versioning: metadata batch failed: {}; falling back to per-entry writes",
+                      batchResult.error().message);
+    }
+
+    for (const auto& [documentId, key, value] : entries) {
+        auto setResult = repo.setMetadata(documentId, key, value);
+        if (!setResult) {
+            spdlog::debug("Versioning: failed to set metadata doc={} key='{}': {}", documentId, key,
+                          setResult.error().message);
+        }
+    }
 }
 
 int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& filePath,
@@ -32,7 +58,12 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
                     maxVersion = v;
                     prevLatestHint = doc;
                 }
+            } catch (const std::exception& ex) {
+                spdlog::debug("Versioning: ignoring invalid prior version metadata for doc {}: {}",
+                              doc.id, ex.what());
             } catch (...) {
+                spdlog::debug("Versioning: ignoring invalid prior version metadata for doc {}",
+                              doc.id);
             }
         }
     };
@@ -70,8 +101,11 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
         }
 
         int64_t newVersion = 1;
+        std::vector<std::tuple<int64_t, std::string, MetadataValue>> metadataEntries;
+        metadataEntries.reserve(prevLatestHint.has_value() ? 4U : 3U);
+
         if (prevLatestHint.has_value()) {
-            (void)repo.setMetadata(prevLatestHint->id, "is_latest", MetadataValue(false));
+            metadataEntries.emplace_back(prevLatestHint->id, "is_latest", MetadataValue(false));
 
             DocumentRelationship rel;
             rel.parentId = prevLatestHint->id;
@@ -84,9 +118,10 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
             newVersion = (maxVersion > 0 ? maxVersion : 1) + 1;
         }
 
-        (void)repo.setMetadata(newDocumentId, "version", MetadataValue(newVersion));
-        (void)repo.setMetadata(newDocumentId, "is_latest", MetadataValue(true));
-        (void)repo.setMetadata(newDocumentId, "series_key", MetadataValue(seriesKey));
+        metadataEntries.emplace_back(newDocumentId, "version", MetadataValue(newVersion));
+        metadataEntries.emplace_back(newDocumentId, "is_latest", MetadataValue(true));
+        metadataEntries.emplace_back(newDocumentId, "series_key", MetadataValue(seriesKey));
+        applyVersioningMetadataWrites(repo, metadataEntries);
 
         if (auto latestRes = repo.getMetadata(newDocumentId, "is_latest");
             latestRes && latestRes.value().has_value()) {

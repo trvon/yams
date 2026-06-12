@@ -136,3 +136,49 @@ TEST_CASE("DocumentService atomic metadata updates preserve request-level counts
     REQUIRE((tags));
     CHECK((std::find(tags.value().begin(), tags.value().end(), "fresh") != tags.value().end()));
 }
+
+TEST_CASE("DocumentService non-atomic metadata updates use batch-compatible semantics",
+          "[document][service][update]") {
+    UpdateMetadataFixture fixture;
+
+    UpdateMetadataRequest request;
+    request.hash = fixture.storedHash;
+    request.atomic = false;
+    request.keyValues = {{"author", "alice"}, {"category", "docs"}};
+    request.pairs = {"topic=systems", "topic=storage", "invalidpair"};
+    request.addTags = {"fresh", "fresh"};
+    request.removeTags = {"test", "missing"};
+
+    auto result = fixture.documentService->updateMetadata(request);
+    REQUIRE((result));
+    REQUIRE((result.value().success));
+    REQUIRE((result.value().documentId.has_value()));
+    CHECK((result.value().updatesApplied == 4));
+    CHECK((result.value().tagsAdded == 2));
+    CHECK((result.value().tagsRemoved == 1));
+
+    const auto documentId = *result.value().documentId;
+    auto author = fixture.metadataRepo->getMetadata(documentId, "author");
+    REQUIRE((author));
+    REQUIRE((author.value().has_value()));
+    CHECK((author.value()->asString() == "alice"));
+
+    auto category = fixture.metadataRepo->getMetadata(documentId, "category");
+    REQUIRE((category));
+    REQUIRE((category.value().has_value()));
+    CHECK((category.value()->asString() == "docs"));
+
+    auto topic = fixture.metadataRepo->getMetadata(documentId, "topic");
+    REQUIRE((topic));
+    REQUIRE((topic.value().has_value()));
+    CHECK((topic.value()->asString() == "storage"));
+
+    auto tags = fixture.metadataRepo->getDocumentTags(documentId);
+    REQUIRE((tags));
+    CHECK((std::find(tags.value().begin(), tags.value().end(), "fresh") != tags.value().end()));
+
+    auto removedTag = fixture.metadataRepo->getMetadata(documentId, "tag:test");
+    REQUIRE((removedTag));
+    REQUIRE((removedTag.value().has_value()));
+    CHECK((removedTag.value()->asString().empty()));
+}

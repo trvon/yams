@@ -4,6 +4,7 @@
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/profiling.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -47,6 +48,7 @@ WriteCoordinator::~WriteCoordinator() {
 }
 
 void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
+    YAMS_ZONE_SCOPED_N("WriteCoordinator::enqueue");
     if (!batch)
         return;
     batch->enqueueTime = std::chrono::steady_clock::now();
@@ -62,6 +64,7 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
                          pendingBatches_.size());
         }
         pendingBatches_.push_back(std::move(batch));
+        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(pendingBatches_.size()));
     }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -71,6 +74,7 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
 }
 
 bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
+    YAMS_ZONE_SCOPED_N("WriteCoordinator::tryEnqueue");
     if (!batch)
         return false;
     {
@@ -81,6 +85,7 @@ bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
         }
         batch->enqueueTime = std::chrono::steady_clock::now();
         pendingBatches_.push_back(std::move(batch));
+        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(pendingBatches_.size()));
     }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -108,6 +113,7 @@ void WriteCoordinator::start() {
 }
 
 Result<void> WriteCoordinator::flush(std::chrono::milliseconds timeout) {
+    YAMS_ZONE_SCOPED_N("WriteCoordinator::flush");
     if (stop_.load()) {
         return Error{ErrorCode::InvalidState, "WriteCoordinator is shutting down"};
     }
@@ -216,6 +222,7 @@ void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_
 }
 
 boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
+    YAMS_SET_THREAD_NAME("yams-write-coordinator");
     spdlog::info("[WriteCoordinator] Writer loop started");
     auto pollTimer = wakeTimer_;
 
@@ -234,6 +241,10 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
             std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::dequeue");
+                YAMS_PLOT("wc.dequeue.batch_count", static_cast<int64_t>(count));
+                YAMS_PLOT("wc.queue.depth_after_dequeue",
+                          static_cast<int64_t>(pendingBatches_.size() - count));
                 inFlight_.store(count, std::memory_order_release);
                 batchesToProcess.reserve(count);
                 for (std::size_t i = 0; i < count; ++i)
@@ -259,6 +270,7 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
         }
 
         spdlog::debug("[WriteCoordinator] Processing {} batches", batchesToProcess.size());
+        YAMS_PLOT("wc.in_flight.batches", static_cast<int64_t>(batchesToProcess.size()));
         auto result = applyBatches(batchesToProcess);
         if (!result) {
             {
@@ -289,6 +301,8 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
 }
 
 Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches) {
+    YAMS_ZONE_SCOPED_N("WriteCoordinator::applyBatches");
+    YAMS_PLOT("wc.apply.batch_count", static_cast<int64_t>(batches.size()));
     if (batches.empty()) {
         return Result<void>();
     }
@@ -302,6 +316,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             std::chrono::duration_cast<std::chrono::milliseconds>(applyStart - batch->enqueueTime)
                 .count());
         recordSourceQueueWait(batch->source, waitMs);
+        YAMS_PLOT("wc.queue.wait_ms", static_cast<int64_t>(waitMs));
         if (waitMs >= 1000) {
             spdlog::warn("[WriteCoordinator] slow queue wait source='{}' wait_ms={} ops={}",
                          batch->source, waitMs, batch->ops.size());
@@ -338,6 +353,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     std::optional<Error> firstOpError;
 
     if (hasKgOps && kg_) {
+        YAMS_ZONE_SCOPED_N("WriteCoordinator::applyKG");
         auto batchResult = kg_->beginWriteBatch();
         if (!batchResult) {
             spdlog::error("[WriteCoordinator] beginWriteBatch failed: {}",
@@ -422,6 +438,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     }
 
     if (hasMetaOps && meta_) {
+        YAMS_ZONE_SCOPED_N("WriteCoordinator::applyMetadata");
         struct RepairStatusGroup {
             std::string source;
             metadata::RepairStatus status;
@@ -578,12 +595,14 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
         for (auto& [_, group] : extractionStatusBySource) {
             for (std::size_t off = 0; off < group.updates.size(); off += chunkMax) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceExtractionStatus");
                 const auto end = std::min(group.updates.size(), off + chunkMax);
                 std::vector<metadata::ExtractionStatusUpdate> chunk(
                     std::make_move_iterator(group.updates.begin() + static_cast<long>(off)),
                     std::make_move_iterator(group.updates.begin() + static_cast<long>(end)));
                 const auto sourceStart = std::chrono::steady_clock::now();
                 const auto updateCount = static_cast<std::uint64_t>(chunk.size());
+                YAMS_PLOT("wc.coalesce.extraction_status", static_cast<int64_t>(updateCount));
                 metadata::MetadataOpScope opScope("wc_extraction_status_batch");
                 auto r = meta_->batchUpdateDocumentExtractionStatuses(chunk);
                 const auto sourceApplyMs = static_cast<std::uint64_t>(
@@ -605,6 +624,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
         for (auto& [source, entries] : metadataBySource) {
             for (std::size_t off = 0; off < entries.size(); off += chunkMax) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceMetadata");
                 const auto end = std::min(entries.size(), off + chunkMax);
                 const auto sourceStart = std::chrono::steady_clock::now();
                 SetMetadataBatchOp op{
@@ -612,6 +632,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         std::make_move_iterator(entries.begin() + static_cast<long>(off)),
                         std::make_move_iterator(entries.begin() + static_cast<long>(end)))};
                 const auto entryCount = static_cast<std::uint64_t>(op.entries.size());
+                YAMS_PLOT("wc.coalesce.metadata_entries", static_cast<int64_t>(entryCount));
                 auto r = applyMetadataOp(op);
                 const auto sourceApplyMs = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -630,6 +651,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
         for (auto& [_, group] : repairStatusBySourceAndStatus) {
             for (std::size_t off = 0; off < group.hashes.size(); off += chunkMax) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceRepairStatus");
                 const auto end = std::min(group.hashes.size(), off + chunkMax);
                 const auto sourceStart = std::chrono::steady_clock::now();
                 UpdateRepairStatusOp op{
@@ -638,6 +660,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
                     group.status};
                 const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
+                YAMS_PLOT("wc.coalesce.repair_status", static_cast<int64_t>(hashCount));
                 auto r = applyMetadataOp(op);
                 const auto sourceApplyMs = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -656,6 +679,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
         for (auto& [_, group] : embeddingStatusBySourceAndState) {
             for (std::size_t off = 0; off < group.hashes.size(); off += chunkMax) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceEmbeddingStatus");
                 const auto end = std::min(group.hashes.size(), off + chunkMax);
                 const auto sourceStart = std::chrono::steady_clock::now();
                 UpdateEmbeddingStatusByHashesOp op{
@@ -664,6 +688,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
                     group.embedded, group.modelName};
                 const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
+                YAMS_PLOT("wc.coalesce.embedding_status", static_cast<int64_t>(hashCount));
                 auto r = applyMetadataOp(op);
                 const auto sourceApplyMs = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -681,6 +706,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
 
         for (auto& [source, termFreqs] : symspellTermsBySource) {
+            YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceSymSpell");
             if (termFreqs.empty()) {
                 continue;
             }
@@ -692,6 +718,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 termPairs.emplace_back(term, freq);
                 termAddCount += static_cast<std::uint64_t>(freq);
             }
+            YAMS_PLOT("wc.coalesce.symspell_unique_terms", static_cast<int64_t>(termPairs.size()));
+            YAMS_PLOT("wc.coalesce.symspell_total_terms", static_cast<int64_t>(termAddCount));
             Result<void> r;
             {
                 metadata::MetadataOpScope opScope("wc_symspell_terms");

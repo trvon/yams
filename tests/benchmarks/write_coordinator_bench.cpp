@@ -39,6 +39,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/profiling.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -203,6 +204,8 @@ void sleepMs(int ms) {
 } // namespace
 
 TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-coordinator]") {
+    YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator");
+    YAMS_SET_THREAD_NAME("bench-write-coordinator");
     const auto cfg = loadConfig();
 
     spdlog::info("=== WriteCoordinator Benchmark ===");
@@ -217,6 +220,9 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
     REQUIRE(outFile.is_open());
 
     for (int rep = 0; rep < cfg.repeat; ++rep) {
+        YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::repeat");
+        YAMS_FRAME_MARK_NAMED("write_coordinator_repeat");
+        YAMS_PLOT("bench.write_coordinator.repeat", static_cast<int64_t>(rep));
         spdlog::info("--- Repeat {}/{} ---", rep + 1, cfg.repeat);
 
         DaemonHarness::Options harnessOpts;
@@ -270,6 +276,8 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 1: Cold ingest (first-time, no versioning) ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::cold_ingest");
+            YAMS_PLOT("bench.write_coordinator.files", static_cast<int64_t>(cfg.numFiles));
             spdlog::info("Phase 1: cold ingest {} files", cfg.numFiles);
             auto snapBefore = CoordinatorSnapshot::from(wc->getStats());
 
@@ -311,10 +319,13 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 2: Version churn (re-ingest same paths) ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::version_churn");
             spdlog::info("Phase 2: version churn ({} iterations of {} files)",
                          cfg.versionIterations, cfg.numFiles);
 
             for (int vi = 0; vi < cfg.versionIterations; ++vi) {
+                YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::version_iteration");
+                YAMS_PLOT("bench.write_coordinator.version_iter", static_cast<int64_t>(vi));
                 // Write new content to the same files
                 for (int i = 0; i < cfg.numFiles; ++i) {
                     auto content = randomContent(static_cast<std::size_t>(cfg.fileSizeBytes), rng);
@@ -363,6 +374,7 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
         // ── Phase 3: Final coordinator summary ──
         {
+            YAMS_ZONE_SCOPED_N("Bench::WriteCoordinator::final_stats");
             sleepMs(500);
             wc->flush(60s);
 

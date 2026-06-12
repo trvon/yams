@@ -18,7 +18,8 @@
 //   YAMS_BENCH_METADATA_BATCH        - setMetadataBatch entries per write op (default: 8)
 //   YAMS_BENCH_STATUS_BATCH          - repair-status hashes per write op (default: 64)
 //   YAMS_BENCH_READ_BATCH            - getMetadataForDocuments ids per read op (default: 16)
-//   YAMS_BENCH_CHECKPOINT_EVERY_MS   - TRUNCATE checkpoint cadence, 0 disables (default: 500)
+//   YAMS_BENCH_CHECKPOINT_EVERY_MS   - checkpoint cadence, 0 disables (default: 500)
+//   YAMS_BENCH_CHECKPOINT_MODE       - truncate|passive checkpoint type (default: truncate)
 //   YAMS_BENCH_DB_BUSY_TIMEOUT_MS    - SQLite busy timeout (default: 100)
 //   YAMS_BENCH_DUAL_POOL             - 1 => separate read-only pool, 0 => single pool (default: 1)
 //   YAMS_BENCH_EXTERNAL_LOCKER       - 1 => separate writer periodically holds BEGIN IMMEDIATE
@@ -95,6 +96,8 @@ struct BenchConfig {
     int statusBatchSize{64};
     int readBatchSize{16};
     int checkpointEveryMs{500};
+    std::string checkpointModeName{"truncate"};
+    bool checkpointTruncate{true};
     int dbBusyTimeoutMs{100};
     bool dualPool{true};
     bool externalLocker{false};
@@ -143,6 +146,24 @@ using yams::bench::isoTimestamp;
 using yams::bench::readBoolEnv;
 using yams::bench::readIntEnv;
 
+std::pair<bool, std::string> readCheckpointModeEnv() {
+    const char* val = std::getenv("YAMS_BENCH_CHECKPOINT_MODE");
+    if (!val || !*val) {
+        return {true, "truncate"};
+    }
+    std::string s(val);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (s == "passive") {
+        return {false, "passive"};
+    }
+    if (s == "truncate") {
+        return {true, "truncate"};
+    }
+    spdlog::warn("Unknown YAMS_BENCH_CHECKPOINT_MODE='{}'; using truncate", s);
+    return {true, "truncate"};
+}
+
 std::pair<int, std::string> readWriteModeEnv() {
     const char* val = std::getenv("YAMS_BENCH_WRITE_MODE");
     if (!val || !*val) {
@@ -189,6 +210,9 @@ BenchConfig loadConfig() {
     cfg.statusBatchSize = readIntEnv("YAMS_BENCH_STATUS_BATCH", 64, 1, 1024);
     cfg.readBatchSize = readIntEnv("YAMS_BENCH_READ_BATCH", 16, 1, 256);
     cfg.checkpointEveryMs = readIntEnv("YAMS_BENCH_CHECKPOINT_EVERY_MS", 500, 0, 60000);
+    auto [checkpointTruncate, checkpointModeName] = readCheckpointModeEnv();
+    cfg.checkpointTruncate = checkpointTruncate;
+    cfg.checkpointModeName = std::move(checkpointModeName);
     cfg.dbBusyTimeoutMs = readIntEnv("YAMS_BENCH_DB_BUSY_TIMEOUT_MS", 100, 0, 30000);
     cfg.dualPool = readBoolEnv("YAMS_BENCH_DUAL_POOL", true);
     cfg.externalLocker = readBoolEnv("YAMS_BENCH_EXTERNAL_LOCKER", false);
@@ -361,6 +385,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
     spdlog::info("  statusBatchSize:    {}", cfg.statusBatchSize);
     spdlog::info("  readBatchSize:      {}", cfg.readBatchSize);
     spdlog::info("  checkpointEveryMs:  {}", cfg.checkpointEveryMs);
+    spdlog::info("  checkpointMode:     {}", cfg.checkpointModeName);
     spdlog::info("  dbBusyTimeoutMs:    {}", cfg.dbBusyTimeoutMs);
     spdlog::info("  dualPool:           {}", cfg.dualPool);
     spdlog::info("  externalLocker:     {}", cfg.externalLocker);
@@ -964,8 +989,10 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                         break;
                     }
                     const auto t0 = std::chrono::steady_clock::now();
-                    MetadataOpScope op("bench_checkpoint_truncate");
-                    auto result = repo.checkpointWalTruncate();
+                    MetadataOpScope op(cfg.checkpointTruncate ? "bench_checkpoint_truncate"
+                                                              : "bench_checkpoint_passive");
+                    auto result = cfg.checkpointTruncate ? repo.checkpointWalTruncate()
+                                                         : repo.checkpointWal();
                     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                                         std::chrono::steady_clock::now() - t0)
                                         .count();
@@ -1040,6 +1067,7 @@ TEST_CASE("MetadataRepository SQLite contention profile", "[bench][metadata][sql
                     {"status_batch_size", cfg.statusBatchSize},
                     {"read_batch_size", cfg.readBatchSize},
                     {"checkpoint_every_ms", cfg.checkpointEveryMs},
+                    {"checkpoint_mode", cfg.checkpointModeName},
                     {"db_busy_timeout_ms", cfg.dbBusyTimeoutMs},
                     {"external_locker", cfg.externalLocker},
                     {"external_lock_hold_ms", cfg.externalLockHoldMs},
