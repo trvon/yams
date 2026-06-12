@@ -987,8 +987,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     sql += placeholders;
                     sql += ')';
 
-                    YAMS_TRY_UNWRAP(statusStmtResult, db.prepareCached(sql));
-                    auto& statusStmt = *statusStmtResult;
+                    YAMS_TRY_UNWRAP(statusStmt, db.prepare(sql));
                     YAMS_TRY(statusStmt.reset());
                     YAMS_TRY(statusStmt.clearBindings());
                     for (std::size_t i = 0; i < chunkSize; ++i) {
@@ -3255,8 +3254,11 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
 
     for (std::size_t offset = 0; offset < filtered.size(); offset += kTermsPerChunk) {
         const std::size_t end = std::min(filtered.size(), offset + kTermsPerChunk);
-        std::vector<std::pair<std::string, int64_t>> chunk(filtered.begin() + offset,
-                                                           filtered.begin() + end);
+        std::vector<std::pair<std::string, int64_t>> chunk;
+        chunk.reserve(end - offset);
+        for (std::size_t i = offset; i < end; ++i) {
+            chunk.push_back(std::move(filtered[i]));
+        }
         auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
             sqlite3* rawDb = db.rawHandle();
             if (!rawDb) {
