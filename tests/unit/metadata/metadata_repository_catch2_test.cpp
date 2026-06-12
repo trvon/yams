@@ -3384,6 +3384,40 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     }
 }
 
+TEST_CASE(
+    "batchInsertContentAndIndex: duplicate document entries preserve per-entry repair attempts",
+    "[unit][metadata-repo][batch-content][status-update][duplicates]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo doc;
+    doc.sha256Hash = "counter_hash_duplicate_status";
+    doc.fileName = "duplicate_status.txt";
+    doc.fileSize = 100;
+    doc.mimeType = "text/plain";
+    doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = doc.createdTime;
+    auto insertResult = fix.repository_->insertDocument(doc);
+    REQUIRE((insertResult.has_value()));
+    const auto docId = insertResult.value();
+
+    BatchContentEntry first = makeBatchContentEntry(docId, "First title", "First content");
+    BatchContentEntry second = makeBatchContentEntry(docId, "Second title", "Second content");
+
+    auto batchResult = fix.repository_->batchInsertContentAndIndex({first, second});
+    REQUIRE((batchResult.has_value()));
+
+    auto docResult = fix.repository_->getDocument(docId);
+    REQUIRE((docResult.has_value()));
+    REQUIRE((docResult.value().has_value()));
+    CHECK((docResult.value()->repairStatus == RepairStatus::Completed));
+    CHECK((docResult.value()->repairAttempts == 2));
+
+    auto contentResult = fix.repository_->getContent(docId);
+    REQUIRE((contentResult.has_value()));
+    REQUIRE((contentResult.value().has_value()));
+    CHECK((contentResult.value()->contentText == "Second content"));
+}
+
 TEST_CASE("batchInsertContentAndIndex: skips stale missing document ids",
           "[unit][metadata-repo][batch-content][counters][stale]") {
     MetadataRepositoryFixture fix;

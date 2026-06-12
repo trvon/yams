@@ -689,79 +689,122 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         bool priorStateKnown = false;
         bool priorContentExtracted = false;
     };
+    struct BatchContentPhaseTimings {
+        int64_t prepareInputUs{0};
+        int64_t transactionUs{0};
+        int64_t beginUs{0};
+        int64_t detectFtsUs{0};
+        int64_t prepareStatementsUs{0};
+        int64_t precheckUs{0};
+        int64_t contentUpsertUs{0};
+        int64_t ftsUpsertUs{0};
+        int64_t statusUpdateUs{0};
+        int64_t commitUs{0};
+        std::size_t prechecks{0};
+        std::size_t contentUpserts{0};
+        std::size_t ftsUpserts{0};
+        std::size_t statusUpdates{0};
+        std::size_t staleSkipped{0};
+    };
+
+    const bool traceBatchContent = metadata_trace_enabled();
+#ifdef TRACY_ENABLE
+    constexpr bool kCollectBatchContentTimingForTracy = true;
+#else
+    constexpr bool kCollectBatchContentTimingForTracy = false;
+#endif
+    const bool collectBatchContentTiming = traceBatchContent || kCollectBatchContentTimingForTracy;
+    BatchContentPhaseTimings phaseTimings;
+    auto addElapsedUs = [&](int64_t& target, std::chrono::steady_clock::time_point start) {
+        if (collectBatchContentTiming) {
+            target += std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+        }
+    };
 
     constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
     constexpr std::size_t kMaxBoostedBytes = kMaxTextBytes;
     std::vector<PreparedBatchContentEntry> preparedEntries;
     preparedEntries.reserve(entries.size());
-    for (const auto& entry : entries) {
-        YAMS_DCHECK(entry.documentId != 0,
-                    "batch content entry should target a persisted document");
+    const auto prepareStart = std::chrono::steady_clock::now();
+    {
+        YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrepare");
+        for (const auto& entry : entries) {
+            YAMS_DCHECK(entry.documentId != 0,
+                        "batch content entry should target a persisted document");
 
-        std::string_view contentView = entry.contentText;
-        if (contentView.size() > kMaxTextBytes) {
-            contentView = contentView.substr(0, kMaxTextBytes);
-        }
-
-        // Sanitize and build the boosted FTS payload before taking the write transaction so
-        // contention is dominated by SQLite work, not per-entry UTF-8 cleanup/string assembly.
-        preparedEntries.emplace_back();
-        auto& prepared = preparedEntries.back();
-        prepared.documentId = entry.documentId;
-        prepared.extractionMethod = entry.extractionMethod;
-        prepared.language = entry.language;
-        prepared.priorStateKnown = entry.priorStateKnown;
-        prepared.priorContentExtracted = entry.priorContentExtracted;
-
-        std::string contentStorage;
-        prepared.sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
-
-        std::string titleStorage;
-        prepared.sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
-
-        prepared.boostedContent.reserve(
-            std::min<std::size_t>(prepared.sanitizedContent.size() + 512, kMaxBoostedBytes));
-        auto append_repeated = [&](std::string_view text, int times) {
-            if (text.empty())
-                return;
-            for (int t = 0; t < times; ++t) {
-                if (prepared.boostedContent.size() >= kMaxBoostedBytes)
-                    break;
-                if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
-                    prepared.boostedContent.push_back(' ');
-                }
-                std::size_t avail = kMaxBoostedBytes - prepared.boostedContent.size();
-                if (avail < text.size() + 1) {
-                    prepared.boostedContent.append(text.substr(0, std::min(text.size(), avail)));
-                    break;
-                }
-                prepared.boostedContent.append(text);
+            std::string_view contentView = entry.contentText;
+            if (contentView.size() > kMaxTextBytes) {
+                contentView = contentView.substr(0, kMaxTextBytes);
             }
-        };
 
-        append_repeated(prepared.sanitizedTitle, 3);
-        if (!entry.abstract.empty()) {
-            std::string absStorage;
-            auto sanitizedAbstract = common::ensureValidUtf8(entry.abstract, absStorage);
-            append_repeated(sanitizedAbstract, 2);
+            // Sanitize and build the boosted FTS payload before taking the write transaction so
+            // contention is dominated by SQLite work, not per-entry UTF-8 cleanup/string assembly.
+            preparedEntries.emplace_back();
+            auto& prepared = preparedEntries.back();
+            prepared.documentId = entry.documentId;
+            prepared.extractionMethod = entry.extractionMethod;
+            prepared.language = entry.language;
+            prepared.priorStateKnown = entry.priorStateKnown;
+            prepared.priorContentExtracted = entry.priorContentExtracted;
+
+            std::string contentStorage;
+            prepared.sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
+
+            std::string titleStorage;
+            prepared.sanitizedTitle = common::ensureValidUtf8(entry.title, titleStorage);
+
+            prepared.boostedContent.reserve(
+                std::min<std::size_t>(prepared.sanitizedContent.size() + 512, kMaxBoostedBytes));
+            auto append_repeated = [&](std::string_view text, int times) {
+                if (text.empty())
+                    return;
+                for (int t = 0; t < times; ++t) {
+                    if (prepared.boostedContent.size() >= kMaxBoostedBytes)
+                        break;
+                    if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
+                        prepared.boostedContent.push_back(' ');
+                    }
+                    std::size_t avail = kMaxBoostedBytes - prepared.boostedContent.size();
+                    if (avail < text.size() + 1) {
+                        prepared.boostedContent.append(
+                            text.substr(0, std::min(text.size(), avail)));
+                        break;
+                    }
+                    prepared.boostedContent.append(text);
+                }
+            };
+
+            append_repeated(prepared.sanitizedTitle, 3);
+            if (!entry.abstract.empty()) {
+                std::string absStorage;
+                auto sanitizedAbstract = common::ensureValidUtf8(entry.abstract, absStorage);
+                append_repeated(sanitizedAbstract, 2);
+            }
+            if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
+                prepared.boostedContent.push_back(' ');
+            }
+            const std::size_t bodySpace = kMaxBoostedBytes > prepared.boostedContent.size()
+                                              ? kMaxBoostedBytes - prepared.boostedContent.size()
+                                              : 0;
+            prepared.boostedContent.append(prepared.sanitizedContent.substr(
+                0, std::min(bodySpace, prepared.sanitizedContent.size())));
         }
-        if (!prepared.boostedContent.empty() && prepared.boostedContent.back() != ' ') {
-            prepared.boostedContent.push_back(' ');
-        }
-        const std::size_t bodySpace = kMaxBoostedBytes > prepared.boostedContent.size()
-                                          ? kMaxBoostedBytes - prepared.boostedContent.size()
-                                          : 0;
-        prepared.boostedContent.append(prepared.sanitizedContent.substr(
-            0, std::min(bodySpace, prepared.sanitizedContent.size())));
     }
+    addElapsedUs(phaseTimings.prepareInputUs, prepareStart);
 
     auto result = executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
+        YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentTransaction");
+        const auto transactionStart = std::chrono::steady_clock::now();
         // Track counter deltas per attempt. executeQueryOnPool may retry the lambda
         // after lock/constraint races; deltas from failed attempts must not leak into
         // the final cache update.
         BatchContentDelta delta;
         delta.indexedDocIds.reserve(preparedEntries.size());
+        const auto beginStart = std::chrono::steady_clock::now();
         YAMS_TRY(beginTransaction(db));
+        addElapsedUs(phaseTimings.beginUs, beginStart);
         bool committed = false;
         auto rollback = scope_exit([&] {
             if (!committed) {
@@ -770,9 +813,12 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         });
 
         // Check if FTS5 is available once
+        const auto ftsDetectStart = std::chrono::steady_clock::now();
         YAMS_TRY_UNWRAP(hasFts5, db.hasFTS5());
+        addElapsedUs(phaseTimings.detectFtsUs, ftsDetectStart);
 
         // Prepare cached statements for reuse
+        const auto prepareStatementsStart = std::chrono::steady_clock::now();
         YAMS_TRY_UNWRAP(contentStmtResult, db.prepareCached(R"(
                 INSERT INTO document_content (
                     document_id, content_text, content_length,
@@ -809,19 +855,17 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             )"));
         auto& checkStmt = *checkStmtResult;
 
-        // Combined UPDATE: sets all extraction fields in a single statement
-        // (replaces 3 separate conditional UPDATEs per document).
-        YAMS_TRY_UNWRAP(combinedStmtResult, db.prepareCached(R"(
-                UPDATE documents
-                SET content_extracted = 1,
-                    extraction_status = 'Success',
-                    extraction_error = NULL,
-                    repair_status = 'completed',
-                    repair_attempted_at = unixepoch(),
-                    repair_attempts = repair_attempts + 1
-                WHERE id = ?
-            )"));
-        auto& combinedStmt = *combinedStmtResult;
+        addElapsedUs(phaseTimings.prepareStatementsUs, prepareStatementsStart);
+
+        std::vector<int64_t> statusUpdateIds;
+        statusUpdateIds.reserve(preparedEntries.size());
+        std::unordered_set<int64_t> uniqueStatusIds;
+        std::unordered_set<int64_t> newlyExtractedIds;
+        std::unordered_set<int64_t> newlyIndexedIds;
+        uniqueStatusIds.reserve(preparedEntries.size());
+        newlyExtractedIds.reserve(preparedEntries.size());
+        newlyIndexedIds.reserve(preparedEntries.size());
+        bool hasDuplicateStatusIds = false;
 
         for (const auto& entry : preparedEntries) {
             bool wasExtracted = entry.priorContentExtracted;
@@ -829,6 +873,8 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
             if (!entry.priorStateKnown || hasFts5) {
+                YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheck");
+                const auto phaseStart = std::chrono::steady_clock::now();
                 YAMS_TRY(checkStmt.reset());
                 YAMS_TRY(checkStmt.clearBindings());
                 YAMS_TRY(checkStmt.bind(1, entry.documentId));
@@ -839,6 +885,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 if (checkStep.value()) {
                     wasExtracted = checkStmt.getInt(0) == 1;
                     wasIndexed = checkStmt.getInt(1) == 1;
+                    phaseTimings.prechecks++;
                 } else {
                     // Post-ingest work can race with document deletion or duplicate-content
                     // resolution. Do not create orphan content/FTS rows or advance counters
@@ -846,18 +893,29 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     spdlog::debug("MetadataRepository: skipping stale batch content entry for "
                                   "missing document id {}",
                                   entry.documentId);
+                    phaseTimings.staleSkipped++;
+                    addElapsedUs(phaseTimings.precheckUs, phaseStart);
                     continue;
                 }
+                addElapsedUs(phaseTimings.precheckUs, phaseStart);
             }
 
-            YAMS_TRY(contentStmt.reset());
-            YAMS_TRY(contentStmt.clearBindings());
-            YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
-                                         static_cast<int64_t>(entry.sanitizedContent.length()),
-                                         entry.extractionMethod, entry.language));
-            YAMS_TRY(contentStmt.execute());
+            {
+                YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentUpsertContent");
+                const auto phaseStart = std::chrono::steady_clock::now();
+                YAMS_TRY(contentStmt.reset());
+                YAMS_TRY(contentStmt.clearBindings());
+                YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
+                                             static_cast<int64_t>(entry.sanitizedContent.length()),
+                                             entry.extractionMethod, entry.language));
+                YAMS_TRY(contentStmt.execute());
+                phaseTimings.contentUpserts++;
+                addElapsedUs(phaseTimings.contentUpsertUs, phaseStart);
+            }
 
             if (hasFts5 && ftsStmtOpt) {
+                YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentUpsertFts");
+                const auto phaseStart = std::chrono::steady_clock::now();
                 auto& ftsStmt = **ftsStmtOpt;
                 YAMS_TRY(ftsStmt.reset());
                 YAMS_TRY(ftsStmt.clearBindings());
@@ -865,23 +923,91 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                     ftsStmt.bindAll(entry.documentId, entry.boostedContent, entry.sanitizedTitle));
                 YAMS_TRY(ftsStmt.execute());
                 delta.indexedDocIds.push_back(entry.documentId);
+                phaseTimings.ftsUpserts++;
+                addElapsedUs(phaseTimings.ftsUpsertUs, phaseStart);
             }
 
-            YAMS_TRY(combinedStmt.reset());
-            YAMS_TRY(combinedStmt.clearBindings());
-            YAMS_TRY(combinedStmt.bind(1, entry.documentId));
-            YAMS_TRY(combinedStmt.execute());
+            statusUpdateIds.push_back(entry.documentId);
+            if (!uniqueStatusIds.insert(entry.documentId).second) {
+                hasDuplicateStatusIds = true;
+            }
             if (!wasExtracted) {
-                delta.newlyExtracted++;
+                newlyExtractedIds.insert(entry.documentId);
             }
             if (!wasIndexed) {
-                delta.newlyIndexed++;
+                newlyIndexedIds.insert(entry.documentId);
             }
         }
+        delta.newlyExtracted = newlyExtractedIds.size();
+        delta.newlyIndexed = newlyIndexedIds.size();
 
+        if (!statusUpdateIds.empty()) {
+            YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentStatusUpdate");
+            const auto phaseStart = std::chrono::steady_clock::now();
+            if (hasDuplicateStatusIds) {
+                // Preserve legacy repair_attempts semantics for duplicate entries targeting the
+                // same document in one batch: each entry counts as one repair attempt.
+                YAMS_TRY_UNWRAP(statusStmtResult, db.prepareCached(R"(
+                    UPDATE documents
+                    SET content_extracted = 1,
+                        extraction_status = 'Success',
+                        extraction_error = NULL,
+                        repair_status = 'completed',
+                        repair_attempted_at = unixepoch(),
+                        repair_attempts = repair_attempts + 1
+                    WHERE id = ?
+                )"));
+                auto& statusStmt = *statusStmtResult;
+                for (const auto documentId : statusUpdateIds) {
+                    YAMS_TRY(statusStmt.reset());
+                    YAMS_TRY(statusStmt.clearBindings());
+                    YAMS_TRY(statusStmt.bind(1, documentId));
+                    YAMS_TRY(statusStmt.execute());
+                }
+            } else {
+                constexpr std::size_t kMaxStatusIdsPerUpdate = 400;
+                for (std::size_t offset = 0; offset < statusUpdateIds.size();
+                     offset += kMaxStatusIdsPerUpdate) {
+                    const auto chunkSize =
+                        std::min(kMaxStatusIdsPerUpdate, statusUpdateIds.size() - offset);
+                    std::string placeholders;
+                    placeholders.reserve(chunkSize * 2);
+                    for (std::size_t i = 0; i < chunkSize; ++i) {
+                        if (i > 0) {
+                            placeholders += ',';
+                        }
+                        placeholders += '?';
+                    }
+                    std::string sql;
+                    sql.reserve(placeholders.size() + 256);
+                    sql += "UPDATE documents SET content_extracted = 1, ";
+                    sql += "extraction_status = 'Success', extraction_error = NULL, ";
+                    sql += "repair_status = 'completed', repair_attempted_at = unixepoch(), ";
+                    sql += "repair_attempts = repair_attempts + 1 WHERE id IN (";
+                    sql += placeholders;
+                    sql += ')';
+
+                    YAMS_TRY_UNWRAP(statusStmtResult, db.prepareCached(sql));
+                    auto& statusStmt = *statusStmtResult;
+                    YAMS_TRY(statusStmt.reset());
+                    YAMS_TRY(statusStmt.clearBindings());
+                    for (std::size_t i = 0; i < chunkSize; ++i) {
+                        YAMS_TRY(
+                            statusStmt.bind(static_cast<int>(i + 1), statusUpdateIds[offset + i]));
+                    }
+                    YAMS_TRY(statusStmt.execute());
+                }
+            }
+            phaseTimings.statusUpdates += statusUpdateIds.size();
+            addElapsedUs(phaseTimings.statusUpdateUs, phaseStart);
+        }
+
+        const auto commitStart = std::chrono::steady_clock::now();
         YAMS_TRY(commitOrRollback(db));
+        addElapsedUs(phaseTimings.commitUs, commitStart);
         committed = true;
         rollback.dismiss();
+        addElapsedUs(phaseTimings.transactionUs, transactionStart);
 
         return delta;
     });
@@ -905,6 +1031,26 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                   static_cast<int64_t>(delta.newlyExtracted));
         YAMS_PLOT("metadata_repo::batch_content_newly_indexed",
                   static_cast<int64_t>(delta.newlyIndexed));
+        YAMS_PLOT("metadata_repo::batch_content_prepare_us", phaseTimings.prepareInputUs);
+        YAMS_PLOT("metadata_repo::batch_content_transaction_us", phaseTimings.transactionUs);
+        YAMS_PLOT("metadata_repo::batch_content_precheck_us", phaseTimings.precheckUs);
+        YAMS_PLOT("metadata_repo::batch_content_content_upsert_us", phaseTimings.contentUpsertUs);
+        YAMS_PLOT("metadata_repo::batch_content_fts_upsert_us", phaseTimings.ftsUpsertUs);
+        YAMS_PLOT("metadata_repo::batch_content_status_update_us", phaseTimings.statusUpdateUs);
+        if (traceBatchContent) {
+            spdlog::info("MetadataRepository::batchInsertContentAndIndex phases entries={} "
+                         "prepare_us={} transaction_us={} begin_us={} fts_detect_us={} "
+                         "stmt_prepare_us={} precheck_us={} content_upsert_us={} "
+                         "fts_upsert_us={} status_update_us={} commit_us={} prechecks={} "
+                         "content_upserts={} fts_upserts={} status_updates={} stale_skipped={}",
+                         entries.size(), phaseTimings.prepareInputUs, phaseTimings.transactionUs,
+                         phaseTimings.beginUs, phaseTimings.detectFtsUs,
+                         phaseTimings.prepareStatementsUs, phaseTimings.precheckUs,
+                         phaseTimings.contentUpsertUs, phaseTimings.ftsUpsertUs,
+                         phaseTimings.statusUpdateUs, phaseTimings.commitUs, phaseTimings.prechecks,
+                         phaseTimings.contentUpserts, phaseTimings.ftsUpserts,
+                         phaseTimings.statusUpdates, phaseTimings.staleSkipped);
+        }
 
         const auto cachedIndexed = cachedIndexedCount_.load(std::memory_order_relaxed);
         const auto cachedDocuments = cachedDocumentCount_.load(std::memory_order_relaxed);
