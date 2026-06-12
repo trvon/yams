@@ -2,23 +2,32 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <source_location>
 #include <string_view>
-
-#if defined(__has_include)
-#if __has_include(<stacktrace>)
-#include <stacktrace>
-#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
-#define YAMS_CORE_HAS_STACKTRACE 1
-#endif
-#endif
-#endif
 
 #ifndef YAMS_CORE_HAS_STACKTRACE
 #define YAMS_CORE_HAS_STACKTRACE 0
 #endif
 
+#if YAMS_CORE_HAS_STACKTRACE
+#include <stacktrace>
+#endif
+
 namespace yams::core::detail {
+
+struct SourceLocation {
+    const char* fileName{"(unknown)"};
+    unsigned lineNumber{0};
+    const char* functionName{"(unknown)"};
+
+    [[nodiscard]] static constexpr SourceLocation current(
+        const char* file = "(unknown)", unsigned line = 0,
+        const char* function = "(unknown)") noexcept {
+        return SourceLocation{file, line, function};
+    }
+};
+
+#define YAMS_SOURCE_LOCATION_CURRENT()                                                            \
+    ::yams::core::detail::SourceLocation::current(__FILE__, __LINE__, __func__)
 
 enum class AssertionKind {
     Assert,
@@ -74,12 +83,12 @@ inline void printStacktrace() noexcept {
 #endif
 }
 
-[[noreturn]] inline void
-reportAssertionFailure(AssertionKind kind, const char* expression, std::string_view message,
-                       std::source_location location = std::source_location::current()) noexcept {
+[[noreturn]] inline void reportAssertionFailure(
+    AssertionKind kind, const char* expression, std::string_view message,
+    SourceLocation location = SourceLocation::current()) noexcept {
     std::fprintf(stderr, "[YAMS] %s failed\n", assertionKindName(kind));
-    std::fprintf(stderr, "  file: %s:%u\n", location.file_name(), location.line());
-    std::fprintf(stderr, "  function: %s\n", location.function_name());
+    std::fprintf(stderr, "  file: %s:%u\n", location.fileName, location.lineNumber);
+    std::fprintf(stderr, "  function: %s\n", location.functionName);
     if (expression != nullptr && expression[0] != '\0') {
         std::fprintf(stderr, "  expression: %s\n", expression);
     }
@@ -98,7 +107,7 @@ reportAssertionFailure(AssertionKind kind, const char* expression, std::string_v
         if (!(condition)) [[unlikely]] {                                                           \
             ::yams::core::detail::reportAssertionFailure(                                          \
                 ::yams::core::detail::AssertionKind::Assert, #condition, (message),                \
-                std::source_location::current());                                                  \
+                YAMS_SOURCE_LOCATION_CURRENT());                                                   \
         }                                                                                          \
     } while (false)
 
@@ -107,7 +116,7 @@ reportAssertionFailure(AssertionKind kind, const char* expression, std::string_v
         if (!(condition)) [[unlikely]] {                                                           \
             ::yams::core::detail::reportAssertionFailure(                                          \
                 ::yams::core::detail::AssertionKind::Precondition, #condition, (message),          \
-                std::source_location::current());                                                  \
+                YAMS_SOURCE_LOCATION_CURRENT());                                                   \
         }                                                                                          \
     } while (false)
 
@@ -116,7 +125,7 @@ reportAssertionFailure(AssertionKind kind, const char* expression, std::string_v
         if (!(condition)) [[unlikely]] {                                                           \
             ::yams::core::detail::reportAssertionFailure(                                          \
                 ::yams::core::detail::AssertionKind::Postcondition, #condition, (message),         \
-                std::source_location::current());                                                  \
+                YAMS_SOURCE_LOCATION_CURRENT());                                                   \
         }                                                                                          \
     } while (false)
 
@@ -128,7 +137,7 @@ reportAssertionFailure(AssertionKind kind, const char* expression, std::string_v
         if (!(condition)) [[unlikely]] {                                                           \
             ::yams::core::detail::reportAssertionFailure(                                          \
                 ::yams::core::detail::AssertionKind::DebugCheck, #condition, (message),            \
-                std::source_location::current());                                                  \
+                YAMS_SOURCE_LOCATION_CURRENT());                                                   \
         }                                                                                          \
     } while (false)
 #else
@@ -139,5 +148,5 @@ reportAssertionFailure(AssertionKind kind, const char* expression, std::string_v
     do {                                                                                           \
         ::yams::core::detail::reportAssertionFailure(                                              \
             ::yams::core::detail::AssertionKind::Unreachable, nullptr, (message),                  \
-            std::source_location::current());                                                      \
+            YAMS_SOURCE_LOCATION_CURRENT());                                                       \
     } while (false)
