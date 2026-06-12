@@ -72,6 +72,7 @@ TEST_CASE("WriteCoordinator: shutdown drains queued batches and rejects new enqu
     config.maxBatchDelayMs = std::chrono::milliseconds{1};
     config.channelCapacity = 8;
     WriteCoordinator coordinator(io, {}, {}, config);
+    CHECK_FALSE(coordinator.isShuttingDown());
 
     coordinator.enqueue(makeTermBatch("alpha"));
     coordinator.enqueue(makeTermBatch("beta"));
@@ -87,6 +88,7 @@ TEST_CASE("WriteCoordinator: shutdown drains queued batches and rejects new enqu
     }
 
     CHECK((coordinator.queuedBatches() == 0));
+    CHECK(coordinator.isShuttingDown());
     auto stats = coordinator.getStats();
     CHECK((stats.batchesEnqueued == 2));
     CHECK((stats.batchesCommitted == 2));

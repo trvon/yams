@@ -485,7 +485,7 @@ void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
         } else if (args[i] == "--remove-tags" && i + 1 < args.size()) {
             remove_tags_.push_back(args[++i]);
         } else if (args[i] == "--key" && i + 1 < args.size()) {
-            if (i + 2 < args.size() && args[i + 2] == "--value") {
+            if (i + 3 < args.size() && args[i + 2] == "--value") {
                 metadata_.push_back(args[i + 1] + "=" + args[i + 3]);
                 i += 3;
             }

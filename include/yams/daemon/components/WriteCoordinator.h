@@ -272,6 +272,9 @@ public:
 
     void start();
     void shutdown();
+    [[nodiscard]] bool isShuttingDown() const noexcept {
+        return stop_.load(std::memory_order_acquire);
+    }
 
     std::size_t queuedBatches() const;
     std::size_t inFlight() const { return inFlight_.load(); }

@@ -1,3 +1,4 @@
+#include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <string_view>
 #include <tuple>

@@ -152,6 +152,23 @@ TEST_CASE("UpdateCommand - parseArguments captures key and value pairs", "[cli][
     CHECK((metadata.value()->asString() == "notes"));
 }
 
+TEST_CASE("UpdateCommand - parseArguments ignores missing value after key",
+          "[cli][update][catch2]") {
+    UpdateCommandFixture fixture;
+    fixture.insertTestDocument("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                               "missing-value.txt");
+
+    UpdateCommand command(fixture.repo, nullptr);
+    command.parseArguments({"--hash",
+                            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                            "--key", "category", "--value"});
+
+    CaptureStdout capture;
+    const auto result = command.execute();
+    REQUIRE(result.has_value());
+    CHECK((capture.str().find("Metadata updated: 0") != std::string::npos));
+}
+
 TEST_CASE("UpdateCommand - local path batches multiple metadata and tag updates",
           "[cli][update][catch2]") {
     UpdateCommandFixture fixture;
