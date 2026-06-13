@@ -434,3 +434,134 @@ TEST_CASE("GraphContextService explore relationship budget is not capped by symb
     CHECK((response.relationships[1].targetLabel == "right"));
     CHECK_FALSE(response.truncated);
 }
+
+TEST_CASE("GraphContextService lookupSymbol disambiguates by file", "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto pathA = fixture.writeSource("src/a.cpp", {"int parseToken() { return 1; }"});
+    auto pathB = fixture.writeSource("src/b.cpp", {"int parseToken() { return 2; }"});
+    auto symA = fixture.symbol(pathA, "parseToken", "a::parseToken", 1, 1);
+    auto symB = fixture.symbol(pathB, "parseToken", "b::parseToken", 1, 1);
+    fixture.upsertSymbols({symA, symB});
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphSymbolLookupRequest ambiguousReq;
+    ambiguousReq.symbol = "parseToken";
+    auto ambiguous = service->lookupSymbol(ambiguousReq);
+    REQUIRE((ambiguous.has_value()));
+    CHECK((ambiguous.value().matches.size() == 2));
+    CHECK(ambiguous.value().ambiguous);
+
+    GraphSymbolLookupRequest scopedReq;
+    scopedReq.symbol = "parseToken";
+    scopedReq.file = pathA.string();
+    auto scoped = service->lookupSymbol(scopedReq);
+    REQUIRE((scoped.has_value()));
+    REQUIRE((scoped.value().matches.size() == 1));
+    CHECK((scoped.value().matches.front().filePath == pathA.string()));
+    CHECK_FALSE(scoped.value().ambiguous);
+}
+
+TEST_CASE("GraphContextService impact finds reverse dependents", "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return callee(); }"});
+    auto calleePath = fixture.writeSource("src/callee.cpp", {"int callee() { return 1; }"});
+    auto callerSym = fixture.symbol(callerPath, "caller", "demo::caller", 1, 1);
+    auto calleeSym = fixture.symbol(calleePath, "callee", "demo::callee", 1, 1);
+    fixture.upsertSymbols({callerSym, calleeSym});
+    const auto callerId = fixture.upsertNodeFor(callerSym);
+    const auto calleeId = fixture.upsertNodeFor(calleeSym);
+
+    KGEdge edge;
+    edge.srcNodeId = callerId;
+    edge.dstNodeId = calleeId;
+    edge.relation = "calls";
+    edge.weight = 0.9F;
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "callee";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+    CHECK_FALSE(result.value().relationships.empty());
+}
+
+TEST_CASE("GraphContextService trace finds a path across a call chain",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto aPath = fixture.writeSource("src/alpha.cpp", {"int alpha() { return beta(); }"});
+    auto bPath = fixture.writeSource("src/beta.cpp", {"int beta() { return gamma(); }"});
+    auto cPath = fixture.writeSource("src/gamma.cpp", {"int gamma() { return 1; }"});
+    auto aSym = fixture.symbol(aPath, "alpha", "demo::alpha", 1, 1);
+    auto bSym = fixture.symbol(bPath, "beta", "demo::beta", 1, 1);
+    auto cSym = fixture.symbol(cPath, "gamma", "demo::gamma", 1, 1);
+    fixture.upsertSymbols({aSym, bSym, cSym});
+    const auto aId = fixture.upsertNodeFor(aSym);
+    const auto bId = fixture.upsertNodeFor(bSym);
+    const auto cId = fixture.upsertNodeFor(cSym);
+
+    KGEdge ab;
+    ab.srcNodeId = aId;
+    ab.dstNodeId = bId;
+    ab.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(ab).has_value()));
+    KGEdge bc;
+    bc.srcNodeId = bId;
+    bc.dstNodeId = cId;
+    bc.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(bc).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphTraceRequest req;
+    req.from = "alpha";
+    req.to = "gamma";
+    auto result = service->trace(req);
+    REQUIRE((result.has_value()));
+    CHECK(result.value().found);
+    REQUIRE((result.value().path.size() == 2));
+
+    GraphTraceRequest missingReq;
+    missingReq.from = "gamma";
+    missingReq.to = "alpha";
+    missingReq.maxDepth = 1;
+    auto missing = service->trace(missingReq);
+    REQUIRE((missing.has_value()));
+    CHECK_FALSE(missing.value().found);
+}
+
+TEST_CASE("GraphContextService affectedTests maps changed files to tests",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto srcPath = fixture.writeSource("src/widget.cpp", {"int widget() { return 1; }"});
+    auto testPath =
+        fixture.writeSource("tests/widget_test.cpp", {"void t() { widget(); }"});
+    auto srcSym = fixture.symbol(srcPath, "widget", "demo::widget", 1, 1);
+    auto testSym = fixture.symbol(testPath, "t", "demo::t", 1, 1);
+    fixture.upsertSymbols({srcSym, testSym});
+    const auto srcId = fixture.upsertNodeFor(srcSym);
+    const auto testId = fixture.upsertNodeFor(testSym);
+
+    KGEdge edge;
+    edge.srcNodeId = testId;
+    edge.dstNodeId = srcId;
+    edge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphAffectedTestsRequest req;
+    req.changedFiles = {srcPath.string()};
+    auto result = service->affectedTests(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedTests.size() == 1));
+    CHECK((result.value().affectedTests.front() == testPath.string()));
+}
