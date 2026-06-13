@@ -2950,6 +2950,342 @@ template <> struct ProtoBinding<GraphExploreResponse> {
     }
 };
 
+// Shared helpers for the graph navigation bindings (reuse GraphExplore sub-messages).
+static void setGraphSymbolMsg(pb::GraphExploreSymbol* o, const GraphExploreSymbol& r) {
+    o->set_node_key(r.nodeKey);
+    o->set_label(r.label);
+    o->set_qualified_name(r.qualifiedName);
+    o->set_kind(r.kind);
+    o->set_file_path(r.filePath);
+    o->set_has_start_line(r.startLine.has_value());
+    if (r.startLine)
+        o->set_start_line(*r.startLine);
+    o->set_has_end_line(r.endLine.has_value());
+    if (r.endLine)
+        o->set_end_line(*r.endLine);
+    o->set_score(r.score);
+    o->set_exact_match(r.exactMatch);
+    o->set_generated_or_cache(r.generatedOrCache);
+    o->set_test_file(r.testFile);
+}
+
+static GraphExploreSymbol getGraphSymbolMsg(const pb::GraphExploreSymbol& i) {
+    GraphExploreSymbol r{};
+    r.nodeKey = i.node_key();
+    r.label = i.label();
+    r.qualifiedName = i.qualified_name();
+    r.kind = i.kind();
+    r.filePath = i.file_path();
+    if (i.has_start_line())
+        r.startLine = i.start_line();
+    if (i.has_end_line())
+        r.endLine = i.end_line();
+    r.score = i.score();
+    r.exactMatch = i.exact_match();
+    r.generatedOrCache = i.generated_or_cache();
+    r.testFile = i.test_file();
+    return r;
+}
+
+static void setGraphSnippetMsg(pb::GraphExploreSnippet* o, const GraphExploreSnippet& r) {
+    o->set_file_path(r.filePath);
+    o->set_language(r.language);
+    o->set_mode(r.mode);
+    o->set_has_start_line(r.startLine.has_value());
+    if (r.startLine)
+        o->set_start_line(*r.startLine);
+    o->set_has_end_line(r.endLine.has_value());
+    if (r.endLine)
+        o->set_end_line(*r.endLine);
+    o->set_heading(r.heading);
+    o->set_content(r.content);
+    for (const auto& symbol : r.symbols) {
+        setGraphSymbolMsg(o->add_symbols(), symbol);
+    }
+    o->set_truncated(r.truncated);
+}
+
+static GraphExploreSnippet getGraphSnippetMsg(const pb::GraphExploreSnippet& i) {
+    GraphExploreSnippet r{};
+    r.filePath = i.file_path();
+    r.language = i.language();
+    r.mode = i.mode();
+    if (i.has_start_line())
+        r.startLine = i.start_line();
+    if (i.has_end_line())
+        r.endLine = i.end_line();
+    r.heading = i.heading();
+    r.content = i.content();
+    reserve_from_proto_size(r.symbols, i.symbols_size());
+    for (const auto& symbol : i.symbols()) {
+        r.symbols.push_back(getGraphSymbolMsg(symbol));
+    }
+    r.truncated = i.truncated();
+    return r;
+}
+
+static void setGraphRelationMsg(pb::GraphExploreRelation* o, const GraphExploreRelation& r) {
+    o->set_relation(r.relation);
+    o->set_source_node_key(r.sourceNodeKey);
+    o->set_source_label(r.sourceLabel);
+    o->set_target_node_key(r.targetNodeKey);
+    o->set_target_label(r.targetLabel);
+    o->set_weight(r.weight);
+    o->set_confidence(r.confidence);
+    o->set_provenance(r.provenance);
+}
+
+static GraphExploreRelation getGraphRelationMsg(const pb::GraphExploreRelation& i) {
+    GraphExploreRelation r{};
+    r.relation = i.relation();
+    r.sourceNodeKey = i.source_node_key();
+    r.sourceLabel = i.source_label();
+    r.targetNodeKey = i.target_node_key();
+    r.targetLabel = i.target_label();
+    r.weight = i.weight();
+    r.confidence = i.confidence();
+    r.provenance = i.provenance();
+    return r;
+}
+
+template <> struct ProtoBinding<GraphSymbolLookupRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphSymbolLookupRequest;
+    static void set(Envelope& env, const GraphSymbolLookupRequest& r) {
+        auto* o = env.mutable_graph_symbol_lookup_request();
+        o->set_symbol(r.symbol);
+        o->set_has_file(r.hasFile);
+        o->set_file(r.file);
+        o->set_has_line(r.hasLine);
+        o->set_line(r.line);
+        o->set_max_files(r.maxFiles);
+        o->set_max_symbols(r.maxSymbols);
+        o->set_max_total_chars(r.maxTotalChars);
+        o->set_max_chars_per_file(r.maxCharsPerFile);
+        o->set_max_snippet_lines(r.maxSnippetLines);
+        o->set_include_line_numbers(r.includeLineNumbers);
+        o->set_include_code(r.includeCode);
+    }
+    static GraphSymbolLookupRequest get(const Envelope& env) {
+        const auto& i = env.graph_symbol_lookup_request();
+        GraphSymbolLookupRequest r{};
+        r.symbol = i.symbol();
+        r.hasFile = i.has_file();
+        r.file = i.file();
+        r.hasLine = i.has_line();
+        r.line = i.line();
+        r.maxFiles = i.max_files();
+        r.maxSymbols = i.max_symbols();
+        r.maxTotalChars = i.max_total_chars();
+        r.maxCharsPerFile = i.max_chars_per_file();
+        r.maxSnippetLines = i.max_snippet_lines();
+        r.includeLineNumbers = i.include_line_numbers();
+        r.includeCode = i.include_code();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphSymbolLookupResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphSymbolLookupResponse;
+    static void set(Envelope& env, const GraphSymbolLookupResponse& r) {
+        auto* o = env.mutable_graph_symbol_lookup_response();
+        o->set_symbol(r.symbol);
+        for (const auto& match : r.matches) {
+            setGraphSymbolMsg(o->add_matches(), match);
+        }
+        for (const auto& snippet : r.snippets) {
+            setGraphSnippetMsg(o->add_snippets(), snippet);
+        }
+        for (const auto& relation : r.trail) {
+            setGraphRelationMsg(o->add_trail(), relation);
+        }
+        set_string_list(r.warnings, o->mutable_warnings());
+        o->set_ambiguous(r.ambiguous);
+        o->set_truncated(r.truncated);
+    }
+    static GraphSymbolLookupResponse get(const Envelope& env) {
+        const auto& i = env.graph_symbol_lookup_response();
+        GraphSymbolLookupResponse r{};
+        r.symbol = i.symbol();
+        reserve_from_proto_size(r.matches, i.matches_size());
+        for (const auto& match : i.matches()) {
+            r.matches.push_back(getGraphSymbolMsg(match));
+        }
+        reserve_from_proto_size(r.snippets, i.snippets_size());
+        for (const auto& snippet : i.snippets()) {
+            r.snippets.push_back(getGraphSnippetMsg(snippet));
+        }
+        reserve_from_proto_size(r.trail, i.trail_size());
+        for (const auto& relation : i.trail()) {
+            r.trail.push_back(getGraphRelationMsg(relation));
+        }
+        r.warnings = get_string_list(i.warnings());
+        r.ambiguous = i.ambiguous();
+        r.truncated = i.truncated();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphTraceRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphTraceRequest;
+    static void set(Envelope& env, const GraphTraceRequest& r) {
+        auto* o = env.mutable_graph_trace_request();
+        o->set_from(r.from);
+        o->set_to(r.to);
+        o->set_max_depth(r.maxDepth);
+        o->set_max_files(r.maxFiles);
+        o->set_max_symbols(r.maxSymbols);
+        o->set_max_total_chars(r.maxTotalChars);
+        o->set_max_chars_per_file(r.maxCharsPerFile);
+        o->set_max_snippet_lines(r.maxSnippetLines);
+        o->set_include_line_numbers(r.includeLineNumbers);
+    }
+    static GraphTraceRequest get(const Envelope& env) {
+        const auto& i = env.graph_trace_request();
+        GraphTraceRequest r{};
+        r.from = i.from();
+        r.to = i.to();
+        r.maxDepth = i.max_depth();
+        r.maxFiles = i.max_files();
+        r.maxSymbols = i.max_symbols();
+        r.maxTotalChars = i.max_total_chars();
+        r.maxCharsPerFile = i.max_chars_per_file();
+        r.maxSnippetLines = i.max_snippet_lines();
+        r.includeLineNumbers = i.include_line_numbers();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphTraceResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphTraceResponse;
+    static void set(Envelope& env, const GraphTraceResponse& r) {
+        auto* o = env.mutable_graph_trace_response();
+        o->set_from(r.from);
+        o->set_to(r.to);
+        for (const auto& relation : r.path) {
+            setGraphRelationMsg(o->add_path(), relation);
+        }
+        for (const auto& snippet : r.snippets) {
+            setGraphSnippetMsg(o->add_snippets(), snippet);
+        }
+        set_string_list(r.warnings, o->mutable_warnings());
+        o->set_found(r.found);
+        o->set_truncated(r.truncated);
+    }
+    static GraphTraceResponse get(const Envelope& env) {
+        const auto& i = env.graph_trace_response();
+        GraphTraceResponse r{};
+        r.from = i.from();
+        r.to = i.to();
+        reserve_from_proto_size(r.path, i.path_size());
+        for (const auto& relation : i.path()) {
+            r.path.push_back(getGraphRelationMsg(relation));
+        }
+        reserve_from_proto_size(r.snippets, i.snippets_size());
+        for (const auto& snippet : i.snippets()) {
+            r.snippets.push_back(getGraphSnippetMsg(snippet));
+        }
+        r.warnings = get_string_list(i.warnings());
+        r.found = i.found();
+        r.truncated = i.truncated();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphImpactRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphImpactRequest;
+    static void set(Envelope& env, const GraphImpactRequest& r) {
+        auto* o = env.mutable_graph_impact_request();
+        o->set_symbol(r.symbol);
+        o->set_depth(r.depth);
+        o->set_max_symbols(r.maxSymbols);
+    }
+    static GraphImpactRequest get(const Envelope& env) {
+        const auto& i = env.graph_impact_request();
+        GraphImpactRequest r{};
+        r.symbol = i.symbol();
+        r.depth = i.depth();
+        r.maxSymbols = i.max_symbols();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphImpactResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphImpactResponse;
+    static void set(Envelope& env, const GraphImpactResponse& r) {
+        auto* o = env.mutable_graph_impact_response();
+        o->set_symbol(r.symbol);
+        for (const auto& affected : r.affectedSymbols) {
+            setGraphSymbolMsg(o->add_affected_symbols(), affected);
+        }
+        for (const auto& relation : r.relationships) {
+            setGraphRelationMsg(o->add_relationships(), relation);
+        }
+        set_string_list(r.warnings, o->mutable_warnings());
+        o->set_truncated(r.truncated);
+    }
+    static GraphImpactResponse get(const Envelope& env) {
+        const auto& i = env.graph_impact_response();
+        GraphImpactResponse r{};
+        r.symbol = i.symbol();
+        reserve_from_proto_size(r.affectedSymbols, i.affected_symbols_size());
+        for (const auto& affected : i.affected_symbols()) {
+            r.affectedSymbols.push_back(getGraphSymbolMsg(affected));
+        }
+        reserve_from_proto_size(r.relationships, i.relationships_size());
+        for (const auto& relation : i.relationships()) {
+            r.relationships.push_back(getGraphRelationMsg(relation));
+        }
+        r.warnings = get_string_list(i.warnings());
+        r.truncated = i.truncated();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphAffectedTestsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphAffectedTestsRequest;
+    static void set(Envelope& env, const GraphAffectedTestsRequest& r) {
+        auto* o = env.mutable_graph_affected_tests_request();
+        set_string_list(r.changedFiles, o->mutable_changed_files());
+        o->set_depth(r.depth);
+        o->set_test_path_pattern(r.testPathPattern);
+    }
+    static GraphAffectedTestsRequest get(const Envelope& env) {
+        const auto& i = env.graph_affected_tests_request();
+        GraphAffectedTestsRequest r{};
+        r.changedFiles = get_string_list(i.changed_files());
+        r.depth = i.depth();
+        r.testPathPattern = i.test_path_pattern();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<GraphAffectedTestsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphAffectedTestsResponse;
+    static void set(Envelope& env, const GraphAffectedTestsResponse& r) {
+        auto* o = env.mutable_graph_affected_tests_response();
+        set_string_list(r.changedFiles, o->mutable_changed_files());
+        set_string_list(r.affectedTests, o->mutable_affected_tests());
+        for (const auto& relation : r.relationships) {
+            setGraphRelationMsg(o->add_relationships(), relation);
+        }
+        set_string_list(r.warnings, o->mutable_warnings());
+        o->set_truncated(r.truncated);
+    }
+    static GraphAffectedTestsResponse get(const Envelope& env) {
+        const auto& i = env.graph_affected_tests_response();
+        GraphAffectedTestsResponse r{};
+        r.changedFiles = get_string_list(i.changed_files());
+        r.affectedTests = get_string_list(i.affected_tests());
+        reserve_from_proto_size(r.relationships, i.relationships_size());
+        for (const auto& relation : i.relationships()) {
+            r.relationships.push_back(getGraphRelationMsg(relation));
+        }
+        r.warnings = get_string_list(i.warnings());
+        r.truncated = i.truncated();
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<GraphPathHistoryRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryRequest;
     static void set(Envelope& env, const GraphPathHistoryRequest& r) {
@@ -3925,6 +4261,26 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kGraphSymbolLookupRequest: {
+            auto v = ProtoBinding<GraphSymbolLookupRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kGraphTraceRequest: {
+            auto v = ProtoBinding<GraphTraceRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kGraphImpactRequest: {
+            auto v = ProtoBinding<GraphImpactRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kGraphAffectedTestsRequest: {
+            auto v = ProtoBinding<GraphAffectedTestsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kGraphPathHistoryRequest: {
             auto v = ProtoBinding<GraphPathHistoryRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -4125,6 +4481,26 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kGraphExploreResponse: {
             auto v = ProtoBinding<GraphExploreResponse>::get(env);
             m.payload = Response{std::in_place_type<GraphExploreResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphSymbolLookupResponse: {
+            auto v = ProtoBinding<GraphSymbolLookupResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphSymbolLookupResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphTraceResponse: {
+            auto v = ProtoBinding<GraphTraceResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphTraceResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphImpactResponse: {
+            auto v = ProtoBinding<GraphImpactResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphImpactResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kGraphAffectedTestsResponse: {
+            auto v = ProtoBinding<GraphAffectedTestsResponse>::get(env);
+            m.payload = Response{std::in_place_type<GraphAffectedTestsResponse>, std::move(v)};
             break;
         }
         case Envelope::kGraphPathHistoryResponse: {

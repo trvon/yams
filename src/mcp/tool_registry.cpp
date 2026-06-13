@@ -1551,6 +1551,15 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
 
     req.scopeSnapshot = j.value("scope_snapshot", std::string{});
 
+    // Navigation fields (lookup/impact/trace/affected_tests)
+    req.symbol = j.value("symbol", std::string{});
+    req.file = j.value("file", std::string{});
+    req.line = static_cast<int32_t>(parse_int_tolerant(j, "line", -1));
+    req.fromSymbol = j.value("from", std::string{});
+    req.toSymbol = j.value("to", std::string{});
+    detail::readStringArray(j, "changed_files", req.changedFiles);
+    req.testPattern = j.value("test_pattern", std::string{});
+
     // Ingest fields (only relevant when action == "ingest")
     if (j.contains("nodes") && j["nodes"].is_array()) {
         for (const auto& n : j["nodes"]) {
@@ -1715,6 +1724,14 @@ json MCPGraphResponse::toJson() const {
         j["success"] = success;
         if (!errors.empty())
             j["errors"] = errors;
+    } else if (!navResult.is_null()) {
+        // Navigation results (lookup/impact/trace/affected_tests)
+        for (auto it = navResult.begin(); it != navResult.end(); ++it) {
+            j[it.key()] = it.value();
+        }
+        j["kg_available"] = kgAvailable;
+        if (!warning.empty())
+            j["warning"] = warning;
     } else {
         // Query results
         j["origin"] = origin;

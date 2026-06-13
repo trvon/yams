@@ -3905,6 +3905,142 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return co_await handleKgIngest(req);
     }
 
+    const auto symbolToJson = [](const auto& s) {
+        json sj{{"node_key", s.nodeKey},     {"label", s.label}, {"qualified_name", s.qualifiedName},
+                {"kind", s.kind}, {"file_path", s.filePath}};
+        if (s.startLine.has_value())
+            sj["start_line"] = *s.startLine;
+        if (s.endLine.has_value())
+            sj["end_line"] = *s.endLine;
+        return sj;
+    };
+    const auto relationToJson = [](const auto& r) {
+        return json{{"relation", r.relation},
+                    {"source", r.sourceLabel},
+                    {"source_node_key", r.sourceNodeKey},
+                    {"target", r.targetLabel},
+                    {"target_node_key", r.targetNodeKey}};
+    };
+
+    if (req.action == "lookup") {
+        auto clientRes = requireDaemonClient();
+        if (!clientRes)
+            co_return clientRes.error();
+        yams::daemon::GraphSymbolLookupRequest dreq;
+        dreq.symbol = req.symbol.empty() ? req.name : req.symbol;
+        if (!req.file.empty()) {
+            dreq.hasFile = true;
+            dreq.file = req.file;
+        }
+        if (req.line >= 0) {
+            dreq.hasLine = true;
+            dreq.line = req.line;
+        }
+        auto res = co_await clientRes.value()->call<yams::daemon::GraphSymbolLookupRequest>(dreq);
+        if (!res)
+            co_return res.error();
+        const auto& resp = res.value();
+        MCPGraphResponse out;
+        out.action = "lookup";
+        json nav;
+        nav["symbol"] = resp.symbol;
+        nav["ambiguous"] = resp.ambiguous;
+        nav["truncated"] = resp.truncated;
+        nav["matches"] = json::array();
+        for (const auto& m : resp.matches)
+            nav["matches"].push_back(symbolToJson(m));
+        nav["trail"] = json::array();
+        for (const auto& r : resp.trail)
+            nav["trail"].push_back(relationToJson(r));
+        nav["warnings"] = resp.warnings;
+        out.navResult = std::move(nav);
+        co_return out;
+    }
+
+    if (req.action == "impact") {
+        auto clientRes = requireDaemonClient();
+        if (!clientRes)
+            co_return clientRes.error();
+        yams::daemon::GraphImpactRequest dreq;
+        dreq.symbol = req.symbol.empty() ? req.name : req.symbol;
+        dreq.depth = static_cast<uint64_t>(req.depth);
+        auto res = co_await clientRes.value()->call<yams::daemon::GraphImpactRequest>(dreq);
+        if (!res)
+            co_return res.error();
+        const auto& resp = res.value();
+        MCPGraphResponse out;
+        out.action = "impact";
+        json nav;
+        nav["symbol"] = resp.symbol;
+        nav["truncated"] = resp.truncated;
+        nav["affected_symbols"] = json::array();
+        for (const auto& s : resp.affectedSymbols)
+            nav["affected_symbols"].push_back(symbolToJson(s));
+        nav["relationships"] = json::array();
+        for (const auto& r : resp.relationships)
+            nav["relationships"].push_back(relationToJson(r));
+        nav["warnings"] = resp.warnings;
+        out.navResult = std::move(nav);
+        co_return out;
+    }
+
+    if (req.action == "trace") {
+        auto clientRes = requireDaemonClient();
+        if (!clientRes)
+            co_return clientRes.error();
+        yams::daemon::GraphTraceRequest dreq;
+        dreq.from = req.fromSymbol;
+        dreq.to = req.toSymbol;
+        if (req.depth > 1) {
+            dreq.maxDepth = static_cast<uint64_t>(req.depth);
+        }
+        auto res = co_await clientRes.value()->call<yams::daemon::GraphTraceRequest>(dreq);
+        if (!res)
+            co_return res.error();
+        const auto& resp = res.value();
+        MCPGraphResponse out;
+        out.action = "trace";
+        json nav;
+        nav["from"] = resp.from;
+        nav["to"] = resp.to;
+        nav["found"] = resp.found;
+        nav["truncated"] = resp.truncated;
+        nav["path"] = json::array();
+        for (const auto& r : resp.path)
+            nav["path"].push_back(relationToJson(r));
+        nav["warnings"] = resp.warnings;
+        out.navResult = std::move(nav);
+        co_return out;
+    }
+
+    if (req.action == "affected_tests") {
+        auto clientRes = requireDaemonClient();
+        if (!clientRes)
+            co_return clientRes.error();
+        yams::daemon::GraphAffectedTestsRequest dreq;
+        dreq.changedFiles = req.changedFiles;
+        if (req.depth > 1) {
+            dreq.depth = static_cast<uint64_t>(req.depth);
+        }
+        dreq.testPathPattern = req.testPattern;
+        auto res = co_await clientRes.value()->call<yams::daemon::GraphAffectedTestsRequest>(dreq);
+        if (!res)
+            co_return res.error();
+        const auto& resp = res.value();
+        MCPGraphResponse out;
+        out.action = "affected_tests";
+        json nav;
+        nav["changed_files"] = resp.changedFiles;
+        nav["affected_tests"] = resp.affectedTests;
+        nav["truncated"] = resp.truncated;
+        nav["relationships"] = json::array();
+        for (const auto& r : resp.relationships)
+            nav["relationships"].push_back(relationToJson(r));
+        nav["warnings"] = resp.warnings;
+        out.navResult = std::move(nav);
+        co_return out;
+    }
+
     auto clientRes = requireDaemonClient();
     if (!clientRes)
         co_return clientRes.error();
@@ -4818,10 +4954,34 @@ void MCPServer::initializeToolRegistry() {
                  {"properties",
                   {{"action",
                     {{"type", "string"},
-                     {"description", "Operation: 'query' (default) to traverse/explore the graph, "
-                                     "'ingest' to insert nodes/edges/aliases"},
-                     {"enum", json::array({"query", "ingest"})},
+                     {"description",
+                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
+                      "insert nodes/edges/aliases, 'lookup' to resolve a symbol definition, "
+                      "'impact' for reverse dependents (blast radius), 'trace' for a path between "
+                      "two symbols, 'affected_tests' to map changed files to affected tests"},
+                     {"enum", json::array({"query", "ingest", "lookup", "impact", "trace",
+                                           "affected_tests"})},
                      {"default", "query"}}},
+                   // ── Navigation parameters (lookup/impact/trace/affected_tests) ──
+                   {"symbol",
+                    {{"type", "string"},
+                     {"description", "Target symbol for action=lookup or action=impact"}}},
+                   {"file",
+                    {{"type", "string"},
+                     {"description", "File path substring to disambiguate action=lookup"}}},
+                   {"line",
+                    {{"type", "integer"},
+                     {"description", "Line number to disambiguate action=lookup"}}},
+                   {"from", {{"type", "string"}, {"description", "Source symbol for action=trace"}}},
+                   {"to", {{"type", "string"}, {"description", "Target symbol for action=trace"}}},
+                   {"changed_files",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Changed file paths for action=affected_tests"}}},
+                   {"test_pattern",
+                    {{"type", "string"},
+                     {"description", "Path substring identifying test files for "
+                                     "action=affected_tests"}}},
                    // ── Query parameters ──
                    {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
                    {"name", {{"type", "string"}, {"description", "Document name to query from"}}},

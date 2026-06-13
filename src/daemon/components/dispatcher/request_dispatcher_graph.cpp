@@ -106,6 +106,106 @@ GraphExploreResponse mapGraphExploreResponse(const app::services::GraphExploreRe
     return out;
 }
 
+GraphExploreSnippet mapGraphSnippet(const app::services::GraphContextSnippet& in) {
+    GraphExploreSnippet snippet;
+    snippet.filePath = in.filePath;
+    snippet.language = in.language;
+    snippet.mode = snippetModeToString(in.mode);
+    snippet.startLine = in.startLine;
+    snippet.endLine = in.endLine;
+    snippet.heading = in.heading;
+    snippet.content = in.content;
+    snippet.truncated = in.truncated;
+    snippet.symbols.reserve(in.symbols.size());
+    for (const auto& symbol : in.symbols) {
+        snippet.symbols.push_back(mapGraphExploreSymbol(symbol));
+    }
+    return snippet;
+}
+
+GraphExploreRelation mapGraphRelation(const app::services::GraphContextRelation& in) {
+    GraphExploreRelation out;
+    out.relation = in.relation;
+    out.sourceNodeKey = in.sourceNodeKey;
+    out.sourceLabel = in.sourceLabel;
+    out.targetNodeKey = in.targetNodeKey;
+    out.targetLabel = in.targetLabel;
+    out.weight = in.weight;
+    out.confidence = in.confidence;
+    out.provenance = in.provenance.value_or("");
+    return out;
+}
+
+GraphSymbolLookupResponse
+mapGraphSymbolLookupResponse(const app::services::GraphSymbolLookupResponse& in) {
+    GraphSymbolLookupResponse out;
+    out.symbol = in.symbol;
+    out.ambiguous = in.ambiguous;
+    out.truncated = in.truncated;
+    out.warnings = in.warnings;
+    out.matches.reserve(in.matches.size());
+    for (const auto& match : in.matches) {
+        out.matches.push_back(mapGraphExploreSymbol(match));
+    }
+    out.snippets.reserve(in.snippets.size());
+    for (const auto& snippet : in.snippets) {
+        out.snippets.push_back(mapGraphSnippet(snippet));
+    }
+    out.trail.reserve(in.trail.size());
+    for (const auto& relation : in.trail) {
+        out.trail.push_back(mapGraphRelation(relation));
+    }
+    return out;
+}
+
+GraphTraceResponse mapGraphTraceResponse(const app::services::GraphTraceResponse& in) {
+    GraphTraceResponse out;
+    out.from = in.from;
+    out.to = in.to;
+    out.found = in.found;
+    out.truncated = in.truncated;
+    out.warnings = in.warnings;
+    out.path.reserve(in.path.size());
+    for (const auto& relation : in.path) {
+        out.path.push_back(mapGraphRelation(relation));
+    }
+    out.snippets.reserve(in.snippets.size());
+    for (const auto& snippet : in.snippets) {
+        out.snippets.push_back(mapGraphSnippet(snippet));
+    }
+    return out;
+}
+
+GraphImpactResponse mapGraphImpactResponse(const app::services::GraphImpactResponse& in) {
+    GraphImpactResponse out;
+    out.symbol = in.symbol;
+    out.truncated = in.truncated;
+    out.warnings = in.warnings;
+    out.affectedSymbols.reserve(in.affectedSymbols.size());
+    for (const auto& symbol : in.affectedSymbols) {
+        out.affectedSymbols.push_back(mapGraphExploreSymbol(symbol));
+    }
+    out.relationships.reserve(in.relationships.size());
+    for (const auto& relation : in.relationships) {
+        out.relationships.push_back(mapGraphRelation(relation));
+    }
+    return out;
+}
+
+GraphAffectedTestsResponse
+mapGraphAffectedTestsResponse(const app::services::GraphAffectedTestsResponse& in) {
+    GraphAffectedTestsResponse out;
+    out.changedFiles = in.changedFiles;
+    out.affectedTests = in.affectedTests;
+    out.truncated = in.truncated;
+    out.warnings = in.warnings;
+    out.relationships.reserve(in.relationships.size());
+    for (const auto& relation : in.relationships) {
+        out.relationships.push_back(mapGraphRelation(relation));
+    }
+    return out;
+}
+
 } // namespace
 
 using namespace yams::app::services;
@@ -262,6 +362,148 @@ RequestDispatcher::handleGraphExploreRequest(const GraphExploreRequest& req) {
     spdlog::debug("GraphExplore: returning {} files, {} symbols, truncated={}",
                   response.files.size(), response.entrySymbols.size(), response.truncated);
     co_return response;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphSymbolLookupRequest(const GraphSymbolLookupRequest& req) {
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
+    }
+    auto kgStore = metaRepo->getKnowledgeGraphStore();
+    if (!kgStore) {
+        GraphSymbolLookupResponse resp;
+        resp.symbol = req.symbol;
+        resp.warnings.push_back("Knowledge graph not available");
+        co_return resp;
+    }
+    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph context service");
+    }
+    app::services::GraphSymbolLookupRequest serviceReq;
+    serviceReq.symbol = req.symbol;
+    if (req.hasFile) {
+        serviceReq.file = req.file;
+    }
+    if (req.hasLine) {
+        serviceReq.line = req.line;
+    }
+    serviceReq.budget.maxFiles = static_cast<std::size_t>(req.maxFiles);
+    serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
+    serviceReq.budget.maxTotalChars = static_cast<std::size_t>(req.maxTotalChars);
+    serviceReq.budget.maxCharsPerFile = static_cast<std::size_t>(req.maxCharsPerFile);
+    serviceReq.budget.maxSnippetLines = static_cast<std::size_t>(req.maxSnippetLines);
+    serviceReq.budget.includeLineNumbers = req.includeLineNumbers;
+    serviceReq.includeCode = req.includeCode;
+
+    auto result = graphService->lookupSymbol(serviceReq);
+    if (!result) {
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
+    }
+    co_return mapGraphSymbolLookupResponse(result.value());
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphTraceRequest(const GraphTraceRequest& req) {
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
+    }
+    auto kgStore = metaRepo->getKnowledgeGraphStore();
+    if (!kgStore) {
+        GraphTraceResponse resp;
+        resp.from = req.from;
+        resp.to = req.to;
+        resp.warnings.push_back("Knowledge graph not available");
+        co_return resp;
+    }
+    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph context service");
+    }
+    app::services::GraphTraceRequest serviceReq;
+    serviceReq.from = req.from;
+    serviceReq.to = req.to;
+    serviceReq.maxDepth = static_cast<std::size_t>(req.maxDepth);
+    serviceReq.budget.maxFiles = static_cast<std::size_t>(req.maxFiles);
+    serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
+    serviceReq.budget.maxTotalChars = static_cast<std::size_t>(req.maxTotalChars);
+    serviceReq.budget.maxCharsPerFile = static_cast<std::size_t>(req.maxCharsPerFile);
+    serviceReq.budget.maxSnippetLines = static_cast<std::size_t>(req.maxSnippetLines);
+    serviceReq.budget.includeLineNumbers = req.includeLineNumbers;
+
+    auto result = graphService->trace(serviceReq);
+    if (!result) {
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
+    }
+    co_return mapGraphTraceResponse(result.value());
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
+    }
+    auto kgStore = metaRepo->getKnowledgeGraphStore();
+    if (!kgStore) {
+        GraphImpactResponse resp;
+        resp.symbol = req.symbol;
+        resp.warnings.push_back("Knowledge graph not available");
+        co_return resp;
+    }
+    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph context service");
+    }
+    app::services::GraphImpactRequest serviceReq;
+    serviceReq.symbol = req.symbol;
+    serviceReq.depth = static_cast<std::size_t>(req.depth);
+    serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
+
+    auto result = graphService->impact(serviceReq);
+    if (!result) {
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
+    }
+    co_return mapGraphImpactResponse(result.value());
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req) {
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Metadata repository unavailable");
+    }
+    auto kgStore = metaRepo->getKnowledgeGraphStore();
+    if (!kgStore) {
+        GraphAffectedTestsResponse resp;
+        resp.changedFiles = req.changedFiles;
+        resp.warnings.push_back("Knowledge graph not available");
+        co_return resp;
+    }
+    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
+    if (!graphService) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Failed to create graph context service");
+    }
+    app::services::GraphAffectedTestsRequest serviceReq;
+    serviceReq.changedFiles = req.changedFiles;
+    serviceReq.depth = static_cast<std::size_t>(req.depth);
+    serviceReq.testPathPattern = req.testPathPattern;
+
+    auto result = graphService->affectedTests(serviceReq);
+    if (!result) {
+        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
+    }
+    co_return mapGraphAffectedTestsResponse(result.value());
 }
 
 // PBI-093: Helper for listByType mode - list KG nodes by type without traversal

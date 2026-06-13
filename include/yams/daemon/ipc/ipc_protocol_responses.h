@@ -3673,6 +3673,270 @@ struct GraphExploreResponse {
     }
 };
 
+struct GraphSymbolLookupResponse {
+    std::string symbol;
+    std::vector<GraphExploreSymbol> matches;
+    std::vector<GraphExploreSnippet> snippets;
+    std::vector<GraphExploreRelation> trail;
+    std::vector<std::string> warnings;
+    bool ambiguous{false};
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << symbol << static_cast<uint32_t>(matches.size());
+        for (const auto& match : matches) {
+            match.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(snippets.size());
+        for (const auto& snippet : snippets) {
+            snippet.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(trail.size());
+        for (const auto& relation : trail) {
+            relation.serialize(ser);
+        }
+        ser << warnings << ambiguous << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphSymbolLookupResponse> deserialize(Deserializer& deser) {
+        GraphSymbolLookupResponse response;
+        if (auto r = deser.readString(); r)
+            response.symbol = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.matches.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto match = GraphExploreSymbol::deserialize(deser);
+                if (!match)
+                    return match.error();
+                response.matches.push_back(std::move(match.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.snippets.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto snippet = GraphExploreSnippet::deserialize(deser);
+                if (!snippet)
+                    return snippet.error();
+                response.snippets.push_back(std::move(snippet.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.trail.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto relation = GraphExploreRelation::deserialize(deser);
+                if (!relation)
+                    return relation.error();
+                response.trail.push_back(std::move(relation.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.readStringVector(); r)
+            response.warnings = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.ambiguous = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.truncated = r.value();
+        else
+            return r.error();
+        return response;
+    }
+};
+
+struct GraphTraceResponse {
+    std::string from;
+    std::string to;
+    std::vector<GraphExploreRelation> path;
+    std::vector<GraphExploreSnippet> snippets;
+    std::vector<std::string> warnings;
+    bool found{false};
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << from << to << static_cast<uint32_t>(path.size());
+        for (const auto& relation : path) {
+            relation.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(snippets.size());
+        for (const auto& snippet : snippets) {
+            snippet.serialize(ser);
+        }
+        ser << warnings << found << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphTraceResponse> deserialize(Deserializer& deser) {
+        GraphTraceResponse response;
+        if (auto r = deser.readString(); r)
+            response.from = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            response.to = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.path.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto relation = GraphExploreRelation::deserialize(deser);
+                if (!relation)
+                    return relation.error();
+                response.path.push_back(std::move(relation.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.snippets.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto snippet = GraphExploreSnippet::deserialize(deser);
+                if (!snippet)
+                    return snippet.error();
+                response.snippets.push_back(std::move(snippet.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.readStringVector(); r)
+            response.warnings = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.found = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.truncated = r.value();
+        else
+            return r.error();
+        return response;
+    }
+};
+
+struct GraphImpactResponse {
+    std::string symbol;
+    std::vector<GraphExploreSymbol> affectedSymbols;
+    std::vector<GraphExploreRelation> relationships;
+    std::vector<std::string> warnings;
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << symbol << static_cast<uint32_t>(affectedSymbols.size());
+        for (const auto& affected : affectedSymbols) {
+            affected.serialize(ser);
+        }
+        ser << static_cast<uint32_t>(relationships.size());
+        for (const auto& relation : relationships) {
+            relation.serialize(ser);
+        }
+        ser << warnings << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphImpactResponse> deserialize(Deserializer& deser) {
+        GraphImpactResponse response;
+        if (auto r = deser.readString(); r)
+            response.symbol = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.affectedSymbols.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto affected = GraphExploreSymbol::deserialize(deser);
+                if (!affected)
+                    return affected.error();
+                response.affectedSymbols.push_back(std::move(affected.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.relationships.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto relation = GraphExploreRelation::deserialize(deser);
+                if (!relation)
+                    return relation.error();
+                response.relationships.push_back(std::move(relation.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.readStringVector(); r)
+            response.warnings = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.truncated = r.value();
+        else
+            return r.error();
+        return response;
+    }
+};
+
+struct GraphAffectedTestsResponse {
+    std::vector<std::string> changedFiles;
+    std::vector<std::string> affectedTests;
+    std::vector<GraphExploreRelation> relationships;
+    std::vector<std::string> warnings;
+    bool truncated{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << changedFiles << affectedTests << static_cast<uint32_t>(relationships.size());
+        for (const auto& relation : relationships) {
+            relation.serialize(ser);
+        }
+        ser << warnings << truncated;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphAffectedTestsResponse> deserialize(Deserializer& deser) {
+        GraphAffectedTestsResponse response;
+        if (auto r = deser.readStringVector(); r)
+            response.changedFiles = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readStringVector(); r)
+            response.affectedTests = std::move(r.value());
+        else
+            return r.error();
+        if (auto cnt = deser.template read<uint32_t>(); cnt) {
+            response.relationships.reserve(cnt.value());
+            for (uint32_t i = 0; i < cnt.value(); ++i) {
+                auto relation = GraphExploreRelation::deserialize(deser);
+                if (!relation)
+                    return relation.error();
+                response.relationships.push_back(std::move(relation.value()));
+            }
+        } else
+            return cnt.error();
+        if (auto r = deser.readStringVector(); r)
+            response.warnings = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            response.truncated = r.value();
+        else
+            return r.error();
+        return response;
+    }
+};
+
 struct PathHistoryEntry {
     std::string path;
     std::string snapshotId;
@@ -4632,8 +4896,10 @@ using Response =
                  PluginTrustListResponse, CatResponse, ListSessionsResponse, ListTreeDiffResponse,
                  FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
                  RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse,
-                 GraphExploreResponse, GraphPathHistoryResponse, GraphRepairResponse,
-                 GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse,
+                 GraphExploreResponse, GraphSymbolLookupResponse, GraphTraceResponse,
+                 GraphImpactResponse, GraphAffectedTestsResponse, GraphPathHistoryResponse,
+                 GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
+                 MetadataValueCountsResponse,
                  // Batch response (Track B)
                  BatchResponse,
                  // Streaming events (progress/heartbeats)

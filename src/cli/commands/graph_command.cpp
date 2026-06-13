@@ -69,6 +69,21 @@ public:
         cmd->add_option("--max-files", exploreMaxFiles_, "Maximum files to include for --explore")
             ->default_val(8);
 
+        // Agent-oriented navigation ops (share --depth where relevant)
+        cmd->add_option("--lookup", lookupSymbol_,
+                        "Resolve a symbol definition (go-to-definition)");
+        cmd->add_option("--at-file", lookupAtFile_,
+                        "Disambiguate --lookup by file path substring");
+        cmd->add_option("--impact", impactSymbol_,
+                        "Show reverse dependents (blast radius) of a symbol");
+        cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
+        cmd->add_option("--to", traceTo_, "Target symbol for --trace");
+        cmd->add_option("--affected-tests", affectedTestsFiles_,
+                        "Find tests affected by the given changed file(s)")
+            ->expected(-1);
+        cmd->add_option("--test-pattern", testPathPattern_,
+                        "Path substring identifying test files for --affected-tests");
+
         // Relation filtering for traversal
         cmd->add_option("--relation,-r", relationFilter_,
                         "Filter edges by relation (e.g., calls, contains, imports)");
@@ -118,6 +133,19 @@ public:
 
             if (!exploreQuery_.empty()) {
                 co_return co_await executeGraphExplore();
+            }
+
+            if (!lookupSymbol_.empty()) {
+                co_return co_await executeGraphLookup();
+            }
+            if (!impactSymbol_.empty()) {
+                co_return co_await executeGraphImpact();
+            }
+            if (!traceFrom_.empty()) {
+                co_return co_await executeGraphTrace();
+            }
+            if (!affectedTestsFiles_.empty()) {
+                co_return co_await executeGraphAffectedTests();
             }
 
             // yams-66h: Handle --list-types mode (show available node types)
@@ -1014,6 +1042,343 @@ private:
         co_return Result<void>();
     }
 
+    template <typename Sym> static void appendSymbolJson(nlohmann::json& arr, const Sym& s) {
+        nlohmann::json sj;
+        sj["label"] = s.label;
+        sj["qualifiedName"] = s.qualifiedName;
+        sj["kind"] = s.kind;
+        sj["filePath"] = s.filePath;
+        if (s.startLine.has_value())
+            sj["startLine"] = *s.startLine;
+        if (s.endLine.has_value())
+            sj["endLine"] = *s.endLine;
+        arr.push_back(std::move(sj));
+    }
+
+    template <typename Sym> static void printSymbolLine(const Sym& s) {
+        std::cout << "  " << s.qualifiedName << " [" << s.kind << "] " << s.filePath;
+        if (s.startLine.has_value())
+            std::cout << ":" << *s.startLine;
+        std::cout << "\n";
+    }
+
+    template <typename Resp> void renderLookup(const Resp& resp) const {
+        if (wantsJsonOutput()) {
+            nlohmann::json j;
+            j["symbol"] = resp.symbol;
+            j["ambiguous"] = resp.ambiguous;
+            j["matches"] = nlohmann::json::array();
+            for (const auto& m : resp.matches)
+                appendSymbolJson(j["matches"], m);
+            j["trail"] = nlohmann::json::array();
+            for (const auto& r : resp.trail)
+                j["trail"].push_back({{"relation", r.relation},
+                                      {"source", r.sourceLabel},
+                                      {"target", r.targetLabel}});
+            j["warnings"] = resp.warnings;
+            std::cout << j.dump(2) << "\n";
+            return;
+        }
+        if (resp.matches.empty()) {
+            std::cout << "No symbol matching '" << resp.symbol << "' found\n";
+        } else {
+            if (resp.ambiguous)
+                std::cout << resp.matches.size() << " matches (ambiguous):\n";
+            for (const auto& m : resp.matches)
+                printSymbolLine(m);
+            if (!resp.trail.empty()) {
+                std::cout << "Relationships:\n";
+                for (const auto& r : resp.trail)
+                    std::cout << "  " << r.sourceLabel << " --" << r.relation << "--> "
+                              << r.targetLabel << "\n";
+            }
+        }
+        for (const auto& w : resp.warnings)
+            std::cout << "warning: " << w << "\n";
+    }
+
+    template <typename Resp> void renderImpact(const Resp& resp) const {
+        if (wantsJsonOutput()) {
+            nlohmann::json j;
+            j["symbol"] = resp.symbol;
+            j["truncated"] = resp.truncated;
+            j["affectedSymbols"] = nlohmann::json::array();
+            for (const auto& s : resp.affectedSymbols)
+                appendSymbolJson(j["affectedSymbols"], s);
+            j["warnings"] = resp.warnings;
+            std::cout << j.dump(2) << "\n";
+            return;
+        }
+        std::cout << "Impact of '" << resp.symbol << "': " << resp.affectedSymbols.size()
+                  << " dependent symbol(s)\n";
+        for (const auto& s : resp.affectedSymbols)
+            printSymbolLine(s);
+        if (resp.truncated)
+            std::cout << "  (truncated)\n";
+        for (const auto& w : resp.warnings)
+            std::cout << "warning: " << w << "\n";
+    }
+
+    template <typename Resp> void renderTrace(const Resp& resp) const {
+        if (wantsJsonOutput()) {
+            nlohmann::json j;
+            j["from"] = resp.from;
+            j["to"] = resp.to;
+            j["found"] = resp.found;
+            j["path"] = nlohmann::json::array();
+            for (const auto& r : resp.path)
+                j["path"].push_back({{"relation", r.relation},
+                                     {"source", r.sourceLabel},
+                                     {"target", r.targetLabel}});
+            j["warnings"] = resp.warnings;
+            std::cout << j.dump(2) << "\n";
+            return;
+        }
+        if (!resp.found) {
+            std::cout << "No path found from '" << resp.from << "' to '" << resp.to << "'\n";
+        } else {
+            std::cout << "Path from '" << resp.from << "' to '" << resp.to << "' ("
+                      << resp.path.size() << " hop(s)):\n";
+            for (const auto& r : resp.path)
+                std::cout << "  " << r.sourceLabel << " --" << r.relation << "--> "
+                          << r.targetLabel << "\n";
+        }
+        for (const auto& w : resp.warnings)
+            std::cout << "warning: " << w << "\n";
+    }
+
+    template <typename Resp> void renderAffectedTests(const Resp& resp) const {
+        if (wantsJsonOutput()) {
+            nlohmann::json j;
+            j["changedFiles"] = resp.changedFiles;
+            j["affectedTests"] = resp.affectedTests;
+            j["warnings"] = resp.warnings;
+            std::cout << j.dump(2) << "\n";
+            return;
+        }
+        std::cout << resp.affectedTests.size() << " affected test file(s):\n";
+        for (const auto& t : resp.affectedTests)
+            std::cout << "  " << t << "\n";
+        for (const auto& w : resp.warnings)
+            std::cout << "warning: " << w << "\n";
+    }
+
+    boost::asio::awaitable<Result<void>> executeGraphLookup() {
+        const auto renderLocal = [&]() -> Result<void> {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx == nullptr) {
+                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
+            }
+            app::services::GraphSymbolLookupRequest req;
+            req.symbol = lookupSymbol_;
+            if (!lookupAtFile_.empty()) {
+                req.file = lookupAtFile_;
+            }
+            req.includeCode = verbose_;
+            auto result = service->lookupSymbol(req);
+            if (!result) {
+                return result.error();
+            }
+            renderLookup(result.value());
+            return Result<void>();
+        };
+
+        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            co_return renderLocal();
+        }
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        daemon::GraphSymbolLookupRequest req;
+        req.symbol = lookupSymbol_;
+        if (!lookupAtFile_.empty()) {
+            req.hasFile = true;
+            req.file = lookupAtFile_;
+        }
+        req.includeCode = verbose_;
+        auto result = co_await client.call(req);
+        if (!result) {
+            const auto& err = result.error();
+            const bool daemonCompatibilityFailure =
+                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
+            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
+                co_return err;
+            }
+            co_return renderLocal();
+        }
+        renderLookup(result.value());
+        co_return Result<void>();
+    }
+
+    boost::asio::awaitable<Result<void>> executeGraphImpact() {
+        const auto renderLocal = [&]() -> Result<void> {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx == nullptr) {
+                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
+            }
+            app::services::GraphImpactRequest req;
+            req.symbol = impactSymbol_;
+            req.depth = static_cast<std::size_t>(depth_);
+            auto result = service->impact(req);
+            if (!result) {
+                return result.error();
+            }
+            renderImpact(result.value());
+            return Result<void>();
+        };
+
+        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            co_return renderLocal();
+        }
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        daemon::GraphImpactRequest req;
+        req.symbol = impactSymbol_;
+        req.depth = static_cast<uint64_t>(depth_);
+        auto result = co_await client.call(req);
+        if (!result) {
+            const auto& err = result.error();
+            const bool daemonCompatibilityFailure =
+                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
+            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
+                co_return err;
+            }
+            co_return renderLocal();
+        }
+        renderImpact(result.value());
+        co_return Result<void>();
+    }
+
+    boost::asio::awaitable<Result<void>> executeGraphTrace() {
+        if (traceTo_.empty()) {
+            co_return Error{ErrorCode::InvalidArgument, "--trace requires --to <symbol>"};
+        }
+        const auto maxDepth = static_cast<uint64_t>(depth_ > 1 ? depth_ : 6);
+        const auto renderLocal = [&]() -> Result<void> {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx == nullptr) {
+                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
+            }
+            app::services::GraphTraceRequest req;
+            req.from = traceFrom_;
+            req.to = traceTo_;
+            req.maxDepth = static_cast<std::size_t>(maxDepth);
+            auto result = service->trace(req);
+            if (!result) {
+                return result.error();
+            }
+            renderTrace(result.value());
+            return Result<void>();
+        };
+
+        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            co_return renderLocal();
+        }
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        daemon::GraphTraceRequest req;
+        req.from = traceFrom_;
+        req.to = traceTo_;
+        req.maxDepth = maxDepth;
+        auto result = co_await client.call(req);
+        if (!result) {
+            const auto& err = result.error();
+            const bool daemonCompatibilityFailure =
+                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
+            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
+                co_return err;
+            }
+            co_return renderLocal();
+        }
+        renderTrace(result.value());
+        co_return Result<void>();
+    }
+
+    boost::asio::awaitable<Result<void>> executeGraphAffectedTests() {
+        const auto depth = static_cast<uint64_t>(depth_ > 1 ? depth_ : 5);
+        const auto renderLocal = [&]() -> Result<void> {
+            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
+            if (appCtx == nullptr) {
+                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
+            }
+            auto service =
+                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
+            if (!service) {
+                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
+            }
+            app::services::GraphAffectedTestsRequest req;
+            req.changedFiles = affectedTestsFiles_;
+            req.depth = static_cast<std::size_t>(depth);
+            req.testPathPattern = testPathPattern_;
+            auto result = service->affectedTests(req);
+            if (!result) {
+                return result.error();
+            }
+            renderAffectedTests(result.value());
+            return Result<void>();
+        };
+
+        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            co_return renderLocal();
+        }
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        daemon::GraphAffectedTestsRequest req;
+        req.changedFiles = affectedTestsFiles_;
+        req.depth = depth;
+        req.testPathPattern = testPathPattern_;
+        auto result = co_await client.call(req);
+        if (!result) {
+            const auto& err = result.error();
+            const bool daemonCompatibilityFailure =
+                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
+            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
+                co_return err;
+            }
+            co_return renderLocal();
+        }
+        renderAffectedTests(result.value());
+        co_return Result<void>();
+    }
+
     YamsCLI* cli_{nullptr};
     std::filesystem::path invocationCwd_ = std::filesystem::current_path();
     std::string hash_;
@@ -1039,6 +1404,13 @@ private:
     std::string topologyClusterId_;
     std::string topologySnapshotId_;
     bool scopeToCwd_{false};
+    std::string lookupSymbol_;
+    std::string lookupAtFile_;
+    std::string impactSymbol_;
+    std::string traceFrom_;
+    std::string traceTo_;
+    std::vector<std::string> affectedTestsFiles_;
+    std::string testPathPattern_;
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {
