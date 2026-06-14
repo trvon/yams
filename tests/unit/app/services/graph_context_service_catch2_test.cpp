@@ -492,6 +492,52 @@ TEST_CASE("GraphContextService impact finds reverse dependents", "[services][gra
     CHECK_FALSE(result.value().relationships.empty());
 }
 
+TEST_CASE("GraphContextService impact finds callers through symbol_reference placeholders",
+          "[services][graph][context]") {
+    // Mirrors the real KG topology: cross-file callers emit
+    //   caller_version --calls--> symbol_reference(callee)
+    // rather than pointing at the callee's canonical definition node.
+    GraphContextServiceFixture fixture;
+    auto calleePath = fixture.writeSource("src/callee.cpp", {"int callee() { return 1; }"});
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return callee(); }"});
+    auto calleeSym = fixture.symbol(calleePath, "callee", "demo::callee", 1, 1);
+    fixture.upsertSymbols({calleeSym});
+    fixture.upsertNodeFor(calleeSym); // canonical function node for the callee
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee";
+    placeholder.label = "demo::callee";
+    placeholder.type = "symbol_reference";
+    auto placeholderId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE((placeholderId.has_value()));
+
+    KGNode callerVersion;
+    callerVersion.nodeKey = "function:demo::caller@" + callerPath.string() + "@snap:abc";
+    callerVersion.label = "caller";
+    callerVersion.type = "function_version";
+    callerVersion.properties = std::string("{\"qualified_name\":\"demo::caller\",\"file_path\":\"") +
+                               callerPath.string() + "\",\"start_line\":1,\"end_line\":1}";
+    auto callerId = fixture.kgStore->upsertNode(callerVersion);
+    REQUIRE((callerId.has_value()));
+
+    KGEdge edge;
+    edge.srcNodeId = callerId.value();
+    edge.dstNodeId = placeholderId.value();
+    edge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "callee";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+    CHECK((result.value().affectedSymbols.front().filePath == callerPath.string()));
+}
+
 TEST_CASE("GraphContextService trace finds a path across a call chain",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;

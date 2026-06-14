@@ -4,6 +4,7 @@
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/profiling.h>
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -445,6 +446,7 @@ public:
         : kgStore_(std::move(kgStore)), metadataRepo_(std::move(metadataRepo)) {}
 
     Result<GraphExploreResponse> explore(const GraphExploreRequest& req) override {
+        YAMS_ZONE_SCOPED_N("graph_context::explore");
         GraphExploreResponse response;
         response.query = req.query;
         response.kgAvailable = kgStore_ != nullptr;
@@ -545,6 +547,7 @@ public:
     }
 
     Result<GraphSymbolLookupResponse> lookupSymbol(const GraphSymbolLookupRequest& req) override {
+        YAMS_ZONE_SCOPED_N("graph_context::lookupSymbol");
         GraphSymbolLookupResponse response;
         response.symbol = req.symbol;
         if (!kgStore_) {
@@ -628,10 +631,13 @@ public:
                 response.truncated = true;
             }
         }
+        YAMS_PLOT("graph_context::lookup_matches",
+                  static_cast<int64_t>(response.matches.size()));
         return response;
     }
 
     Result<GraphTraceResponse> trace(const GraphTraceRequest& req) override {
+        YAMS_ZONE_SCOPED_N("graph_context::trace");
         GraphTraceResponse response;
         response.from = req.from;
         response.to = req.to;
@@ -721,10 +727,12 @@ public:
                 response.truncated = true;
             }
         }
+        YAMS_PLOT("graph_context::trace_path_hops", static_cast<int64_t>(response.path.size()));
         return response;
     }
 
     Result<GraphImpactResponse> impact(const GraphImpactRequest& req) override {
+        YAMS_ZONE_SCOPED_N("graph_context::impact");
         GraphImpactResponse response;
         response.symbol = req.symbol;
         if (!kgStore_) {
@@ -755,6 +763,10 @@ public:
             if (id.value().has_value() && seedSeen.insert(*id.value()).second) {
                 seedIds.push_back(*id.value());
             }
+            if (auto r = collectCallTargetNodeIds(sym.label, sym.qualifiedName, seedSeen, seedIds);
+                !r) {
+                return r.error();
+            }
         }
         if (seedIds.empty()) {
             response.warnings.push_back(
@@ -769,6 +781,8 @@ public:
             !r) {
             return r.error();
         }
+        YAMS_PLOT("graph_context::impact_affected",
+                  static_cast<int64_t>(affected.size()));
         response.affectedSymbols.reserve(affected.size());
         for (const auto& node : affected) {
             response.affectedSymbols.push_back(makeContextSymbol(node, req.symbol, 0.0));
@@ -787,6 +801,7 @@ public:
     }
 
     Result<GraphAffectedTestsResponse> affectedTests(const GraphAffectedTestsRequest& req) override {
+        YAMS_ZONE_SCOPED_N("graph_context::affectedTests");
         GraphAffectedTestsResponse response;
         response.changedFiles = req.changedFiles;
         if (!kgStore_) {
@@ -812,6 +827,11 @@ public:
                 }
                 if (id.value().has_value() && seedSeen.insert(*id.value()).second) {
                     seedIds.push_back(*id.value());
+                }
+                if (auto r = collectCallTargetNodeIds(sym.symbolName, sym.qualifiedName, seedSeen,
+                                                      seedIds);
+                    !r) {
+                    return r.error();
                 }
             }
         }
@@ -843,12 +863,15 @@ public:
         }
         response.affectedTests.assign(testFiles.begin(), testFiles.end());
         std::sort(response.affectedTests.begin(), response.affectedTests.end());
+        YAMS_PLOT("graph_context::affected_tests",
+                  static_cast<int64_t>(response.affectedTests.size()));
         return response;
     }
 
 private:
     void addRelationships(const std::vector<GraphContextSymbol>& symbols,
                           GraphExploreResponse& response, const GraphContextBudget& budget) {
+        YAMS_ZONE_SCOPED_N("graph_context::addRelationships");
         YAMS_PRECONDITION(kgStore_ != nullptr,
                           "GraphContextService::addRelationships requires a knowledge graph store");
         if (!budget.includeRelationships || symbols.empty()) {
@@ -1005,6 +1028,7 @@ private:
                               std::vector<GraphContextSnippet>& outFiles,
                               std::vector<std::string>& warnings, bool& truncated,
                               std::size_t& totalFilesConsidered) {
+        YAMS_ZONE_SCOPED_N("graph_context::buildSnippets");
         std::unordered_map<std::string, std::vector<GraphContextSymbol>> byFile;
         for (const auto& symbol : symbols) {
             if (symbol.filePath.empty()) {
@@ -1127,6 +1151,7 @@ private:
                                                                 const std::optional<std::string>& file,
                                                                 std::optional<std::int32_t> line,
                                                                 std::size_t limit) {
+        YAMS_ZONE_SCOPED_N("graph_context::resolveEntrySymbols");
         std::vector<GraphContextSymbol> out;
         std::unordered_set<std::string> seen;
         auto byName = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, name,
@@ -1187,10 +1212,51 @@ private:
         return out;
     }
 
+    // Cross-file calls land on `symbol_reference` placeholder nodes (and the per-snapshot
+    // version nodes), not the canonical definition node. To answer "who depends on X" we must
+    // seed reverse traversal from every node a caller could have referenced for X.
+    Result<void> collectCallTargetNodeIds(const std::string& simpleName,
+                                          const std::string& qualifiedName,
+                                          std::unordered_set<std::int64_t>& seedSet,
+                                          std::vector<std::int64_t>& seedIds) {
+        if (simpleName.empty()) {
+            return Result<void>();
+        }
+        auto matches = kgStore_->searchNodesByLabel(simpleName, 200, 0);
+        if (!matches) {
+            return matches.error();
+        }
+        const auto lowerSimple = lowerAscii(simpleName);
+        const auto lowerQualified = lowerAscii(qualifiedName);
+        const auto suffix = "::" + lowerSimple;
+        for (const auto& node : matches.value()) {
+            const auto& type = node.type;
+            const bool callTargetType =
+                type == "symbol_reference" || type == "function" || type == "method" ||
+                type == "function_version" || type == "method_version" || type == "class" ||
+                type == "struct";
+            if (!callTargetType) {
+                continue;
+            }
+            const auto label = lowerAscii(node.label.value_or(std::string{}));
+            const bool nameMatch =
+                label == lowerSimple || (!lowerQualified.empty() && label == lowerQualified) ||
+                (label.size() > suffix.size() && label.ends_with(suffix));
+            if (!nameMatch) {
+                continue;
+            }
+            if (seedSet.insert(node.id).second) {
+                seedIds.push_back(node.id);
+            }
+        }
+        return Result<void>();
+    }
+
     Result<void> collectReverseDependents(const std::vector<std::int64_t>& seedIds,
                                           std::size_t depth, std::size_t maxNodes,
                                           std::vector<metadata::KGNode>& affectedNodes,
                                           std::vector<GraphContextRelation>& relationships) {
+        YAMS_ZONE_SCOPED_N("graph_context::collectReverseDependents");
         if (seedIds.empty() || depth == 0 || maxNodes == 0) {
             return Result<void>();
         }
@@ -1200,8 +1266,11 @@ private:
         std::vector<metadata::KGEdge> keptEdges;
         const auto& relations = impactRelations();
         static constexpr std::size_t kPerNode = 64;
+        std::size_t edgesExamined = 0;
+        std::size_t hopsReached = 0;
 
         for (std::size_t d = 0; d < depth && !frontier.empty(); ++d) {
+            hopsReached = d + 1;
             auto incoming = kgStore_->getEdgesToBatch(frontier, std::nullopt, kPerNode);
             if (!incoming) {
                 return incoming.error();
@@ -1209,6 +1278,7 @@ private:
             std::vector<std::int64_t> next;
             for (const auto& [dstId, edges] : incoming.value()) {
                 for (const auto& edge : edges) {
+                    ++edgesExamined;
                     if (!relations.contains(metadata::normalizeRelationName(edge.relation))) {
                         continue;
                     }
@@ -1223,6 +1293,10 @@ private:
             }
             frontier = std::move(next);
         }
+
+        YAMS_PLOT("graph_context::impact_seeds", static_cast<int64_t>(seedIds.size()));
+        YAMS_PLOT("graph_context::impact_edges_examined", static_cast<int64_t>(edgesExamined));
+        YAMS_PLOT("graph_context::impact_hops_reached", static_cast<int64_t>(hopsReached));
 
         std::vector<std::int64_t> idsToHydrate(discovered.begin(), discovered.end());
         idsToHydrate.insert(idsToHydrate.end(), seedIds.begin(), seedIds.end());
@@ -1257,6 +1331,7 @@ private:
                                    const std::unordered_set<std::int64_t>& targets,
                                    std::size_t maxDepth,
                                    std::vector<GraphContextRelation>& path, bool& found) {
+        YAMS_ZONE_SCOPED_N("graph_context::shortestPathToAny");
         found = false;
         if (targets.contains(fromId)) {
             found = true;

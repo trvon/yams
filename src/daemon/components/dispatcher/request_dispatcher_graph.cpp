@@ -13,6 +13,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 
@@ -366,6 +367,7 @@ RequestDispatcher::handleGraphExploreRequest(const GraphExploreRequest& req) {
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphSymbolLookupRequest(const GraphSymbolLookupRequest& req) {
+    YAMS_ZONE_SCOPED_N("dispatch::graphSymbolLookup");
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
         co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
@@ -408,6 +410,7 @@ RequestDispatcher::handleGraphSymbolLookupRequest(const GraphSymbolLookupRequest
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphTraceRequest(const GraphTraceRequest& req) {
+    YAMS_ZONE_SCOPED_N("dispatch::graphTrace");
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
         co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
@@ -446,6 +449,7 @@ RequestDispatcher::handleGraphTraceRequest(const GraphTraceRequest& req) {
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
+    YAMS_ZONE_SCOPED_N("dispatch::graphImpact");
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
         co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
@@ -477,6 +481,7 @@ RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req) {
+    YAMS_ZONE_SCOPED_N("dispatch::graphAffectedTests");
     auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
     if (!metaRepo) {
         co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
