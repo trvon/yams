@@ -26,6 +26,14 @@ std::string lowerAscii(std::string value) {
     return value;
 }
 
+std::string simpleNameOf(const std::string& qualified) {
+    const auto pos = qualified.rfind("::");
+    if (pos == std::string::npos || pos + 2 >= qualified.size()) {
+        return qualified;
+    }
+    return qualified.substr(pos + 2);
+}
+
 bool containsToken(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return true;
@@ -747,14 +755,16 @@ public:
         if (!entry) {
             return entry.error();
         }
-        if (entry.value().empty()) {
-            response.warnings.push_back("No symbol matching '" + req.symbol +
-                                        "' found in the knowledge graph");
-            return response;
-        }
 
         std::vector<std::int64_t> seedIds;
         std::unordered_set<std::int64_t> seedSeen;
+        // Seed from the literal query name first: callers reference the call-site surface form
+        // (`symbol_ref:<name>`), which does not always match the substring-resolved definition.
+        if (auto r = collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen,
+                                              seedIds);
+            !r) {
+            return r.error();
+        }
         for (const auto& sym : entry.value()) {
             auto id = nodeIdForSymbol(sym);
             if (!id) {
@@ -769,8 +779,8 @@ public:
             }
         }
         if (seedIds.empty()) {
-            response.warnings.push_back(
-                "Matched symbol has no graph node; re-run extraction to populate edges");
+            response.warnings.push_back("No symbol matching '" + req.symbol +
+                                        "' found in the knowledge graph");
             return response;
         }
 
@@ -1262,6 +1272,7 @@ private:
         }
         std::unordered_set<std::int64_t> visited(seedIds.begin(), seedIds.end());
         std::unordered_set<std::int64_t> discovered;
+        std::unordered_set<std::int64_t> bridgeSeen(seedIds.begin(), seedIds.end());
         std::vector<std::int64_t> frontier = seedIds;
         std::vector<metadata::KGEdge> keptEdges;
         const auto& relations = impactRelations();
@@ -1275,7 +1286,7 @@ private:
             if (!incoming) {
                 return incoming.error();
             }
-            std::vector<std::int64_t> next;
+            std::vector<std::int64_t> callersThisHop;
             for (const auto& [dstId, edges] : incoming.value()) {
                 for (const auto& edge : edges) {
                     ++edgesExamined;
@@ -1287,11 +1298,31 @@ private:
                     if (!visited.contains(srcId) && discovered.size() < maxNodes) {
                         visited.insert(srcId);
                         discovered.insert(srcId);
-                        next.push_back(srcId);
+                        callersThisHop.push_back(srcId);
                     }
                 }
             }
-            frontier = std::move(next);
+            // A caller is a version/canonical node that itself carries no incoming calls — its
+            // callers point at its `symbol_reference` placeholder. Bridge each discovered caller
+            // to its placeholders so the next hop can find who calls it.
+            std::vector<std::int64_t> nextFrontier;
+            if (d + 1 < depth && !callersThisHop.empty() && discovered.size() < maxNodes) {
+                auto callerNodes = kgStore_->getNodesByIds(callersThisHop);
+                if (!callerNodes) {
+                    return callerNodes.error();
+                }
+                for (const auto& node : callerNodes.value()) {
+                    const auto simple = node.label.value_or(std::string{});
+                    const auto qualified =
+                        tryExtractStringProperty(node, "qualified_name").value_or(simple);
+                    if (auto r =
+                            collectCallTargetNodeIds(simple, qualified, bridgeSeen, nextFrontier);
+                        !r) {
+                        return r.error();
+                    }
+                }
+            }
+            frontier = std::move(nextFrontier);
         }
 
         YAMS_PLOT("graph_context::impact_seeds", static_cast<int64_t>(seedIds.size()));

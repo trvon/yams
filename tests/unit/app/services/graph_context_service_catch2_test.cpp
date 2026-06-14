@@ -538,6 +538,82 @@ TEST_CASE("GraphContextService impact finds callers through symbol_reference pla
     CHECK((result.value().affectedSymbols.front().filePath == callerPath.string()));
 }
 
+TEST_CASE("GraphContextService impact bridges placeholders across multiple hops",
+          "[services][graph][context]") {
+    // A_version --calls--> symbol_ref:B ; B_version --calls--> symbol_ref:C
+    // impact(C) must reach B at depth 1 and A at depth 2 by bridging each discovered caller
+    // version node to its own placeholder.
+    GraphContextServiceFixture fixture;
+    auto cPath = fixture.writeSource("src/c.cpp", {"int cFn() { return 1; }"});
+    auto cSym = fixture.symbol(cPath, "cFn", "demo::cFn", 1, 1);
+    fixture.upsertSymbols({cSym});
+    fixture.upsertNodeFor(cSym);
+
+    const auto makeRef = [&](const std::string& key, const std::string& label) {
+        KGNode node;
+        node.nodeKey = key;
+        node.label = label;
+        node.type = "symbol_reference";
+        auto id = fixture.kgStore->upsertNode(node);
+        REQUIRE((id.has_value()));
+        return id.value();
+    };
+    const auto makeVersion = [&](const std::string& simple, const std::string& qualified,
+                                 const std::filesystem::path& path) {
+        KGNode node;
+        node.nodeKey = "function:" + qualified + "@" + path.string() + "@snap:" + simple;
+        node.label = simple;
+        node.type = "function_version";
+        node.properties = std::string("{\"qualified_name\":\"") + qualified +
+                          "\",\"file_path\":\"" + path.string() +
+                          "\",\"start_line\":1,\"end_line\":1}";
+        auto id = fixture.kgStore->upsertNode(node);
+        REQUIRE((id.has_value()));
+        return id.value();
+    };
+
+    auto refC = makeRef("symbol_ref:demo::cfn", "demo::cFn");
+    auto refB = makeRef("symbol_ref:demo::bfn", "demo::bFn");
+    auto bPath = fixture.writeSource("src/b.cpp", {"int bFn() { return cFn(); }"});
+    auto aPath = fixture.writeSource("src/a.cpp", {"int aFn() { return bFn(); }"});
+    auto bVersion = makeVersion("bFn", "demo::bFn", bPath);
+    auto aVersion = makeVersion("aFn", "demo::aFn", aPath);
+
+    KGEdge bCallsC;
+    bCallsC.srcNodeId = bVersion;
+    bCallsC.dstNodeId = refC;
+    bCallsC.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(bCallsC).has_value()));
+    KGEdge aCallsB;
+    aCallsB.srcNodeId = aVersion;
+    aCallsB.dstNodeId = refB;
+    aCallsB.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(aCallsB).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest depth1;
+    depth1.symbol = "cFn";
+    depth1.depth = 1;
+    auto r1 = service->impact(depth1);
+    REQUIRE((r1.has_value()));
+    REQUIRE((r1.value().affectedSymbols.size() == 1));
+    CHECK((r1.value().affectedSymbols.front().label == "bFn"));
+
+    GraphImpactRequest depth2;
+    depth2.symbol = "cFn";
+    depth2.depth = 2;
+    auto r2 = service->impact(depth2);
+    REQUIRE((r2.has_value()));
+    REQUIRE((r2.value().affectedSymbols.size() == 2));
+    std::vector<std::string> labels;
+    for (const auto& s : r2.value().affectedSymbols)
+        labels.push_back(s.label);
+    CHECK((std::find(labels.begin(), labels.end(), "aFn") != labels.end()));
+    CHECK((std::find(labels.begin(), labels.end(), "bFn") != labels.end()));
+}
+
 TEST_CASE("GraphContextService trace finds a path across a call chain",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;
