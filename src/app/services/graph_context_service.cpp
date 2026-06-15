@@ -1258,6 +1258,20 @@ private:
             if (seedSet.insert(node.id).second) {
                 seedIds.push_back(node.id);
             }
+            // If a reconciliation pass linked placeholders to this definition, seed those
+            // deterministically (avoids relying solely on surface-form name matching).
+            const bool isDefinition = type == "function" || type == "method" ||
+                                      type == "class" || type == "struct";
+            if (isDefinition) {
+                auto resolved = kgStore_->getEdgesTo(node.id, std::string_view("resolves_to"), 64, 0);
+                if (resolved) {
+                    for (const auto& edge : resolved.value()) {
+                        if (seedSet.insert(edge.srcNodeId).second) {
+                            seedIds.push_back(edge.srcNodeId);
+                        }
+                    }
+                }
+            }
         }
         return Result<void>();
     }

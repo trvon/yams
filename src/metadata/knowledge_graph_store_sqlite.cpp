@@ -1642,6 +1642,30 @@ public:
         });
     }
 
+    Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            // Canonical symbol nodes (kind:qualName@file) carry file_path; unresolved
+            // reference nodes carry source_file. Neither has a document_hash, so they are not
+            // covered by deleteNodesForDocumentHash. Their edges cascade via FK once removed.
+            auto stmtR = db.prepare(
+                "DELETE FROM kg_nodes WHERE json_extract(properties, '$.file_path') = ? "
+                "OR json_extract(properties, '$.source_file') = ?");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            if (auto br = stmt.bind(1, filePath); !br)
+                return br.error();
+            if (auto br = stmt.bind(2, filePath); !br)
+                return br.error();
+            if (auto execR = stmt.execute(); !execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            spdlog::debug("deleteNodesForSourceFile: deleted {} nodes for path {}", deleted,
+                          filePath);
+            return deleted;
+        });
+    }
+
     Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare(

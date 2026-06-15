@@ -538,6 +538,50 @@ TEST_CASE("GraphContextService impact finds callers through symbol_reference pla
     CHECK((result.value().affectedSymbols.front().filePath == callerPath.string()));
 }
 
+TEST_CASE("GraphContextService impact follows resolves_to reconciliation links",
+          "[services][graph][context]") {
+    // A reconciliation pass links a placeholder (whose surface form does NOT match the symbol
+    // name) to the canonical definition via `resolves_to`. impact must still find the caller
+    // that points at that placeholder.
+    GraphContextServiceFixture fixture;
+    auto defPath = fixture.writeSource("src/def.cpp", {"int target() { return 1; }"});
+    auto defSym = fixture.symbol(defPath, "target", "demo::target", 1, 1);
+    fixture.upsertSymbols({defSym});
+    const auto defId = fixture.upsertNodeFor(defSym);
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:aliased::target";
+    placeholder.label = "aliasedSurfaceForm"; // intentionally does not match "target"
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder).value();
+
+    KGEdge resolvesTo;
+    resolvesTo.srcNodeId = refId;
+    resolvesTo.dstNodeId = defId;
+    resolvesTo.relation = "resolves_to";
+    REQUIRE((fixture.kgStore->addEdge(resolvesTo).has_value()));
+
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return target(); }"});
+    auto callerSym = fixture.symbol(callerPath, "caller", "demo::caller", 1, 1);
+    fixture.upsertSymbols({callerSym});
+    const auto callerId = fixture.upsertNodeFor(callerSym);
+    KGEdge calls;
+    calls.srcNodeId = callerId;
+    calls.dstNodeId = refId;
+    calls.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(calls).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "target";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+}
+
 TEST_CASE("GraphContextService impact bridges placeholders across multiple hops",
           "[services][graph][context]") {
     // A_version --calls--> symbol_ref:B ; B_version --calls--> symbol_ref:C

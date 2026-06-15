@@ -427,6 +427,11 @@ public:
     // Returns the count of nodes deleted.
     virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
 
+    // Delete KG nodes whose properties.file_path or properties.source_file matches the given
+    // path. Covers canonical symbol nodes and unresolved reference nodes that carry no
+    // document_hash (so deleteNodesForDocumentHash misses them). Edges cascade via FK.
+    virtual Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) = 0;
+
     // Delete all edges where properties.source_file matches the given path.
     // Used to clean up stale relationships when re-indexing a file.
     // Returns the count of edges deleted.

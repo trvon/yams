@@ -737,6 +737,22 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 }
             }
 
+            // The content FTS5 table is a standard (own-content) virtual table that does NOT
+            // participate in foreign-key cascade, so its row must be removed explicitly within
+            // this transaction; otherwise it leaks and yields stale matches for a deleted id.
+            if (wasIndexed) {
+                if (auto fts5 = db.hasFTS5(); fts5 && fts5.value()) {
+                    auto ftsStmt = db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
+                    if (ftsStmt) {
+                        auto& fstmt = *ftsStmt.value();
+                        if (auto b = fstmt.bind(1, id); !b)
+                            return b.error();
+                        if (auto e = fstmt.execute(); !e)
+                            return e.error();
+                    }
+                }
+            }
+
             // Foreign key constraints will handle cascading deletes
             // Use prepareCached for better performance
             auto stmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");

@@ -883,9 +883,141 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         }
     }
 
+    auto reconcileResult = reconcileSymbolReferences(dryRun);
+    if (!reconcileResult) {
+        ++stats.errors;
+        stats.issues.push_back("symbol reference reconciliation failed: " +
+                               reconcileResult.error().message);
+    } else {
+        const auto& rc = reconcileResult.value();
+        stats.referencesLinked += rc.referencesLinked;
+        stats.referencesAmbiguous += rc.referencesAmbiguous;
+        stats.edgesCreated += rc.referencesLinked;
+        stats.issues.push_back(
+            "reconciled " + std::to_string(rc.referencesLinked) + " symbol references (" +
+            std::to_string(rc.referencesAmbiguous) + " ambiguous, " +
+            std::to_string(rc.referencesUnresolved) + " unresolved, " +
+            std::to_string(rc.referencesScanned) + " scanned)");
+    }
+
     if (dryRun) {
         stats.issues.push_back(
             "dry-run: changes were rolled back (counts reflect attempted writes)");
+    }
+    return stats;
+}
+
+Result<GraphComponent::ReferenceReconcileStats>
+GraphComponent::reconcileSymbolReferences(bool dryRun) {
+    if (!initialized_ || !kgStore_) {
+        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
+    }
+
+    ReferenceReconcileStats stats;
+    constexpr std::size_t kPage = 500;
+    std::size_t offset = 0;
+    std::vector<metadata::KGEdge> pending;
+
+    const auto flush = [&]() -> Result<void> {
+        if (pending.empty() || dryRun) {
+            pending.clear();
+            return Result<void>();
+        }
+        auto res = kgStore_->addEdgesUnique(pending);
+        pending.clear();
+        return res;
+    };
+
+    while (true) {
+        auto nodesRes = kgStore_->findNodesByType("symbol_reference", kPage, offset);
+        if (!nodesRes) {
+            return nodesRes.error();
+        }
+        const auto& nodes = nodesRes.value();
+        if (nodes.empty()) {
+            break;
+        }
+        for (const auto& ref : nodes) {
+            ++stats.referencesScanned;
+            const auto surface = ref.label.value_or(std::string{});
+            if (surface.empty()) {
+                ++stats.referencesUnresolved;
+                continue;
+            }
+            std::string simple = surface;
+            if (const auto pos = surface.rfind("::");
+                pos != std::string::npos && pos + 2 < surface.size()) {
+                simple = surface.substr(pos + 2);
+            }
+
+            auto candRes =
+                kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, simple, 50, 0);
+            if (!candRes) {
+                return candRes.error();
+            }
+            const metadata::SymbolMetadata* match = nullptr;
+            std::size_t matchCount = 0;
+            for (const auto& cand : candRes.value()) {
+                const bool exact = cand.qualifiedName == surface ||
+                                   (surface == simple && cand.symbolName == simple);
+                if (exact) {
+                    ++matchCount;
+                    match = &cand;
+                }
+            }
+            if (matchCount == 0) {
+                ++stats.referencesUnresolved;
+                continue;
+            }
+            if (matchCount > 1) {
+                ++stats.referencesAmbiguous;
+                continue;
+            }
+
+            const std::string canonicalKey =
+                match->kind + ":" + match->qualifiedName + "@" + match->filePath;
+            auto nodeRes = kgStore_->getNodeByKey(canonicalKey);
+            if (!nodeRes) {
+                return nodeRes.error();
+            }
+            if (!nodeRes.value().has_value() || nodeRes.value()->id == ref.id) {
+                ++stats.referencesUnresolved;
+                continue;
+            }
+
+            // Idempotent: only count/create a link when this placeholder is not already
+            // resolved, so counts converge to 0 on a clean graph (addEdgesUnique dedupes the
+            // edge but cannot report whether a row was new).
+            auto existing =
+                kgStore_->getEdgesFrom(ref.id, std::string_view("resolves_to"), 1, 0);
+            if (!existing) {
+                return existing.error();
+            }
+            if (!existing.value().empty()) {
+                ++stats.referencesAlreadyLinked;
+                continue;
+            }
+
+            metadata::KGEdge edge;
+            edge.srcNodeId = ref.id;
+            edge.dstNodeId = nodeRes.value()->id;
+            edge.relation = "resolves_to";
+            edge.weight = 0.9F;
+            pending.push_back(std::move(edge));
+            ++stats.referencesLinked;
+            if (pending.size() >= 256) {
+                if (auto res = flush(); !res) {
+                    return res.error();
+                }
+            }
+        }
+        offset += nodes.size();
+        if (nodes.size() < kPage) {
+            break;
+        }
+    }
+    if (auto res = flush(); !res) {
+        return res.error();
     }
     return stats;
 }

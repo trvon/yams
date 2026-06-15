@@ -1184,3 +1184,149 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts empty", "[daemon][graph][query
     REQUIRE(result.has_value());
     REQUIRE(result.value().empty());
 }
+
+TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to definitions",
+          "[daemon][graph]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    // Canonical definition: document + symbol_metadata + canonical node.
+    const std::string filePath = (fixture.testDir / "callee.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "callee.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-demo-callee";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    SymbolMetadata sym;
+    sym.documentHash = doc.sha256Hash;
+    sym.filePath = filePath;
+    sym.symbolName = "callee";
+    sym.qualifiedName = "demo::callee";
+    sym.kind = "function";
+    sym.startLine = 1;
+    sym.endLine = 1;
+    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:demo::callee@" + filePath;
+    canonical.label = "callee";
+    canonical.type = "function";
+    const auto canonicalId = fixture.kgStore->upsertNode(canonical);
+    REQUIRE(canonicalId.has_value());
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee";
+    placeholder.label = "demo::callee";
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE(refId.has_value());
+
+    auto result = component.reconcileSymbolReferences(false);
+    REQUIRE(result.has_value());
+    CHECK(result.value().referencesLinked == 1);
+
+    auto edges = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges.has_value());
+    REQUIRE(edges.value().size() == 1);
+    CHECK(edges.value().front().dstNodeId == canonicalId.value());
+
+    // Idempotent: a second pass adds no duplicate edge.
+    REQUIRE(component.reconcileSymbolReferences(false).has_value());
+    auto edges2 = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges2.has_value());
+    CHECK(edges2.value().size() == 1);
+
+    // Dry-run on a fresh placeholder makes no change.
+    KGNode placeholder2;
+    placeholder2.nodeKey = "symbol_ref:demo::callee::dup";
+    placeholder2.label = "demo::callee";
+    placeholder2.type = "symbol_reference";
+    const auto ref2 = fixture.kgStore->upsertNode(placeholder2);
+    REQUIRE(ref2.has_value());
+    auto dry = component.reconcileSymbolReferences(true);
+    REQUIRE(dry.has_value());
+    auto edgesDry = fixture.kgStore->getEdgesFrom(ref2.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edgesDry.has_value());
+    CHECK(edgesDry.value().empty());
+}
+
+TEST_CASE("GraphComponent reconcileSymbolReferences is idempotent (no double-count on re-run)",
+          "[daemon][graph][reconcile][idempotency]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    const std::string filePath = (fixture.testDir / "callee2.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "callee2.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-demo-callee2";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    SymbolMetadata sym;
+    sym.documentHash = doc.sha256Hash;
+    sym.filePath = filePath;
+    sym.symbolName = "callee2";
+    sym.qualifiedName = "demo::callee2";
+    sym.kind = "function";
+    sym.startLine = 1;
+    sym.endLine = 1;
+    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:demo::callee2@" + filePath;
+    canonical.label = "callee2";
+    canonical.type = "function";
+    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee2";
+    placeholder.label = "demo::callee2";
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE(refId.has_value());
+
+    auto first = component.reconcileSymbolReferences(false);
+    REQUIRE(first.has_value());
+    CHECK(first.value().referencesLinked == 1);
+
+    auto second = component.reconcileSymbolReferences(false);
+    REQUIRE(second.has_value());
+
+    auto edges =
+        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges.has_value());
+    CHECK(edges.value().size() == 1);
+
+    // FIXED: counts converge — the second pass links nothing new.
+    CHECK(second.value().referencesLinked == 0);
+    CHECK(second.value().referencesAlreadyLinked == 1);
+}

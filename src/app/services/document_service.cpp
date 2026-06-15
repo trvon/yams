@@ -716,6 +716,26 @@ private:
                 spdlog::warn("Failed to clean up KG nodes for document {}: {}", doc.sha256Hash,
                              kgResult.error().message);
             }
+            // doc/version nodes carry document_hash, but canonical symbol nodes and unresolved
+            // reference nodes are keyed by file path only — clean those (and their edges) too,
+            // otherwise delete leaves orphaned nodes/edges behind.
+            if (!doc.filePath.empty()) {
+                if (auto edgeResult = ctx_.kgStore->deleteEdgesForSourceFile(doc.filePath);
+                    !edgeResult) {
+                    spdlog::warn("Failed to clean up KG edges for {}: {}", doc.filePath,
+                                 edgeResult.error().message);
+                }
+                if (auto nodeResult = ctx_.kgStore->deleteNodesForSourceFile(doc.filePath);
+                    !nodeResult) {
+                    spdlog::warn("Failed to clean up KG path nodes for {}: {}", doc.filePath,
+                                 nodeResult.error().message);
+                }
+            }
+            if (auto symResult = ctx_.kgStore->deleteSymbolMetadataForDocument(doc.sha256Hash);
+                !symResult) {
+                spdlog::warn("Failed to clean up symbol metadata for {}: {}", doc.sha256Hash,
+                             symResult.error().message);
+            }
         }
         return true;
     }
