@@ -26,8 +26,6 @@ yams_cli_sources = [
   'commands/grep_command.cpp',
   'commands/config_command.cpp',
   'commands/auth_command.cpp',
-  'commands/uninstall_command.cpp',
-  'commands/migrate_command.cpp',
   'commands/delete_command.cpp',
   'commands/list_command.cpp',
   'commands/tree_command.cpp',

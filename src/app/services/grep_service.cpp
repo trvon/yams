@@ -1,5 +1,4 @@
 #include "../../cli/hot_cold_utils.h"
-#include <yams/app/services/grep_mode_tls.h>
 #include <yams/app/services/grep_regex.hpp>
 #include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/path_projection.hpp>

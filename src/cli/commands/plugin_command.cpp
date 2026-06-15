@@ -181,26 +181,6 @@ public:
             update->add_option("name", updateName_, "Plugin name (empty = check all)");
             update->add_flag("--all,-a", updateAll_, "Update all installed plugins");
             update->callback([this]() { updatePlugins(); });
-
-            // plugin enable/disable/verify (stubs)
-            plugin->add_subcommand("enable", "Enable a previously loaded plugin (stub)")
-                ->add_option("name", nameToggle_, "Plugin name")
-                ->required();
-            plugin->get_subcommand("enable")->callback(
-                [this]() { std::cout << "yams plugin enable: TODO name=" << nameToggle_ << "\n"; });
-
-            plugin->add_subcommand("disable", "Disable a plugin (stub)")
-                ->add_option("name", nameToggle_, "Plugin name")
-                ->required();
-            plugin->get_subcommand("disable")->callback([this]() {
-                std::cout << "yams plugin disable: TODO name=" << nameToggle_ << "\n";
-            });
-
-            plugin->add_subcommand("verify", "Verify plugin signature/hash (stub)")
-                ->add_option("name", nameToggle_, "Plugin name")
-                ->required();
-            plugin->get_subcommand("verify")->callback(
-                [this]() { std::cout << "yams plugin verify: TODO name=" << nameToggle_ << "\n"; });
         };
 
         auto* plugin = app.add_subcommand(getName(), getDescription());
@@ -248,7 +228,6 @@ private:
     std::string untrustPath_;
     bool trustDetails_{false};
     std::string installSrc_;
-    std::string nameToggle_;
     bool verboseList_{false};
 
     // Install options

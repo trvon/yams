@@ -19,8 +19,6 @@ std::unique_ptr<ICommand> createGrepCommand();
 std::unique_ptr<ICommand> createConfigCommand();
 std::unique_ptr<ICommand> createAuthCommand();
 std::unique_ptr<ICommand> createStatusCommand();
-std::unique_ptr<ICommand> createUninstallCommand();
-std::unique_ptr<ICommand> createMigrateCommand();
 std::unique_ptr<ICommand> createUpdateCommand();
 std::unique_ptr<ICommand> createDownloadCommand();
 std::unique_ptr<ICommand> createSessionCommand();
@@ -66,8 +64,6 @@ constexpr auto kConfigCommandRegistrations = std::to_array<CommandRegistration>(
     {"config", &createConfigCommand},
     {"auth", &createAuthCommand},
     {"status", &createStatusCommand},
-    {"uninstall", &createUninstallCommand},
-    {"migrate", &createMigrateCommand},
     {"update", &createUpdateCommand},
 });
 
