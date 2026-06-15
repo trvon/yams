@@ -2524,6 +2524,7 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
             stats.issues.push_back(
                 "WriteCoordinator unavailable for orphan edge/doc_entities cleanup");
         } else {
+            const auto before = coord->getStats();
             auto wb = std::make_unique<WriteBatch>();
             wb->source = "RepairService::kgOrphanCleanup";
             wb->ops.emplace_back(DeleteOrphanedEdgesOp{});
@@ -2535,8 +2536,12 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 stats.issues.push_back("orphan edge/doc_entities cleanup flush failed: " +
                                        flushRes.error().message);
             } else {
-                stats.issues.push_back(
-                    "orphan edge/doc_entities cleanup queued via WriteCoordinator");
+                // flush() drains the queue, so the coordinator stats now reflect this batch.
+                const auto after = coord->getStats();
+                if (after.edgesDeleted >= before.edgesDeleted)
+                    stats.edgesDeleted += after.edgesDeleted - before.edgesDeleted;
+                if (after.docEntitiesDeleted >= before.docEntitiesDeleted)
+                    stats.docEntitiesDeleted += after.docEntitiesDeleted - before.docEntitiesDeleted;
             }
         }
     } else {

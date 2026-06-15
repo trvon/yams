@@ -449,6 +449,53 @@ TEST_CASE("ContentStore: Deduplication", "[api][content-store][dedup]") {
         REQUIRE(r2.has_value());
         CHECK(r1.value().contentHash != r2.value().contentHash);
     }
+
+    SECTION("Removing one of two shared references keeps blob retrievable") {
+        std::string content = "Shared blob content that two documents reference";
+
+        auto file1 = fixture.createTestFile("shared1.txt", content);
+        auto result1 = fixture.store_->store(file1);
+        REQUIRE(result1.has_value());
+
+        auto file2 = fixture.createTestFile("shared2.txt", content);
+        auto result2 = fixture.store_->store(file2);
+        REQUIRE(result2.has_value());
+
+        const std::string hash = result1.value().contentHash;
+        REQUIRE(hash == result2.value().contentHash);
+
+        auto existsBefore = fixture.store_->exists(hash);
+        REQUIRE(existsBefore.has_value());
+        CHECK(existsBefore.value());
+
+        // Delete the first logical reference. The blob is still referenced by
+        // the second document, so it MUST remain retrievable.
+        auto removeFirst = fixture.store_->remove(hash);
+        REQUIRE(removeFirst.has_value());
+
+        auto existsAfterFirst = fixture.store_->exists(hash);
+        REQUIRE(existsAfterFirst.has_value());
+        CHECK(existsAfterFirst.value());
+
+        auto retrievedAfterFirst = fixture.store_->retrieveBytes(hash);
+        REQUIRE(retrievedAfterFirst.has_value());
+        std::string roundTripped(reinterpret_cast<const char*>(retrievedAfterFirst.value().data()),
+                                 retrievedAfterFirst.value().size());
+        CHECK(roundTripped == content);
+
+        // Delete the second (last) reference. The manifest and content metadata are
+        // now removed; physical chunk eviction is deferred to the garbage collector
+        // for blocks that reached a zero reference count.
+        auto removeSecond = fixture.store_->remove(hash);
+        REQUIRE(removeSecond.has_value());
+        CHECK(removeSecond.value());
+
+        // The manifest is gone, so the content is no longer logically present: a
+        // further remove reports "nothing removed".
+        auto removeThird = fixture.store_->remove(hash);
+        REQUIRE(removeThird.has_value());
+        CHECK_FALSE(removeThird.value());
+    }
 }
 
 // =============================================================================

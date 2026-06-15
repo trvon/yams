@@ -727,23 +727,38 @@ public:
             }
         }
 
-        // Remove manifest
-        auto removeResult = storage_->remove(manifestHash);
-        if (!removeResult) {
-            transaction->rollback();
-            return Result<bool>(removeResult.error());
-        }
-
-        // Remove metadata
-        {
-            std::unique_lock lock(metadataMutex_);
-            metadataStore_.erase(hash);
-        }
-
-        // Commit transaction
+        // Commit the decrement so subsequent ref-count probes observe the new counts.
+        // Physical chunk eviction is the garbage collector's job for blocks at zero refs.
         auto commitResult = transaction->commit();
         if (!commitResult) {
             return Result<bool>(commitResult.error());
+        }
+
+        // The manifest (and content metadata) must only be removed when the last reference to
+        // this content is dropped. If any chunk is still referenced by another document sharing
+        // the same hash, keep the manifest so the surviving document remains retrievable.
+        bool stillReferenced = false;
+        for (const auto& chunk : manifest.value().chunks) {
+            auto refCount = refCounter_->getRefCount(chunk.hash);
+            if (refCount && refCount.value() > 0) {
+                stillReferenced = true;
+                break;
+            }
+        }
+        if (stillReferenced) {
+            spdlog::debug("Dropped one reference to content {}; still referenced, manifest kept",
+                          hash);
+            return Result<bool>(true);
+        }
+
+        // Last reference dropped: remove manifest and metadata.
+        auto removeResult = storage_->remove(manifestHash);
+        if (!removeResult) {
+            return Result<bool>(removeResult.error());
+        }
+        {
+            std::unique_lock lock(metadataMutex_);
+            metadataStore_.erase(hash);
         }
 
         updateStats(0, 0, 0, 0, 0, 0, 1);

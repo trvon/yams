@@ -13,6 +13,7 @@
 #include <yams/core/cpp23_features.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
@@ -654,6 +655,81 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
         REQUIRE(after);
         CHECK_FALSE(after.value().has_value());
+    }
+
+    SECTION("Content removal failure leaves document, metadata, and KG fully intact") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore =
+            std::move(kgStoreRes.value());
+
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:" + fixture.testHash2_;
+        node.type = "document";
+        auto upserted = kgStore->upsertNode(node);
+        REQUIRE(upserted);
+
+        auto kgBefore = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(kgBefore);
+        REQUIRE(kgBefore.value().has_value());
+
+        auto failingStore = std::make_shared<RemoveFailingContentStore>(
+            fixture.contentStore_, fixture.testHash2_,
+            Error{ErrorCode::IOError, "simulated content removal failure"});
+        fixture.appContext_.store = failingStore;
+        fixture.appContext_.kgStore = kgStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+
+        auto result = fixture.documentService_->deleteByName(request);
+        REQUIRE(result);
+        CHECK(result.value().deleted.empty());
+        REQUIRE(result.value().errors.size() == 1);
+
+        // Document row + metadata must survive the content-removal failure.
+        auto docAfter = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(docAfter);
+        REQUIRE(docAfter.value().has_value());
+
+        // KG node must also survive (no partial delete).
+        auto kgAfter = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(kgAfter);
+        CHECK(kgAfter.value().has_value());
+    }
+
+    SECTION("Successful content removal cascades to metadata and KG") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore =
+            std::move(kgStoreRes.value());
+
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:" + fixture.testHash2_;
+        node.type = "document";
+        auto upserted = kgStore->upsertNode(node);
+        REQUIRE(upserted);
+
+        fixture.appContext_.kgStore = kgStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+
+        auto result = fixture.documentService_->deleteByName(request);
+        REQUIRE(result);
+        CHECK(result.value().errors.empty());
+        REQUIRE(result.value().deleted.size() == 1);
+        CHECK(result.value().deleted.front().deleted);
+
+        auto docAfter = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(docAfter);
+        CHECK_FALSE(docAfter.value().has_value());
+
+        auto kgAfter = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(kgAfter);
+        CHECK_FALSE(kgAfter.value().has_value());
     }
 
     SECTION("Delete document by raw hash removes content even without metadata") {
