@@ -1666,6 +1666,38 @@ public:
         });
     }
 
+    Result<std::int64_t> deleteOrphanedNodes() override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            // NOT IN subqueries exclude NULLs explicitly (SQL NULL semantics would otherwise
+            // make the predicate never match). Edges of deleted nodes cascade via FK.
+            static constexpr const char* kSql = R"SQL(
+                DELETE FROM kg_nodes WHERE
+                  (node_key LIKE 'doc:%' AND substr(node_key, 5) NOT IN
+                     (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
+                  OR (node_key LIKE 'blob:%' AND substr(node_key, 6) NOT IN
+                     (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
+                  OR (json_extract(properties, '$.document_hash') IS NOT NULL
+                      AND json_extract(properties, '$.document_hash') NOT IN
+                         (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
+                  OR (json_extract(properties, '$.file_path') IS NOT NULL
+                      AND json_extract(properties, '$.file_path') NOT IN
+                         (SELECT file_path FROM documents WHERE file_path IS NOT NULL))
+                  OR (json_extract(properties, '$.source_file') IS NOT NULL
+                      AND json_extract(properties, '$.source_file') NOT IN
+                         (SELECT file_path FROM documents WHERE file_path IS NOT NULL))
+            )SQL";
+            auto stmtR = db.prepare(kSql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            if (auto execR = stmt.execute(); !execR)
+                return execR.error();
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            spdlog::debug("deleteOrphanedNodes: deleted {} orphaned nodes", deleted);
+            return deleted;
+        });
+    }
+
     Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare(

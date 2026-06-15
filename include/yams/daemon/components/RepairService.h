@@ -236,7 +236,8 @@ private:
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
                                                 const ProgressFn& progress);
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req,
-                                               const ProgressFn& progress);
+                                               const ProgressFn& progress,
+                                               std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,
                                                    const ProgressFn& progress);
     RepairOperationResult applySemanticDedupe(const RepairRequest& req, const ProgressFn& progress);

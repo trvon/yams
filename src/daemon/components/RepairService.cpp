@@ -1175,7 +1175,8 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
 
     // Phase 2.5: Knowledge graph repair
     if (doGraph)
-        if (!runOp("graph", [&] { return repairKnowledgeGraph(request, progress); }))
+        if (!runOp("graph",
+                   [&] { return repairKnowledgeGraph(request, progress, cancelRequested); }))
             goto finalize;
 
     // Phase 3: Search index repair
@@ -1408,7 +1409,8 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
         });
     }
     if (keepGoing && doGraph) {
-        keepGoing = runOp("graph", [&] { return repairKnowledgeGraph(request, progress); });
+        keepGoing =
+            runOp("graph", [&] { return repairKnowledgeGraph(request, progress, cancelRequested); });
     }
     if (keepGoing && doFts5) {
         keepGoing =
@@ -2250,7 +2252,8 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
 }
 
 RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& req,
-                                                          const ProgressFn& progress) {
+                                                          const ProgressFn& progress,
+                                                          std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "graph";
 
@@ -2276,7 +2279,7 @@ RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& r
         ev.message = "graph repair scanning";
         progress(ev);
     };
-    auto repairRes = graphComponent->repairGraph(req.dryRun, graphProgress);
+    auto repairRes = graphComponent->repairGraph(req.dryRun, graphProgress, cancelRequested);
     if (!repairRes) {
         result.failed = 1;
         result.message = "Graph repair failed: " + repairRes.error().message;
@@ -2306,6 +2309,11 @@ RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& r
         message += "; cleaned orphans (nodes=" + std::to_string(cleanup.nodesDeleted) +
                    ", edges=" + std::to_string(cleanup.edgesDeleted) +
                    ", doc_entities=" + std::to_string(cleanup.docEntitiesDeleted) + ")";
+    }
+    // Surface the graph repair summaries (reconciliation counts, orphaned-node removal, skips)
+    // to the caller — previously these were only logged, so the CLI showed none of them.
+    for (const auto& issue : stats.issues) {
+        message += "; " + issue;
     }
     if (req.dryRun) {
         message += " (dry-run: changes were not committed)";

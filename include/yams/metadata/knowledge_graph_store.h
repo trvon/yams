@@ -437,6 +437,11 @@ public:
     // Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
 
+    // Delete document-bound nodes whose backing document no longer exists: doc:/blob: nodes,
+    // nodes carrying document_hash, and symbol/reference nodes carrying file_path/source_file.
+    // Set-based against the documents table (same DB); edges cascade via FK. Returns count.
+    virtual Result<std::int64_t> deleteOrphanedNodes() = 0;
+
     // Delete every edge matching the given relation. Used to clear derived
     // graphs (e.g. semantic_neighbor) before a deterministic corpus-wide rebuild.
     virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;

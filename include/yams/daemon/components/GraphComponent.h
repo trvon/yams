@@ -82,7 +82,8 @@ public:
     };
     using RepairProgressFn =
         std::function<void(uint64_t processed, uint64_t total, const RepairStats& statsSnapshot)>;
-    Result<RepairStats> repairGraph(bool dryRun = false, RepairProgressFn progress = {});
+    Result<RepairStats> repairGraph(bool dryRun = false, RepairProgressFn progress = {},
+                                    const std::atomic<bool>* cancelRequested = nullptr);
 
     struct GraphHealthReport {
         uint64_t totalNodes{0};
@@ -124,7 +125,8 @@ public:
         uint64_t referencesUnresolved{0};
         bool skipped{false};
     };
-    Result<ReferenceReconcileStats> reconcileSymbolReferences(bool dryRun = false);
+    Result<ReferenceReconcileStats>
+    reconcileSymbolReferences(bool dryRun = false, const std::atomic<bool>* cancelRequested = nullptr);
     Result<SemanticTopologyMaintenanceStats>
     maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
                                          bool dryRun = false);

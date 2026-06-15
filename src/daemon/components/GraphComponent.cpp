@@ -499,16 +499,22 @@ std::string GraphComponent::resolveSymbolExtractorIdForLanguage(const std::strin
     return {};
 }
 
-Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
-                                                                RepairProgressFn progress) {
+Result<GraphComponent::RepairStats>
+GraphComponent::repairGraph(bool dryRun, RepairProgressFn progress,
+                            const std::atomic<bool>* cancelRequested) {
     if (!initialized_ || !metadataRepo_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
+    const auto canceled = [&]() {
+        return cancelRequested != nullptr && cancelRequested->load(std::memory_order_relaxed);
+    };
 
     RepairStats stats;
     constexpr int kBatchSize = 500;
     constexpr uint64_t kProgressStride = 100;
-    uint64_t processed = 0;
+    // Atomic: the heartbeat thread in runWithHeartbeat reads this concurrently with the main
+    // repair loop's updates.
+    std::atomic<uint64_t> processed{0};
     uint64_t nextProgressAt = kProgressStride;
     const auto totalDocsRes = metadataRepo_->getDocumentCount();
     const uint64_t totalDocs = totalDocsRes ? static_cast<uint64_t>(totalDocsRes.value()) : 0ULL;
@@ -566,6 +572,10 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
     std::size_t offset = 0;
     while (true) {
+        if (canceled()) {
+            stats.issues.push_back("graph repair canceled before completion");
+            return stats;
+        }
         metadata::DocumentQueryOptions opts;
         opts.limit = kBatchSize;
         opts.offset = static_cast<int>(offset);
@@ -872,6 +882,11 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 
     emit(processed);
 
+    if (canceled()) {
+        stats.issues.push_back("graph repair canceled before maintenance");
+        return stats;
+    }
+
     auto maintenanceResult = maintainSemanticTopology(dryRun);
     if (!maintenanceResult) {
         ++stats.errors;
@@ -883,7 +898,19 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
         }
     }
 
-    auto reconcileResult = reconcileSymbolReferences(dryRun);
+    if (!dryRun) {
+        auto orphanResult = kgStore_->deleteOrphanedNodes();
+        if (!orphanResult) {
+            ++stats.errors;
+            stats.issues.push_back("orphaned node cleanup failed: " +
+                                   orphanResult.error().message);
+        } else if (orphanResult.value() > 0) {
+            stats.issues.push_back("removed " + std::to_string(orphanResult.value()) +
+                                   " orphaned KG nodes");
+        }
+    }
+
+    auto reconcileResult = reconcileSymbolReferences(dryRun, cancelRequested);
     if (!reconcileResult) {
         ++stats.errors;
         stats.issues.push_back("symbol reference reconciliation failed: " +
@@ -908,7 +935,7 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun,
 }
 
 Result<GraphComponent::ReferenceReconcileStats>
-GraphComponent::reconcileSymbolReferences(bool dryRun) {
+GraphComponent::reconcileSymbolReferences(bool dryRun, const std::atomic<bool>* cancelRequested) {
     if (!initialized_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
@@ -917,6 +944,9 @@ GraphComponent::reconcileSymbolReferences(bool dryRun) {
     constexpr std::size_t kPage = 500;
     std::size_t offset = 0;
     std::vector<metadata::KGEdge> pending;
+    const auto canceled = [&]() {
+        return cancelRequested != nullptr && cancelRequested->load(std::memory_order_relaxed);
+    };
 
     const auto flush = [&]() -> Result<void> {
         if (pending.empty() || dryRun) {
@@ -929,6 +959,13 @@ GraphComponent::reconcileSymbolReferences(bool dryRun) {
     };
 
     while (true) {
+        if (canceled()) {
+            if (auto res = flush(); !res) {
+                return res.error();
+            }
+            stats.skipped = true;
+            return stats;
+        }
         auto nodesRes = kgStore_->findNodesByType("symbol_reference", kPage, offset);
         if (!nodesRes) {
             return nodesRes.error();
