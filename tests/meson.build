@@ -1968,6 +1968,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  builtin_content_extractor_exe = executable('builtin_content_extractor',
+    files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Text extraction to FTS5 pipeline test(detection->extraction->indexing->search)
   text_extraction_fts5_pipeline_exe = executable('text_extraction_fts5_pipeline',
     files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
@@ -2418,6 +2427,12 @@ if catch2_dep.found()
 
   test('plain_text_extractor', plain_text_extractor_exe,
     suite: ['catch2', 'unit', 'extraction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('builtin_content_extractor', builtin_content_extractor_exe,
+    suite: ['catch2', 'unit', 'extraction', 'content_extractor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
