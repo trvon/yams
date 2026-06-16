@@ -276,6 +276,14 @@ Result<void> Statement::execute() {
         // Include SQL snippet for constraint failures to aid debugging
         std::string errMsg = "Failed to execute statement: " + std::string(sqlite3_errstr(rc));
         if (rc == SQLITE_CONSTRAINT && stmt_) {
+            // Append the specific constraint detail (e.g. "FOREIGN KEY constraint failed",
+            // "UNIQUE constraint failed: t.c") so the retry classifier and logs can tell a
+            // transient FK race from a deterministic violation. The generic token above is
+            // retained for callers that match on "constraint failed".
+            if (const char* detail = sqlite3_errmsg(sqlite3_db_handle(stmt_));
+                detail && *detail) {
+                errMsg += " (" + std::string(detail) + ")";
+            }
             const char* sql = sqlite3_sql(stmt_);
             if (sql) {
                 // Include first 100 chars of SQL for context
@@ -310,8 +318,14 @@ Result<bool> Statement::step() {
             continue;
         }
         // Non-retryable error or max retries exceeded
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to step statement: " + std::string(sqlite3_errstr(rc))};
+        std::string errMsg = "Failed to step statement: " + std::string(sqlite3_errstr(rc));
+        if (rc == SQLITE_CONSTRAINT && stmt_) {
+            if (const char* detail = sqlite3_errmsg(sqlite3_db_handle(stmt_));
+                detail && *detail) {
+                errMsg += " (" + std::string(detail) + ")";
+            }
+        }
+        return Error{ErrorCode::DatabaseError, errMsg};
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to step statement: max retries exceeded"};

@@ -497,6 +497,25 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Relationship operations",
         REQUIRE(orphanResult.has_value());
     }
 
+    SECTION("Duplicate relationship is idempotent") {
+        DocumentRelationship rel;
+        rel.parentId = parentId;
+        rel.childId = child1Id;
+        rel.relationshipType = RelationshipType::VersionOf;
+        rel.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
+        auto first = repo_->insertRelationship(rel);
+        REQUIRE(first.has_value());
+
+        auto second = repo_->insertRelationship(rel);
+        REQUIRE(second.has_value());
+
+        auto parentRels = repo_->getRelationships(parentId);
+        REQUIRE(parentRels.has_value());
+        CHECK((parentRels.value().size() == 1));
+    }
+
     SECTION("Delete relationship") {
         DocumentRelationship rel;
         rel.parentId = parentId;

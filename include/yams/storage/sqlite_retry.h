@@ -65,6 +65,13 @@ inline bool isBusyOrLockedMessage(std::string_view message) noexcept {
            message.find("busy") != std::string_view::npos;
 }
 
+inline bool isTransientConstraintMessage(std::string_view message) noexcept {
+    // FOREIGN KEY violations can be a transient race (a referenced row may not have
+    // committed yet on a concurrent connection). UNIQUE / NOT NULL / CHECK / PRIMARY KEY
+    // failures are deterministic and never succeed on retry.
+    return message.find("FOREIGN KEY constraint failed") != std::string_view::npos;
+}
+
 inline bool canRetry(int rc, int attempt, BusyRetryPolicy policy) noexcept {
     return isBusyOrLocked(rc) && attempt + 1 < policy.maxRetries;
 }

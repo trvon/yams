@@ -14,7 +14,7 @@ namespace yams::metadata {
 Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationship& relationship) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         YAMS_TRY_UNWRAP(stmt, db.prepare(R"(
-            INSERT INTO document_relationships (
+            INSERT OR IGNORE INTO document_relationships (
                 parent_id, child_id, relationship_type, created_time
             ) VALUES (?, ?, ?, ?)
         )"));
@@ -31,6 +31,9 @@ Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationshi
         }
 
         YAMS_TRY(stmt.execute());
+        if (db.changes() == 0) {
+            return static_cast<int64_t>(0);
+        }
         return db.lastInsertRowId();
     });
 }

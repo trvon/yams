@@ -331,7 +331,10 @@ if catch2_dep.found()
   )
 
   catch2_daemon_metrics_exe = executable('catch2_daemon_metrics',
-    files('unit/daemon/daemon_metrics_status_test.cpp'),
+    files(
+      'unit/daemon/daemon_metrics_status_test.cpp',
+      'unit/daemon/daemon_metrics_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -401,6 +404,7 @@ if catch2_dep.found()
       'unit/daemon/request_handler_admission_reuse_catch2_test.cpp',
       'unit/daemon/request_handler_repair_cancel_catch2_test.cpp',
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
+      'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1450,7 +1454,6 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
-      'unit/api/raw_text_storage_catch2_test.cpp',
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     include_directories: incs,

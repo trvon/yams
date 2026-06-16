@@ -70,11 +70,16 @@ public:
      * @return Number of '\n' characters found
      * Null data with nonzero size returns 0.
      */
-    static size_t countNewlines(const char* data, size_t size);
-
-private:
-    static size_t findNewlineScalar(const char* data, size_t size);
-    static size_t countNewlinesScalar(const char* data, size_t size);
+    static inline size_t countNewlines(const char* data, size_t size) {
+        if (size == 0 || data == nullptr)
+            return 0;
+        size_t count = 0;
+        for (size_t i = 0; i < size; ++i) {
+            if (data[i] == '\n')
+                ++count;
+        }
+        return count;
+    }
 };
 
 } // namespace services

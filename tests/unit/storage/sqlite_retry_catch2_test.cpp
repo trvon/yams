@@ -20,6 +20,21 @@ TEST_CASE("SQLite retry policy classifies transient lock failures", "[storage][s
     CHECK_FALSE(isBusyOrLockedMessage("constraint failed"));
 }
 
+TEST_CASE("SQLite retry policy only retries FOREIGN KEY constraint failures",
+          "[storage][sqlite][retry]") {
+    using namespace yams::storage::sqlite_retry;
+
+    CHECK(isTransientConstraintMessage("FOREIGN KEY constraint failed"));
+    CHECK(isTransientConstraintMessage(
+        "Failed to execute statement: FOREIGN KEY constraint failed [SQL: INSERT ...]"));
+
+    CHECK_FALSE(isTransientConstraintMessage("UNIQUE constraint failed: documents.sha256_hash"));
+    CHECK_FALSE(isTransientConstraintMessage("NOT NULL constraint failed: documents.id"));
+    CHECK_FALSE(isTransientConstraintMessage("CHECK constraint failed: positive_size"));
+    CHECK_FALSE(isTransientConstraintMessage("constraint failed"));
+    CHECK_FALSE(isTransientConstraintMessage("database is locked"));
+}
+
 TEST_CASE("SQLite retry policy bounds exponential retry attempts", "[storage][sqlite][retry]") {
     using namespace yams::storage::sqlite_retry;
 
