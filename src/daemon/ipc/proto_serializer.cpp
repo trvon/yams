@@ -278,6 +278,9 @@ template <> struct ProtoBinding<SearchRequest> {
         if (!r.instanceId.empty()) {
             o->set_instance_id(yams::common::sanitizeUtf8(r.instanceId));
         }
+        if (!r.collection.empty()) {
+            o->set_collection(yams::common::sanitizeUtf8(r.collection));
+        }
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -321,6 +324,7 @@ template <> struct ProtoBinding<SearchRequest> {
             r.sessionName = i.session_id();
         }
         r.instanceId = i.instance_id();
+        r.collection = i.collection();
         return r;
     }
 };

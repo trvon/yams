@@ -16,6 +16,10 @@ else
     'fsm_tuning_benchmark_integration_test.cpp',
   )
 
+  corpus_relevance_srcs = files(
+    'corpus_relevance_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # Catch2 needs its main library
@@ -89,6 +93,28 @@ else
       is_parallel: false,
       timeout: 180,  # 3 minutes - FSM tests run multiple search operations
       # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
+      args: ['--allow-running-no-tests'],
+    )
+
+    # Provable multi-corpus relevance gate (FTS completeness, collection isolation, path scoping)
+    corpus_relevance_exe = executable('yams_corpus_relevance',
+      corpus_relevance_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('corpus_relevance',
+      corpus_relevance_exe,
+      suite: ['integration', 'search', 'relevance', 'fts', 'catch2'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_VECTORS': '1',  # keyword/FTS + metadata scoping; no embeddings needed
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: 180,
       args: ['--allow-running-no-tests'],
     )
   else

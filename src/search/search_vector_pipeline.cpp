@@ -138,8 +138,15 @@ aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecord
         deduped.push_back(std::move(record));
     }
 
-    std::sort(deduped.begin(), deduped.end(),
-              [](const auto& a, const auto& b) { return a.relevance_score > b.relevance_score; });
+    std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
+        if (a.relevance_score != b.relevance_score) {
+            return a.relevance_score > b.relevance_score;
+        }
+        if (a.document_hash != b.document_hash) {
+            return a.document_hash < b.document_hash;
+        }
+        return a.chunk_id < b.chunk_id;
+    });
     if (deduped.size() > limit) {
         deduped.resize(limit);
     }
@@ -171,8 +178,12 @@ dedupeEntityVectorRecords(std::vector<vector::EntityVectorRecord> entityRecords,
         }
     }
 
-    std::sort(deduped.begin(), deduped.end(),
-              [](const auto& a, const auto& b) { return a.relevance_score > b.relevance_score; });
+    std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
+        if (a.relevance_score != b.relevance_score) {
+            return a.relevance_score > b.relevance_score;
+        }
+        return a.node_key < b.node_key;
+    });
     if (deduped.size() > limit) {
         deduped.resize(limit);
     }

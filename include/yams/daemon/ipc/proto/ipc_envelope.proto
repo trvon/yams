@@ -50,6 +50,7 @@ message SearchRequest {
   int32 snippet_hydration_timeout_ms = 33;
   string session_id = 99;
   string instance_id = 100;
+  string collection = 101; // Scope to a named corpus (collection metadata key)
 }
 
 message GetRequest {

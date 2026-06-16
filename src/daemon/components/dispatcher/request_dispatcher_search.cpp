@@ -73,6 +73,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         serviceReq.useSession = req.useSession;
         serviceReq.sessionName = req.sessionName;
         serviceReq.globalSearch = req.globalSearch;
+        if (!req.collection.empty()) {
+            serviceReq.metadataFilters.emplace_back("collection", req.collection);
+        }
 
         if (const char* disVec = std::getenv("YAMS_DISABLE_VECTOR");
             disVec && *disVec && std::string(disVec) != "0" && std::string(disVec) != "false") {

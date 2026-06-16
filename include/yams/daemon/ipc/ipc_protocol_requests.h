@@ -57,6 +57,7 @@ struct SearchRequest {
     bool globalSearch = false;   // Session-isolated memory (PBI-082): bypass session isolation
     bool symbolRank = true;      // Enable automatic symbol ranking boost for code-like queries
     std::string instanceId = {}; // Instance-level isolation (UUID of MCP connection)
+    std::string collection = {}; // Scope to a named corpus (collection metadata key)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -71,7 +72,7 @@ struct SearchRequest {
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
-            << globalSearch << symbolRank << instanceId;
+            << globalSearch << symbolRank << instanceId << collection;
     }
 
     template <typename Deserializer>
@@ -269,6 +270,9 @@ struct SearchRequest {
         }
         if (auto ii = deser.readString(); ii) {
             req.instanceId = std::move(ii.value());
+        }
+        if (auto col = deser.readString(); col) {
+            req.collection = std::move(col.value());
         }
 
         return req;

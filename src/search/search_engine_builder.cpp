@@ -335,6 +335,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             } else if (*fusionEnv == "COMB_MNZ") {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+            } else if (*fusionEnv == "CONVEX") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
+            } else if (*fusionEnv == "WEIGHTED_LINEAR_ZSCORE") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
             } else {
                 spdlog::warn("Unknown YAMS_FUSION_STRATEGY value '{}', ignoring", *fusionEnv);
             }
