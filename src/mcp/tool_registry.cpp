@@ -628,6 +628,50 @@ json MCPListDownloadJobsResponse::toJson() const {
     return j;
 }
 
+// MCPDownloadJobsRequest — unified (replaces download_status/list_jobs/cancel)
+MCPDownloadJobsRequest MCPDownloadJobsRequest::fromJson(const json& j) {
+    MCPDownloadJobsRequest req;
+    req.action = j.value("action", std::string{"status"});
+    req.jobId = j.value("job_id", std::string{});
+    return req;
+}
+
+json MCPDownloadJobsRequest::toJson() const {
+    return json{{"action", action}, {"job_id", jobId}};
+}
+
+MCPDownloadJobsResponse MCPDownloadJobsResponse::fromJson(const json& j) {
+    MCPDownloadJobsResponse resp;
+    resp.action = j.value("action", std::string{});
+    if (j.contains("job") && j["job"].is_object()) {
+        resp.job = MCPDownloadJobResponse::fromJson(j["job"]);
+    }
+    if (j.contains("jobs") && j["jobs"].is_array()) {
+        resp.jobs.reserve(j["jobs"].size());
+        for (const auto& item : j["jobs"]) {
+            if (item.is_object()) {
+                resp.jobs.push_back(MCPDownloadJobResponse::fromJson(item));
+            }
+        }
+    }
+    return resp;
+}
+
+json MCPDownloadJobsResponse::toJson() const {
+    json j;
+    j["action"] = action;
+    if (!job.jobId.empty()) {
+        j["job"] = job.toJson();
+    }
+    if (!jobs.empty()) {
+        j["jobs"] = json::array();
+        for (const auto& item : jobs) {
+            j["jobs"].push_back(item.toJson());
+        }
+    }
+    return j;
+}
+
 // MCPStoreDocumentRequest implementation
 MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     MCPStoreDocumentRequest req;

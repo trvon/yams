@@ -551,24 +551,16 @@ json MCPServer::describeOp(const std::string& target) const {
                  {"required", json::array({"url"})}},
             "execute", false};
 
-        ops["download_status"] = {
-            "Get daemon-managed download job status",
+        ops["download_jobs"] = {
+            "Manage daemon download jobs (status, list, or cancel)",
             json{{"type", "object"},
                  {"properties",
-                  {{"job_id", {{"type", "string"}, {"description", "Download job id"}}}}},
-                 {"required", json::array({"job_id"})}},
+                  {{"action",
+                    {{"type", "string"},
+                     {"enum", json::array({"status", "list", "cancel"})},
+                     {"default", "status"}}},
+                   {"job_id", {{"type", "string"}, {"description", "Job id for status/cancel"}}}}}},
             "query", true};
-
-        ops["download_list_jobs"] = {"List daemon-managed download jobs", json{{"type", "object"}},
-                                     "query", true};
-
-        ops["download_cancel"] = {
-            "Cancel daemon-managed download job",
-            json{{"type", "object"},
-                 {"properties",
-                  {{"job_id", {{"type", "string"}, {"description", "Download job id"}}}}},
-                 {"required", json::array({"job_id"})}},
-            "execute", false};
 
         ops["session_start"] = {
             "Start (and optionally warm) a session",
@@ -829,7 +821,7 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
     cfg.invalidOpHint = "Use the 'query' tool for read operations (search, grep, list, etc).";
     cfg.opTable = {
         {"add", "add"},         {"update", "update"},     {"delete", "delete_by_name"},
-        {"restore", "restore"}, {"download", "download"}, {"download_cancel", "download_cancel"},
+        {"restore", "restore"}, {"download", "download"}, {"download_jobs", "download_jobs"},
     };
     cfg.stepProjector = projections::executeStepProjection;
     cfg.finalResultBuilder = projections::executeFinalResult;

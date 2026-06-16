@@ -567,6 +567,28 @@ struct MCPListDownloadJobsResponse {
     json toJson() const;
 };
 
+// Unified download_jobs request (replaces download_status/list_jobs/cancel)
+struct MCPDownloadJobsRequest {
+    using RequestType = MCPDownloadJobsRequest;
+
+    std::string action; // "status", "list", or "cancel"
+    std::string jobId;  // required for status/cancel
+
+    static MCPDownloadJobsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPDownloadJobsResponse {
+    using ResponseType = MCPDownloadJobsResponse;
+
+    std::string action;
+    MCPDownloadJobResponse job;               // single job (status/cancel)
+    std::vector<MCPDownloadJobResponse> jobs; // multiple jobs (list)
+
+    static MCPDownloadJobsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // Store document DTOs
 struct MCPStoreDocumentRequest {
     using RequestType = MCPStoreDocumentRequest;

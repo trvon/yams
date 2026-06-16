@@ -28,7 +28,6 @@ std::unique_ptr<ICommand> createRepairCommand();
 std::unique_ptr<ICommand> createModelCommand();
 std::unique_ptr<ICommand> createDaemonCommand();
 std::unique_ptr<ICommand> createPluginCommand();
-std::unique_ptr<ICommand> createDrCommand();
 std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createDiffCommand();
@@ -80,7 +79,6 @@ constexpr auto kRuntimeCommandRegistrations = std::to_array<CommandRegistration>
     {"daemon", &createDaemonCommand},
     {"plugin", &createPluginCommand},
     {"doctor", &createDoctorCommand},
-    {"dr", &createDrCommand},
 });
 
 constexpr auto kAnalysisCommandRegistrations = std::to_array<CommandRegistration>({

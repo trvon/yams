@@ -63,7 +63,6 @@ yams_cli_sources = [
   'commands/doctor/repairs/fts5_event_renderer.cpp',
   'commands/doctor/repairs/fts5_progress.cpp',
   'commands/doctor/repairs/db_repair.cpp',
-  'commands/dr_command.cpp',
   'commands/graph_command.cpp',
   'commands/diff_command.cpp',
   'commands/tune_command.cpp',
