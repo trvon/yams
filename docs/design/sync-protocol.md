@@ -231,8 +231,7 @@ Sync must be disabled or degraded unless these daemon states are explicit:
 | Object backend | Healthy, checksum-capable, and not silently in fallback-local mode for shared-store sync. |
 | Repair service | Running only when required storage/catalog dependencies are ready. |
 
-The test gate for these classes is tracked in
-`docs/testing/coverage_report.md`.
+Test coverage is tracked via meson test targets.
 
 ## Observability
 
