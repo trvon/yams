@@ -1,40 +1,25 @@
-#if !defined(YAMS_WASI)
-#include <yams/app/services/document_ingestion_service.h>
-#include <yams/app/services/retrieval_service.h>
-#include <yams/app/services/services.hpp>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/cli/daemon_helpers.h>
-#include <yams/cli/graph_helpers.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/compression/compression_header.h>
-#include <yams/compression/compressor_interface.h>
-#include <yams/config/config_migration.h>
-#include <yams/core/task.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/daemon/client/daemon_client.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/daemon/client/global_io_context.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/daemon/components/TuneAdvisor.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/daemon/daemon.h>
-#include <yams/daemon/ipc/socket_utils.h>
-#endif
-#if !defined(YAMS_WASI)
-#include <yams/downloader/downloader.hpp>
-#endif
 #include <yams/common/fs_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
+
 #if !defined(YAMS_WASI)
+#include <yams/app/services/document_ingestion_service.h>
+#include <yams/app/services/retrieval_service.h>
+#include <yams/app/services/services.hpp>
+#include <yams/cli/daemon_helpers.h>
+#include <yams/cli/graph_helpers.h>
+#include <yams/compression/compression_header.h>
+#include <yams/compression/compressor_interface.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/config_migration.h>
+#include <yams/core/task.h>
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/socket_utils.h>
+#include <yams/downloader/downloader.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
@@ -3906,8 +3891,11 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     }
 
     const auto symbolToJson = [](const auto& s) {
-        json sj{{"node_key", s.nodeKey},     {"label", s.label}, {"qualified_name", s.qualifiedName},
-                {"kind", s.kind}, {"file_path", s.filePath}};
+        json sj{{"node_key", s.nodeKey},
+                {"label", s.label},
+                {"qualified_name", s.qualifiedName},
+                {"kind", s.kind},
+                {"file_path", s.filePath}};
         if (s.startLine.has_value())
             sj["start_line"] = *s.startLine;
         if (s.endLine.has_value())
@@ -4950,148 +4938,149 @@ void MCPServer::initializeToolRegistry() {
 
         toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
             "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
-            json{{"type", "object"},
-                 {"properties",
-                  {{"action",
-                    {{"type", "string"},
-                     {"description",
-                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
-                      "insert nodes/edges/aliases, 'lookup' to resolve a symbol definition, "
-                      "'impact' for reverse dependents (blast radius), 'trace' for a path between "
-                      "two symbols, 'affected_tests' to map changed files to affected tests"},
-                     {"enum", json::array({"query", "ingest", "lookup", "impact", "trace",
-                                           "affected_tests"})},
-                     {"default", "query"}}},
-                   // ── Navigation parameters (lookup/impact/trace/affected_tests) ──
-                   {"symbol",
-                    {{"type", "string"},
-                     {"description", "Target symbol for action=lookup or action=impact"}}},
-                   {"file",
-                    {{"type", "string"},
-                     {"description", "File path substring to disambiguate action=lookup"}}},
-                   {"line",
-                    {{"type", "integer"},
-                     {"description", "Line number to disambiguate action=lookup"}}},
-                   {"from", {{"type", "string"}, {"description", "Source symbol for action=trace"}}},
-                   {"to", {{"type", "string"}, {"description", "Target symbol for action=trace"}}},
-                   {"changed_files",
-                    {{"type", "array"},
-                     {"items", {{"type", "string"}}},
-                     {"description", "Changed file paths for action=affected_tests"}}},
-                   {"test_pattern",
-                    {{"type", "string"},
-                     {"description", "Path substring identifying test files for "
-                                     "action=affected_tests"}}},
-                   // ── Query parameters ──
-                   {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
-                   {"name", {{"type", "string"}, {"description", "Document name to query from"}}},
-                   {"node_key",
-                    {{"type", "string"},
-                     {"description", "Direct node key lookup (e.g., fn:abc:0x1000)"}}},
-                   {"node_id", {{"type", "integer"}, {"description", "Direct node ID lookup"}}},
-                   {"list_types",
-                    {{"type", "boolean"},
-                     {"description", "List available node types with counts"},
-                     {"default", false}}},
-                   {"list_type",
-                    {{"type", "string"},
-                     {"description", "List nodes of specific type (e.g., binary.function)"}}},
-                   {"isolated",
-                    {{"type", "boolean"},
-                     {"description", "Find isolated nodes (no incoming edges)"},
-                     {"default", false}}},
-                   {"relation",
-                    {{"type", "string"},
-                     {"description", "Filter by relation type (e.g., calls, imports)"}}},
-                   {"depth",
-                    {{"type", "integer"},
-                     {"description", "BFS traversal depth (1-5)"},
-                     {"default", 1},
-                     {"minimum", 1},
-                     {"maximum", 5}}},
-                   {"limit",
-                    {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
-                   {"offset",
-                    {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}},
-                   {"reverse",
-                    {{"type", "boolean"},
-                     {"description", "Traverse incoming edges instead of outgoing"},
-                     {"default", false}}},
-                   {"include_properties",
-                    {{"type", "boolean"},
-                     {"description", "Include node and edge properties"},
-                     {"default", false}}},
-                   {"scope_snapshot",
-                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}},
-                   // ── Ingest parameters (used when action == "ingest") ──
-                   {"nodes",
-                    {{"type", "array"},
-                     {"description", "Nodes to ingest (action=ingest)"},
-                     {"items",
-                      {{"type", "object"},
-                       {"properties",
-                        {{"node_key",
-                          {{"type", "string"},
-                           {"description",
-                            "Unique logical key (e.g., 'strongs:H1234', 'lemma:λόγος')"}}},
-                         {"label", {{"type", "string"}, {"description", "Human-readable name"}}},
-                         {"type",
-                          {{"type", "string"},
-                           {"description",
-                            "Node type (e.g., 'token', 'strongs', 'lemma', 'verse')"}}},
-                         {"properties",
-                          {{"type", "object"},
-                           {"description", "Arbitrary properties as JSON object"}}}}},
-                       {"required", json::array({"node_key", "type"})}}}}},
-                   {"edges",
-                    {{"type", "array"},
-                     {"description", "Edges/relationships to ingest (action=ingest)"},
-                     {"items",
-                      {{"type", "object"},
-                       {"properties",
-                        {{"src_node_key", {{"type", "string"}, {"description", "Source node key"}}},
-                         {"dst_node_key",
-                          {{"type", "string"}, {"description", "Destination node key"}}},
-                         {"relation",
-                          {{"type", "string"},
-                           {"description",
-                            "Relation type (e.g., 'HAS_STRONGS', 'HAS_LEMMA', 'CONTAINS')"}}},
-                         {"weight",
-                          {{"type", "number"}, {"description", "Edge weight"}, {"default", 1.0}}},
-                         {"properties",
-                          {{"type", "object"}, {"description", "Arbitrary edge properties"}}}}},
-                       {"required", json::array({"src_node_key", "dst_node_key", "relation"})}}}}},
-                   {"aliases",
-                    {{"type", "array"},
-                     {"description", "Aliases/surface forms to ingest (action=ingest)"},
-                     {"items",
-                      {{"type", "object"},
-                       {"properties",
-                        {{"node_key",
-                          {{"type", "string"}, {"description", "Node key to attach alias to"}}},
-                         {"alias",
-                          {{"type", "string"}, {"description", "Surface form / alias text"}}},
-                         {"source",
-                          {{"type", "string"},
-                           {"description", "Origin system (e.g., 'symphony', 'manual')"}}},
-                         {"confidence",
-                          {{"type", "number"},
-                           {"description", "Confidence [0,1]"},
-                           {"default", 1.0}}}}},
-                       {"required", json::array({"node_key", "alias"})}}}}},
-                   {"document_hash",
-                    {{"type", "string"},
-                     {"description",
-                      "Associate ingested entities with this document (action=ingest)"}}},
-                   {"skip_existing_nodes",
-                    {{"type", "boolean"},
-                     {"description", "Skip nodes that already exist by node_key (action=ingest)"},
-                     {"default", true}}},
-                   {"skip_existing_edges",
-                    {{"type", "boolean"},
-                     {"description",
-                      "Skip edges that already exist by src/dst/relation (action=ingest)"},
-                     {"default", true}}}}}},
+            json{
+                {"type", "object"},
+                {"properties",
+                 {{"action",
+                   {{"type", "string"},
+                    {"description",
+                     "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
+                     "insert nodes/edges/aliases, 'lookup' to resolve a symbol definition, "
+                     "'impact' for reverse dependents (blast radius), 'trace' for a path between "
+                     "two symbols, 'affected_tests' to map changed files to affected tests"},
+                    {"enum", json::array({"query", "ingest", "lookup", "impact", "trace",
+                                          "affected_tests"})},
+                    {"default", "query"}}},
+                  // ── Navigation parameters (lookup/impact/trace/affected_tests) ──
+                  {"symbol",
+                   {{"type", "string"},
+                    {"description", "Target symbol for action=lookup or action=impact"}}},
+                  {"file",
+                   {{"type", "string"},
+                    {"description", "File path substring to disambiguate action=lookup"}}},
+                  {"line",
+                   {{"type", "integer"},
+                    {"description", "Line number to disambiguate action=lookup"}}},
+                  {"from", {{"type", "string"}, {"description", "Source symbol for action=trace"}}},
+                  {"to", {{"type", "string"}, {"description", "Target symbol for action=trace"}}},
+                  {"changed_files",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "Changed file paths for action=affected_tests"}}},
+                  {"test_pattern",
+                   {{"type", "string"},
+                    {"description", "Path substring identifying test files for "
+                                    "action=affected_tests"}}},
+                  // ── Query parameters ──
+                  {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
+                  {"name", {{"type", "string"}, {"description", "Document name to query from"}}},
+                  {"node_key",
+                   {{"type", "string"},
+                    {"description", "Direct node key lookup (e.g., fn:abc:0x1000)"}}},
+                  {"node_id", {{"type", "integer"}, {"description", "Direct node ID lookup"}}},
+                  {"list_types",
+                   {{"type", "boolean"},
+                    {"description", "List available node types with counts"},
+                    {"default", false}}},
+                  {"list_type",
+                   {{"type", "string"},
+                    {"description", "List nodes of specific type (e.g., binary.function)"}}},
+                  {"isolated",
+                   {{"type", "boolean"},
+                    {"description", "Find isolated nodes (no incoming edges)"},
+                    {"default", false}}},
+                  {"relation",
+                   {{"type", "string"},
+                    {"description", "Filter by relation type (e.g., calls, imports)"}}},
+                  {"depth",
+                   {{"type", "integer"},
+                    {"description", "BFS traversal depth (1-5)"},
+                    {"default", 1},
+                    {"minimum", 1},
+                    {"maximum", 5}}},
+                  {"limit",
+                   {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
+                  {"offset",
+                   {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}},
+                  {"reverse",
+                   {{"type", "boolean"},
+                    {"description", "Traverse incoming edges instead of outgoing"},
+                    {"default", false}}},
+                  {"include_properties",
+                   {{"type", "boolean"},
+                    {"description", "Include node and edge properties"},
+                    {"default", false}}},
+                  {"scope_snapshot",
+                   {{"type", "string"}, {"description", "Scope results to specific snapshot"}}},
+                  // ── Ingest parameters (used when action == "ingest") ──
+                  {"nodes",
+                   {{"type", "array"},
+                    {"description", "Nodes to ingest (action=ingest)"},
+                    {"items",
+                     {{"type", "object"},
+                      {"properties",
+                       {{"node_key",
+                         {{"type", "string"},
+                          {"description",
+                           "Unique logical key (e.g., 'strongs:H1234', 'lemma:λόγος')"}}},
+                        {"label", {{"type", "string"}, {"description", "Human-readable name"}}},
+                        {"type",
+                         {{"type", "string"},
+                          {"description",
+                           "Node type (e.g., 'token', 'strongs', 'lemma', 'verse')"}}},
+                        {"properties",
+                         {{"type", "object"},
+                          {"description", "Arbitrary properties as JSON object"}}}}},
+                      {"required", json::array({"node_key", "type"})}}}}},
+                  {"edges",
+                   {{"type", "array"},
+                    {"description", "Edges/relationships to ingest (action=ingest)"},
+                    {"items",
+                     {{"type", "object"},
+                      {"properties",
+                       {{"src_node_key", {{"type", "string"}, {"description", "Source node key"}}},
+                        {"dst_node_key",
+                         {{"type", "string"}, {"description", "Destination node key"}}},
+                        {"relation",
+                         {{"type", "string"},
+                          {"description",
+                           "Relation type (e.g., 'HAS_STRONGS', 'HAS_LEMMA', 'CONTAINS')"}}},
+                        {"weight",
+                         {{"type", "number"}, {"description", "Edge weight"}, {"default", 1.0}}},
+                        {"properties",
+                         {{"type", "object"}, {"description", "Arbitrary edge properties"}}}}},
+                      {"required", json::array({"src_node_key", "dst_node_key", "relation"})}}}}},
+                  {"aliases",
+                   {{"type", "array"},
+                    {"description", "Aliases/surface forms to ingest (action=ingest)"},
+                    {"items",
+                     {{"type", "object"},
+                      {"properties",
+                       {{"node_key",
+                         {{"type", "string"}, {"description", "Node key to attach alias to"}}},
+                        {"alias",
+                         {{"type", "string"}, {"description", "Surface form / alias text"}}},
+                        {"source",
+                         {{"type", "string"},
+                          {"description", "Origin system (e.g., 'symphony', 'manual')"}}},
+                        {"confidence",
+                         {{"type", "number"},
+                          {"description", "Confidence [0,1]"},
+                          {"default", 1.0}}}}},
+                      {"required", json::array({"node_key", "alias"})}}}}},
+                  {"document_hash",
+                   {{"type", "string"},
+                    {"description",
+                     "Associate ingested entities with this document (action=ingest)"}}},
+                  {"skip_existing_nodes",
+                   {{"type", "boolean"},
+                    {"description", "Skip nodes that already exist by node_key (action=ingest)"},
+                    {"default", true}}},
+                  {"skip_existing_edges",
+                   {{"type", "boolean"},
+                    {"description",
+                     "Skip edges that already exist by src/dst/relation (action=ingest)"},
+                    {"default", true}}}}}},
             "Query or mutate the knowledge graph. Use action='query' (default) to explore "
             "relationships, or action='ingest' to bulk-insert nodes, edges, and aliases "
             "(e.g., token-to-Strong's/lemma graphs).",
