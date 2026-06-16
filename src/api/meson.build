@@ -7,7 +7,6 @@ yams_api_lib = static_library('yams_api',
     'progress_reporter.cpp',
     'metadata_api.cpp',
     'semantic_search_api.cpp',
-    'raw_text_storage.cpp',
   ],
   dependencies: [
     dependency('yams_core'),

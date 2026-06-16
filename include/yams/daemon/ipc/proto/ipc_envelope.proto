@@ -50,6 +50,7 @@ message SearchRequest {
   int32 snippet_hydration_timeout_ms = 33;
   string session_id = 99;
   string instance_id = 100;
+  string collection = 101; // Scope to a named corpus (collection metadata key)
 }
 
 message GetRequest {
@@ -1014,6 +1015,81 @@ message GraphExploreResponse {
   bool truncated = 10;
 }
 
+message GraphSymbolLookupRequest {
+  string symbol = 1;
+  bool has_file = 2;
+  string file = 3;
+  bool has_line = 4;
+  int32 line = 5;
+  uint64 max_files = 6;
+  uint64 max_symbols = 7;
+  uint64 max_total_chars = 8;
+  uint64 max_chars_per_file = 9;
+  uint64 max_snippet_lines = 10;
+  bool include_line_numbers = 11;
+  bool include_code = 12;
+}
+
+message GraphSymbolLookupResponse {
+  string symbol = 1;
+  repeated GraphExploreSymbol matches = 2;
+  repeated GraphExploreSnippet snippets = 3;
+  repeated GraphExploreRelation trail = 4;
+  repeated string warnings = 5;
+  bool ambiguous = 6;
+  bool truncated = 7;
+}
+
+message GraphTraceRequest {
+  string from = 1;
+  string to = 2;
+  uint64 max_depth = 3;
+  uint64 max_files = 4;
+  uint64 max_symbols = 5;
+  uint64 max_total_chars = 6;
+  uint64 max_chars_per_file = 7;
+  uint64 max_snippet_lines = 8;
+  bool include_line_numbers = 9;
+}
+
+message GraphTraceResponse {
+  string from = 1;
+  string to = 2;
+  repeated GraphExploreRelation path = 3;
+  repeated GraphExploreSnippet snippets = 4;
+  repeated string warnings = 5;
+  bool found = 6;
+  bool truncated = 7;
+}
+
+message GraphImpactRequest {
+  string symbol = 1;
+  uint64 depth = 2;
+  uint64 max_symbols = 3;
+}
+
+message GraphImpactResponse {
+  string symbol = 1;
+  repeated GraphExploreSymbol affected_symbols = 2;
+  repeated GraphExploreRelation relationships = 3;
+  repeated string warnings = 4;
+  bool truncated = 5;
+}
+
+message GraphAffectedTestsRequest {
+  repeated string changed_files = 1;
+  uint64 depth = 2;
+  string test_path_pattern = 3;
+}
+
+message GraphAffectedTestsResponse {
+  repeated string changed_files = 1;
+  repeated string affected_tests = 2;
+  repeated GraphExploreRelation relationships = 3;
+  repeated string warnings = 4;
+  bool truncated = 5;
+}
+
 message GraphPathHistoryRequest {
   string path = 1;
   uint32 limit = 2;
@@ -1215,6 +1291,14 @@ message Envelope {
     // Graph query responses
     GraphQueryResponse graph_query_response = 140;
     GraphExploreResponse graph_explore_response = 148;
+    GraphSymbolLookupRequest graph_symbol_lookup_request = 149;
+    GraphSymbolLookupResponse graph_symbol_lookup_response = 150;
+    GraphTraceRequest graph_trace_request = 151;
+    GraphTraceResponse graph_trace_response = 152;
+    GraphImpactRequest graph_impact_request = 153;
+    GraphImpactResponse graph_impact_response = 154;
+    GraphAffectedTestsRequest graph_affected_tests_request = 155;
+    GraphAffectedTestsResponse graph_affected_tests_response = 156;
     GraphPathHistoryResponse graph_path_history_response = 141;
     MetadataValueCountsResponse metadata_value_counts_response = 142;
     // Batch request/response (Track B)

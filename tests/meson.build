@@ -331,7 +331,10 @@ if catch2_dep.found()
   )
 
   catch2_daemon_metrics_exe = executable('catch2_daemon_metrics',
-    files('unit/daemon/daemon_metrics_status_test.cpp'),
+    files(
+      'unit/daemon/daemon_metrics_status_test.cpp',
+      'unit/daemon/daemon_metrics_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -401,6 +404,7 @@ if catch2_dep.found()
       'unit/daemon/request_handler_admission_reuse_catch2_test.cpp',
       'unit/daemon/request_handler_repair_cancel_catch2_test.cpp',
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
+      'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -423,6 +427,7 @@ if catch2_dep.found()
       'unit/daemon/graph_component_catch2_test.cpp',
       'unit/app/services/graph_query_service_catch2_test.cpp',
       'unit/app/services/graph_context_service_catch2_test.cpp',
+      'unit/metadata/delete_cascade_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1368,7 +1373,6 @@ if catch2_dep.found()
       'unit/cli/doctor/dim_consistency_catch2_test.cpp',
       'unit/cli/doctor/storage_blob_check_catch2_test.cpp',
       'unit/cli/doctor/ref_count_check_catch2_test.cpp',
-      'unit/cli/dr_command_catch2_test.cpp',
       'unit/cli/error_hints_catch2_test.cpp',
       'unit/cli/graph_explore_presenter_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
@@ -1376,6 +1380,7 @@ if catch2_dep.found()
       'unit/cli/graph_topology_support_catch2_test.cpp',
       'unit/cli/grep_command_path_tree_catch2_test.cpp',
       'unit/cli/homebrew_service_formula_catch2_test.cpp',
+      'unit/cli/list_command_catch2_test.cpp',
       'unit/cli/init_command_catch2_test.cpp',
       'unit/cli/model_command_catch2_test.cpp',
       'unit/cli/plugin_command_catch2_test.cpp',
@@ -1449,7 +1454,6 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
-      'unit/api/raw_text_storage_catch2_test.cpp',
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -1967,6 +1971,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  builtin_content_extractor_exe = executable('builtin_content_extractor',
+    files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Text extraction to FTS5 pipeline test(detection->extraction->indexing->search)
   text_extraction_fts5_pipeline_exe = executable('text_extraction_fts5_pipeline',
     files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
@@ -2417,6 +2430,12 @@ if catch2_dep.found()
 
   test('plain_text_extractor', plain_text_extractor_exe,
     suite: ['catch2', 'unit', 'extraction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('builtin_content_extractor', builtin_content_extractor_exe,
+    suite: ['catch2', 'unit', 'extraction', 'content_extractor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

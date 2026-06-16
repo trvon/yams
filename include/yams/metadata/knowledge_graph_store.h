@@ -427,10 +427,20 @@ public:
     // Returns the count of nodes deleted.
     virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
 
+    // Delete KG nodes whose properties.file_path or properties.source_file matches the given
+    // path. Covers canonical symbol nodes and unresolved reference nodes that carry no
+    // document_hash (so deleteNodesForDocumentHash misses them). Edges cascade via FK.
+    virtual Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) = 0;
+
     // Delete all edges where properties.source_file matches the given path.
     // Used to clean up stale relationships when re-indexing a file.
     // Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
+
+    // Delete document-bound nodes whose backing document no longer exists: doc:/blob: nodes,
+    // nodes carrying document_hash, and symbol/reference nodes carrying file_path/source_file.
+    // Set-based against the documents table (same DB); edges cascade via FK. Returns count.
+    virtual Result<std::int64_t> deleteOrphanedNodes() = 0;
 
     // Delete every edge matching the given relation. Used to clear derived
     // graphs (e.g. semantic_neighbor) before a deterministic corpus-wide rebuild.

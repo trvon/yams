@@ -119,12 +119,6 @@ public:
                       "Show all metadata values (override default limit)");
 
         // Metadata filters (key/value)
-        cmd->add_option("--pbi", pbiFilters_, "Filter by PBI (metadata key 'pbi')")->take_all();
-        cmd->add_option("--task", taskFilters_, "Filter by task (metadata key 'task')")->take_all();
-        cmd->add_option("--phase", phaseFilters_, "Filter by phase (metadata key 'phase')")
-            ->take_all();
-        cmd->add_option("--owner", ownerFilters_, "Filter by owner (metadata key 'owner')")
-            ->take_all();
         cmd->add_option("--metadata", metadataFiltersRaw_,
                         "Additional metadata filters key=value (repeatable)")
             ->take_all();
@@ -307,19 +301,9 @@ public:
             dreq.filterTags = filterTags_;
             dreq.matchAllTags = matchAllTags_;
 
-            // Metadata filters (pbi/task/phase/owner + arbitrary key=value)
-            auto setLast = [](const std::vector<std::string>& src, const std::string& key,
-                              std::map<std::string, std::string>& dest) {
-                if (!src.empty()) {
-                    dest[key] = src.back();
-                }
-            };
+            // Metadata filters (arbitrary key=value)
 
             std::map<std::string, std::string> metadataFilters;
-            setLast(pbiFilters_, "pbi", metadataFilters);
-            setLast(taskFilters_, "task", metadataFilters);
-            setLast(phaseFilters_, "phase", metadataFilters);
-            setLast(ownerFilters_, "owner", metadataFilters);
 
             for (const auto& kv : metadataFiltersRaw_) {
                 auto pos = kv.find('=');
@@ -892,18 +876,7 @@ private:
 
             // Metadata filters
             {
-                auto setLast = [](const std::vector<std::string>& src, const std::string& key,
-                                  std::map<std::string, std::string>& dest) {
-                    if (!src.empty()) {
-                        dest[key] = src.back();
-                    }
-                };
-
                 std::map<std::string, std::string> metadataFilters;
-                setLast(pbiFilters_, "pbi", metadataFilters);
-                setLast(taskFilters_, "task", metadataFilters);
-                setLast(phaseFilters_, "phase", metadataFilters);
-                setLast(ownerFilters_, "owner", metadataFilters);
 
                 for (const auto& kv : metadataFiltersRaw_) {
                     auto pos = kv.find('=');
@@ -2119,10 +2092,6 @@ private:
     std::string metadataValuesRaw_{};
     int metadataValuesLimit_ = 10000;
     bool allMetadataValues_ = false;
-    std::vector<std::string> pbiFilters_;
-    std::vector<std::string> taskFilters_;
-    std::vector<std::string> phaseFilters_;
-    std::vector<std::string> ownerFilters_;
     std::vector<std::string> metadataFiltersRaw_;
     bool matchAnyMetadata_ = false;
 

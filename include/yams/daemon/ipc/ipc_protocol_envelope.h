@@ -403,6 +403,10 @@ enum class MessageType : uint8_t {
     // Graph query requests (PBI-009)
     GraphQueryRequest = 43,
     GraphExploreRequest = 77,
+    GraphSymbolLookupRequest = 175,
+    GraphTraceRequest = 177,
+    GraphImpactRequest = 179,
+    GraphAffectedTestsRequest = 181,
     GraphPathHistoryRequest = 44,
     // Graph maintenance requests (PBI-009 Phase 4.3)
     GraphRepairRequest = 45,
@@ -450,6 +454,10 @@ enum class MessageType : uint8_t {
     // Graph query responses (PBI-009)
     GraphQueryResponse = 164,
     GraphExploreResponse = 174,
+    GraphSymbolLookupResponse = 176,
+    GraphTraceResponse = 178,
+    GraphImpactResponse = 180,
+    GraphAffectedTestsResponse = 182,
     GraphPathHistoryResponse = 165,
     // Graph maintenance responses (PBI-009 Phase 4.3)
     GraphRepairResponse = 166,

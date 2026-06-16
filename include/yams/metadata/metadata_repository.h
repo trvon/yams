@@ -1175,10 +1175,13 @@ private:
 
             // Check if it's a lock error that we should retry
             bool isLockError = storage::sqlite_retry::isBusyOrLockedMessage(result.error().message);
-            // Constraint failures can be transient (e.g. FOREIGN KEY race when
-            // a document insert hasn't committed yet). Retry with backoff.
-            bool isRetryable = isLockError || result.error().message.find("constraint failed") !=
-                                                  std::string::npos;
+            // Only FOREIGN KEY constraint failures can be transient (a referenced row may
+            // not have committed yet on a concurrent connection). UNIQUE / NOT NULL / CHECK /
+            // PRIMARY KEY failures are deterministic and never succeed on retry, so retrying
+            // them only burns the budget and backs up the WriteCoordinator queue.
+            bool isRetryable =
+                isLockError ||
+                storage::sqlite_retry::isTransientConstraintMessage(result.error().message);
 
             if (!isRetryable || attempt == retryPolicy.maxRetries - 1) {
                 // Non-retryable error or final attempt - report and return error

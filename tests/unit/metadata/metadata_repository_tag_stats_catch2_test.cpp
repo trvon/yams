@@ -312,6 +312,7 @@ TEST_CASE("MetadataRepository insertDocumentWithMetadata preserves cached counte
     auto insert = fix.repository->insertDocumentWithMetadata(doc, metadata, nullptr);
     REQUIRE_FALSE(insert.has_value());
     CHECK((insert.error().message.find("constraint failed") != std::string::npos));
+    CHECK((insert.error().message.find("injected metadata insert failure") != std::string::npos));
     CHECK((fix.repository->getCachedDocumentCount() == 0));
     CHECK((fix.repository->getCachedExtractedCount() == 0));
 

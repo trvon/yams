@@ -687,6 +687,7 @@ private:
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
+    void seedBuiltinContentExtractors();
     void shutdownModelProviderForShutdown();
     void resetRetrievalSessionsForShutdown();
     void unloadPluginsForShutdown();

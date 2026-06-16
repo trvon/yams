@@ -57,6 +57,7 @@ struct SearchRequest {
     bool globalSearch = false;   // Session-isolated memory (PBI-082): bypass session isolation
     bool symbolRank = true;      // Enable automatic symbol ranking boost for code-like queries
     std::string instanceId = {}; // Instance-level isolation (UUID of MCP connection)
+    std::string collection = {}; // Scope to a named corpus (collection metadata key)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -71,7 +72,7 @@ struct SearchRequest {
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
-            << globalSearch << symbolRank << instanceId;
+            << globalSearch << symbolRank << instanceId << collection;
     }
 
     template <typename Deserializer>
@@ -269,6 +270,9 @@ struct SearchRequest {
         }
         if (auto ii = deser.readString(); ii) {
             req.instanceId = std::move(ii.value());
+        }
+        if (auto col = deser.readString(); col) {
+            req.collection = std::move(col.value());
         }
 
         return req;
@@ -2473,6 +2477,208 @@ struct GraphExploreRequest {
     }
 };
 
+struct GraphSymbolLookupRequest {
+    std::string symbol;
+    bool hasFile{false};
+    std::string file;
+    bool hasLine{false};
+    int32_t line{0};
+    uint64_t maxFiles{8};
+    uint64_t maxSymbols{32};
+    uint64_t maxTotalChars{24000};
+    uint64_t maxCharsPerFile{7000};
+    uint64_t maxSnippetLines{160};
+    bool includeLineNumbers{true};
+    bool includeCode{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << symbol << hasFile << file << hasLine << line << maxFiles << maxSymbols
+            << maxTotalChars << maxCharsPerFile << maxSnippetLines << includeLineNumbers
+            << includeCode;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphSymbolLookupRequest> deserialize(Deserializer& deser) {
+        GraphSymbolLookupRequest req;
+        if (auto r = deser.readString(); r)
+            req.symbol = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.hasFile = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            req.file = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.hasLine = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<int32_t>(); r)
+            req.line = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxFiles = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSymbols = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxTotalChars = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxCharsPerFile = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSnippetLines = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeLineNumbers = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeCode = r.value();
+        else
+            return r.error();
+        return req;
+    }
+};
+
+struct GraphTraceRequest {
+    std::string from;
+    std::string to;
+    uint64_t maxDepth{6};
+    uint64_t maxFiles{8};
+    uint64_t maxSymbols{32};
+    uint64_t maxTotalChars{24000};
+    uint64_t maxCharsPerFile{7000};
+    uint64_t maxSnippetLines{160};
+    bool includeLineNumbers{true};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << from << to << maxDepth << maxFiles << maxSymbols << maxTotalChars << maxCharsPerFile
+            << maxSnippetLines << includeLineNumbers;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphTraceRequest> deserialize(Deserializer& deser) {
+        GraphTraceRequest req;
+        if (auto r = deser.readString(); r)
+            req.from = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            req.to = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxDepth = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxFiles = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSymbols = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxTotalChars = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxCharsPerFile = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSnippetLines = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<bool>(); r)
+            req.includeLineNumbers = r.value();
+        else
+            return r.error();
+        return req;
+    }
+};
+
+struct GraphImpactRequest {
+    std::string symbol;
+    uint64_t depth{2};
+    uint64_t maxSymbols{32};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << symbol << depth << maxSymbols;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphImpactRequest> deserialize(Deserializer& deser) {
+        GraphImpactRequest req;
+        if (auto r = deser.readString(); r)
+            req.symbol = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.depth = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.maxSymbols = r.value();
+        else
+            return r.error();
+        return req;
+    }
+};
+
+struct GraphAffectedTestsRequest {
+    std::vector<std::string> changedFiles;
+    uint64_t depth{5};
+    std::string testPathPattern;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << changedFiles << depth << testPathPattern;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<GraphAffectedTestsRequest> deserialize(Deserializer& deser) {
+        GraphAffectedTestsRequest req;
+        if (auto r = deser.readStringVector(); r)
+            req.changedFiles = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            req.depth = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            req.testPathPattern = std::move(r.value());
+        else
+            return r.error();
+        return req;
+    }
+};
+
 struct GraphPathHistoryRequest {
     std::string path;
     uint32_t limit{100};
@@ -3097,7 +3303,8 @@ using Request = std::variant<
     CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
-    GraphExploreRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
+    GraphExploreRequest, GraphSymbolLookupRequest, GraphTraceRequest, GraphImpactRequest,
+    GraphAffectedTestsRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
     KgIngestRequest, MetadataValueCountsRequest, BatchRequest, RepairRequest>;
 
 } // namespace yams::daemon

@@ -1184,3 +1184,322 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts empty", "[daemon][graph][query
     REQUIRE(result.has_value());
     REQUIRE(result.value().empty());
 }
+
+TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to definitions",
+          "[daemon][graph]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    // Canonical definition: document + symbol_metadata + canonical node.
+    const std::string filePath = (fixture.testDir / "callee.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "callee.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-demo-callee";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    SymbolMetadata sym;
+    sym.documentHash = doc.sha256Hash;
+    sym.filePath = filePath;
+    sym.symbolName = "callee";
+    sym.qualifiedName = "demo::callee";
+    sym.kind = "function";
+    sym.startLine = 1;
+    sym.endLine = 1;
+    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:demo::callee@" + filePath;
+    canonical.label = "callee";
+    canonical.type = "function";
+    const auto canonicalId = fixture.kgStore->upsertNode(canonical);
+    REQUIRE(canonicalId.has_value());
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee";
+    placeholder.label = "demo::callee";
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE(refId.has_value());
+
+    auto result = component.reconcileSymbolReferences(false);
+    REQUIRE(result.has_value());
+    CHECK(result.value().referencesLinked == 1);
+
+    auto edges = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges.has_value());
+    REQUIRE(edges.value().size() == 1);
+    CHECK(edges.value().front().dstNodeId == canonicalId.value());
+
+    // Idempotent: a second pass adds no duplicate edge.
+    REQUIRE(component.reconcileSymbolReferences(false).has_value());
+    auto edges2 = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges2.has_value());
+    CHECK(edges2.value().size() == 1);
+
+    // Dry-run on a fresh placeholder makes no change.
+    KGNode placeholder2;
+    placeholder2.nodeKey = "symbol_ref:demo::callee::dup";
+    placeholder2.label = "demo::callee";
+    placeholder2.type = "symbol_reference";
+    const auto ref2 = fixture.kgStore->upsertNode(placeholder2);
+    REQUIRE(ref2.has_value());
+    auto dry = component.reconcileSymbolReferences(true);
+    REQUIRE(dry.has_value());
+    auto edgesDry = fixture.kgStore->getEdgesFrom(ref2.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edgesDry.has_value());
+    CHECK(edgesDry.value().empty());
+}
+
+TEST_CASE("GraphComponent reconcileSymbolReferences is idempotent (no double-count on re-run)",
+          "[daemon][graph][reconcile][idempotency]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    const std::string filePath = (fixture.testDir / "callee2.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "callee2.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-demo-callee2";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    SymbolMetadata sym;
+    sym.documentHash = doc.sha256Hash;
+    sym.filePath = filePath;
+    sym.symbolName = "callee2";
+    sym.qualifiedName = "demo::callee2";
+    sym.kind = "function";
+    sym.startLine = 1;
+    sym.endLine = 1;
+    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:demo::callee2@" + filePath;
+    canonical.label = "callee2";
+    canonical.type = "function";
+    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee2";
+    placeholder.label = "demo::callee2";
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE(refId.has_value());
+
+    auto first = component.reconcileSymbolReferences(false);
+    REQUIRE(first.has_value());
+    CHECK(first.value().referencesLinked == 1);
+
+    auto second = component.reconcileSymbolReferences(false);
+    REQUIRE(second.has_value());
+
+    auto edges =
+        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edges.has_value());
+    CHECK(edges.value().size() == 1);
+
+    // FIXED: counts converge — the second pass links nothing new.
+    CHECK(second.value().referencesLinked == 0);
+    CHECK(second.value().referencesAlreadyLinked == 1);
+}
+
+TEST_CASE("GraphComponent: repairGraph removes orphaned KG nodes after document deletion",
+          "[daemon][graph][repair][orphan]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    const std::string filePath = (fixture.testDir / "gone.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "gone.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "orphan-hash-gone";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    auto docId = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docId.has_value());
+
+    // KG nodes as the ingest pipeline creates them: doc node + canonical symbol node.
+    KGNode docNode;
+    docNode.nodeKey = "doc:orphan-hash-gone";
+    docNode.type = "document";
+    docNode.properties = R"({"document_hash":"orphan-hash-gone"})";
+    REQUIRE(fixture.kgStore->upsertNode(docNode).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:gone@" + filePath;
+    canonical.label = "gone";
+    canonical.type = "function";
+    canonical.properties = std::string(R"({"qualified_name":"gone","file_path":")") + filePath +
+                           R"("})";
+    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
+
+    // Delete the backing document row -> both nodes are now orphaned.
+    REQUIRE(fixture.metadataRepo->deleteDocument(docId.value()).has_value());
+
+    REQUIRE(component.repairGraph(false).has_value());
+
+    // FIXED: repairGraph removes orphaned nodes (no WriteCoordinator required).
+    auto docAfter = fixture.kgStore->getNodeByKey("doc:orphan-hash-gone");
+    REQUIRE(docAfter.has_value());
+    CHECK_FALSE(docAfter.value().has_value());
+    auto canonAfter = fixture.kgStore->getNodeByKey("function:gone@" + filePath);
+    REQUIRE(canonAfter.has_value());
+    CHECK_FALSE(canonAfter.value().has_value());
+}
+
+TEST_CASE("GraphComponent: repairGraph removes dangling resolves_to after canonical deletion",
+          "[daemon][graph][reconcile][dangling]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    const std::string filePath = (fixture.testDir / "callee3.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "callee3.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-demo-callee3";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    auto docId = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docId.has_value());
+
+    SymbolMetadata sym;
+    sym.documentHash = doc.sha256Hash;
+    sym.filePath = filePath;
+    sym.symbolName = "callee3";
+    sym.qualifiedName = "demo::callee3";
+    sym.kind = "function";
+    sym.startLine = 1;
+    sym.endLine = 1;
+    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
+
+    KGNode canonical;
+    canonical.nodeKey = "function:demo::callee3@" + filePath;
+    canonical.label = "callee3";
+    canonical.type = "function";
+    canonical.properties = std::string(R"({"qualified_name":"demo::callee3","file_path":")") +
+                           filePath + R"("})";
+    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee3";
+    placeholder.label = "demo::callee3";
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE(refId.has_value());
+
+    REQUIRE(component.reconcileSymbolReferences(false).has_value());
+    {
+        auto edges =
+            fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 1);
+    }
+
+    // Delete the canonical definition's document -> canonical node orphaned.
+    REQUIRE(fixture.metadataRepo->deleteDocument(docId.value()).has_value());
+
+    REQUIRE(component.repairGraph(false).has_value());
+
+    // FIXED: orphaned canonical is removed and the resolves_to edge cascades away.
+    auto edgesAfter =
+        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    REQUIRE(edgesAfter.has_value());
+    CHECK(edgesAfter.value().empty());
+}
+
+TEST_CASE("GraphComponent: repairGraph aborts promptly on cancellation",
+          "[daemon][graph][repair][cancel]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    REQUIRE(component.initialize().has_value());
+
+    const std::string filePath = (fixture.testDir / "cancel.cpp").string();
+    DocumentInfo doc;
+    doc.filePath = filePath;
+    const auto derived = computePathDerivedValues(filePath);
+    doc.fileName = "cancel.cpp";
+    doc.fileExtension = ".cpp";
+    doc.fileSize = 1;
+    doc.sha256Hash = "hash-cancel";
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
+
+    // Pre-cancel: repairGraph must observe the flag and return early rather than running the
+    // full scan/maintenance to completion (which is what wedged the in-progress guard).
+    std::atomic<bool> cancel{true};
+    auto res = component.repairGraph(false, {}, &cancel);
+    REQUIRE(res.has_value());
+    bool sawCancel = false;
+    for (const auto& issue : res.value().issues) {
+        if (issue.find("canceled") != std::string::npos) {
+            sawCancel = true;
+        }
+    }
+    CHECK(sawCancel);
+
+    // reconcileSymbolReferences honors cancellation too.
+    auto rec = component.reconcileSymbolReferences(false, &cancel);
+    REQUIRE(rec.has_value());
+    CHECK(rec.value().skipped);
+}

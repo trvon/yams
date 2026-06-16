@@ -165,6 +165,22 @@ void require_stable_update_payload(const nlohmann::json& parsed, const std::stri
 
 } // namespace
 
+TEST_CASE("Mobile context create rejects null config pointer", "[mobile][abi]") {
+    yams_mobile_context_t* ctx = nullptr;
+    CHECK(yams_mobile_context_create(nullptr, &ctx) == YAMS_MOBILE_STATUS_INVALID_ARGUMENT);
+    CHECK(ctx == nullptr);
+}
+
+TEST_CASE("Mobile context create rejects null context out pointer", "[mobile][abi]") {
+    yams_mobile_context_config config = yams_mobile_context_config_default();
+    CHECK(yams_mobile_context_create(&config, nullptr) == YAMS_MOBILE_STATUS_INVALID_ARGUMENT);
+}
+
+TEST_CASE("Mobile context destroy is safe with null", "[mobile][abi]") {
+    yams_mobile_context_destroy(nullptr);
+    SUCCEED("no crash on null destroy");
+}
+
 TEST_CASE("Mobile ABI version matches header macros", "[mobile][abi]") {
     const auto version = yams_mobile_get_version();
     CHECK(version.major == YAMS_MOBILE_API_VERSION_MAJOR);

@@ -17,7 +17,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_host.h>
 #endif
-#include <yams/plugins/search_provider_v1.h>
 #include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/query_qualifiers.hpp>

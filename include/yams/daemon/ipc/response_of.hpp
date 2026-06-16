@@ -142,6 +142,18 @@ template <> struct ResponseOf<GraphQueryRequest> {
 template <> struct ResponseOf<GraphExploreRequest> {
     using type = GraphExploreResponse;
 };
+template <> struct ResponseOf<GraphSymbolLookupRequest> {
+    using type = GraphSymbolLookupResponse;
+};
+template <> struct ResponseOf<GraphTraceRequest> {
+    using type = GraphTraceResponse;
+};
+template <> struct ResponseOf<GraphImpactRequest> {
+    using type = GraphImpactResponse;
+};
+template <> struct ResponseOf<GraphAffectedTestsRequest> {
+    using type = GraphAffectedTestsResponse;
+};
 
 // KG ingest operations (PBI-093)
 template <> struct ResponseOf<KgIngestRequest> {

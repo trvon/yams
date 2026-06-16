@@ -434,3 +434,300 @@ TEST_CASE("GraphContextService explore relationship budget is not capped by symb
     CHECK((response.relationships[1].targetLabel == "right"));
     CHECK_FALSE(response.truncated);
 }
+
+TEST_CASE("GraphContextService lookupSymbol disambiguates by file", "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto pathA = fixture.writeSource("src/a.cpp", {"int parseToken() { return 1; }"});
+    auto pathB = fixture.writeSource("src/b.cpp", {"int parseToken() { return 2; }"});
+    auto symA = fixture.symbol(pathA, "parseToken", "a::parseToken", 1, 1);
+    auto symB = fixture.symbol(pathB, "parseToken", "b::parseToken", 1, 1);
+    fixture.upsertSymbols({symA, symB});
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphSymbolLookupRequest ambiguousReq;
+    ambiguousReq.symbol = "parseToken";
+    auto ambiguous = service->lookupSymbol(ambiguousReq);
+    REQUIRE((ambiguous.has_value()));
+    CHECK((ambiguous.value().matches.size() == 2));
+    CHECK(ambiguous.value().ambiguous);
+
+    GraphSymbolLookupRequest scopedReq;
+    scopedReq.symbol = "parseToken";
+    scopedReq.file = pathA.string();
+    auto scoped = service->lookupSymbol(scopedReq);
+    REQUIRE((scoped.has_value()));
+    REQUIRE((scoped.value().matches.size() == 1));
+    CHECK((scoped.value().matches.front().filePath == pathA.string()));
+    CHECK_FALSE(scoped.value().ambiguous);
+}
+
+TEST_CASE("GraphContextService impact finds reverse dependents", "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return callee(); }"});
+    auto calleePath = fixture.writeSource("src/callee.cpp", {"int callee() { return 1; }"});
+    auto callerSym = fixture.symbol(callerPath, "caller", "demo::caller", 1, 1);
+    auto calleeSym = fixture.symbol(calleePath, "callee", "demo::callee", 1, 1);
+    fixture.upsertSymbols({callerSym, calleeSym});
+    const auto callerId = fixture.upsertNodeFor(callerSym);
+    const auto calleeId = fixture.upsertNodeFor(calleeSym);
+
+    KGEdge edge;
+    edge.srcNodeId = callerId;
+    edge.dstNodeId = calleeId;
+    edge.relation = "calls";
+    edge.weight = 0.9F;
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "callee";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+    CHECK_FALSE(result.value().relationships.empty());
+}
+
+TEST_CASE("GraphContextService impact finds callers through symbol_reference placeholders",
+          "[services][graph][context]") {
+    // Mirrors the real KG topology: cross-file callers emit
+    //   caller_version --calls--> symbol_reference(callee)
+    // rather than pointing at the callee's canonical definition node.
+    GraphContextServiceFixture fixture;
+    auto calleePath = fixture.writeSource("src/callee.cpp", {"int callee() { return 1; }"});
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return callee(); }"});
+    auto calleeSym = fixture.symbol(calleePath, "callee", "demo::callee", 1, 1);
+    fixture.upsertSymbols({calleeSym});
+    fixture.upsertNodeFor(calleeSym); // canonical function node for the callee
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:demo::callee";
+    placeholder.label = "demo::callee";
+    placeholder.type = "symbol_reference";
+    auto placeholderId = fixture.kgStore->upsertNode(placeholder);
+    REQUIRE((placeholderId.has_value()));
+
+    KGNode callerVersion;
+    callerVersion.nodeKey = "function:demo::caller@" + callerPath.string() + "@snap:abc";
+    callerVersion.label = "caller";
+    callerVersion.type = "function_version";
+    callerVersion.properties = std::string("{\"qualified_name\":\"demo::caller\",\"file_path\":\"") +
+                               callerPath.string() + "\",\"start_line\":1,\"end_line\":1}";
+    auto callerId = fixture.kgStore->upsertNode(callerVersion);
+    REQUIRE((callerId.has_value()));
+
+    KGEdge edge;
+    edge.srcNodeId = callerId.value();
+    edge.dstNodeId = placeholderId.value();
+    edge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "callee";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+    CHECK((result.value().affectedSymbols.front().filePath == callerPath.string()));
+}
+
+TEST_CASE("GraphContextService impact follows resolves_to reconciliation links",
+          "[services][graph][context]") {
+    // A reconciliation pass links a placeholder (whose surface form does NOT match the symbol
+    // name) to the canonical definition via `resolves_to`. impact must still find the caller
+    // that points at that placeholder.
+    GraphContextServiceFixture fixture;
+    auto defPath = fixture.writeSource("src/def.cpp", {"int target() { return 1; }"});
+    auto defSym = fixture.symbol(defPath, "target", "demo::target", 1, 1);
+    fixture.upsertSymbols({defSym});
+    const auto defId = fixture.upsertNodeFor(defSym);
+
+    KGNode placeholder;
+    placeholder.nodeKey = "symbol_ref:aliased::target";
+    placeholder.label = "aliasedSurfaceForm"; // intentionally does not match "target"
+    placeholder.type = "symbol_reference";
+    const auto refId = fixture.kgStore->upsertNode(placeholder).value();
+
+    KGEdge resolvesTo;
+    resolvesTo.srcNodeId = refId;
+    resolvesTo.dstNodeId = defId;
+    resolvesTo.relation = "resolves_to";
+    REQUIRE((fixture.kgStore->addEdge(resolvesTo).has_value()));
+
+    auto callerPath = fixture.writeSource("src/caller.cpp", {"int caller() { return target(); }"});
+    auto callerSym = fixture.symbol(callerPath, "caller", "demo::caller", 1, 1);
+    fixture.upsertSymbols({callerSym});
+    const auto callerId = fixture.upsertNodeFor(callerSym);
+    KGEdge calls;
+    calls.srcNodeId = callerId;
+    calls.dstNodeId = refId;
+    calls.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(calls).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "target";
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().label == "caller"));
+}
+
+TEST_CASE("GraphContextService impact bridges placeholders across multiple hops",
+          "[services][graph][context]") {
+    // A_version --calls--> symbol_ref:B ; B_version --calls--> symbol_ref:C
+    // impact(C) must reach B at depth 1 and A at depth 2 by bridging each discovered caller
+    // version node to its own placeholder.
+    GraphContextServiceFixture fixture;
+    auto cPath = fixture.writeSource("src/c.cpp", {"int cFn() { return 1; }"});
+    auto cSym = fixture.symbol(cPath, "cFn", "demo::cFn", 1, 1);
+    fixture.upsertSymbols({cSym});
+    fixture.upsertNodeFor(cSym);
+
+    const auto makeRef = [&](const std::string& key, const std::string& label) {
+        KGNode node;
+        node.nodeKey = key;
+        node.label = label;
+        node.type = "symbol_reference";
+        auto id = fixture.kgStore->upsertNode(node);
+        REQUIRE((id.has_value()));
+        return id.value();
+    };
+    const auto makeVersion = [&](const std::string& simple, const std::string& qualified,
+                                 const std::filesystem::path& path) {
+        KGNode node;
+        node.nodeKey = "function:" + qualified + "@" + path.string() + "@snap:" + simple;
+        node.label = simple;
+        node.type = "function_version";
+        node.properties = std::string("{\"qualified_name\":\"") + qualified +
+                          "\",\"file_path\":\"" + path.string() +
+                          "\",\"start_line\":1,\"end_line\":1}";
+        auto id = fixture.kgStore->upsertNode(node);
+        REQUIRE((id.has_value()));
+        return id.value();
+    };
+
+    auto refC = makeRef("symbol_ref:demo::cfn", "demo::cFn");
+    auto refB = makeRef("symbol_ref:demo::bfn", "demo::bFn");
+    auto bPath = fixture.writeSource("src/b.cpp", {"int bFn() { return cFn(); }"});
+    auto aPath = fixture.writeSource("src/a.cpp", {"int aFn() { return bFn(); }"});
+    auto bVersion = makeVersion("bFn", "demo::bFn", bPath);
+    auto aVersion = makeVersion("aFn", "demo::aFn", aPath);
+
+    KGEdge bCallsC;
+    bCallsC.srcNodeId = bVersion;
+    bCallsC.dstNodeId = refC;
+    bCallsC.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(bCallsC).has_value()));
+    KGEdge aCallsB;
+    aCallsB.srcNodeId = aVersion;
+    aCallsB.dstNodeId = refB;
+    aCallsB.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(aCallsB).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest depth1;
+    depth1.symbol = "cFn";
+    depth1.depth = 1;
+    auto r1 = service->impact(depth1);
+    REQUIRE((r1.has_value()));
+    REQUIRE((r1.value().affectedSymbols.size() == 1));
+    CHECK((r1.value().affectedSymbols.front().label == "bFn"));
+
+    GraphImpactRequest depth2;
+    depth2.symbol = "cFn";
+    depth2.depth = 2;
+    auto r2 = service->impact(depth2);
+    REQUIRE((r2.has_value()));
+    REQUIRE((r2.value().affectedSymbols.size() == 2));
+    std::vector<std::string> labels;
+    for (const auto& s : r2.value().affectedSymbols)
+        labels.push_back(s.label);
+    CHECK((std::find(labels.begin(), labels.end(), "aFn") != labels.end()));
+    CHECK((std::find(labels.begin(), labels.end(), "bFn") != labels.end()));
+}
+
+TEST_CASE("GraphContextService trace finds a path across a call chain",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto aPath = fixture.writeSource("src/alpha.cpp", {"int alpha() { return beta(); }"});
+    auto bPath = fixture.writeSource("src/beta.cpp", {"int beta() { return gamma(); }"});
+    auto cPath = fixture.writeSource("src/gamma.cpp", {"int gamma() { return 1; }"});
+    auto aSym = fixture.symbol(aPath, "alpha", "demo::alpha", 1, 1);
+    auto bSym = fixture.symbol(bPath, "beta", "demo::beta", 1, 1);
+    auto cSym = fixture.symbol(cPath, "gamma", "demo::gamma", 1, 1);
+    fixture.upsertSymbols({aSym, bSym, cSym});
+    const auto aId = fixture.upsertNodeFor(aSym);
+    const auto bId = fixture.upsertNodeFor(bSym);
+    const auto cId = fixture.upsertNodeFor(cSym);
+
+    KGEdge ab;
+    ab.srcNodeId = aId;
+    ab.dstNodeId = bId;
+    ab.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(ab).has_value()));
+    KGEdge bc;
+    bc.srcNodeId = bId;
+    bc.dstNodeId = cId;
+    bc.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(bc).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphTraceRequest req;
+    req.from = "alpha";
+    req.to = "gamma";
+    auto result = service->trace(req);
+    REQUIRE((result.has_value()));
+    CHECK(result.value().found);
+    REQUIRE((result.value().path.size() == 2));
+
+    GraphTraceRequest missingReq;
+    missingReq.from = "gamma";
+    missingReq.to = "alpha";
+    missingReq.maxDepth = 1;
+    auto missing = service->trace(missingReq);
+    REQUIRE((missing.has_value()));
+    CHECK_FALSE(missing.value().found);
+}
+
+TEST_CASE("GraphContextService affectedTests maps changed files to tests",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto srcPath = fixture.writeSource("src/widget.cpp", {"int widget() { return 1; }"});
+    auto testPath =
+        fixture.writeSource("tests/widget_test.cpp", {"void t() { widget(); }"});
+    auto srcSym = fixture.symbol(srcPath, "widget", "demo::widget", 1, 1);
+    auto testSym = fixture.symbol(testPath, "t", "demo::t", 1, 1);
+    fixture.upsertSymbols({srcSym, testSym});
+    const auto srcId = fixture.upsertNodeFor(srcSym);
+    const auto testId = fixture.upsertNodeFor(testSym);
+
+    KGEdge edge;
+    edge.srcNodeId = testId;
+    edge.dstNodeId = srcId;
+    edge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphAffectedTestsRequest req;
+    req.changedFiles = {srcPath.string()};
+    auto result = service->affectedTests(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedTests.size() == 1));
+    CHECK((result.value().affectedTests.front() == testPath.string()));
+}

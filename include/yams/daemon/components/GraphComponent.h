@@ -75,12 +75,15 @@ public:
         uint64_t nodesCreated{0};
         uint64_t nodesUpdated{0};
         uint64_t edgesCreated{0};
+        uint64_t referencesLinked{0};
+        uint64_t referencesAmbiguous{0};
         uint64_t errors{0};
         std::vector<std::string> issues;
     };
     using RepairProgressFn =
         std::function<void(uint64_t processed, uint64_t total, const RepairStats& statsSnapshot)>;
-    Result<RepairStats> repairGraph(bool dryRun = false, RepairProgressFn progress = {});
+    Result<RepairStats> repairGraph(bool dryRun = false, RepairProgressFn progress = {},
+                                    const std::atomic<bool>* cancelRequested = nullptr);
 
     struct GraphHealthReport {
         uint64_t totalNodes{0};
@@ -110,6 +113,20 @@ public:
         std::vector<std::string> issues;
     };
     Result<SemanticTopologyMaintenanceStats> maintainSemanticTopology(bool dryRun = false);
+
+    // Link symbol_reference placeholder nodes to their canonical definition nodes via
+    // `resolves_to` edges (best-effort, exact-name, skip-ambiguous). One-time backfill that lets
+    // graph navigation map call-site placeholders to definitions without query-time name guessing.
+    struct ReferenceReconcileStats {
+        uint64_t referencesScanned{0};
+        uint64_t referencesLinked{0};
+        uint64_t referencesAlreadyLinked{0};
+        uint64_t referencesAmbiguous{0};
+        uint64_t referencesUnresolved{0};
+        bool skipped{false};
+    };
+    Result<ReferenceReconcileStats>
+    reconcileSymbolReferences(bool dryRun = false, const std::atomic<bool>* cancelRequested = nullptr);
     Result<SemanticTopologyMaintenanceStats>
     maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
                                          bool dryRun = false);

@@ -424,8 +424,12 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
     for (const auto& [nodeId, score] : seedScores) {
         seeds.push_back({nodeId, score});
     }
-    std::stable_sort(seeds.begin(), seeds.end(),
-                     [](const auto& a, const auto& b) { return a.score > b.score; });
+    std::stable_sort(seeds.begin(), seeds.end(), [](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.nodeId < b.nodeId;
+    });
     if (seeds.size() > config.maxSeeds) {
         seeds.resize(config.maxSeeds);
     }
@@ -466,8 +470,12 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
     for (const auto& [text, score] : termScores) {
         out.push_back({text, score});
     }
-    std::stable_sort(out.begin(), out.end(),
-                     [](const auto& a, const auto& b) { return a.score > b.score; });
+    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.text < b.text;
+    });
     if (out.size() > config.maxTerms) {
         out.resize(config.maxTerms);
     }
@@ -495,8 +503,12 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
     }
     std::unordered_set<std::string> queryAliasSet(queryAliases.begin(), queryAliases.end());
     std::vector<GraphExpansionSeedDoc> docs = seedDocs;
-    std::stable_sort(docs.begin(), docs.end(),
-                     [](const auto& a, const auto& b) { return a.score > b.score; });
+    std::stable_sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.documentHash < b.documentHash;
+    });
     if (docs.size() > config.maxSeeds) {
         docs.resize(config.maxSeeds);
     }
@@ -755,8 +767,12 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
     for (const auto& [text, score] : termScores) {
         out.push_back({text, score});
     }
-    std::stable_sort(out.begin(), out.end(),
-                     [](const auto& a, const auto& b) { return a.score > b.score; });
+    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.text < b.text;
+    });
     if (out.size() > config.maxTerms) {
         out.resize(config.maxTerms);
     }

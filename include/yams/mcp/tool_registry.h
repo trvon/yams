@@ -567,6 +567,28 @@ struct MCPListDownloadJobsResponse {
     json toJson() const;
 };
 
+// Unified download_jobs request (replaces download_status/list_jobs/cancel)
+struct MCPDownloadJobsRequest {
+    using RequestType = MCPDownloadJobsRequest;
+
+    std::string action; // "status", "list", or "cancel"
+    std::string jobId;  // required for status/cancel
+
+    static MCPDownloadJobsRequest fromJson(const json& j);
+    json toJson() const;
+};
+
+struct MCPDownloadJobsResponse {
+    using ResponseType = MCPDownloadJobsResponse;
+
+    std::string action;
+    MCPDownloadJobResponse job;               // single job (status/cancel)
+    std::vector<MCPDownloadJobResponse> jobs; // multiple jobs (list)
+
+    static MCPDownloadJobsResponse fromJson(const json& j);
+    json toJson() const;
+};
+
 // Store document DTOs
 struct MCPStoreDocumentRequest {
     using RequestType = MCPStoreDocumentRequest;
@@ -1260,6 +1282,15 @@ struct MCPGraphRequest {
     // Snapshot scoping
     std::string scopeSnapshot;
 
+    // ── Navigation fields (lookup/impact/trace/affected_tests actions) ──
+    std::string symbol;
+    std::string file;
+    int32_t line{-1};
+    std::string fromSymbol;
+    std::string toSymbol;
+    std::vector<std::string> changedFiles;
+    std::string testPattern;
+
     // ── Ingest fields (used when action == "ingest") ─────────
     std::vector<MCPKgIngestNodeInput> nodes;
     std::vector<MCPKgIngestEdgeInput> edges;
@@ -1287,6 +1318,9 @@ struct MCPGraphResponse {
     int64_t queryTimeMs{0};
     bool kgAvailable{true};
     std::string warning;
+
+    // ── Navigation result (populated for lookup/impact/trace/affected_tests) ──
+    json navResult;
 
     // ── Ingest result fields (populated when action == "ingest") ──
     std::string action{"query"}; // echoes the action for clarity

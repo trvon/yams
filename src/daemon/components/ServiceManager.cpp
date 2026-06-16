@@ -96,6 +96,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
@@ -1218,6 +1219,17 @@ void ServiceManager::clearCachedServiceState() {
     searchComponent_.reset();
 }
 
+void ServiceManager::seedBuiltinContentExtractors() {
+    for (const auto& ext : contentExtractors_) {
+        if (std::dynamic_pointer_cast<extraction::BuiltinTextContentExtractor>(ext)) {
+            return;
+        }
+    }
+    contentExtractors_.push_back(std::make_shared<extraction::BuiltinTextContentExtractor>());
+    spdlog::info("[ServiceManager] Registered built-in text content extractor (platform-"
+                 "independent baseline)");
+}
+
 void ServiceManager::shutdownModelProviderForShutdown() {
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
     auto modelProvider = loadModelProvider();
@@ -2211,6 +2223,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: KG Store Initialized.");
 
+    seedBuiltinContentExtractors();
+
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
         using TA = yams::daemon::TuneAdvisor;
@@ -2432,7 +2446,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     storeModelProvider(pmp);
                     embeddingLifecycle_.setModelName(pluginManager_->getEmbeddingModelName());
                 }
-                contentExtractors_ = pluginManager_->getContentExtractors();
+                contentExtractors_.clear();
+                seedBuiltinContentExtractors();
+                for (auto& ext : pluginManager_->getContentExtractors()) {
+                    contentExtractors_.push_back(ext);
+                }
                 auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
                 if (piq) {
                     if (!contentExtractors_.empty()) {

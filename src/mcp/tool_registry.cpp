@@ -628,6 +628,50 @@ json MCPListDownloadJobsResponse::toJson() const {
     return j;
 }
 
+// MCPDownloadJobsRequest — unified (replaces download_status/list_jobs/cancel)
+MCPDownloadJobsRequest MCPDownloadJobsRequest::fromJson(const json& j) {
+    MCPDownloadJobsRequest req;
+    req.action = j.value("action", std::string{"status"});
+    req.jobId = j.value("job_id", std::string{});
+    return req;
+}
+
+json MCPDownloadJobsRequest::toJson() const {
+    return json{{"action", action}, {"job_id", jobId}};
+}
+
+MCPDownloadJobsResponse MCPDownloadJobsResponse::fromJson(const json& j) {
+    MCPDownloadJobsResponse resp;
+    resp.action = j.value("action", std::string{});
+    if (j.contains("job") && j["job"].is_object()) {
+        resp.job = MCPDownloadJobResponse::fromJson(j["job"]);
+    }
+    if (j.contains("jobs") && j["jobs"].is_array()) {
+        resp.jobs.reserve(j["jobs"].size());
+        for (const auto& item : j["jobs"]) {
+            if (item.is_object()) {
+                resp.jobs.push_back(MCPDownloadJobResponse::fromJson(item));
+            }
+        }
+    }
+    return resp;
+}
+
+json MCPDownloadJobsResponse::toJson() const {
+    json j;
+    j["action"] = action;
+    if (!job.jobId.empty()) {
+        j["job"] = job.toJson();
+    }
+    if (!jobs.empty()) {
+        j["jobs"] = json::array();
+        for (const auto& item : jobs) {
+            j["jobs"].push_back(item.toJson());
+        }
+    }
+    return j;
+}
+
 // MCPStoreDocumentRequest implementation
 MCPStoreDocumentRequest MCPStoreDocumentRequest::fromJson(const json& j) {
     MCPStoreDocumentRequest req;
@@ -1551,6 +1595,15 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
 
     req.scopeSnapshot = j.value("scope_snapshot", std::string{});
 
+    // Navigation fields (lookup/impact/trace/affected_tests)
+    req.symbol = j.value("symbol", std::string{});
+    req.file = j.value("file", std::string{});
+    req.line = static_cast<int32_t>(parse_int_tolerant(j, "line", -1));
+    req.fromSymbol = j.value("from", std::string{});
+    req.toSymbol = j.value("to", std::string{});
+    detail::readStringArray(j, "changed_files", req.changedFiles);
+    req.testPattern = j.value("test_pattern", std::string{});
+
     // Ingest fields (only relevant when action == "ingest")
     if (j.contains("nodes") && j["nodes"].is_array()) {
         for (const auto& n : j["nodes"]) {
@@ -1715,6 +1768,14 @@ json MCPGraphResponse::toJson() const {
         j["success"] = success;
         if (!errors.empty())
             j["errors"] = errors;
+    } else if (!navResult.is_null()) {
+        // Navigation results (lookup/impact/trace/affected_tests)
+        for (auto it = navResult.begin(); it != navResult.end(); ++it) {
+            j[it.key()] = it.value();
+        }
+        j["kg_available"] = kgAvailable;
+        if (!warning.empty())
+            j["warning"] = warning;
     } else {
         // Query results
         j["origin"] = origin;

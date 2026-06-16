@@ -463,6 +463,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
             std::is_same<Req, GraphQueryRequest>, std::is_same<Req, GraphExploreRequest>,
+            // Graph navigation operations
+            std::is_same<Req, GraphSymbolLookupRequest>, std::is_same<Req, GraphTraceRequest>,
+            std::is_same<Req, GraphImpactRequest>, std::is_same<Req, GraphAffectedTestsRequest>,
             // KG ingest operations
             std::is_same<Req, KgIngestRequest>,
             // Cat operations

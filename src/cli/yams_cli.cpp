@@ -61,8 +61,6 @@ namespace fs = std::filesystem;
         __has_include(<generated/cli_help_config.hpp>) && \
         __has_include(<generated/cli_help_auth.hpp>) && \
         __has_include(<generated/cli_help_stats.hpp>) && \
-        __has_include(<generated/cli_help_uninstall.hpp>) && \
-        __has_include(<generated/cli_help_migrate.hpp>) && \
         __has_include(<generated/cli_help_serve.hpp>)
 #define YAMS_HAVE_GENERATED_CLI_HELP 1
 #include <generated/cli_help.hpp>
@@ -73,11 +71,9 @@ namespace fs = std::filesystem;
 #include <generated/cli_help_get.hpp>
 #include <generated/cli_help_init.hpp>
 #include <generated/cli_help_list.hpp>
-#include <generated/cli_help_migrate.hpp>
 #include <generated/cli_help_search.hpp>
 #include <generated/cli_help_serve.hpp>
 #include <generated/cli_help_stats.hpp>
-#include <generated/cli_help_uninstall.hpp>
 #else
 // Generated CLI help was requested but headers are not available.
 // Disable embedded help to fall back to runtime message paths.
@@ -619,10 +615,6 @@ int YamsCLI::run(int argc, char* argv[]) {
                 sectionPtr = yams::cli_help::CMD_AUTH;
             else if (cmd == "stats")
                 sectionPtr = yams::cli_help::CMD_STATS;
-            else if (cmd == "uninstall")
-                sectionPtr = yams::cli_help::CMD_UNINSTALL;
-            else if (cmd == "migrate")
-                sectionPtr = yams::cli_help::CMD_MIGRATE;
             else if (cmd == "serve")
                 sectionPtr = yams::cli_help::CMD_SERVE;
             if (sectionPtr && sectionPtr[0] != '\0') {

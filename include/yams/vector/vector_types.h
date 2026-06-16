@@ -63,7 +63,7 @@ parseVectorSearchEngine(std::string_view raw) {
 
 enum class EntityEmbeddingType { SIGNATURE, DOCUMENTATION, ALIAS, CONTEXT };
 
-enum class VectorBackendType { SqliteVec, LanceDB, Faiss, InMemory };
+enum class VectorBackendType { SqliteVec, Faiss };
 
 struct VectorDatabaseConfig {
     std::string database_path = "vectors.db";

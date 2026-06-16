@@ -1,14 +1,22 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/migration.h>
 
 #include <boost/asio/io_context.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
+#include <random>
 #include <thread>
 
 using yams::daemon::AddSymSpellTermsOp;
+using yams::daemon::DeleteOrphanedDocEntitiesOp;
+using yams::daemon::DeleteOrphanedEdgesOp;
 using yams::daemon::WriteBatch;
 using yams::daemon::WriteCoordinator;
 
@@ -97,4 +105,88 @@ TEST_CASE("WriteCoordinator: shutdown drains queued batches and rejects new enqu
     CHECK_FALSE(coordinator.tryEnqueue(lateBatch));
     CHECK((lateBatch != nullptr));
     CHECK((coordinator.queuedBatches() == 0));
+}
+
+TEST_CASE("WriteCoordinator: orphan edge/doc-entity cleanup populates deletion stats",
+          "[unit][daemon][write-coordinator][kg]") {
+    // Regression for #7: RepairService::cleanOrphanedKgEntries reported edges=0 /
+    // doc_entities=0 because it never read the deletion counts back. The counts are
+    // available via WriteCoordinator::getStats() (edgesDeleted/docEntitiesDeleted),
+    // which the repair path now snapshots before/after the flush. This proves the
+    // stats source is actually populated by the orphan-cleanup ops.
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() /
+               ("wc_kg_orphan_" + std::to_string(std::random_device{}()));
+    fs::create_directories(dir);
+    auto dbPath = (dir / "kg.db").string();
+
+    {
+        yams::metadata::Database db;
+        auto open = db.open(dbPath, yams::metadata::ConnectionMode::Create);
+        REQUIRE(open);
+        yams::metadata::MigrationManager mm(db);
+        REQUIRE(mm.initialize());
+        mm.registerMigrations(yams::metadata::YamsMetadataMigrations::getAllMigrations());
+        REQUIRE(mm.migrate());
+        db.close();
+    }
+
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.maxConnections = 2;
+    auto pool = std::make_shared<yams::metadata::ConnectionPool>(dbPath, poolConfig);
+
+    // Insert a genuinely orphaned edge directly. kg_edges has ON DELETE CASCADE on
+    // both endpoints, so deleting a node also removes its edges — to create the
+    // orphan condition the repair path is meant to clean up (an edge whose endpoint
+    // node no longer exists), insert the edge with foreign keys disabled, pointing
+    // at node ids that do not exist.
+    {
+        yams::metadata::Database db;
+        auto open = db.open(dbPath, yams::metadata::ConnectionMode::ReadWrite);
+        REQUIRE(open);
+        REQUIRE(db.execute("PRAGMA foreign_keys = OFF"));
+        REQUIRE(db.execute("INSERT INTO kg_edges (src_node_id, dst_node_id, relation) "
+                           "VALUES (999001, 999002, 'related')"));
+        db.close();
+    }
+
+    auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(*pool);
+    REQUIRE(kgRes);
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg = std::move(kgRes.value());
+
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchSize = 4;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 8;
+    WriteCoordinator coordinator(io, kg, {}, config);
+
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    const auto before = coordinator.getStats();
+
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/orphan_cleanup";
+    batch->ops.emplace_back(DeleteOrphanedEdgesOp{});
+    batch->ops.emplace_back(DeleteOrphanedDocEntitiesOp{});
+    coordinator.enqueue(std::move(batch));
+
+    auto flushResult = coordinator.flush(std::chrono::seconds{10});
+    REQUIRE(flushResult.has_value());
+
+    const auto after = coordinator.getStats();
+    CHECK((after.edgesDeleted - before.edgesDeleted) == 1);
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+
+    kg.reset();
+    pool->shutdown();
+    pool.reset();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }

@@ -221,6 +221,12 @@ private:
     boost::asio::awaitable<Response> handleGraphQueryRequest(const GraphQueryRequest& req);
     boost::asio::awaitable<Response> handleGraphExploreRequest(const GraphExploreRequest& req);
     boost::asio::awaitable<Response>
+    handleGraphSymbolLookupRequest(const GraphSymbolLookupRequest& req);
+    boost::asio::awaitable<Response> handleGraphTraceRequest(const GraphTraceRequest& req);
+    boost::asio::awaitable<Response> handleGraphImpactRequest(const GraphImpactRequest& req);
+    boost::asio::awaitable<Response>
+    handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req);
+    boost::asio::awaitable<Response>
     handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req);
     // PBI-093: Helper for listByType mode
     boost::asio::awaitable<Response>

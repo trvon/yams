@@ -171,6 +171,7 @@ private:
     // File-type and MIME filtering
     std::string extension_;
     std::string mimeType_;
+    std::string collection_;
     std::string fileType_;
     bool textOnly_{false};
     bool binaryOnly_{false};
@@ -936,8 +937,12 @@ private:
             dreq.pathPatterns = includeGlobsExpanded;
             spdlog::debug("[CLI] Setting {} path patterns for search", includeGlobsExpanded.size());
         } else if (!pathFilter_.empty()) {
-            dreq.pathPattern = pathFilter_;
-            dreq.pathPatterns.push_back(pathFilter_);
+            std::string pat = pathFilter_;
+            if (pat.find('*') == std::string::npos && pat.find('?') == std::string::npos) {
+                pat = "*" + pat + "*";
+            }
+            dreq.pathPattern = pat;
+            dreq.pathPatterns.push_back(pat);
             spdlog::debug("[CLI] Using pathFilter fallback, set pathPatterns with 1 element");
         }
 
@@ -961,6 +966,9 @@ private:
         if (shouldUseSessionScope()) {
             dreq.sessionName = *sessionOverride_;
         }
+        if (!collection_.empty()) {
+            dreq.collection = collection_;
+        }
         return dreq;
     }
 
@@ -980,7 +988,12 @@ private:
         sreq.beforeContext = static_cast<int>(beforeContext_);
         sreq.afterContext = static_cast<int>(afterContext_);
         sreq.context = static_cast<int>(context_);
-        sreq.pathPattern = pathFilter_;
+        if (!pathFilter_.empty() && pathFilter_.find('*') == std::string::npos &&
+            pathFilter_.find('?') == std::string::npos) {
+            sreq.pathPattern = "*" + pathFilter_ + "*";
+        } else {
+            sreq.pathPattern = pathFilter_;
+        }
         sreq.extension = extension_;
         sreq.mimeType = mimeType_;
         sreq.fileType = fileType_;
@@ -995,6 +1008,9 @@ private:
         sreq.tags = parsedFilterTags();
         if (!sreq.tags.empty()) {
             sreq.matchAllTags = matchAllTags_;
+        }
+        if (!collection_.empty()) {
+            sreq.metadataFilters.emplace_back("collection", collection_);
         }
         sreq.useSession = shouldUseSessionScope();
         sreq.globalSearch = !shouldUseSessionScope();
@@ -1135,6 +1151,8 @@ public:
         cmd->add_option("query_positional", extraArgs_, "Search query terms")
             ->expected(0, -1); // Accept 0 or more positional arguments
         cmd->add_option("--path", pathFilter_, "Filter results by path pattern (optional)");
+        cmd->add_option("--collection", collection_,
+                        "Scope search to a named collection/corpus (metadata-keyed)");
         // Query input sources
         cmd->add_flag("--stdin", readStdin_, "Read query from STDIN if not provided");
         cmd->add_option("--query-file", queryFile_,
