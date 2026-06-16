@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
 
@@ -14,7 +15,8 @@ std::string normalizeExtension(const std::string& extension) {
     if (!normalized.empty() && normalized[0] != '.') {
         normalized = "." + normalized;
     }
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
     return normalized;
 }
 

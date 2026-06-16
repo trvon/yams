@@ -2401,6 +2401,11 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     MCPDownloadJobsResponse out;
     out.action = req.action;
 
+    if ((req.action == "status" || req.action == "cancel") && req.jobId.empty()) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "job_id is required for action '" + req.action + "'"};
+    }
+
     if (req.action == "status") {
         auto dres = co_await client->downloadStatus(yams::daemon::DownloadStatusRequest{req.jobId});
         if (!dres)

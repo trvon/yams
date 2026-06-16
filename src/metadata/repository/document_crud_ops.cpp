@@ -743,13 +743,13 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             if (wasIndexed) {
                 if (auto fts5 = db.hasFTS5(); fts5 && fts5.value()) {
                     auto ftsStmt = db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
-                    if (ftsStmt) {
-                        auto& fstmt = *ftsStmt.value();
-                        if (auto b = fstmt.bind(1, id); !b)
-                            return b.error();
-                        if (auto e = fstmt.execute(); !e)
-                            return e.error();
-                    }
+                    if (!ftsStmt)
+                        return ftsStmt.error();
+                    auto& fstmt = *ftsStmt.value();
+                    if (auto b = fstmt.bind(1, id); !b)
+                        return b.error();
+                    if (auto e = fstmt.execute(); !e)
+                        return e.error();
                 }
             }
 

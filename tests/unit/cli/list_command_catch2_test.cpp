@@ -5,6 +5,8 @@
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 
+#include <cctype>
+
 #include <string>
 #include <vector>
 
@@ -128,7 +130,7 @@ TEST_CASE("extractSnippet handles exact max length", "[list][snippet]") {
         std::string result;
         bool lastWasSpace = false;
         for (char c : snippet) {
-            if (std::isspace(c)) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
                 if (!lastWasSpace) {
                     result += ' ';
                     lastWasSpace = true;
