@@ -14,7 +14,9 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/extraction/html_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 
 namespace yams::cli {
 

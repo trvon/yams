@@ -8,7 +8,9 @@
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/search/symspell_search.h>
 
 #include "document_query_filters.hpp"

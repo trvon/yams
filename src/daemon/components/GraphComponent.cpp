@@ -103,6 +103,7 @@ GraphComponent::~GraphComponent() {
 }
 
 Result<void> GraphComponent::initialize() {
+    YAMS_ZONE_SCOPED_N("GraphComponent::initialize");
     if (initialized_) {
         return Result<void>();
     }
@@ -132,6 +133,7 @@ Result<void> GraphComponent::initialize() {
 }
 
 void GraphComponent::shutdown() {
+    YAMS_ZONE_SCOPED_N("GraphComponent::shutdown");
     if (!initialized_) {
         return;
     }
@@ -147,10 +149,12 @@ void GraphComponent::shutdown() {
 }
 
 bool GraphComponent::isReady() const {
+    YAMS_ZONE_SCOPED_N("GraphComponent::isReady");
     return initialized_ && queryService_ != nullptr;
 }
 
 Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx) {
+    YAMS_ZONE_SCOPED_N("GraphComponent::onDocumentIngested");
     if (!initialized_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
@@ -273,6 +277,7 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
 }
 
 Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts) {
+    YAMS_ZONE_SCOPED_N("GraphComponent::onDocumentsIngestedBatch");
     if (!initialized_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
@@ -458,6 +463,7 @@ bool GraphComponent::shouldSkipEntityExtraction(
 }
 
 Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
+    YAMS_ZONE_SCOPED_N("GraphComponent::submitEntityExtraction");
     if (!initialized_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
@@ -486,6 +492,7 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
 }
 
 std::string GraphComponent::resolveSymbolExtractorIdForLanguage(const std::string& language) const {
+    YAMS_ZONE_SCOPED_N("GraphComponent::resolveSymbolExtractorIdForLanguage");
     if (!serviceManager_ || language.empty()) {
         return {};
     }
@@ -1060,6 +1067,7 @@ GraphComponent::reconcileSymbolReferences(bool dryRun, const std::atomic<bool>* 
 }
 
 Result<GraphComponent::GraphHealthReport> GraphComponent::validateGraph() {
+    YAMS_ZONE_SCOPED_N("GraphComponent::validateGraph");
     if (!initialized_ || !kgStore_) {
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
@@ -1413,10 +1421,12 @@ GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::stri
 }
 
 std::shared_ptr<app::services::IGraphQueryService> GraphComponent::getQueryService() const {
+    YAMS_ZONE_SCOPED_N("GraphComponent::getQueryService");
     return queryService_;
 }
 
 GraphComponent::EntityStats GraphComponent::getEntityStats() const {
+    YAMS_ZONE_SCOPED_N("GraphComponent::getEntityStats");
     if (!entityService_) {
         return EntityStats{};
     }

@@ -2,7 +2,9 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 
 namespace yams::ingest {
 

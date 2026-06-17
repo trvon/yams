@@ -7,7 +7,9 @@
 #include <boost/asio/detached.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/client/global_io_context.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/vector/embedding_generator.h>
 
 #include <algorithm>

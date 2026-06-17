@@ -25,7 +25,9 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 
 #ifdef _WIN32
 #include <io.h>

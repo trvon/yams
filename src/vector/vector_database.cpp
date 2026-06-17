@@ -3,7 +3,9 @@
 #include <fstream>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>

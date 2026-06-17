@@ -2,6 +2,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/core/assert.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -53,6 +54,7 @@ EmbeddingService::~EmbeddingService() {
 }
 
 Result<void> EmbeddingService::initialize() {
+    YAMS_ZONE_SCOPED_N("Embedding::initialize");
     // Use configurable channel capacity from TuneAdvisor
     std::size_t capacity = static_cast<std::size_t>(TuneAdvisor::embedChannelCapacity());
     std::size_t postIngestCap = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
@@ -74,6 +76,7 @@ Result<void> EmbeddingService::initialize() {
 }
 
 void EmbeddingService::start() {
+    YAMS_ZONE_SCOPED_N("Embedding::start");
     stop_.store(false);
     pollerRunning_.store(false, std::memory_order_release);
     {
@@ -92,6 +95,7 @@ EmbeddingService::phaseTimingsSnapshot() const {
 }
 
 void EmbeddingService::resetPhaseTimings() {
+    YAMS_ZONE_SCOPED_N("Embedding::resetPhaseTimings");
     std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
     phaseTimings_.clear();
 }
@@ -151,6 +155,7 @@ void EmbeddingService::enqueueEmbeddingStatusUpdate(std::vector<std::string> has
 }
 
 void EmbeddingService::shutdown() {
+    YAMS_ZONE_SCOPED_N("Embedding::shutdown");
     if (stop_.exchange(true)) {
         return;
     }
@@ -279,42 +284,53 @@ void EmbeddingService::setTopologyRebuildRequester(
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
+    YAMS_ZONE_SCOPED_N("Embedding::queuedJobs");
     const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
     const std::size_t ch = chPtr ? chPtr->size_approx() : 0;
     const std::size_t pending = this->pendingApprox_.load(std::memory_order_relaxed);
+    YAMS_DCHECK(inFlight_.load(std::memory_order_relaxed) <= ch + pending || (ch + pending) == 0,
+                "inFlight exceeds queued+channel jobs");
     return ch + pending;
 }
 
 std::size_t EmbeddingService::inFlightJobs() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inFlightJobs");
     return inFlight_.load();
 }
 
 std::size_t EmbeddingService::activeInferSubBatches() const {
+    YAMS_ZONE_SCOPED_N("Embedding::activeInferSubBatches");
     std::lock_guard<std::mutex> lock(inferTrackerMutex_);
     return activeInferSubBatches_.size();
 }
 
 uint64_t EmbeddingService::inferSubBatchStartedCount() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferSubBatchStartedCount");
     return inferSubBatchStarted_.load(std::memory_order_relaxed);
 }
 
 uint64_t EmbeddingService::inferSubBatchCompletedCount() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferSubBatchCompletedCount");
     return inferSubBatchCompleted_.load(std::memory_order_relaxed);
 }
 
 uint64_t EmbeddingService::inferSubBatchLastDurationMs() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferSubBatchLastDurationMs");
     return inferSubBatchLastDurationMs_.load(std::memory_order_relaxed);
 }
 
 uint64_t EmbeddingService::inferSubBatchMaxDurationMs() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferSubBatchMaxDurationMs");
     return inferSubBatchMaxDurationMs_.load(std::memory_order_relaxed);
 }
 
 uint64_t EmbeddingService::inferSubBatchWarnCount() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferSubBatchWarnCount");
     return inferSubBatchWarnCount_.load(std::memory_order_relaxed);
 }
 
 uint64_t EmbeddingService::inferOldestActiveMs() const {
+    YAMS_ZONE_SCOPED_N("Embedding::inferOldestActiveMs");
     std::lock_guard<std::mutex> lock(inferTrackerMutex_);
     if (activeInferSubBatches_.empty()) {
         return 0;
@@ -1149,6 +1165,7 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
 }
 
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
+    YAMS_ZONE_SCOPED_N("Embedding::channelPoller");
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     pollerRunning_.store(true, std::memory_order_release);
@@ -1600,6 +1617,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 }
 
 void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
+    YAMS_ZONE_SCOPED_N("Embedding::processEmbedJob");
     const bool timingEnabled = []() {
         if (const char* s = std::getenv("YAMS_EMBED_DEBUG_TIMINGS")) {
             return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";

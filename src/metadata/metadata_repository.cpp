@@ -28,7 +28,9 @@
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/search/symspell_search.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/storage/sqlite_retry.h>

@@ -3,6 +3,7 @@
 namespace yams::daemon::repair {
 
 RepairRequest RepairPlanBuilder::buildFast(const RepairHealthSnapshot& health) {
+    YAMS_ZONE_SCOPED_N("RepairPlan::buildFast");
     RepairRequest req;
     // Fast auto-repair must stay cheap: it runs frequently and should only
     // schedule bounded integrity repair derived from the fast health probe.
@@ -13,6 +14,7 @@ RepairRequest RepairPlanBuilder::buildFast(const RepairHealthSnapshot& health) {
 }
 
 RepairRequest RepairPlanBuilder::buildWarm(const RepairHealthSnapshot& health, int32_t maxRetries) {
+    YAMS_ZONE_SCOPED_N("RepairPlan::buildWarm");
     RepairRequest req;
     // Warm auto-repair should not invoke the synchronous full-corpus FTS5 or
     // embedding repair RPC paths. The background RepairService loop already
@@ -30,6 +32,7 @@ RepairRequest RepairPlanBuilder::buildWarm(const RepairHealthSnapshot& health, i
 }
 
 RepairRequest RepairPlanBuilder::buildCold() {
+    YAMS_ZONE_SCOPED_N("RepairPlan::buildCold");
     RepairRequest req;
     req.repairOrphans = true;
     req.repairMime = true;
@@ -43,6 +46,7 @@ RepairRequest RepairPlanBuilder::buildCold() {
 }
 
 bool RepairPlanBuilder::hasWork(const RepairRequest& request) {
+    YAMS_ZONE_SCOPED_N("RepairPlan::hasWork");
     return request.repairOrphans || request.repairMime || request.repairDownloads ||
            request.repairPathTree || request.repairChunks || request.repairBlockRefs ||
            request.repairFts5 || request.repairEmbeddings || request.repairStuckDocs ||

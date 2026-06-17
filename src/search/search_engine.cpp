@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
+#include <yams/core/assert.hpp>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
@@ -4424,6 +4425,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       response.failedComponents.size());
     }
 
+    YAMS_DCHECK(response.results.size() <= params.limit + 10,
+                "result count exceeds requested limit");
+
     return response;
 }
 
@@ -5000,50 +5004,62 @@ Result<SearchResponse> SearchEngine::searchWithResponse(const std::string& query
 }
 
 void SearchEngine::setConfig(const SearchEngineConfig& config) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setConfig");
     pImpl_->setConfig(config);
 }
 
 const SearchEngineConfig& SearchEngine::getConfig() const {
+    YAMS_ZONE_SCOPED_N("SearchEngine::getConfig");
     return pImpl_->getConfig();
 }
 
 const SearchEngine::Statistics& SearchEngine::getStatistics() const {
+    YAMS_ZONE_SCOPED_N("SearchEngine::getStatistics");
     return pImpl_->getStatistics();
 }
 
 void SearchEngine::resetStatistics() {
+    YAMS_ZONE_SCOPED_N("SearchEngine::resetStatistics");
     pImpl_->resetStatistics();
 }
 
 Result<void> SearchEngine::healthCheck() {
+    YAMS_ZONE_SCOPED_N("SearchEngine::healthCheck");
     return pImpl_->healthCheck();
 }
 
 void SearchEngine::setExecutor(std::optional<boost::asio::any_io_executor> executor) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setExecutor");
     pImpl_->setExecutor(std::move(executor));
 }
 
 void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setConceptExtractor");
     pImpl_->setConceptExtractor(std::move(extractor));
 }
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setSimeonLexicalBackend");
     pImpl_->setSimeonLexicalBackend(std::move(backend));
 }
 
 void SearchEngine::setCrossReranker(CrossRerankScorer scorer) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setCrossReranker");
     pImpl_->setCrossReranker(std::move(scorer));
 }
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {
+    YAMS_ZONE_SCOPED_N("SearchEngine::setSearchTuner");
     pImpl_->setSearchTuner(std::move(tuner));
 }
 
 std::shared_ptr<SearchTuner> SearchEngine::getSearchTuner() const {
+    YAMS_ZONE_SCOPED_N("SearchEngine::getSearchTuner");
     return pImpl_->getSearchTuner();
 }
 
 SearchEngine::SimeonLexicalStatus SearchEngine::getSimeonLexicalStatus() const {
+    YAMS_ZONE_SCOPED_N("SearchEngine::getSimeonLexicalStatus");
     return pImpl_->getSimeonLexicalStatus();
 }
 

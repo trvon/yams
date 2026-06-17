@@ -6,7 +6,9 @@
 
 #include <yams/common/utf8_utils.h>
 #include <yams/metadata/metadata_repository.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 
 #include "crud_ops.hpp"
 

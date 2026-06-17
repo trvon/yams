@@ -144,6 +144,7 @@ IngestService::~IngestService() {
 }
 
 void IngestService::start() {
+    YAMS_ZONE_SCOPED_N("IngestService::start");
     bool expected = false;
     if (!startGuard_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         spdlog::debug("[IngestService] start() ignored; poller already active or starting");
@@ -155,11 +156,13 @@ void IngestService::start() {
 }
 
 void IngestService::notifyLifecycle() {
+    YAMS_ZONE_SCOPED_N("IngestService::notifyLifecycle");
     std::lock_guard<std::mutex> lock(lifecycleMutex_);
     lifecycleCv_.notify_all();
 }
 
 void IngestService::stop() {
+    YAMS_ZONE_SCOPED_N("IngestService::stop");
     stop_.store(true);
     notifyLifecycle();
     spdlog::info("[IngestService] Stop requested");
@@ -183,6 +186,7 @@ void IngestService::stop() {
 }
 
 boost::asio::awaitable<void> IngestService::channelPoller() {
+    YAMS_ZONE_SCOPED_N("IngestService::channelPoller");
     running_.store(true, std::memory_order_release);
     struct RunningGuard {
         std::atomic<bool>& running;

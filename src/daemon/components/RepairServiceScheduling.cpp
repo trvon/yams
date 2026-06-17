@@ -9,6 +9,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 
 #include <cstdint>
 #include <mutex>
@@ -37,16 +38,19 @@ std::unordered_map<std::string, std::string> buildExtensionLanguageMap(
 } // namespace
 
 bool RepairService::maintenanceAllowed() const {
+    YAMS_ZONE_SCOPED_N("RepairSched::maintenanceAllowed");
     if (!activeConnFn_)
         return false;
     return activeConnFn_() == 0;
 }
 
 std::shared_ptr<GraphComponent> RepairService::getGraphComponentForScheduling() const {
+    YAMS_ZONE_SCOPED_N("RepairSched::getGraphComponentForScheduling");
     return ctx_.getGraphComponent ? ctx_.getGraphComponent() : nullptr;
 }
 
 std::shared_ptr<metadata::KnowledgeGraphStore> RepairService::getKgStoreForScheduling() const {
+    YAMS_ZONE_SCOPED_N("RepairSched::getKgStoreForScheduling");
     return ctx_.getKgStore ? ctx_.getKgStore() : nullptr;
 }
 
@@ -57,6 +61,7 @@ RepairService::getSymbolExtractorsForScheduling() const {
 }
 
 void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
+    YAMS_ZONE_SCOPED_N("RepairSched::onDocumentAdded");
     if (!cfg_.enable || !running_)
         return;
 
@@ -138,12 +143,14 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
 }
 
 void RepairService::onDocumentRemoved(const DocumentRemovedEvent& event) {
+    YAMS_ZONE_SCOPED_N("RepairSched::onDocumentRemoved");
     if (!cfg_.enable || !running_)
         return;
     spdlog::debug("RepairService: document {} removed", event.hash);
 }
 
 void RepairService::enqueueEmbeddingRepair(const std::vector<std::string>& hashes) {
+    YAMS_ZONE_SCOPED_N("RepairSched::enqueueEmbeddingRepair");
     if (!cfg_.enable || !running_ || hashes.empty())
         return;
     size_t enqueuedCount = 0;

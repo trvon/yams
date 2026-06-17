@@ -18,6 +18,7 @@ RepairHealthProbe::RepairHealthProbe(std::shared_ptr<metadata::IMetadataReposito
       graphComponent_(std::move(graphComponent)), kgStore_(std::move(kgStore)) {}
 
 bool RepairHealthProbe::vectorsDisabledByEnv() {
+    YAMS_ZONE_SCOPED_N("RepairHealth::vectorsDisabledByEnv");
     if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env)
         return true;
     if (const char* env = std::getenv("YAMS_DISABLE_VECTOR_DB"); env && *env)
@@ -26,6 +27,7 @@ bool RepairHealthProbe::vectorsDisabledByEnv() {
 }
 
 RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options) const {
+    YAMS_ZONE_SCOPED_N("RepairHealth::probe");
     RepairHealthSnapshot snapshot;
     if (!meta_) {
         snapshot.issues.push_back("Metadata repository not available");

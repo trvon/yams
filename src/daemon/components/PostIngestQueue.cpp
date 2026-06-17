@@ -3502,6 +3502,9 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 
     YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
 
+    // Invariant: in-flight work requires pending tasks
+    YAMS_DCHECK(totalInFlight() == 0 || !tasks.empty(), "in-flight work without pending tasks");
+
     using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
     const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
     YAMS_ASSERT(numChunks > 0, "PostIngestQueue::processBatch requires at least one worker chunk");

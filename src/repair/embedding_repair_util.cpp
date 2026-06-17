@@ -10,6 +10,9 @@
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
+#ifdef TRACY_ENABLE
+#include <yams/profiling.h>
+#endif
 #include <atomic>
 #include <cmath>
 #include <ctime>

@@ -7,9 +7,9 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#include <mutex>
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -17,6 +17,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/common/utf8_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -146,6 +147,7 @@ EntityGraphService::~EntityGraphService() {
 }
 
 void EntityGraphService::start() {
+    YAMS_ZONE_SCOPED_N("EntityGraph::start");
     if (!services_)
         return;
     auto* coordinator = services_->getWorkCoordinator();
@@ -158,10 +160,12 @@ void EntityGraphService::start() {
 }
 
 void EntityGraphService::stop() {
+    YAMS_ZONE_SCOPED_N("EntityGraph::stop");
     stop_.store(true);
 }
 
 boost::asio::awaitable<void> EntityGraphService::channelPoller() {
+    YAMS_ZONE_SCOPED_N("EntityGraph::channelPoller");
     constexpr std::size_t kChannelCapacity = 4096;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityGraphJob>(
@@ -228,6 +232,7 @@ boost::asio::awaitable<void> EntityGraphService::channelPoller() {
 }
 
 Result<void> EntityGraphService::submitExtraction(Job job) {
+    YAMS_ZONE_SCOPED_N("EntityGraph::submitExtraction");
     if (stop_.load(std::memory_order_relaxed)) {
         return Error{ErrorCode::InvalidState, "service_stopped"};
     }
@@ -263,11 +268,17 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
 }
 
 EntityGraphService::Stats EntityGraphService::getStats() const {
+    YAMS_ZONE_SCOPED_N("EntityGraph::getStats");
+    YAMS_DCHECK(processed_.load(std::memory_order_relaxed) +
+                        failed_.load(std::memory_order_relaxed) <=
+                    accepted_.load(std::memory_order_relaxed) + 100,
+                "processed+failed exceeds accepted");
     return {accepted_.load(std::memory_order_relaxed), processed_.load(std::memory_order_relaxed),
             failed_.load(std::memory_order_relaxed)};
 }
 
 bool EntityGraphService::process(Job& job) {
+    YAMS_ZONE_SCOPED_N("EntityGraph::process");
     if (!services_)
         return false;
 
@@ -1040,6 +1051,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 // ============================================================================
 
 bool EntityGraphService::isNaturalLanguageContent(const Job& job) {
+    YAMS_ZONE_SCOPED_N("EntityGraph::isNaturalLanguageContent");
     // Check MIME type first
     if (!job.mimeType.empty()) {
         if (job.mimeType == "text/plain" || job.mimeType == "text/markdown" ||

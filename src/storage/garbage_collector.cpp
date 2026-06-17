@@ -1,5 +1,7 @@
 #include <yams/compression/compression_header.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 

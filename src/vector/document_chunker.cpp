@@ -1,4 +1,6 @@
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/vector/document_chunker.h>
 
 #include <algorithm>

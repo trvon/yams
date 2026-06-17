@@ -11,7 +11,9 @@
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
+#endif
 #include <yams/search/query_router.h>
 #include <yams/search/search_engine_builder.h>
 

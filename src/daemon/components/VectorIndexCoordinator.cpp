@@ -6,6 +6,7 @@
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -133,6 +134,7 @@ void VectorIndexCoordinator::postTelemetryRefresh() noexcept {
 }
 
 VectorIndexCoordinator::BulkScope VectorIndexCoordinator::beginBulkIngest(RebuildReason reason) {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::beginBulkIngest");
     pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_relaxed);
 
     // fetch_add is atomic: exactly one caller sees prev == 0 and enters bulk mode.
@@ -176,6 +178,7 @@ void VectorIndexCoordinator::releaseBulkScope() noexcept {
 }
 
 void VectorIndexCoordinator::doFinalizeOnStrand() {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::doFinalizeOnStrand");
     // Running on the strand.
     auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
     if (vdb) {
@@ -222,6 +225,7 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(RebuildReason reason) {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::requestRebuild");
     // This function is safe to call from any executor — use atomics for the
     // critical path and waitersMutex_ to protect the waiter list.
     // doRebuild runs on the strand (single-writer for VDB).
@@ -273,6 +277,7 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(Rebu
 }
 
 void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::doRebuildOnStrand");
     // Called via post(strand_, ...) — always deferred, never inline.
     // post() guarantees this runs AFTER all currently-queued strand items, so
     // every concurrent requestRebuild caller has already stored its waiter before
@@ -340,6 +345,7 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeeded() {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::initialBuildIfNeeded");
     co_await boost::asio::dispatch(strand_, boost::asio::use_awaitable);
 
     if (buildsSuppressed_.load(std::memory_order_relaxed)) {
@@ -461,6 +467,7 @@ VectorIndexTelemetry VectorIndexCoordinator::readTelemetrySeqlock() const noexce
 // ── Waiters ──────────────────────────────────────────────────────────────────
 
 void VectorIndexCoordinator::notifyWaiters(uint64_t currentEpoch) {
+    YAMS_ZONE_SCOPED_N("VecIdxCoord::notifyWaiters");
     // Drain waiters whose targetEpoch is satisfied.  Protected by waitersMutex_.
     std::vector<RebuildCompletion> toNotify;
     {

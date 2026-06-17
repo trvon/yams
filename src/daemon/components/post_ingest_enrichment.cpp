@@ -253,6 +253,7 @@ void runScientificAdapterFallback(PostIngestQueue::PreparedMetadataEntry& entry)
 // =========================================================================
 
 void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs) {
+    YAMS_ZONE_SCOPED_N("PostIngestEnrich::processKnowledgeGraphBatch");
     if (jobs.empty())
         return;
     for (const auto& j : jobs) {
@@ -310,6 +311,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
+    YAMS_ZONE_SCOPED_N("PostIngestEnrich::kgPoller");
     auto ch = kgChannel_;
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
@@ -399,6 +401,7 @@ void PostIngestQueue::dispatchToSymbolChannel(
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
+    YAMS_ZONE_SCOPED_N("PostIngestEnrich::symbolPoller");
     auto ch = symbolChannel_;
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
@@ -474,6 +477,7 @@ void PostIngestQueue::dispatchToEntityChannel(
 }
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
+    YAMS_ZONE_SCOPED_N("PostIngestEnrich::entityPoller");
     auto ch = entityChannel_;
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
@@ -682,6 +686,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
+    YAMS_ZONE_SCOPED_N("PostIngestEnrich::titlePoller");
     auto ch = titleChannel_;
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";

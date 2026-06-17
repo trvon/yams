@@ -8,6 +8,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 
@@ -125,6 +126,7 @@ std::vector<TopologyArm> defaultArmGrid(std::size_t corpusDocCount) {
 TopologyTuner::TopologyTuner(TopologyTunerConfig cfg) : cfg_(cfg) {}
 
 void TopologyTuner::setArms(std::vector<TopologyArm> arms) {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::setArms");
     std::lock_guard<std::mutex> lock(mutex_);
     arms_ = std::move(arms);
     std::vector<yams::search::TunerMAB::Arm> mabArms;
@@ -137,6 +139,7 @@ void TopologyTuner::setArms(std::vector<TopologyArm> arms) {
 }
 
 bool TopologyTuner::rebuildArmGridForCorpusSize(std::size_t corpusDocCount) {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::rebuildArmGridForCorpusSize");
     auto fresh = defaultArmGrid(corpusDocCount);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -158,6 +161,7 @@ bool TopologyTuner::rebuildArmGridForCorpusSize(std::size_t corpusDocCount) {
 }
 
 std::optional<TopologyArm> TopologyTuner::selectArm() {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::selectArm");
     std::lock_guard<std::mutex> lock(mutex_);
     if (!cfg_.enabled || arms_.empty()) {
         return std::nullopt;
@@ -243,6 +247,7 @@ void TopologyTuner::observeRebuildStats(std::string_view armId,
 }
 
 void TopologyTuner::observeShadowExtrinsic(double extrinsicSignal) {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::observeShadowExtrinsic");
     std::lock_guard<std::mutex> lock(mutex_);
     if (!haveLastIntrinsic_) {
         return;
@@ -301,16 +306,19 @@ bool TopologyTuner::canPullArm(std::chrono::steady_clock::time_point now,
 }
 
 std::optional<std::string> TopologyTuner::bestArmId() const {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::bestArmId");
     std::lock_guard<std::mutex> lock(mutex_);
     return mab_.bestArmId();
 }
 
 std::vector<TopologyArm> TopologyTuner::arms() const {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::arms");
     std::lock_guard<std::mutex> lock(mutex_);
     return arms_;
 }
 
 nlohmann::json TopologyTuner::toJson() const {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::toJson");
     std::lock_guard<std::mutex> lock(mutex_);
     nlohmann::json j;
     j["mab"] = mab_.toJson();
@@ -329,6 +337,7 @@ nlohmann::json TopologyTuner::toJson() const {
 }
 
 Result<void> TopologyTuner::fromJson(const nlohmann::json& payload) {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::fromJson");
     std::lock_guard<std::mutex> lock(mutex_);
     if (!payload.is_object() || !payload.contains("mab")) {
         return Error{ErrorCode::InvalidArgument, "TopologyTuner state missing 'mab' field"};
@@ -337,6 +346,7 @@ Result<void> TopologyTuner::fromJson(const nlohmann::json& payload) {
 }
 
 Result<void> TopologyTuner::loadState(const std::filesystem::path& path) {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::loadState");
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::exists(path, ec) || ec) {
@@ -356,6 +366,7 @@ Result<void> TopologyTuner::loadState(const std::filesystem::path& path) {
 }
 
 Result<void> TopologyTuner::saveState(const std::filesystem::path& path) const {
+    YAMS_ZONE_SCOPED_N("TopologyTuner::saveState");
     namespace fs = std::filesystem;
     nlohmann::json payload = toJson();
     std::error_code ec;
