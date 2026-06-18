@@ -1,16 +1,17 @@
 #include <yams/daemon/components/TopologyManager.h>
 
 #include <spdlog/spdlog.h>
-#include <yams/profiling.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <yams/core/assert.hpp>
+#include <yams/profiling.h>
 
 #include <yams/daemon/components/TopologyTuner.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/topological_quality.h>
 #include <yams/vector/vector_database.h>
 
@@ -163,6 +164,8 @@ void TopologyManager::clearScheduled() {
                                           .count(),
                                       std::memory_order_release);
     rebuildScheduled_.store(false, std::memory_order_release);
+    YAMS_DCHECK(!rebuildScheduled_.load(std::memory_order_acquire),
+                "rebuildScheduled must be false after clearScheduled");
 }
 
 TopologyManager::TelemetrySnapshot TopologyManager::getTelemetrySnapshot() const {

@@ -5175,6 +5175,13 @@ struct BenchFixture {
             if (g_debugFile->is_open()) {
                 g_debugOut = g_debugFile.get();
                 spdlog::info("Benchmark debug logging enabled: {}", env_debug_file);
+                DebugLogEntry startEntry;
+                startEntry.searchType = "benchmark_setup";
+                startEntry.extraFields = {
+                    {"event", "setup"},
+                    {"debug_file", env_debug_file},
+                };
+                debugLogWriteJsonLine(startEntry);
             } else {
                 spdlog::warn("Failed to open YAMS_BENCH_DEBUG_FILE={} for writing", env_debug_file);
                 g_debugFile.reset();
@@ -5677,12 +5684,20 @@ struct BenchFixture {
             }
 
             if (embedBackendSimeon) {
-                // Simeon backend handles embeddings in-process — only configure
-                // ONNX reranker. Skip preferred_model to avoid model download.
-                json onnxConfig;
-                onnxConfig["reranker_model"] = "bge-reranker-base";
-                harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
-                spdlog::info("Configured ONNX plugin: reranker=bge-reranker-base (simeon backend)");
+                // Simeon backend is the preferred fast, built-in benchmark path.
+                // Keep live-ish runs off ONNX entirely unless the operator explicitly
+                // opts in via YAMS_BENCH_ENABLE_ONNX_RERANK=1.
+                const bool enableOnnxRerank =
+                    envTruthy(std::getenv("YAMS_BENCH_ENABLE_ONNX_RERANK"));
+                if (enableOnnxRerank) {
+                    json onnxConfig;
+                    onnxConfig["reranker_model"] = "bge-reranker-base";
+                    harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
+                    spdlog::info("Configured ONNX plugin: reranker=bge-reranker-base (explicit "
+                                 "opt-in on simeon backend)");
+                } else {
+                    spdlog::info("Simeon benchmark path: ONNX reranker disabled");
+                }
             } else {
                 json onnxPluginConfig;
                 onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
@@ -5693,7 +5708,8 @@ struct BenchFixture {
             }
 
             std::vector<EnvSetting> pluginEnvOverrides;
-            if (!std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
+            if (harnessOptions.pluginConfigs.contains("onnx_plugin") &&
+                !std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
                 !std::getenv("YAMS_ONNX_RERANK_FORCE_GPU")) {
                 pluginEnvOverrides.push_back({"YAMS_ONNX_RERANK_FORCE_CPU", std::string("1")});
                 spdlog::info("Enabled CPU-preferred ONNX reranker for benchmark evaluation");
@@ -8003,6 +8019,29 @@ void BM_RetrievalQuality(benchmark::State& state) {
     g_final_keyword_diagnostics = QueryDiagnosticsSummary{};
     g_keyword_metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
                                         fixture.topK, "keyword", &g_final_keyword_diagnostics);
+
+    if (g_debugOut) {
+        DebugLogEntry summaryEntry;
+        summaryEntry.searchType = "benchmark_summary";
+        summaryEntry.extraFields = {
+            {"event", "hybrid_summary"},
+            {"hybrid_metrics",
+             {{"mrr", metrics.mrr},
+              {"recall_at_k", metrics.recallAtK},
+              {"precision_at_k", metrics.precisionAtK},
+              {"ndcg_at_k", metrics.ndcgAtK},
+              {"map", metrics.map}}},
+            {"hybrid_diag_summary", queryDiagnosticsToJson(g_final_hybrid_diagnostics)},
+            {"keyword_metrics",
+             {{"mrr", g_keyword_metrics.mrr},
+              {"recall_at_k", g_keyword_metrics.recallAtK},
+              {"precision_at_k", g_keyword_metrics.precisionAtK},
+              {"ndcg_at_k", g_keyword_metrics.ndcgAtK},
+              {"map", g_keyword_metrics.map}}},
+            {"keyword_diag_summary", queryDiagnosticsToJson(g_final_keyword_diagnostics)},
+        };
+        debugLogWriteJsonLine(summaryEntry);
+    }
 
     state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
     state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;

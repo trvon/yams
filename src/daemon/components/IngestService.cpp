@@ -1,12 +1,10 @@
 #include <spdlog/spdlog.h>
-#include <yams/profiling.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <future>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -22,6 +20,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/profiling.h>
 
 namespace yams::daemon {
 

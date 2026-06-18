@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <yams/core/assert.hpp>
 
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
@@ -46,6 +47,7 @@ void GradientLimiter::onJobEnd() {
 
 void GradientLimiter::onJobComplete(std::chrono::nanoseconds rtt, bool success) {
     uint32_t prevInFlight = inFlight_.fetch_sub(1, std::memory_order_relaxed);
+    YAMS_DCHECK(prevInFlight > 0, "onJobComplete called with zero inFlight");
 
     if (!success) {
         double current = limit_.load(std::memory_order_relaxed);

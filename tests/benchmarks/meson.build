@@ -9,7 +9,7 @@ tracy_args = []
 tracy_deps = []
 if enable_profiling
   tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: true, static: true)
-  tracy_args += ['-DTRACY_ENABLE']
+  tracy_args += ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
   tracy_deps += tracy_dep
   rocm_hint = '/opt/rocm'
   rocm_present = fs.exists(rocm_hint)
@@ -232,6 +232,26 @@ if benchmark_dep.found()
   )
 
   alias_target('bench_metapath_ab', metapath_ab_bench)
+
+  entity_extraction_bench = executable('entity_extraction_bench',
+    files('entity_extraction_bench.cpp'),
+    include_directories: incs,
+    dependencies: [benchmark_main_dep, benchmark_dep, dependency('spdlog')] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_entity_extraction', entity_extraction_bench)
+
+  fts5_indexing_bench = executable('fts5_indexing_bench',
+    files('fts5_indexing_bench.cpp'),
+    include_directories: incs,
+    dependencies: [benchmark_main_dep, benchmark_dep, dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_fts5_indexing', fts5_indexing_bench)
 
   # PBI-004: End-to-end ingestion pipeline benchmark
   ingestion_e2e_bench_deps = search_bench_deps + [test_deps]

@@ -1021,6 +1021,15 @@ public:
 /**
  * Factory functions to construct service implementations from shared context.
  */
+struct DocumentStorePhaseTiming {
+    std::uint64_t calls{0};
+    std::uint64_t totalMs{0};
+    std::uint64_t maxMs{0};
+};
+
+void resetDocumentStorePhaseTimings();
+std::unordered_map<std::string, DocumentStorePhaseTiming> getDocumentStorePhaseTimingsSnapshot();
+
 std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
 std::shared_ptr<IEmbeddingService> makeEmbeddingService(const AppContext& ctx);
 std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);

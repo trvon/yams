@@ -841,21 +841,56 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             ftsStmtOpt = std::move(ftsStmtResult);
         }
 
-        // Pre-check statement to determine counter increments before the combined UPDATE.
-        YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
-                SELECT COALESCE(content_extracted, 0),
-                       CASE WHEN EXISTS(
-                           SELECT 1 FROM documents_fts WHERE rowid = documents.id
-                       ) THEN 1 ELSE 0 END
-                FROM documents WHERE id = ?
-            )"
-                                                                  : R"(
-                SELECT COALESCE(content_extracted, 0), 0
-                FROM documents WHERE id = ?
-            )"));
-        auto& checkStmt = *checkStmtResult;
-
         addElapsedUs(phaseTimings.prepareStatementsUs, prepareStatementsStart);
+
+        struct ExistingContentState {
+            bool contentExtracted = false;
+            bool ftsIndexed = false;
+        };
+        std::unordered_map<int64_t, ExistingContentState> existingStates;
+        const bool needsPrecheck = std::any_of(preparedEntries.begin(), preparedEntries.end(),
+                                               [&](const PreparedBatchContentEntry& entry) {
+                                                   return !entry.priorStateKnown || hasFts5;
+                                               });
+        if (needsPrecheck) {
+            YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheckBatch");
+            const auto phaseStart = std::chrono::steady_clock::now();
+            std::string placeholders;
+            placeholders.reserve(preparedEntries.size() * 2);
+            for (std::size_t i = 0; i < preparedEntries.size(); ++i) {
+                if (i > 0) {
+                    placeholders += ',';
+                }
+                placeholders += '?';
+            }
+            std::string sql;
+            if (hasFts5) {
+                sql = "SELECT id, COALESCE(content_extracted, 0), "
+                      "CASE WHEN EXISTS(SELECT 1 FROM documents_fts WHERE rowid = documents.id) "
+                      "THEN 1 ELSE 0 END FROM documents WHERE id IN (";
+            } else {
+                sql = "SELECT id, COALESCE(content_extracted, 0), 0 "
+                      "FROM documents WHERE id IN (";
+            }
+            sql += placeholders;
+            sql += ')';
+            YAMS_TRY_UNWRAP(checkStmt, db.prepare(sql));
+            for (std::size_t i = 0; i < preparedEntries.size(); ++i) {
+                YAMS_TRY(checkStmt.bind(static_cast<int>(i + 1), preparedEntries[i].documentId));
+            }
+            existingStates.reserve(preparedEntries.size());
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, checkStmt.step());
+                if (!hasRow) {
+                    break;
+                }
+                existingStates.emplace(
+                    checkStmt.getInt64(0),
+                    ExistingContentState{checkStmt.getInt(1) == 1, checkStmt.getInt(2) == 1});
+                phaseTimings.prechecks++;
+            }
+            addElapsedUs(phaseTimings.precheckUs, phaseStart);
+        }
 
         std::vector<int64_t> statusUpdateIds;
         statusUpdateIds.reserve(preparedEntries.size());
@@ -872,21 +907,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             // Without FTS5 there is no documents_fts state to reconcile, so avoid
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
-            if (!entry.priorStateKnown || hasFts5) {
-                YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheck");
-                const auto phaseStart = std::chrono::steady_clock::now();
-                YAMS_TRY(checkStmt.reset());
-                YAMS_TRY(checkStmt.clearBindings());
-                YAMS_TRY(checkStmt.bind(1, entry.documentId));
-                auto checkStep = checkStmt.step();
-                if (!checkStep) {
-                    return checkStep.error();
-                }
-                if (checkStep.value()) {
-                    wasExtracted = checkStmt.getInt(0) == 1;
-                    wasIndexed = checkStmt.getInt(1) == 1;
-                    phaseTimings.prechecks++;
-                } else {
+            if (needsPrecheck) {
+                auto stateIt = existingStates.find(entry.documentId);
+                if (stateIt == existingStates.end()) {
                     // Post-ingest work can race with document deletion or duplicate-content
                     // resolution. Do not create orphan content/FTS rows or advance counters
                     // for a document row that no longer exists.
@@ -894,10 +917,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                                   "missing document id {}",
                                   entry.documentId);
                     phaseTimings.staleSkipped++;
-                    addElapsedUs(phaseTimings.precheckUs, phaseStart);
                     continue;
                 }
-                addElapsedUs(phaseTimings.precheckUs, phaseStart);
+                wasExtracted = stateIt->second.contentExtracted;
+                wasIndexed = stateIt->second.ftsIndexed;
             }
 
             {

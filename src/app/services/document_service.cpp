@@ -41,6 +41,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -68,6 +69,28 @@ daemon::WriteBatchCoalescer& getKgSyncCoalescer() {
 } // namespace
 
 namespace {
+
+std::mutex& documentStoreTimingMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<std::string, DocumentStorePhaseTiming>& documentStoreTimings() {
+    static std::unordered_map<std::string, DocumentStorePhaseTiming> timings;
+    return timings;
+}
+
+void recordDocumentStorePhase(std::string_view phase, std::chrono::steady_clock::time_point start) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    const auto ms = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsed));
+    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
+    auto& timing = documentStoreTimings()[std::string(phase)];
+    timing.calls++;
+    timing.totalMs += ms;
+    timing.maxMs = std::max(timing.maxMs, ms);
+}
 
 constexpr std::size_t kCentroidPreviewLimit = 16;
 
@@ -650,7 +673,6 @@ private:
         return targets;
     }
 
-
     bool cleanupMetadataForDelete(const metadata::DocumentInfo& doc, DeleteByNameResult& r) {
         if (ctx_.vectorDatabase && ctx_.vectorDatabase->isInitialized()) {
             if (!ctx_.vectorDatabase->deleteVectorsByDocument(doc.sha256Hash)) {
@@ -1095,6 +1117,7 @@ public:
 
     // Store: accept path or (content + name); apply tags/metadata; update repo entry
     Result<StoreDocumentResponse> store(const StoreDocumentRequest& req) override {
+        const auto storeTotalStart = std::chrono::steady_clock::now();
         if (!ctx_.store) {
             return Error{ErrorCode::NotInitialized, "Content store not available"};
         }
@@ -1181,7 +1204,9 @@ public:
             return Error{ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'"};
         }
 
+        const auto contentStoreStart = std::chrono::steady_clock::now();
         auto storeRes = ctx_.store->store(usePath, md);
+        recordDocumentStorePhase("content_store", contentStoreStart);
         if (!storeRes) {
             // Preserve upstream error code when meaningful; enrich FileNotFound with guidance.
             auto err = storeRes.error();
@@ -1207,6 +1232,7 @@ public:
 
         // Best-effort: insert/update metadata repository entry
         if (ctx_.metadataRepo) {
+            const auto metadataPrepareStart = std::chrono::steady_clock::now();
             metadata::DocumentInfo info;
             std::filesystem::path p = usePath;
             // When content is provided directly, use the logical name as the canonical path so
@@ -1325,16 +1351,21 @@ public:
                 snapshotRecord.metadata["collection"] = req.collection;
             }
 
+            recordDocumentStorePhase("metadata_prepare", metadataPrepareStart);
+
             // Single-transaction insert: document + metadata + snapshot in one
             // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
             metadata::MetadataOpScope metadataScope("app_store_document");
+            const auto repoInsertStart = std::chrono::steady_clock::now();
             auto ins =
                 ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
+            recordDocumentStorePhase("metadata_insert", repoInsertStart);
             if (ins) {
                 int64_t docId = ins.value();
                 out.documentId = docId;
 
                 // Path-series versioning (best-effort)
+                const auto versioningStart = std::chrono::steady_clock::now();
                 try {
                     auto* writeCoord = (ctx_.service_manager)
                                            ? ctx_.service_manager->getWriteCoordinator()
@@ -1440,8 +1471,10 @@ public:
                 } catch (...) {
                     spdlog::debug("Failed to update versioning metadata for {}", info.filePath);
                 }
+                recordDocumentStorePhase("versioning", versioningStart);
 
                 // Update path tree for this document (best-effort, separate txn)
+                const auto pathTreeStart = std::chrono::steady_clock::now();
                 try {
                     auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
                         info, docId, true /* isNewDocument */, std::span<const float>());
@@ -1457,9 +1490,11 @@ public:
                     // Non-fatal: path tree update is opportunistic
                     spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
                 }
+                recordDocumentStorePhase("path_tree", pathTreeStart);
 
                 // Keep the lightweight corpus graph in sync for single-document stores so
                 // embedded/mobile graph queries can resolve the stored document immediately.
+                const auto kgSyncStart = std::chrono::steady_clock::now();
                 if (ctx_.kgStore) {
                     try {
                         auto* writeCoord = (ctx_.service_manager)
@@ -1561,9 +1596,11 @@ public:
                         spdlog::warn("Exception syncing KG for {}: {}", info.filePath, ex.what());
                     }
                 }
+                recordDocumentStorePhase("kg_sync", kgSyncStart);
 
                 // Index document terms for fuzzy search through the centralized writer lane
                 // (best-effort; lookup remains read-only).
+                const auto fuzzyStart = std::chrono::steady_clock::now();
                 try {
                     auto* writeCoord = (ctx_.service_manager)
                                            ? ctx_.service_manager->getWriteCoordinator()
@@ -1573,9 +1610,11 @@ public:
                     spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", info.filePath,
                                   ex.what());
                 }
+                recordDocumentStorePhase("fuzzy_enqueue", fuzzyStart);
 
                 // Synchronously persist extracted text for direct text adds so sync callers can
                 // search immediately without waiting for post-ingest indexing.
+                const auto inlineContentStart = std::chrono::steady_clock::now();
                 if (isTextMime(info.mimeType)) {
                     std::string extractedText;
                     std::string extractionMethod;
@@ -1597,9 +1636,11 @@ public:
                                                                 info.mimeType, extractionMethod);
                     }
                 }
+                recordDocumentStorePhase("inline_content_index", inlineContentStart);
             }
         }
 
+        recordDocumentStorePhase("store_total", storeTotalStart);
         return out;
     }
 
@@ -2622,6 +2663,16 @@ public:
 private:
     AppContext ctx_;
 };
+
+void resetDocumentStorePhaseTimings() {
+    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
+    documentStoreTimings().clear();
+}
+
+std::unordered_map<std::string, DocumentStorePhaseTiming> getDocumentStorePhaseTimingsSnapshot() {
+    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
+    return documentStoreTimings();
+}
 
 // Factory function for document service
 std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx) {
