@@ -9,9 +9,7 @@
 #include <span>
 #include <vector>
 #include <yams/compression/compression_monitor.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 
 namespace yams::compression {
 

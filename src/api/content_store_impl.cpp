@@ -5,9 +5,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 

@@ -1,5 +1,7 @@
 #include <yams/daemon/components/repair/repair_plan_builder.h>
 
+#include <yams/profiling.h>
+
 namespace yams::daemon::repair {
 
 RepairRequest RepairPlanBuilder::buildFast(const RepairHealthSnapshot& health) {

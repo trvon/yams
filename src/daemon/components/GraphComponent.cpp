@@ -13,6 +13,7 @@
 #include <yams/metadata/query_helpers.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 
 #include <algorithm>
 #include <atomic>

@@ -4,9 +4,7 @@
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 
 #include <nlohmann/json.hpp>
 #include <algorithm>

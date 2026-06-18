@@ -11,9 +11,7 @@
 #include <string_view>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 
 namespace yams::metadata {
 

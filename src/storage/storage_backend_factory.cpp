@@ -1,8 +1,6 @@
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 #include <yams/storage/object_storage_plugin_loader.h>
 #include <yams/storage/storage_backend.h>
 

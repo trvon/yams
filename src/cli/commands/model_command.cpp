@@ -33,9 +33,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/integrity/repair_utils.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 
 namespace yams::cli {
 

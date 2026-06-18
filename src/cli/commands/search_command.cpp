@@ -27,9 +27,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 #include <yams/search/search_engine_builder.h>
 // Daemon client API for daemon-first search
 #include <yams/cli/daemon_helpers.h>

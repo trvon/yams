@@ -2,6 +2,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 #include <yams/core/assert.hpp>
 
 #include <algorithm>

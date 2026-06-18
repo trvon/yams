@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>

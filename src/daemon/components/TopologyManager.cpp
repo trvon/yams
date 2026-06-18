@@ -1,6 +1,7 @@
 #include <yams/daemon/components/TopologyManager.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>

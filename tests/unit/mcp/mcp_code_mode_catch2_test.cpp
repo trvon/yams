@@ -190,7 +190,7 @@ TEST_CASE("describeOp - unknown op returns error with available ops", "[mcp][cod
 TEST_CASE("describeOp - write ops have correct category", "[mcp][codemode][describe]") {
     auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
 
-    for (const auto& op : {"add", "update", "delete", "restore", "download", "download_cancel"}) {
+    for (const auto& op : {"add", "update", "delete", "restore", "download"}) {
         auto result = server->testDescribeOp(op);
         CHECK(result["category"] == "execute");
         CHECK(result["readOnly"] == false);
@@ -228,15 +228,12 @@ TEST_CASE("describeOp - add schema documents single-path semantics and supported
     CHECK_FALSE(props.contains("paths"));
 }
 
-TEST_CASE("describeOp - download job query ops have correct category",
-          "[mcp][codemode][describe]") {
+TEST_CASE("describeOp - download jobs op has correct category", "[mcp][codemode][describe]") {
     auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
 
-    for (const auto& op : {"download_status", "download_list_jobs"}) {
-        auto result = server->testDescribeOp(op);
-        CHECK(result["category"] == "query");
-        CHECK(result["readOnly"] == true);
-    }
+    auto result = server->testDescribeOp("download_jobs");
+    CHECK(result["category"] == "query");
+    CHECK(result["readOnly"] == true);
 }
 
 TEST_CASE("describeOp - session ops have correct category", "[mcp][codemode][describe]") {

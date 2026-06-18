@@ -26,9 +26,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
-#ifdef TRACY_ENABLE
 #include <yams/profiling.h>
-#endif
 #include <yams/storage/corpus_stats.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/vector_database.h>

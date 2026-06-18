@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>

@@ -1,9 +1,6 @@
 #include <yams/search/search_result_fusion.h>
 
 #include <spdlog/spdlog.h>
-#ifdef TRACY_ENABLE
-#include <yams/profiling.h>
-#endif
 
 #include <exception>
 #include <limits>
@@ -15,7 +12,6 @@ namespace yams::search {
 ResultFusion::ResultFusion(const SearchEngineConfig& config) : config_(config) {}
 
 std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>& componentResults) {
-    YAMS_ZONE_SCOPED_N("SearchFusion::fuse");
     if (componentResults.empty()) [[unlikely]] {
         return {};
     }
@@ -122,7 +118,6 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
 }
 
 std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentResult>& results) {
-    YAMS_ZONE_SCOPED_N("SearchFusion::fuseCombMNZ");
     struct Accumulator {
         double score = 0.0;
         size_t componentCount = 0;
@@ -479,12 +474,10 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 }
 
 float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
-    YAMS_ZONE_SCOPED_N("SearchFusion::getComponentWeight");
     return componentSourceWeight(config_, source);
 }
 
 std::vector<SearchResult> ResultFusion::fuseConvex(const std::vector<ComponentResult>& results) {
-    YAMS_ZONE_SCOPED_N("SearchFusion::fuseConvex");
     std::unordered_map<int, double> maxByComponent;
     maxByComponent.reserve(8);
     for (const auto& comp : results) {
