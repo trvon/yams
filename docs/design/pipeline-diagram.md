@@ -1,259 +1,171 @@
 # YAMS Pipeline Architecture
 
+This page gives a high-level view of how YAMS moves data through ingestion,
+retrieval, and repair. It is intended as an orientation guide for operators and
+contributors who want to understand the main components without reading the
+implementation first.
+
 ## Ingestion Pipeline
 
-```
-                    ┌──────────────────┐
-  yams add ────────▶│  IngestService   │──▶ PostIngestQueue
-                    └──────────────────┘    ▲profiling
-                        4 ZoneScopes        │5 YAMS_ASSERT
-                                            │1 ZoneScope
-                                            ▼
-                    ┌──────────────────────────────────┐
-                    │     PostIngestQueue::processBatch │
-                    │  ┌──────────────────────────────┐ │
-                    │  │ post_ingest_enrichment        │ │
-                    │  │   extraction ─▶ KG ─▶ symbol  │ │
-                    │  │   ─▶ entity ─▶ embedding     │ │
-                    │  │   ─▶ FTS5 ─▶ title           │ │
-                    │  │   5 ZoneScopes                │ │
-                    │  └──────────────────────────────┘ │
-                    └──────────────────────────────────┘
-                              │
-         ┌────────────────────┼────────────────────┐
-         ▼                    ▼                    ▼
-  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-  │ EntityGraph  │   │  Embedding   │   │ GraphComponent│
-  │ 7 ZoneScopes │   │ 15 ZoneScopes│   │ 10 ZoneScopes │
-  └──────────────┘   └──────────────┘   └──────────────┘
+`yams add` accepts a file, directory, or inline document and moves it through a
+small set of durable stages. The content store owns bytes and reference counts,
+the metadata repository owns document visibility, and post-ingest workers handle
+secondary enrichment such as text extraction, graph updates, and embeddings.
+
+```text
+  yams add
+      │
+      ▼
+  ┌──────────────────┐
+  │ Request handling │
+  │ CLI / daemon RPC │
+  └──────────────────┘
+      │
+      ▼
+  ┌──────────────────┐
+  │  IngestService   │
+  │ queue + routing  │
+  └──────────────────┘
+      │
+      ▼
+  ┌──────────────────┐
+  │ DocumentService  │
+  │ content + metadata
+  └──────────────────┘
+      │
+      ├──▶ ContentStore
+      │       chunks, manifests, reference counts
+      │
+      ├──▶ MetadataRepository
+      │       document row, tags, snapshot/path metadata
+      │
+      ▼
+  ┌──────────────────┐
+  │ PostIngestQueue  │
+  │ enrichment work  │
+  └──────────────────┘
+      │
+      ├──▶ Content index / FTS
+      ├──▶ Knowledge graph
+      ├──▶ Symbol and entity extraction
+      └──▶ Embeddings and semantic graph updates
 ```
 
-## Retrieval Pipeline (with Precision Data)
+### Ingestion guarantees
 
-```
-  yams search ──────▶ SearchEngine
-                         │ 12 ZoneScopes
-                         ▼
-                    ┌──────────────────┐
-                    │  Query Parser    │
-                    │  Tokenizer       │
-                    └──────────────────┘
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-     ┌────────────────┐   ┌────────────────┐
-     │ Lexical (FTS5) │   │ Vector (Simeon)│
-     │ keyword results │   │ ANN + PQ codes │
-     └────────────────┘   └────────────────┘
-              │                     │
-              └──────────┬──────────┘
-                         ▼
+- Content bytes are stored before document metadata is published.
+- Reference-count updates complete before content-store metadata is published.
+- A successful synchronous store returns after the metadata row is visible.
+- Post-ingest work is asynchronous where possible, so graph and embedding work can
+overlap with later ingestion.
+- Per-document options such as session tags and `--no-embeddings` are carried into
+post-ingest routing.
+
+## Retrieval Pipeline
+
+Search combines lexical, vector, and graph-oriented signals. The exact mix depends
+on the command, query options, available embeddings, and corpus state.
+
+```text
+  yams search / grep / get
+      │
+      ▼
+  ┌──────────────────┐
+  │ Query parsing    │
+  │ filters + limits │
+  └──────────────────┘
+      │
+      ├───────────────┬────────────────┐
+      ▼               ▼                ▼
+  ┌───────────┐  ┌────────────┐  ┌──────────────┐
+  │ Lexical   │  │ Vector     │  │ Metadata /   │
+  │ FTS5      │  │ embeddings │  │ path filters │
+  └───────────┘  └────────────┘  └──────────────┘
+      │               │                │
+      └───────────────┴────────────────┘
+                      │
+                      ▼
               ┌──────────────────┐
-              │  ResultFusion    │  ← +38.9% MRR gain
-              │  4 ZoneScopes    │    recovers low pre-fusion scores
+              │ Result fusion    │
+              │ scoring + merge  │
               └──────────────────┘
-                         │
-                         ▼
+                      │
+                      ▼
               ┌──────────────────┐
-              │  Graph Rerank    │  ← neutral on small corpus
-              │  (optional)      │    significant for large corpora
+              │ Optional graph   │
+              │ and topology use │
               └──────────────────┘
-                         │
-                         ▼
+                      │
+                      ▼
               ┌──────────────────┐
-              │  TopologyManager │──▶ cluster rerank
-              │  12 ZoneScopes   │
-              │  TopologyTuner   │
-              │  10 ZoneScopes   │
-              └──────────────────┘
-                         │
-                         ▼
-              ┌──────────────────┐
-              │ Final Results    │
-              │ (topK documents) │
+              │ Final results    │
               └──────────────────┘
 ```
 
-### Stage Precision (YAMS_SEARCH_STAGE_TRACE, 30 docs, 10 queries, topK=10)
+### Retrieval behavior
 
-```
-  Stage                  MRR     nDCG    Delta
-  ───────────────────────────────────────────
-  pre_fusion            0.611   0.630   ← lexical+vector raw
-  graphless_post_fusion 1.000   1.000   +38.9% ← fusion recovery
-  post_fusion           1.000   1.000   +
-  post_graph            1.000   1.000   =
-  final                 1.000   1.000   =
-
-  Timing: 44.2ms total (4.4ms/query avg, 26.9ms stddev)
-```
-
-### Optimization Loop
-
-```
-  1. Baseline: run retrieval_quality_bench with YAMS_SEARCH_STAGE_TRACE=1
-  2. Identify pre-fusion gaps (stage with lowest MRR)
-  3. Tune: adjust lexical/vector weights, fusion strategy, rerank threshold
-  4. Re-run: measure MRR delta, latency delta
-  5. Record: per-stage timing → docs/design/pipeline-diagram.md
-
-  Helper:
-    tests/benchmarks/scripts/retrieval_opt_loop.sh --corpus-size 100 --queries 20
-    captures best candidate, recommended env overrides, and JSONL debug output.
-    Default mode prefers live embeddings/plugin path; pass `--mock-embeddings`
-    only for explicitly synthetic tuning runs.
-```
-
-## SQL Write Paths Audit
-
-```
-                         ┌────────────────────┐
-  yams add ─────────────▶│  IngestService     │
-                         └────────────────────┘
-                                  │
-                                  ▼
-                         ┌────────────────────┐
-                         │  PostIngestQueue   │──▶ WriteCoordinator (batched)
-                         │  11 WriteCoord refs│
-                         └────────────────────┘
-                                  │
-                         ┌────────┴────────┐
-                         ▼                 ▼
-                  ┌────────────┐   ┌────────────────┐
-                  │ WriteCoord │   │ Metadata Repo  │ ← DIRECT SQL (no batching!)
-                  │ (batched)  │   │ content_ops    │    executeQueryOnPool
-                  └────────────┘   │ doc_crud_ops   │    → pool_.acquire()
-                          │        │ path_tree_ops  │    → db.execute()
-                          ▼        │ relationship_  │
-                   SQLite Writes   │ metadata_kv    │
-                          │        │ history_ops    │
-                          └────────┴────────────────┘
-                                   ▼
-                            SQLite Writes
-                            (unbatched, per-op)
-
-  Problem: 10+ repository/*.cpp files call SQL directly with ZERO
-  WriteCoordinator usage. Every INSERT/UPDATE hits SQLite per-op.
-  Fix: route metadata writes through WriteCoordinator or add
-  write-queue for metadata operations.
-```
-
-## Profiling Data Capture Infrastructure
-
-| Tool | Status | Use |
-|------|--------|-----|
-| xctrace (Instruments) | ✅ Working | CPU sampling, Time Profiler traces |
-| Tracy ZoneScopes | ✅ 108 zones compiled | Frame-level profiling (needs server) |
-| YAMS_SEARCH_STAGE_TRACE | ✅ Working | Per-stage MRR/NDCG in debugStats |
-| YAMS_BENCH_OPT_LOOP | ✅ Working | Optimization sweep with debug output |
-| retrieval_quality_bench | ✅ Working | Precision + latency measurement |
-
-### Benchmark Fidelity Labels
-
-Each benchmark/profile helper should emit a small manifest JSON with a heuristic fidelity label:
-
-- `daemon-faithful` — real plugin discovery and real embeddings enabled
-- `live-ish` — real retrieval path, but some startup/queue/plugin shortcuts remain
-- `synthetic` — mock embeddings, synthetic datasets, or other shortcuts dominate
-
-Current helper scripts write `*.manifest.json` alongside their primary artifacts.
-
-For correlated audit bundles, use:
-`tests/benchmarks/scripts/live_benchmark_bundle.sh`
-This captures a single run's manifest, benchmark log, stage-trace JSONL, xctrace trace, exported profile XML, and parsed hot-zone summary in one directory.
-
-For a higher-level live-mirror suite, use:
-`tests/benchmarks/scripts/live_mirror_suite.sh`
-This pairs daemon-ish ingestion metrics with a correlated retrieval/profile bundle so startup/ingestion and retrieval evidence can be reviewed together.
-Use `--steady-state` when you want longer runs that reduce startup noise and collect denser queue telemetry.
-
-### Quick Profile Recipe
-
-```bash
-# Search precision + timing (small corpus, fast)
-YAMS_BENCH_CORPUS_SIZE=100 YAMS_BENCH_NUM_QUERIES=20 \
-YAMS_BENCH_DATASET=synthetic YAMS_SEARCH_STAGE_TRACE=1 \
-YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 \
-./build/debug/tests/benchmarks/retrieval_quality_bench \
-  --benchmark_filter=BM_RetrievalQuality
-
-# CPU profile with xctrace (large corpus, long run)
-YAMS_BENCH_CORPUS_SIZE=2000 YAMS_BENCH_NUM_QUERIES=200 \
-YAMS_BENCH_DATASET=synthetic YAMS_TEST_SAFE_SINGLE_INSTANCE=1 \
-xcrun xctrace record --template "Time Profiler" --time-limit 600s \
-  --output /tmp/yams-traces/search.trace --no-prompt \
-  --launch -- ./build/debug/tests/benchmarks/retrieval_quality_bench
-
-# Parse xctrace hot zones
-tests/benchmarks/scripts/search_profile.sh --corpus-size 500 --queries 100
-```
+- Lexical search provides exact and near-exact text matching through the content
+index.
+- Vector search contributes semantic matches when an embedding backend is available
+and the corpus has indexed vectors.
+- Metadata and path filters narrow candidates before or during ranking.
+- Graph and topology data can improve navigation between related documents, path
+versions, and semantic neighborhoods.
 
 ## Repair Pipeline
 
+Repair jobs reconcile derived state when indexes, embeddings, graph data, or path
+metadata need to be rebuilt. They reuse the same post-ingest infrastructure where
+possible so repair behavior stays close to normal ingestion behavior.
+
+```text
+  yams doctor / yams repair
+      │
+      ▼
+  ┌──────────────────┐
+  │ RepairService    │
+  │ plan + schedule  │
+  └──────────────────┘
+      │
+      ├──▶ Health checks
+      ├──▶ Repair plan builder
+      ├──▶ Metadata/index repair
+      └──▶ PostIngestQueue for enrichment rebuilds
 ```
-  yams doctor/repair ──▶ RepairService (10 ZoneScopes)
-                            │
-                            ├── RepairServiceScheduling (6 ZoneScopes)
-                            ├── repair_health_probe (2 ZoneScopes)
-                            ├── repair_plan_builder (4 ZoneScopes)
-                            │
-                            ▼
-                       embedding_repair_util ──▶ PostIngestQueue
-                                                  (high-priority RPC channel)
-```
 
-| Stage | Files | ZoneScopes |
-|-------|-------|-----------|
-| RepairService | 1 | 10 |
-| RepairServiceScheduling | 1 | 6 |
-| repair_health_probe | 1 | 2 |
-| repair_plan_builder | 1 | 4 |
-| embedding_repair_util | 1 | 0 (template/utility) |
-| **Repair total** | **5** | **22** |
+Repair may enqueue work at higher priority than background ingestion when it is
+serving an explicit user request. Long-running repair tasks should still preserve
+normal daemon responsiveness and report progress through daemon status surfaces.
 
-## Profiling Coverage
+## Benchmark and Profiling Helpers
 
-| Stage | Files | ZoneScopes | Status |
-|-------|-------|-----------|--------|
-| IngestService | 1 | 4 | ✅ |
-| PostIngestQueue | 1 | 1 | ✅ (1, needs more) |
-| PostIngestEnrich | 1 | 5 | ✅ |
-| EntityGraphService | 1 | 7 | ✅ |
-| EmbeddingService | 1 | 15 | ✅ |
-| GraphComponent | 1 | 10 | ✅ |
-| SearchEngine | 1 | 12 | ✅ |
-| SearchFusion | 1 | 4 | ✅ |
-| TopologyManager | 1 | 12 | ✅ |
-| TopologyTuner | 1 | 10 | ✅ |
-| VectorIndexCoordinator | 1 | 6 | ✅ |
-| **Total** | **11** | **86** | |
+YAMS includes benchmark helpers for development and release validation. These are
+not required for normal use, but they are useful when comparing ingestion or
+retrieval behavior across changes.
 
-## Assertion Coverage
+| Helper | Purpose |
+|--------|---------|
+| `tests/benchmarks/search/ingestion_e2e_bench.cpp` | End-to-end ingestion pipeline benchmark |
+| `tests/benchmarks/search/retrieval_quality_bench.cpp` | Retrieval quality and latency benchmark |
+| `tests/benchmarks/scripts/live_benchmark_bundle.sh` | Collects benchmark logs, trace output, and run metadata |
+| `tests/benchmarks/scripts/live_mirror_suite.sh` | Runs ingestion and retrieval checks as one evidence bundle |
+| `tests/benchmarks/scripts/retrieval_opt_loop.sh` | Explores retrieval scoring candidates and records results |
 
-| Stage | YAMS_ASSERT | YAMS_DCHECK | Status |
-|-------|------------|-------------|--------|
-| PostIngestQueue | 5 | 0 | ⚠️ Has invariants, no DCHECK |
-| All other stages | 0 | 0 | ❌ Missing |
+Benchmark artifacts should be interpreted with their fidelity level in mind:
 
-## Benchmark Coverage
+- `daemon-faithful` runs use real daemon services and production-like components.
+- `live-ish` runs exercise most of the real path but may use smaller corpora or
+controlled startup conditions.
+- `synthetic` runs use mock or generated data and are best for fast comparisons,
+not final performance claims.
 
-| Stage | Benchmarks | Status |
-|-------|-----------|--------|
-| Ingestion | ingestion_throughput, large_scale, multi_client, e2e, single_pipeline | ✅ |
-| Extraction | zyp_extraction, symbol_extraction | ✅ |
-| KG | hnsw_entity_search | ✅ |
-| Symbol | symbol_extraction | ✅ |
-| Entity | — | ❌ Missing |
-| Embedding | vector_backend_compare, vector_memory_scaling | ✅ |
-| FTS5 | — | ❌ Missing |
-| Search/Fusion | search_benchmarks, fusion_experiment, retrieval_quality, metapath_ab | ✅ |
-| Topology | topology_ablation | ✅ |
+## Operational Notes
 
-## Pipeline Invariants (Recommended DCHECKs)
-
-- PostIngestQueue: `queued == in_flight + consumed + dropped`
-- EmbeddingService: `embed_prepared == embed_queued + embed_dropped`
-- EntityGraphService: `kg_consumed + kg_dropped == total_ingested`
-- SearchEngine: `result_count <= requested_limit`
-- TopologyManager: `cluster_count <= document_count`
-- GradientLimiter: `inFlight >= 0`, `rejectCount >= 0`
+- Ingestion throughput is usually limited by durable writes, reference-count
+updates, metadata publication, and post-ingest content-index commits.
+- Retrieval quality depends on corpus size, embedding availability, and whether
+post-ingest enrichment has completed.
+- Repair and ingestion share downstream enrichment paths, so large repair jobs can
+affect queue depth and should be monitored like bulk ingestion.
+- Performance claims should be based on repeated benchmark runs with comparable
+configuration, corpus size, and backend fidelity.
