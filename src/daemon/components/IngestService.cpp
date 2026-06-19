@@ -385,6 +385,8 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
         serviceReq.precomputedHash = task.precomputedHash;
         serviceReq.precomputedFileSize = task.precomputedFileSize;
         serviceReq.precomputedLastWriteTimeNs = task.precomputedLastWriteTimeNs;
+        serviceReq.skipInlineContentIndexing = true;
+        serviceReq.combineMetadataPathTree = true;
 
         auto result = docService->store(serviceReq);
         if (!result) {

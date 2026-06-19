@@ -42,6 +42,15 @@ namespace sql {
 struct QuerySpec;
 }
 
+struct MetadataInsertPhaseTiming {
+    std::uint64_t calls{0};
+    std::uint64_t totalUs{0};
+    std::uint64_t maxUs{0};
+};
+
+void resetMetadataInsertPhaseTimings();
+std::unordered_map<std::string, MetadataInsertPhaseTiming> getMetadataInsertPhaseTimingsSnapshot();
+
 namespace detail {
 inline thread_local std::string_view metadata_op_tag;
 }
@@ -555,10 +564,9 @@ public:
      *                      to the newly inserted docId internally.
      * @return The document ID (either newly inserted or existing).
      */
-    Result<int64_t>
-    insertDocumentWithMetadata(const DocumentInfo& info,
-                               const std::vector<std::pair<std::string, MetadataValue>>& tags,
-                               TreeSnapshotRecord* snapshot = nullptr);
+    Result<int64_t> insertDocumentWithMetadata(
+        const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
+        TreeSnapshotRecord* snapshot = nullptr, bool updatePathTreeInTransaction = false);
 
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
@@ -1179,9 +1187,8 @@ private:
             // not have committed yet on a concurrent connection). UNIQUE / NOT NULL / CHECK /
             // PRIMARY KEY failures are deterministic and never succeed on retry, so retrying
             // them only burns the budget and backs up the WriteCoordinator queue.
-            bool isRetryable =
-                isLockError ||
-                storage::sqlite_retry::isTransientConstraintMessage(result.error().message);
+            bool isRetryable = isLockError || storage::sqlite_retry::isTransientConstraintMessage(
+                                                  result.error().message);
 
             if (!isRetryable || attempt == retryPolicy.maxRetries - 1) {
                 // Non-retryable error or final attempt - report and return error

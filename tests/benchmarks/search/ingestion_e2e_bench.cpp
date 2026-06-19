@@ -29,6 +29,7 @@
 #include "tests/integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -36,6 +37,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
@@ -484,6 +486,9 @@ struct BenchmarkResult {
         embedding_phase_timings;
     std::unordered_map<std::string, yams::app::services::DocumentStorePhaseTiming>
         document_store_phase_timings;
+    std::unordered_map<std::string, yams::api::ContentStorePhaseTiming> content_store_phase_timings;
+    std::unordered_map<std::string, yams::metadata::MetadataInsertPhaseTiming>
+        metadata_insert_phase_timings;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
 
     // Queue monitoring
@@ -558,15 +563,44 @@ struct BenchmarkResult {
         }
         j["document_store_phase_timings"] = std::move(docStoreTimings);
 
+        json contentStoreTimings = json::object();
+        for (const auto& [phase, timing] : content_store_phase_timings) {
+            contentStoreTimings[phase] = {{"calls", timing.calls},
+                                          {"total_ms", timing.totalMs},
+                                          {"max_ms", timing.maxMs},
+                                          {"avg_ms", timing.calls == 0
+                                                         ? 0.0
+                                                         : static_cast<double>(timing.totalMs) /
+                                                               static_cast<double>(timing.calls)}};
+        }
+        j["content_store_phase_timings"] = std::move(contentStoreTimings);
+
+        json metadataInsertTimings = json::object();
+        for (const auto& [phase, timing] : metadata_insert_phase_timings) {
+            metadataInsertTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["metadata_insert_phase_timings"] = std::move(metadataInsertTimings);
+
         json postTimings = json::object();
         for (const auto& [phase, timing] : post_ingest_metrics.timings) {
-            postTimings[phase] = {{"calls", timing.calls},
-                                  {"total_ms", timing.totalMs},
-                                  {"max_ms", timing.maxMs},
-                                  {"avg_ms", timing.calls == 0
-                                                 ? 0.0
-                                                 : static_cast<double>(timing.totalMs) /
-                                                       static_cast<double>(timing.calls)}};
+            postTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_ms", timing.totalMs},
+                {"max_ms", timing.maxMs},
+                {"avg_ms", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalMs) /
+                                                   static_cast<double>(timing.calls)},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
         }
         j["post_ingest_phase_timings"] = std::move(postTimings);
         j["post_ingest_batch_metrics"] = {
@@ -789,6 +823,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         }
         serviceManager->resetEmbeddingPhaseTimings();
         yams::app::services::resetDocumentStorePhaseTimings();
+        yams::api::resetContentStorePhaseTimings();
+        yams::metadata::resetMetadataInsertPhaseTimings();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
         }
@@ -1006,6 +1042,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
         result.document_store_phase_timings =
             yams::app::services::getDocumentStorePhaseTimingsSnapshot();
+        result.content_store_phase_timings = yams::api::getContentStorePhaseTimingsSnapshot();
+        result.metadata_insert_phase_timings =
+            yams::metadata::getMetadataInsertPhaseTimingsSnapshot();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }

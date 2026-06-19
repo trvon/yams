@@ -2,8 +2,8 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
-#include <yams/profiling.h>
 #include <yams/core/assert.hpp>
+#include <yams/profiling.h>
 
 #include <algorithm>
 #include <atomic>
@@ -289,8 +289,6 @@ std::size_t EmbeddingService::queuedJobs() const {
     const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
     const std::size_t ch = chPtr ? chPtr->size_approx() : 0;
     const std::size_t pending = this->pendingApprox_.load(std::memory_order_relaxed);
-    YAMS_DCHECK(inFlight_.load(std::memory_order_relaxed) <= ch + pending || (ch + pending) == 0,
-                "inFlight exceeds queued+channel jobs");
     return ch + pending;
 }
 

@@ -147,6 +147,8 @@ public:
         std::uint64_t calls{0};
         std::uint64_t totalMs{0};
         std::uint64_t maxMs{0};
+        std::uint64_t totalUs{0};
+        std::uint64_t maxUs{0};
     };
 
     struct BatchMetrics {
@@ -623,6 +625,34 @@ private:
     /// Process batch with work-stealing parallelization (default)
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void recordTiming(const std::string& name, std::chrono::steady_clock::time_point start);
+    void recordTimingAggregate(const std::string& name, std::uint64_t calls, std::uint64_t totalUs,
+                               std::uint64_t maxUs);
+
+    struct DispatchTimingAccumulator {
+        std::uint64_t calls{0};
+        std::uint64_t totalUs{0};
+        std::uint64_t maxUs{0};
+
+        void add(std::chrono::steady_clock::duration elapsed);
+    };
+
+    struct DispatchTimingSet {
+        DispatchTimingAccumulator embedPrepare;
+        DispatchTimingAccumulator embedEnqueue;
+        DispatchTimingAccumulator contentLoad;
+        DispatchTimingAccumulator kgDispatch;
+        DispatchTimingAccumulator symbolDispatch;
+        DispatchTimingAccumulator entityDispatch;
+        DispatchTimingAccumulator titleDispatch;
+    };
+
+    void recordDispatchTimingSet(const DispatchTimingSet& timings);
+    std::shared_ptr<std::vector<std::byte>> getOrLoadDispatchContent(
+        const std::string& hash,
+        std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>>& contentByHash);
+    void dispatchNonEmbeddingStages(const PreparedMetadataEntry& prepared,
+                                    std::shared_ptr<std::vector<std::byte>> contentBytes,
+                                    DispatchTimingSet& timings);
 
     /// Snapshot stage config under locks (symbol extension map + entity providers)
     struct StageConfigSnapshot {

@@ -1,6 +1,5 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <yams/profiling.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -36,6 +35,7 @@
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/profiling.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
@@ -1184,15 +1184,99 @@ void PostIngestQueue::resetMetrics() {
 
 void PostIngestQueue::recordTiming(const std::string& name,
                                    std::chrono::steady_clock::time_point start) {
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - start)
                         .count();
+    const auto elapsedUs = static_cast<std::uint64_t>(std::max<long long>(0, us));
+    recordTimingAggregate(name, 1, elapsedUs, elapsedUs);
+}
+
+void PostIngestQueue::recordTimingAggregate(const std::string& name, std::uint64_t calls,
+                                            std::uint64_t totalUs, std::uint64_t maxUs) {
+    if (calls == 0) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(metricsMutex_);
     auto& timing = timings_[name];
-    timing.calls += 1;
-    timing.totalMs += static_cast<std::uint64_t>(std::max<long long>(0, ms));
-    timing.maxMs = std::max<std::uint64_t>(timing.maxMs,
-                                           static_cast<std::uint64_t>(std::max<long long>(0, ms)));
+    timing.calls += calls;
+    timing.totalUs += totalUs;
+    timing.maxUs = std::max<std::uint64_t>(timing.maxUs, maxUs);
+    timing.totalMs = timing.totalUs / 1000u;
+    timing.maxMs = timing.maxUs / 1000u;
+}
+
+void PostIngestQueue::DispatchTimingAccumulator::add(std::chrono::steady_clock::duration elapsed) {
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    const auto bounded = static_cast<std::uint64_t>(std::max<long long>(0, us));
+    ++calls;
+    totalUs += bounded;
+    maxUs = std::max(maxUs, bounded);
+}
+
+void PostIngestQueue::recordDispatchTimingSet(const DispatchTimingSet& timings) {
+    auto flush = [this](std::string_view phase, const DispatchTimingAccumulator& timing) {
+        if (timing.calls == 0) {
+            return;
+        }
+        recordTimingAggregate(std::string(phase), timing.calls, timing.totalUs, timing.maxUs);
+    };
+
+    flush("dispatch_embed_prepare", timings.embedPrepare);
+    flush("dispatch_embed_enqueue", timings.embedEnqueue);
+    flush("dispatch_content_load", timings.contentLoad);
+    flush("dispatch_kg_enqueue", timings.kgDispatch);
+    flush("dispatch_symbol_enqueue", timings.symbolDispatch);
+    flush("dispatch_entity_enqueue", timings.entityDispatch);
+    flush("dispatch_title_enqueue", timings.titleDispatch);
+}
+
+std::shared_ptr<std::vector<std::byte>> PostIngestQueue::getOrLoadDispatchContent(
+    const std::string& hash,
+    std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>>& contentByHash) {
+    if (!store_) {
+        return nullptr;
+    }
+    auto it = contentByHash.find(hash);
+    if (it != contentByHash.end()) {
+        return it->second;
+    }
+    auto contentResult = store_->retrieveBytes(hash);
+    if (!contentResult) {
+        return nullptr;
+    }
+    auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
+    contentByHash.emplace(hash, bytes);
+    return bytes;
+}
+
+void PostIngestQueue::dispatchNonEmbeddingStages(
+    const PreparedMetadataEntry& prepared, std::shared_ptr<std::vector<std::byte>> contentBytes,
+    DispatchTimingSet& timings) {
+    if (prepared.shouldDispatchKg) {
+        const auto dispatchStart = std::chrono::steady_clock::now();
+        dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
+                            std::vector<std::string>(prepared.tags), contentBytes);
+        timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
+    }
+    if (prepared.shouldDispatchSymbol) {
+        const auto dispatchStart = std::chrono::steady_clock::now();
+        dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.filePath,
+                                prepared.symbolLanguage, contentBytes);
+        timings.symbolDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
+    }
+    if (prepared.shouldDispatchEntity) {
+        const auto dispatchStart = std::chrono::steady_clock::now();
+        dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.filePath,
+                                prepared.extension, contentBytes);
+        timings.entityDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
+    }
+    if (prepared.shouldDispatchTitle) {
+        const auto dispatchStart = std::chrono::steady_clock::now();
+        dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
+                               prepared.fileName, prepared.filePath, prepared.language,
+                               prepared.mimeType);
+        timings.titleDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
+    }
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {
@@ -3223,6 +3307,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     } timingGuard{this, timingStart};
 
     std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
+    DispatchTimingSet dispatchTimings;
 
     // Opportunistically enqueue embedding jobs for successfully extracted/indexed documents.
     // This is the primary path for generating vector embeddings during normal ingestion.
@@ -3268,6 +3353,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
         uint32_t waits = 0;
+        const auto enqueueStart = std::chrono::steady_clock::now();
         while (!stop_.load(std::memory_order_acquire)) {
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(batchSize);
@@ -3292,6 +3378,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
                     batchSize, waits);
             }
         }
+        dispatchTimings.embedEnqueue.add(std::chrono::steady_clock::now() - enqueueStart);
         if (stop_.load(std::memory_order_acquire)) {
             InternalEventBus::instance().incEmbedDropped(batchSize);
         }
@@ -3333,28 +3420,12 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         return preparedDoc;
     };
 
-    auto getOrLoadContent =
-        [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
-        if (!store_) {
-            return nullptr;
-        }
-        auto it = contentByHash.find(hash);
-        if (it != contentByHash.end()) {
-            return it->second;
-        }
-        auto contentResult = store_->retrieveBytes(hash);
-        if (!contentResult) {
-            return nullptr;
-        }
-        auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
-        contentByHash.emplace(hash, bytes);
-        return bytes;
-    };
-
     for (const auto& prepared : successes) {
         if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
-            if (auto preparedDoc = makePreparedDoc(prepared);
-                preparedDoc && !preparedDoc->chunks.empty()) {
+            const auto embedPrepareStart = std::chrono::steady_clock::now();
+            auto preparedDoc = makePreparedDoc(prepared);
+            dispatchTimings.embedPrepare.add(std::chrono::steady_clock::now() - embedPrepareStart);
+            if (preparedDoc && !preparedDoc->chunks.empty()) {
                 std::size_t docPayloadBytes = 0;
                 for (const auto& chunk : preparedDoc->chunks) {
                     docPayloadBytes += chunk.content.size();
@@ -3377,29 +3448,16 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
         std::shared_ptr<std::vector<std::byte>> contentBytes = prepared.contentBytes;
         if (!contentBytes && (prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity)) {
-            contentBytes = getOrLoadContent(prepared.hash);
+            const auto contentLoadStart = std::chrono::steady_clock::now();
+            contentBytes = getOrLoadDispatchContent(prepared.hash, contentByHash);
+            dispatchTimings.contentLoad.add(std::chrono::steady_clock::now() - contentLoadStart);
         }
-        if (prepared.shouldDispatchKg) {
-            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                                std::vector<std::string>(prepared.tags), contentBytes);
-        }
-        if (prepared.shouldDispatchSymbol) {
-            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                                    prepared.symbolLanguage, contentBytes);
-        }
-        if (prepared.shouldDispatchEntity) {
-            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                                    prepared.extension, contentBytes);
-        }
-        if (prepared.shouldDispatchTitle) {
-            dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                                   prepared.fileName, prepared.filePath, prepared.language,
-                                   prepared.mimeType);
-        }
+        dispatchNonEmbeddingStages(prepared, contentBytes, dispatchTimings);
         InternalEventBus::instance().incPostConsumed();
     }
 
     flushEmbedBatch();
+    recordDispatchTimingSet(dispatchTimings);
 }
 
 void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {

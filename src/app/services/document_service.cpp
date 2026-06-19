@@ -33,6 +33,8 @@
 #include <yams/vector/vector_database.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -41,7 +43,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -70,26 +71,52 @@ daemon::WriteBatchCoalescer& getKgSyncCoalescer() {
 
 namespace {
 
-std::mutex& documentStoreTimingMutex() {
-    static std::mutex mutex;
-    return mutex;
-}
+struct AtomicDocumentStorePhaseTiming {
+    std::atomic<std::uint64_t> calls{0};
+    std::atomic<std::uint64_t> totalMs{0};
+    std::atomic<std::uint64_t> maxMs{0};
+};
 
-std::unordered_map<std::string, DocumentStorePhaseTiming>& documentStoreTimings() {
-    static std::unordered_map<std::string, DocumentStorePhaseTiming> timings;
+constexpr std::array<std::string_view, 9> kDocumentStorePhaseNames{
+    "content_store", "metadata_prepare", "metadata_insert",      "versioning", "path_tree",
+    "kg_sync",       "fuzzy_enqueue",    "inline_content_index", "store_total"};
+
+std::array<AtomicDocumentStorePhaseTiming, kDocumentStorePhaseNames.size()>&
+documentStoreTimings() {
+    static std::array<AtomicDocumentStorePhaseTiming, kDocumentStorePhaseNames.size()> timings;
     return timings;
 }
 
+std::optional<std::size_t> documentStorePhaseIndex(std::string_view phase) {
+    for (std::size_t i = 0; i < kDocumentStorePhaseNames.size(); ++i) {
+        if (kDocumentStorePhaseNames[i] == phase) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void updateMaxRelaxed(std::atomic<std::uint64_t>& target, std::uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
 void recordDocumentStorePhase(std::string_view phase, std::chrono::steady_clock::time_point start) {
+    const auto index = documentStorePhaseIndex(phase);
+    if (!index) {
+        return;
+    }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - start)
                              .count();
     const auto ms = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsed));
-    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
-    auto& timing = documentStoreTimings()[std::string(phase)];
-    timing.calls++;
-    timing.totalMs += ms;
-    timing.maxMs = std::max(timing.maxMs, ms);
+    auto& timing = documentStoreTimings()[*index];
+    timing.calls.fetch_add(1, std::memory_order_relaxed);
+    timing.totalMs.fetch_add(ms, std::memory_order_relaxed);
+    updateMaxRelaxed(timing.maxMs, ms);
 }
 
 constexpr std::size_t kCentroidPreviewLimit = 16;
@@ -1357,8 +1384,8 @@ public:
             // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
             metadata::MetadataOpScope metadataScope("app_store_document");
             const auto repoInsertStart = std::chrono::steady_clock::now();
-            auto ins =
-                ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
+            auto ins = ctx_.metadataRepo->insertDocumentWithMetadata(
+                info, tagPairs, &snapshotRecord, req.combineMetadataPathTree);
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
             if (ins) {
                 int64_t docId = ins.value();
@@ -1475,20 +1502,22 @@ public:
 
                 // Update path tree for this document (best-effort, separate txn)
                 const auto pathTreeStart = std::chrono::steady_clock::now();
-                try {
-                    auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
-                        info, docId, true /* isNewDocument */, std::span<const float>());
-                    if (!treeRes) {
-                        spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
-                                      treeRes.error().message);
+                if (!req.combineMetadataPathTree) {
+                    try {
+                        auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
+                            info, docId, true /* isNewDocument */, std::span<const float>());
+                        if (!treeRes) {
+                            spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
+                                          treeRes.error().message);
+                        }
+                    } catch (const std::exception& ex) {
+                        // Non-fatal: path tree update is opportunistic
+                        spdlog::debug("Exception updating path tree for {}: {}", info.filePath,
+                                      ex.what());
+                    } catch (...) {
+                        // Non-fatal: path tree update is opportunistic
+                        spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
                     }
-                } catch (const std::exception& ex) {
-                    // Non-fatal: path tree update is opportunistic
-                    spdlog::debug("Exception updating path tree for {}: {}", info.filePath,
-                                  ex.what());
-                } catch (...) {
-                    // Non-fatal: path tree update is opportunistic
-                    spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
                 }
                 recordDocumentStorePhase("path_tree", pathTreeStart);
 
@@ -1615,7 +1644,7 @@ public:
                 // Synchronously persist extracted text for direct text adds so sync callers can
                 // search immediately without waiting for post-ingest indexing.
                 const auto inlineContentStart = std::chrono::steady_clock::now();
-                if (isTextMime(info.mimeType)) {
+                if (!req.skipInlineContentIndexing && isTextMime(info.mimeType)) {
                     std::string extractedText;
                     std::string extractionMethod;
                     if (!req.content.empty()) {
@@ -2665,13 +2694,25 @@ private:
 };
 
 void resetDocumentStorePhaseTimings() {
-    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
-    documentStoreTimings().clear();
+    for (auto& timing : documentStoreTimings()) {
+        timing.calls.store(0, std::memory_order_relaxed);
+        timing.totalMs.store(0, std::memory_order_relaxed);
+        timing.maxMs.store(0, std::memory_order_relaxed);
+    }
 }
 
 std::unordered_map<std::string, DocumentStorePhaseTiming> getDocumentStorePhaseTimingsSnapshot() {
-    std::lock_guard<std::mutex> lock(documentStoreTimingMutex());
-    return documentStoreTimings();
+    std::unordered_map<std::string, DocumentStorePhaseTiming> snapshot;
+    snapshot.reserve(kDocumentStorePhaseNames.size());
+    const auto& timings = documentStoreTimings();
+    for (std::size_t i = 0; i < kDocumentStorePhaseNames.size(); ++i) {
+        snapshot.emplace(
+            std::string(kDocumentStorePhaseNames[i]),
+            DocumentStorePhaseTiming{timings[i].calls.load(std::memory_order_relaxed),
+                                     timings[i].totalMs.load(std::memory_order_relaxed),
+                                     timings[i].maxMs.load(std::memory_order_relaxed)});
+    }
+    return snapshot;
 }
 
 // Factory function for document service

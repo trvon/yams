@@ -11,6 +11,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <array>
+#include <atomic>
 #include <charconv>
 #include <fstream>
 #include <mutex>
@@ -48,7 +50,75 @@ ContentMetadata sanitizeStoredMetadata(ContentMetadata metadata, const std::stri
     return metadata;
 }
 
+struct AtomicContentStorePhaseTiming {
+    std::atomic<std::uint64_t> calls{0};
+    std::atomic<std::uint64_t> totalMs{0};
+    std::atomic<std::uint64_t> maxMs{0};
+};
+
+constexpr std::array<std::string_view, 9> kContentStorePhaseNames{
+    "file_stat",      "hash",       "chunk_file",     "chunk_store_refs", "manifest_create",
+    "manifest_store", "ref_commit", "metadata_stats", "store_total"};
+
+std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()>& contentStoreTimings() {
+    static std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()> timings;
+    return timings;
+}
+
+std::optional<std::size_t> contentStorePhaseIndex(std::string_view phase) {
+    for (std::size_t i = 0; i < kContentStorePhaseNames.size(); ++i) {
+        if (kContentStorePhaseNames[i] == phase) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void updateMaxRelaxed(std::atomic<std::uint64_t>& target, std::uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void recordContentStorePhase(std::string_view phase, std::chrono::steady_clock::time_point start) {
+    const auto index = contentStorePhaseIndex(phase);
+    if (!index) {
+        return;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    const auto ms = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsed));
+    auto& timing = contentStoreTimings()[*index];
+    timing.calls.fetch_add(1, std::memory_order_relaxed);
+    timing.totalMs.fetch_add(ms, std::memory_order_relaxed);
+    updateMaxRelaxed(timing.maxMs, ms);
+}
+
 } // namespace
+
+void resetContentStorePhaseTimings() {
+    for (auto& timing : contentStoreTimings()) {
+        timing.calls.store(0, std::memory_order_relaxed);
+        timing.totalMs.store(0, std::memory_order_relaxed);
+        timing.maxMs.store(0, std::memory_order_relaxed);
+    }
+}
+
+std::unordered_map<std::string, ContentStorePhaseTiming> getContentStorePhaseTimingsSnapshot() {
+    std::unordered_map<std::string, ContentStorePhaseTiming> snapshot;
+    snapshot.reserve(kContentStorePhaseNames.size());
+    const auto& timings = contentStoreTimings();
+    for (std::size_t i = 0; i < kContentStorePhaseNames.size(); ++i) {
+        snapshot.emplace(std::string(kContentStorePhaseNames[i]),
+                         ContentStorePhaseTiming{timings[i].calls.load(std::memory_order_relaxed),
+                                                 timings[i].totalMs.load(std::memory_order_relaxed),
+                                                 timings[i].maxMs.load(std::memory_order_relaxed)});
+    }
+    return snapshot;
+}
 
 // Implementation of the content store
 class ContentStore : public IContentStore {
@@ -70,6 +140,7 @@ public:
                               ProgressCallback progress) override {
         auto startTime = std::chrono::steady_clock::now();
 
+        const auto fileStatStart = std::chrono::steady_clock::now();
         // Validate file exists
         if (!std::filesystem::exists(path)) {
             spdlog::error("File not found: {}", path.string());
@@ -78,11 +149,13 @@ public:
 
         // Get file info
         uint64_t fileSize = std::filesystem::file_size(path);
+        recordContentStorePhase("file_stat", fileStatStart);
         ProgressReporter reporter(fileSize);
         if (progress) {
             reporter.setCallback(progress);
         }
 
+        const auto hashStart = std::chrono::steady_clock::now();
         std::string fileHash;
         const auto trustedHint = metadata.tags.find(std::string{kTrustedHashHintTag});
         if (trustedHint != metadata.tags.end() && trustedHint->second == "1" &&
@@ -106,6 +179,7 @@ public:
             auto fileHasher = crypto::createSHA256Hasher();
             fileHash = fileHasher->hashFile(path);
         }
+        recordContentStorePhase("hash", hashStart);
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
 
         // Create file info
@@ -117,6 +191,7 @@ public:
                               metadata.name.empty() ? path.filename().string() : metadata.name};
 
         // Chunk the file
+        const auto chunkStart = std::chrono::steady_clock::now();
         std::vector<chunking::Chunk> chunks;
         try {
             chunks = chunker_->chunkFile(path);
@@ -129,6 +204,7 @@ public:
             return Result<StoreResult>(
                 Error{ErrorCode::InternalError, "Failed to chunk file: unknown error"});
         }
+        recordContentStorePhase("chunk_file", chunkStart);
         spdlog::debug("File chunked into {} chunks", chunks.size());
 
         // Store chunks and track deduplication
@@ -144,6 +220,7 @@ public:
             // Chunk objects are content-addressed — do not delete by hash on rollback.
         };
 
+        const auto chunkStoreStart = std::chrono::steady_clock::now();
         for (const auto& chunk : chunks) {
             // Check if chunk already exists
             auto existsResult = storage_->exists(chunk.hash);
@@ -186,7 +263,9 @@ public:
             // Report progress
             reporter.addProgress(chunk.size);
         }
+        recordContentStorePhase("chunk_store_refs", chunkStoreStart);
 
+        const auto manifestCreateStart = std::chrono::steady_clock::now();
         // Convert Chunk vector to ChunkRef vector
         std::vector<manifest::ChunkRef> chunkRefs;
         chunkRefs.reserve(chunks.size());
@@ -210,6 +289,9 @@ public:
             return Result<StoreResult>(manifestData.error());
         }
 
+        recordContentStorePhase("manifest_create", manifestCreateStart);
+
+        const auto manifestStoreStart = std::chrono::steady_clock::now();
         auto manifestHash = fileHash + ".manifest";
         auto manifestStoreResult =
             storage_->store(manifestHash, std::span<const std::byte>(manifestData.value()));
@@ -239,15 +321,19 @@ public:
             rollbackStore();
             return Result<StoreResult>(manifestStoreResult.error());
         }
+        recordContentStorePhase("manifest_store", manifestStoreStart);
 
         // Commit transaction
+        const auto refCommitStart = std::chrono::steady_clock::now();
         auto commitResult = transaction->commit();
         if (!commitResult) {
             transaction->rollback();
             cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
         }
+        recordContentStorePhase("ref_commit", refCommitStart);
 
+        const auto metadataStatsStart = std::chrono::steady_clock::now();
         // Store manifest metadata only after durable data and refs commit.
         {
             std::unique_lock lock(metadataMutex_);
@@ -256,8 +342,10 @@ public:
 
         // Update statistics
         updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+        recordContentStorePhase("metadata_stats", metadataStatsStart);
 
         auto endTime = std::chrono::steady_clock::now();
+        recordContentStorePhase("store_total", startTime);
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
         StoreResult result{.contentHash = fileHash,
@@ -865,7 +953,8 @@ public:
         uint64_t availableBytes = spaceInfo.available;
         uint64_t totalBytes = spaceInfo.capacity;
 
-        if (availableBytes < 1024 * 1024 * 100) { // Less than 100MB
+        constexpr uint64_t kCriticalFreeBytes = 100ULL * 1024ULL * 1024ULL;
+        if (availableBytes < kCriticalFreeBytes) { // Less than 100MB
             status.errors.push_back("Critical: Less than 100MB storage available");
             status.isHealthy = false;
         } else if (availableBytes < totalBytes * 0.1) { // Less than 10%

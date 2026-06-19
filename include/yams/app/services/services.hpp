@@ -311,7 +311,8 @@ public:
     // Skips heavy plugins (e.g., PDF) and large binaries.
     // Returns ok when indexing was performed or safely skipped.
     virtual Result<void> lightIndexForHash(const std::string& hash,
-                                           std::size_t maxBytes = 2 * 1024 * 1024) = 0;
+                                           std::size_t maxBytes = static_cast<std::size_t>(2) *
+                                                                  1024U * 1024U) = 0;
 };
 
 // ===========================
@@ -450,8 +451,10 @@ struct StoreDocumentRequest {
     std::string sessionId;     // session to associate document with
     bool bypassSession{false}; // skip session tagging even if session is active
 
-    // Embedding control
-    bool noEmbeddings{false}; // disable embedding generation
+    // Embedding/indexing control
+    bool noEmbeddings{false};              // disable embedding generation
+    bool skipInlineContentIndexing{false}; // async caller will dispatch post-ingest content index
+    bool combineMetadataPathTree{false};   // async caller may fold path-tree into metadata txn
 
     // Optional hash hint computed by the daemon front door before enqueueing async ingest.
     // When the backing file still matches the captured fingerprint, the content store can
