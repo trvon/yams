@@ -41,14 +41,17 @@ struct AtomicMetadataInsertPhaseTiming {
     std::atomic<std::uint64_t> maxUs{0};
 };
 
-constexpr std::array<std::string_view, 8> kMetadataInsertPhaseNames{"prepare_writes",
-                                                                    "begin",
-                                                                    "insert_lookup_document",
-                                                                    "apply_metadata_writes",
-                                                                    "upsert_snapshot",
-                                                                    "path_tree",
-                                                                    "commit",
-                                                                    "cache_update"};
+constexpr std::array<std::string_view, 11> kMetadataInsertPhaseNames{"prepare_writes",
+                                                                     "begin",
+                                                                     "insert_lookup_document",
+                                                                     "apply_metadata_writes",
+                                                                     "upsert_snapshot",
+                                                                     "path_tree",
+                                                                     "path_tree_savepoint",
+                                                                     "path_tree_upsert",
+                                                                     "path_tree_release",
+                                                                     "commit",
+                                                                     "cache_update"};
 
 std::array<AtomicMetadataInsertPhaseTiming, kMetadataInsertPhaseNames.size()>&
 metadataInsertTimings() {
@@ -660,8 +663,14 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
 
             if (updatePathTreeInTransaction) {
                 const auto pathTreeStart = std::chrono::steady_clock::now();
+                const auto pathTreeSavepointStart = std::chrono::steady_clock::now();
                 YAMS_TRY(db.execute("SAVEPOINT yams_inline_path_tree"));
+                recordMetadataInsertPhase("path_tree_savepoint", pathTreeSavepointStart);
+
+                const auto pathTreeUpsertStart = std::chrono::steady_clock::now();
                 auto pathTreeResult = upsertPathTreeForDocumentInTransaction(db, info, docId);
+                recordMetadataInsertPhase("path_tree_upsert", pathTreeUpsertStart);
+                const auto pathTreeReleaseStart = std::chrono::steady_clock::now();
                 if (pathTreeResult) {
                     YAMS_TRY(db.execute("RELEASE SAVEPOINT yams_inline_path_tree"));
                 } else {
@@ -670,6 +679,7 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                     spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
                                   pathTreeResult.error().message);
                 }
+                recordMetadataInsertPhase("path_tree_release", pathTreeReleaseStart);
                 recordMetadataInsertPhase("path_tree", pathTreeStart);
             }
 

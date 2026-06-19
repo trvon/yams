@@ -33,6 +33,18 @@ struct RefCounterCommitPhaseTiming {
     std::uint64_t maxUs{0};
 };
 
+struct RefDelta {
+    enum class Type { Increment, Decrement, Prune };
+    Type type{Type::Increment};
+    std::string blockHash;
+    size_t compressedSize{0};
+    size_t uncompressedSize{0};
+};
+
+struct RefTransactionBatch {
+    std::vector<RefDelta> operations;
+};
+
 void resetRefCounterCommitPhaseTimings();
 std::unordered_map<std::string, RefCounterCommitPhaseTiming>
 getRefCounterCommitPhaseTimingsSnapshot();
@@ -272,6 +284,9 @@ public:
     };
 
     std::unique_ptr<ITransaction> beginTransaction() override;
+
+    // Apply multiple logical reference transactions under one SQLite transaction.
+    Result<void> commitTransactionBatches(std::span<const RefTransactionBatch> batches);
 
     // Maintenance operations
     Result<void> vacuum();     // Optimize database

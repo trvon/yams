@@ -7,6 +7,7 @@
 #include <yams/manifest/manifest_manager.h>
 #include <yams/profiling.h>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_counter_writer.h>
 #include <yams/storage/storage_engine.h>
 
 #include <spdlog/spdlog.h>
@@ -58,9 +59,10 @@ struct AtomicContentStorePhaseTiming {
     std::atomic<std::uint64_t> maxUs{0};
 };
 
-constexpr std::array<std::string_view, 9> kContentStorePhaseNames{
-    "file_stat",      "hash",       "chunk_file",     "chunk_store_refs", "manifest_create",
-    "manifest_store", "ref_commit", "metadata_stats", "store_total"};
+constexpr std::array<std::string_view, 11> kContentStorePhaseNames{
+    "file_stat",       "hash",           "chunk_file", "chunk_store_refs",
+    "manifest_create", "manifest_store", "ref_commit", "ref_submit",
+    "ref_future_wait", "metadata_stats", "store_total"};
 
 std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()>& contentStoreTimings() {
     static std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()> timings;
@@ -140,6 +142,10 @@ public:
         : storage_(std::move(storage)), chunker_(std::move(chunker)), hasher_(std::move(hasher)),
           manifestManager_(std::move(manifestManager)), refCounter_(std::move(refCounter)),
           config_(std::move(config)) {
+        if (auto concreteRefCounter =
+                std::dynamic_pointer_cast<storage::ReferenceCounter>(refCounter_)) {
+            refWriter_ = std::make_unique<storage::RefCounterWriter>(std::move(concreteRefCounter));
+        }
         spdlog::debug("ContentStore initialized with storage path: {}",
                       config_.storagePath.string());
     }
@@ -220,12 +226,11 @@ public:
         uint64_t bytesStored = 0;
         uint64_t bytesDeduped = 0;
 
-        // Begin reference counting transaction
-        auto transaction = refCounter_->beginTransaction();
+        storage::RefTransactionBatch refBatch;
+        refBatch.operations.reserve(chunks.size());
         std::vector<std::string> storedChunks;
 
-        auto rollbackStore = [&]() {
-            transaction->rollback();
+        auto rollbackStore = []() {
             // Chunk objects are content-addressed — do not delete by hash on rollback.
         };
 
@@ -247,7 +252,10 @@ public:
                 size_t compressedSize =
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
-                transaction->increment(chunk.hash, compressedSize, chunk.size);
+                refBatch.operations.push_back({.type = storage::RefDelta::Type::Increment,
+                                               .blockHash = chunk.hash,
+                                               .compressedSize = compressedSize,
+                                               .uncompressedSize = chunk.size});
             } else {
                 // Store new chunk
                 auto storeResult = storage_->store(
@@ -266,7 +274,10 @@ public:
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
                 // Add initial reference with both compressed and uncompressed sizes
-                transaction->increment(chunk.hash, compressedSize, chunk.size);
+                refBatch.operations.push_back({.type = storage::RefDelta::Type::Increment,
+                                               .blockHash = chunk.hash,
+                                               .compressedSize = compressedSize,
+                                               .uncompressedSize = chunk.size});
             }
 
             // Report progress
@@ -307,9 +318,8 @@ public:
         if (!manifestStoreResult) {
             if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
                                                 manifestStoreResult.error())) {
-                auto commitResult2 = transaction->commit();
+                auto commitResult2 = commitReferenceBatch(refBatch);
                 if (!commitResult2) {
-                    transaction->rollback();
                     cleanupStoredObject(manifestHash);
                     cleanupStoredObjects(storedChunks);
                     return Result<StoreResult>(commitResult2.error());
@@ -332,11 +342,10 @@ public:
         }
         recordContentStorePhase("manifest_store", manifestStoreStart);
 
-        // Commit transaction
+        // Commit references before metadata publication.
         const auto refCommitStart = std::chrono::steady_clock::now();
-        auto commitResult = transaction->commit();
+        auto commitResult = commitReferenceBatch(refBatch);
         if (!commitResult) {
-            transaction->rollback();
             cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
         }
@@ -550,12 +559,11 @@ public:
         uint64_t bytesStored = 0;
         uint64_t bytesDeduped = 0;
 
-        // Begin reference counting transaction
-        auto transaction = refCounter_->beginTransaction();
+        storage::RefTransactionBatch refBatch;
+        refBatch.operations.reserve(chunks.size());
         std::vector<std::string> storedChunks;
 
-        auto rollbackStore = [&]() {
-            transaction->rollback();
+        auto rollbackStore = []() {
             // Chunk objects are content-addressed — do not delete by hash on rollback.
         };
 
@@ -576,7 +584,10 @@ public:
                 size_t compressedSize =
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
-                transaction->increment(chunk.hash, compressedSize, chunk.size);
+                refBatch.operations.push_back({.type = storage::RefDelta::Type::Increment,
+                                               .blockHash = chunk.hash,
+                                               .compressedSize = compressedSize,
+                                               .uncompressedSize = chunk.size});
             } else {
                 // Store new chunk — use source buffer subspan (lazy chunks have no data copy)
                 auto storeResult =
@@ -595,7 +606,10 @@ public:
                     blockSizeResult ? static_cast<size_t>(blockSizeResult.value()) : chunk.size;
 
                 // Add initial reference with both compressed and uncompressed sizes
-                transaction->increment(chunk.hash, compressedSize, chunk.size);
+                refBatch.operations.push_back({.type = storage::RefDelta::Type::Increment,
+                                               .blockHash = chunk.hash,
+                                               .compressedSize = compressedSize,
+                                               .uncompressedSize = chunk.size});
             }
         }
 
@@ -635,9 +649,8 @@ public:
         if (!manifestStoreResult) {
             if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
                                                 manifestStoreResult.error())) {
-                auto commitResult2 = transaction->commit();
+                auto commitResult2 = commitReferenceBatch(refBatch);
                 if (!commitResult2) {
-                    transaction->rollback();
                     cleanupStoredObject(manifestHash);
                     cleanupStoredObjects(storedChunks);
                     return Result<StoreResult>(commitResult2.error());
@@ -659,10 +672,9 @@ public:
             return Result<StoreResult>(manifestStoreResult.error());
         }
 
-        // Commit transaction
-        auto commitResult = transaction->commit();
+        // Commit references before metadata publication.
+        auto commitResult = commitReferenceBatch(refBatch);
         if (!commitResult) {
-            transaction->rollback();
             cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
         }
@@ -1215,6 +1227,7 @@ private:
     std::shared_ptr<crypto::IHasher> hasher_;
     std::shared_ptr<manifest::IManifestManager> manifestManager_;
     std::shared_ptr<storage::IReferenceCounter> refCounter_;
+    std::unique_ptr<storage::RefCounterWriter> refWriter_;
     ContentStoreConfig config_;
 
     // Metadata storage (in-memory for now)
@@ -1237,6 +1250,45 @@ private:
         stats_.retrieveOperations += retrieveOps;
         stats_.deleteOperations += deleteOps;
         stats_.lastOperation = std::chrono::system_clock::now();
+    }
+
+    Result<void> commitReferenceBatch(const storage::RefTransactionBatch& batch) {
+        if (batch.operations.empty()) {
+            return {};
+        }
+        if (refWriter_) {
+            const auto submitStart = std::chrono::steady_clock::now();
+            auto future = refWriter_->submit(batch);
+            recordContentStorePhase("ref_submit", submitStart);
+
+            const auto waitStart = std::chrono::steady_clock::now();
+            auto result = future.get();
+            recordContentStorePhase("ref_future_wait", waitStart);
+            return result;
+        }
+
+        auto transaction = refCounter_->beginTransaction();
+        if (!transaction) {
+            return Result<void>(ErrorCode::TransactionFailed);
+        }
+        for (const auto& op : batch.operations) {
+            switch (op.type) {
+                case storage::RefDelta::Type::Increment:
+                    transaction->increment(op.blockHash, op.compressedSize, op.uncompressedSize);
+                    break;
+                case storage::RefDelta::Type::Decrement:
+                    transaction->decrement(op.blockHash);
+                    break;
+                case storage::RefDelta::Type::Prune:
+                    transaction->pruneReference(op.blockHash);
+                    break;
+            }
+        }
+        auto result = transaction->commit();
+        if (!result) {
+            transaction->rollback();
+        }
+        return result;
     }
 
     void cleanupStoredObjects(std::span<const std::string> hashes) {

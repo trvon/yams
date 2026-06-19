@@ -17,6 +17,7 @@
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/atomic_utils.h>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -1164,6 +1165,13 @@ PostIngestQueue::MetricsSnapshot PostIngestQueue::metricsSnapshot() const {
         embedPreparedDocsEmitted_.load(std::memory_order_relaxed);
     snapshot.batches.embedHashOnlyDocsEmitted =
         embedHashOnlyDocsEmitted_.load(std::memory_order_relaxed);
+    snapshot.batches.contentIndexCalls = contentIndexCalls_.load(std::memory_order_relaxed);
+    snapshot.batches.contentIndexEntries = contentIndexEntries_.load(std::memory_order_relaxed);
+    snapshot.batches.contentIndexChunks = contentIndexChunks_.load(std::memory_order_relaxed);
+    snapshot.batches.contentIndexMaxEntries =
+        contentIndexMaxEntries_.load(std::memory_order_relaxed);
+    snapshot.batches.contentIndexMaxChunkEntries =
+        contentIndexMaxChunkEntries_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -1180,6 +1188,11 @@ void PostIngestQueue::resetMetrics() {
     embedDocsEmitted_.store(0, std::memory_order_relaxed);
     embedPreparedDocsEmitted_.store(0, std::memory_order_relaxed);
     embedHashOnlyDocsEmitted_.store(0, std::memory_order_relaxed);
+    contentIndexCalls_.store(0, std::memory_order_relaxed);
+    contentIndexEntries_.store(0, std::memory_order_relaxed);
+    contentIndexChunks_.store(0, std::memory_order_relaxed);
+    contentIndexMaxEntries_.store(0, std::memory_order_relaxed);
+    contentIndexMaxChunkEntries_.store(0, std::memory_order_relaxed);
 }
 
 void PostIngestQueue::recordTiming(const std::string& name,
@@ -3238,12 +3251,21 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
 
         const auto contentWriteStart = std::chrono::steady_clock::now();
         constexpr std::size_t kMaxContentEntriesPerTxn = 128;
+        contentIndexCalls_.fetch_add(1, std::memory_order_relaxed);
+        contentIndexEntries_.fetch_add(static_cast<std::uint64_t>(successes.size()),
+                                       std::memory_order_relaxed);
+        yams::core::atomic_max(contentIndexMaxEntries_,
+                               static_cast<std::uint64_t>(successes.size()));
         std::vector<PreparedMetadataEntry> committed;
         committed.reserve(successes.size());
         {
             metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
             for (std::size_t off = 0; off < entries.size(); off += kMaxContentEntriesPerTxn) {
                 const auto end = std::min(entries.size(), off + kMaxContentEntriesPerTxn);
+                const auto chunkSize = end - off;
+                contentIndexChunks_.fetch_add(1, std::memory_order_relaxed);
+                yams::core::atomic_max(contentIndexMaxChunkEntries_,
+                                       static_cast<std::uint64_t>(chunkSize));
                 std::vector<metadata::BatchContentEntry> chunk(
                     std::make_move_iterator(entries.begin() + static_cast<long>(off)),
                     std::make_move_iterator(entries.begin() + static_cast<long>(end)));

@@ -39,6 +39,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_counter_writer.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
@@ -492,6 +493,10 @@ struct BenchmarkResult {
         metadata_insert_phase_timings;
     std::unordered_map<std::string, yams::storage::RefCounterCommitPhaseTiming>
         ref_counter_commit_phase_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterWriterTiming>
+        ref_counter_writer_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterWriterValueMetric>
+        ref_counter_writer_value_metrics;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
 
     // Queue monitoring
@@ -607,6 +612,30 @@ struct BenchmarkResult {
         }
         j["ref_counter_commit_phase_timings"] = std::move(refCounterCommitTimings);
 
+        json refCounterWriterTimings = json::object();
+        for (const auto& [phase, timing] : ref_counter_writer_timings) {
+            refCounterWriterTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["ref_counter_writer_timings"] = std::move(refCounterWriterTimings);
+
+        json refCounterWriterValueMetrics = json::object();
+        for (const auto& [metric, value] : ref_counter_writer_value_metrics) {
+            refCounterWriterValueMetrics[metric] = {
+                {"calls", value.calls},
+                {"total", value.total},
+                {"max", value.max},
+                {"avg", value.calls == 0
+                            ? 0.0
+                            : static_cast<double>(value.total) / static_cast<double>(value.calls)}};
+        }
+        j["ref_counter_writer_value_metrics"] = std::move(refCounterWriterValueMetrics);
+
         json postTimings = json::object();
         for (const auto& [phase, timing] : post_ingest_metrics.timings) {
             postTimings[phase] = {
@@ -634,7 +663,23 @@ struct BenchmarkResult {
             {"embed_jobs_emitted", post_ingest_metrics.batches.embedJobsEmitted},
             {"embed_docs_emitted", post_ingest_metrics.batches.embedDocsEmitted},
             {"embed_prepared_docs_emitted", post_ingest_metrics.batches.embedPreparedDocsEmitted},
-            {"embed_hash_only_docs_emitted", post_ingest_metrics.batches.embedHashOnlyDocsEmitted}};
+            {"embed_hash_only_docs_emitted", post_ingest_metrics.batches.embedHashOnlyDocsEmitted},
+            {"content_index_calls", post_ingest_metrics.batches.contentIndexCalls},
+            {"content_index_entries", post_ingest_metrics.batches.contentIndexEntries},
+            {"content_index_chunks", post_ingest_metrics.batches.contentIndexChunks},
+            {"content_index_max_entries", post_ingest_metrics.batches.contentIndexMaxEntries},
+            {"content_index_max_chunk_entries",
+             post_ingest_metrics.batches.contentIndexMaxChunkEntries},
+            {"content_index_avg_entries_per_call",
+             post_ingest_metrics.batches.contentIndexCalls == 0
+                 ? 0.0
+                 : static_cast<double>(post_ingest_metrics.batches.contentIndexEntries) /
+                       static_cast<double>(post_ingest_metrics.batches.contentIndexCalls)},
+            {"content_index_avg_entries_per_chunk",
+             post_ingest_metrics.batches.contentIndexChunks == 0
+                 ? 0.0
+                 : static_cast<double>(post_ingest_metrics.batches.contentIndexEntries) /
+                       static_cast<double>(post_ingest_metrics.batches.contentIndexChunks)}};
 
         j["queues"] = {{"max_store_document_tasks", max_store_document_tasks},
                        {"max_embed_jobs", max_embed_jobs},
@@ -849,6 +894,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         yams::api::resetContentStorePhaseTimings();
         yams::metadata::resetMetadataInsertPhaseTimings();
         yams::storage::resetRefCounterCommitPhaseTimings();
+        yams::storage::resetRefCounterWriterMetrics();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
         }
@@ -1071,6 +1117,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             yams::metadata::getMetadataInsertPhaseTimingsSnapshot();
         result.ref_counter_commit_phase_timings =
             yams::storage::getRefCounterCommitPhaseTimingsSnapshot();
+        result.ref_counter_writer_timings = yams::storage::getRefCounterWriterTimingsSnapshot();
+        result.ref_counter_writer_value_metrics =
+            yams::storage::getRefCounterWriterValueMetricsSnapshot();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }

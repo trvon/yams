@@ -162,6 +162,11 @@ public:
         std::uint64_t embedDocsEmitted{0};
         std::uint64_t embedPreparedDocsEmitted{0};
         std::uint64_t embedHashOnlyDocsEmitted{0};
+        std::uint64_t contentIndexCalls{0};
+        std::uint64_t contentIndexEntries{0};
+        std::uint64_t contentIndexChunks{0};
+        std::uint64_t contentIndexMaxEntries{0};
+        std::uint64_t contentIndexMaxChunkEntries{0};
     };
 
     struct MetricsSnapshot {
@@ -691,6 +696,11 @@ private:
     std::atomic<std::uint64_t> embedDocsEmitted_{0};
     std::atomic<std::uint64_t> embedPreparedDocsEmitted_{0};
     std::atomic<std::uint64_t> embedHashOnlyDocsEmitted_{0};
+    std::atomic<std::uint64_t> contentIndexCalls_{0};
+    std::atomic<std::uint64_t> contentIndexEntries_{0};
+    std::atomic<std::uint64_t> contentIndexChunks_{0};
+    std::atomic<std::uint64_t> contentIndexMaxEntries_{0};
+    std::atomic<std::uint64_t> contentIndexMaxChunkEntries_{0};
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};
