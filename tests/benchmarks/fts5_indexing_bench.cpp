@@ -61,8 +61,9 @@ std::string makeContent(std::size_t i) {
 
 BenchContext makeContext(std::size_t count) {
     BenchContext ctx;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     ctx.dbPath = std::filesystem::temp_directory_path() /
-                 ("fts5_index_bench_" + std::to_string(std::rand()) + ".db");
+                 ("fts5_index_bench_" + std::to_string(stamp) + ".db");
     std::filesystem::remove(ctx.dbPath);
 
     ConnectionPoolConfig cfg;

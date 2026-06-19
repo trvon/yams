@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/plugins/abi.h>
@@ -51,7 +52,8 @@ void ensure_plugin_logger() {
         if (spdlog::default_logger()) {
             return;
         }
-        auto logger = std::make_shared<spdlog::logger>("yams_glint");
+        auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("yams_glint", sink);
         logger->set_level(spdlog::level::info);
         spdlog::set_default_logger(std::move(logger));
     } catch (const spdlog::spdlog_ex&) {

@@ -19,6 +19,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace yams::api {
 
@@ -300,7 +301,7 @@ public:
         if (!manifestStoreResult) {
             if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
                                                 manifestStoreResult.error())) {
-                auto commitResult2 = commitReferenceBatch(refBatch);
+                auto commitResult2 = commitReferenceBatch(std::move(refBatch));
                 if (!commitResult2) {
                     cleanupStoredObject(manifestHash);
                     cleanupStoredObjects(storedChunks);
@@ -326,7 +327,7 @@ public:
 
         // Commit references before metadata publication.
         const auto refCommitStart = std::chrono::steady_clock::now();
-        auto commitResult = commitReferenceBatch(refBatch);
+        auto commitResult = commitReferenceBatch(std::move(refBatch));
         if (!commitResult) {
             cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
@@ -614,7 +615,7 @@ public:
         if (!manifestStoreResult) {
             if (reconcileAmbiguousManifestStore(manifestHash, manifestData.value(),
                                                 manifestStoreResult.error())) {
-                auto commitResult2 = commitReferenceBatch(refBatch);
+                auto commitResult2 = commitReferenceBatch(std::move(refBatch));
                 if (!commitResult2) {
                     cleanupStoredObject(manifestHash);
                     cleanupStoredObjects(storedChunks);
@@ -638,7 +639,7 @@ public:
         }
 
         // Commit references before metadata publication.
-        auto commitResult = commitReferenceBatch(refBatch);
+        auto commitResult = commitReferenceBatch(std::move(refBatch));
         if (!commitResult) {
             cleanupStoredObject(manifestHash);
             return Result<StoreResult>(commitResult.error());
@@ -1238,13 +1239,13 @@ private:
         return manifestData.value();
     }
 
-    Result<void> commitReferenceBatch(const storage::RefTransactionBatch& batch) {
+    Result<void> commitReferenceBatch(storage::RefTransactionBatch batch) {
         if (batch.operations.empty()) {
             return {};
         }
         if (refWriter_) {
             const auto submitStart = std::chrono::steady_clock::now();
-            auto future = refWriter_->submit(batch);
+            auto future = refWriter_->submit(std::move(batch));
             recordContentStorePhase("ref_submit", submitStart);
 
             const auto waitStart = std::chrono::steady_clock::now();
