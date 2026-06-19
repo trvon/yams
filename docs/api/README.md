@@ -5,7 +5,6 @@ A concise index for YAMS programmatic interfaces (MCP tools + plugin interfaces)
 ## What’s here
 
 - [MCP Tools](mcp_tools.md) — composite tool surface (query, execute, session)
-- [Graph Adapter v1](graph_adapter_v1.md) — knowledge graph query interface
 - [Storage Plugin v1](storage_plugin_v1.md) — storage backend plugin API
 
 If you’re integrating YAMS today, start with the MCP tools and [CLI reference](../user_guide/cli.md).
@@ -20,3 +19,5 @@ If you’re integrating YAMS today, start with the MCP tools and [CLI reference]
 - [CLI Reference](../user_guide/cli.md)
 - [Installation](../user_guide/installation.md)
 - [MCP Setup Guide](../user_guide/mcp.md)
+
+Legacy graph-adapter interface docs remain for historical reference only; they are not an active in-tree plugin surface.

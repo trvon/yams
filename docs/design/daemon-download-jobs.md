@@ -51,9 +51,7 @@ The design explicitly does not start with arbitrary remote download capability.
   - `yams download --cancel <job-id>`
 - MCP exposes the same read/control surface in
   [src/mcp/mcp_server.cpp](../../src/mcp/mcp_server.cpp):
-  - `download_status`
-  - `download_list_jobs`
-  - `download_cancel`
+  - `download_jobs` with `action=status|list|cancel`
 
 ### Still Missing
 
@@ -272,10 +270,10 @@ Completed:
 
 Remaining:
 
-5. Move the current handler to a compatibility wrapper or deprecate it.
-6. Add resume-by-job.
-7. Enforce `maxFileBytes`, rate limits, and sandboxing.
-8. Only then consider broadening request shape.
+1. Move the current handler to a compatibility wrapper or deprecate it.
+2. Add resume-by-job.
+3. Enforce `maxFileBytes`, rate limits, and sandboxing.
+4. Only then consider broadening request shape.
 
 ## Open Questions
 
