@@ -65,6 +65,11 @@ public:
         bool overridden{false};
     };
 
+    struct EmbeddingDispatchPolicy {
+        EmbeddingSelectionPolicy selection{};
+        EmbeddingChunkingPolicy chunking{};
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> maxClusters;
@@ -389,6 +394,15 @@ public:
      * - YAMS_EMBED_CHUNK_PRESERVE_SENTENCES
      */
     static EmbeddingChunkingPolicy resolveEmbeddingChunkingPolicy();
+
+    /**
+     * @brief Resolve cached embedding dispatch policy for hot ingest dispatch paths.
+     *
+     * Combines selection and chunking policy resolution behind a short-lived cache so
+     * per-document dispatch batches do not repeatedly parse config. TuneAdvisor caps
+     * and stage masks remain live reads at call sites.
+     */
+    static EmbeddingDispatchPolicy resolveEmbeddingDispatchPolicy();
 
     /**
      * @brief Resolve topology-aware routing policy from config file.

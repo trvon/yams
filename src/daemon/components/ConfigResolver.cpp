@@ -14,9 +14,11 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -104,6 +106,58 @@ std::optional<double> parseDouble(const std::string& raw) {
         return std::nullopt;
     }
     return parsed;
+}
+
+std::string getenvValue(const char* name) {
+    if (const char* value = std::getenv(name)) {
+        return value;
+    }
+    return {};
+}
+
+std::string embeddingDispatchEnvSignature() {
+    static constexpr const char* kEnvNames[] = {
+        "YAMS_EMBED_SELECTION_STRATEGY",
+        "YAMS_EMBED_SELECTION_MODE",
+        "YAMS_EMBED_MAX_CHUNKS_PER_DOC",
+        "YAMS_EMBED_MAX_CHARS_PER_DOC",
+        "YAMS_EMBED_SELECTION_HEADING_BOOST",
+        "YAMS_EMBED_SELECTION_INTRO_BOOST",
+        "YAMS_EMBED_CHUNK_STRATEGY",
+        "YAMS_EMBED_CHUNK_PRESERVE_SENTENCES",
+        "YAMS_EMBED_CHUNK_USE_TOKENS",
+        "YAMS_EMBED_CHUNK_TARGET",
+        "YAMS_EMBED_CHUNK_MAX",
+        "YAMS_EMBED_CHUNK_MIN",
+        "YAMS_EMBED_CHUNK_OVERLAP",
+        "YAMS_EMBED_CHUNK_OVERLAP_PCT",
+    };
+
+    std::string signature;
+    for (const auto* name : kEnvNames) {
+        signature += name;
+        signature += '=';
+        signature += getenvValue(name);
+        signature += '\n';
+    }
+    return signature;
+}
+
+std::string embeddingDispatchConfigSignature() {
+    const auto path = ConfigResolver::resolveDefaultConfigPath();
+    if (path.empty()) {
+        return {};
+    }
+
+    std::string signature = path.string();
+    signature += '|';
+    try {
+        const auto mtime = std::filesystem::last_write_time(path);
+        signature += std::to_string(static_cast<long long>(mtime.time_since_epoch().count()));
+    } catch (...) {
+        signature += "mtime-error";
+    }
+    return signature;
 }
 
 std::optional<yams::vector::ChunkingStrategy> parseChunkingStrategy(const std::string& raw) {
@@ -544,6 +598,40 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
     }
 
     return policy;
+}
+
+ConfigResolver::EmbeddingDispatchPolicy ConfigResolver::resolveEmbeddingDispatchPolicy() {
+    struct CacheState {
+        std::mutex mutex;
+        std::optional<EmbeddingDispatchPolicy> value;
+        std::string envSignature;
+        std::string configSignature;
+        std::chrono::steady_clock::time_point nextCheck{};
+    };
+
+    static CacheState cache;
+    static constexpr auto kCacheTtl = std::chrono::seconds(1);
+
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.value && now < cache.nextCheck) {
+        return *cache.value;
+    }
+
+    const auto envSignature = embeddingDispatchEnvSignature();
+    const auto configSignature = embeddingDispatchConfigSignature();
+    if (cache.value && envSignature == cache.envSignature &&
+        configSignature == cache.configSignature) {
+        cache.nextCheck = now + kCacheTtl;
+        return *cache.value;
+    }
+
+    cache.value = EmbeddingDispatchPolicy{resolveEmbeddingSelectionPolicy(),
+                                          resolveEmbeddingChunkingPolicy()};
+    cache.envSignature = envSignature;
+    cache.configSignature = configSignature;
+    cache.nextCheck = now + kCacheTtl;
+    return *cache.value;
 }
 
 std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,

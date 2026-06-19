@@ -149,6 +149,8 @@ public:
         std::uint64_t maxMs{0};
         std::uint64_t totalUs{0};
         std::uint64_t maxUs{0};
+        std::int64_t firstStartMs{0};
+        std::int64_t lastEndMs{0};
     };
 
     struct BatchMetrics {
@@ -637,6 +639,9 @@ private:
     };
 
     struct DispatchTimingSet {
+        DispatchTimingAccumulator setupConfig;
+        DispatchTimingAccumulator setupChunker;
+        DispatchTimingAccumulator postConsumed;
         DispatchTimingAccumulator embedPrepare;
         DispatchTimingAccumulator embedEnqueue;
         DispatchTimingAccumulator contentLoad;

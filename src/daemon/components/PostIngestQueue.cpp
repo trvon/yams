@@ -1184,11 +1184,24 @@ void PostIngestQueue::resetMetrics() {
 
 void PostIngestQueue::recordTiming(const std::string& name,
                                    std::chrono::steady_clock::time_point start) {
-    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - start)
-                        .count();
+    const auto end = std::chrono::steady_clock::now();
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     const auto elapsedUs = static_cast<std::uint64_t>(std::max<long long>(0, us));
-    recordTimingAggregate(name, 1, elapsedUs, elapsedUs);
+    const auto startMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
+    const auto endMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end.time_since_epoch()).count();
+    std::lock_guard<std::mutex> lock(metricsMutex_);
+    auto& timing = timings_[name];
+    if (timing.calls == 0 || startMs < timing.firstStartMs) {
+        timing.firstStartMs = startMs;
+    }
+    timing.lastEndMs = std::max<std::int64_t>(timing.lastEndMs, endMs);
+    timing.calls += 1;
+    timing.totalUs += elapsedUs;
+    timing.maxUs = std::max<std::uint64_t>(timing.maxUs, elapsedUs);
+    timing.totalMs = timing.totalUs / 1000u;
+    timing.maxMs = timing.maxUs / 1000u;
 }
 
 void PostIngestQueue::recordTimingAggregate(const std::string& name, std::uint64_t calls,
@@ -1196,8 +1209,15 @@ void PostIngestQueue::recordTimingAggregate(const std::string& name, std::uint64
     if (calls == 0) {
         return;
     }
+    const auto stampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
     std::lock_guard<std::mutex> lock(metricsMutex_);
     auto& timing = timings_[name];
+    if (timing.calls == 0) {
+        timing.firstStartMs = stampMs;
+    }
+    timing.lastEndMs = std::max<std::int64_t>(timing.lastEndMs, stampMs);
     timing.calls += calls;
     timing.totalUs += totalUs;
     timing.maxUs = std::max<std::uint64_t>(timing.maxUs, maxUs);
@@ -1221,6 +1241,9 @@ void PostIngestQueue::recordDispatchTimingSet(const DispatchTimingSet& timings) 
         recordTimingAggregate(std::string(phase), timing.calls, timing.totalUs, timing.maxUs);
     };
 
+    flush("dispatch_setup_config", timings.setupConfig);
+    flush("dispatch_setup_chunker", timings.setupChunker);
+    flush("dispatch_post_consumed", timings.postConsumed);
     flush("dispatch_embed_prepare", timings.embedPrepare);
     flush("dispatch_embed_enqueue", timings.embedEnqueue);
     flush("dispatch_content_load", timings.contentLoad);
@@ -1534,11 +1557,30 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
         return;
     }
 
+    const auto batchStart = std::chrono::steady_clock::now();
+    std::uint64_t queueWaitTotalUs = 0;
+    std::uint64_t queueWaitMaxUs = 0;
+    const auto dequeueTime = std::chrono::steady_clock::now();
+    for (const auto& job : jobs) {
+        if (job.enqueuedAt.time_since_epoch().count() == 0) {
+            continue;
+        }
+        const auto waitUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(dequeueTime - job.enqueuedAt)
+                .count();
+        const auto bounded = static_cast<std::uint64_t>(std::max<long long>(0, waitUs));
+        queueWaitTotalUs += bounded;
+        queueWaitMaxUs = std::max(queueWaitMaxUs, bounded);
+    }
+    recordTimingAggregate("kg_queue_wait", jobs.size(), queueWaitTotalUs, queueWaitMaxUs);
+
+    const auto consumeStart = std::chrono::steady_clock::now();
     // Count all jobs as consumed for metrics
     for (const auto& job : jobs) {
         (void)job;
         InternalEventBus::instance().incKgConsumed();
     }
+    recordTiming("kg_mark_consumed", consumeStart);
 
     if (!graphComponent_) {
         if (!jobs.empty()) {
@@ -1552,6 +1594,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     spdlog::debug("[PostIngestQueue] KG batch starting for {} documents", jobs.size());
 
     // Build DocumentGraphContext objects for batch processing
+    const auto buildContextsStart = std::chrono::steady_clock::now();
     std::vector<GraphComponent::DocumentGraphContext> contexts;
     contexts.reserve(jobs.size());
 
@@ -1566,11 +1609,15 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
                                                  .skipEntityExtraction = false};
         contexts.push_back(std::move(ctx));
     }
+    recordTiming("kg_build_contexts", buildContextsStart);
 
     // Submit batch to GraphComponent for parallel processing
+    const auto graphCallStart = std::chrono::steady_clock::now();
     auto result = graphComponent_->onDocumentsIngestedBatch(contexts);
+    recordTiming("kg_graph_component", graphCallStart);
 
     auto duration = std::chrono::steady_clock::now() - startTime;
+    recordTiming("kg_process_batch", batchStart);
     double ms = std::chrono::duration<double, std::milli>(duration).count();
 
     if (!result) {
@@ -1603,6 +1650,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.filePath = filePath;
     job.tags = std::move(tags);
     job.contentBytes = std::move(contentBytes);
+    job.enqueuedAt = std::chrono::steady_clock::now();
 
     // Prefer non-blocking fast-path to avoid stalling extraction under load.
     if (channel->try_push(std::move(job))) {
@@ -3318,7 +3366,10 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
     constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
     constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
-    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
+    const auto dispatchPolicyStart = std::chrono::steady_clock::now();
+    const auto dispatchPolicy = ConfigResolver::resolveEmbeddingDispatchPolicy();
+    dispatchTimings.setupConfig.add(std::chrono::steady_clock::now() - dispatchPolicyStart);
+    const auto& selectionCfg = dispatchPolicy.selection;
     embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     const bool embedStageActive =
@@ -3387,9 +3438,11 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         embedPreparedBatchPayloadBytes = 0;
     };
 
-    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    const auto& chunkPolicy = dispatchPolicy.chunking;
+    const auto chunkerStart = std::chrono::steady_clock::now();
     auto embedChunker =
         yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);
+    dispatchTimings.setupChunker.add(std::chrono::steady_clock::now() - chunkerStart);
 
     auto makePreparedDoc = [&](const PreparedMetadataEntry& prepared)
         -> std::optional<InternalEventBus::EmbedPreparedDoc> {
@@ -3453,11 +3506,15 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             dispatchTimings.contentLoad.add(std::chrono::steady_clock::now() - contentLoadStart);
         }
         dispatchNonEmbeddingStages(prepared, contentBytes, dispatchTimings);
+        const auto postConsumedStart = std::chrono::steady_clock::now();
         InternalEventBus::instance().incPostConsumed();
+        dispatchTimings.postConsumed.add(std::chrono::steady_clock::now() - postConsumedStart);
     }
 
     flushEmbedBatch();
+    const auto recordTimingsStart = std::chrono::steady_clock::now();
     recordDispatchTimingSet(dispatchTimings);
+    recordTiming("dispatch_record_timings", recordTimingsStart);
 }
 
 void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {

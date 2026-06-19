@@ -600,7 +600,10 @@ struct BenchmarkResult {
                 {"max_us", timing.maxUs},
                 {"avg_us", timing.calls == 0 ? 0.0
                                              : static_cast<double>(timing.totalUs) /
-                                                   static_cast<double>(timing.calls)}};
+                                                   static_cast<double>(timing.calls)},
+                {"first_start_ms", timing.firstStartMs},
+                {"last_end_ms", timing.lastEndMs},
+                {"span_ms", nonNegativeDeltaMs(timing.lastEndMs, timing.firstStartMs)}};
         }
         j["post_ingest_phase_timings"] = std::move(postTimings);
         j["post_ingest_batch_metrics"] = {

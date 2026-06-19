@@ -989,7 +989,9 @@ private:
     mutable std::chrono::steady_clock::time_point corpusStatsCachedAt_{};
     mutable uint64_t corpusStatsDocCount_{0}; // docCount at cache time for change detection
     mutable std::shared_mutex corpusStatsMutex_;
-    mutable std::atomic<bool> corpusStatsStale_{false};        // Signal-based invalidation flag
+    mutable std::atomic<bool> corpusStatsStale_{false}; // Signal-based invalidation flag
+    mutable std::atomic<uint64_t> corpusStatsStaleSignals_{0};
+    mutable std::atomic<uint64_t> corpusStatsStaleRedundantSignals_{0};
     static constexpr std::chrono::seconds kCorpusStatsTtl{30}; // Base TTL
 
     // Enumeration cache (snapshots, collections, tags) with signal-based invalidation
@@ -1068,6 +1070,8 @@ private:
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
+    std::optional<std::vector<uint8_t>>
+    getCachedFtsIndexedStates(std::span<const int64_t> docIds) const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
     void noteFtsIndexedId(int64_t docId) const;
     void eraseFtsIndexedId(int64_t docId) const;
@@ -1107,6 +1111,9 @@ private:
             const auto acquireMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(acquireEnd - acquireStart)
                     .count();
+            const auto acquireUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(acquireEnd - acquireStart)
+                    .count();
 
             if (!connResult) {
                 auto op = current_metadata_op();
@@ -1116,8 +1123,13 @@ private:
                                              .count();
                     spdlog::warn(
                         "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} query_ms=0 total_ms={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, totalMs,
+                        "acquire_ms={} acquire_us={} query_ms=0 query_us=0 release_us=0 "
+                        "total_ms={} total_us={} ok=false error='{}'",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                        totalMs,
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - attemptStart)
+                            .count(),
                         connResult.error().message);
                 }
                 spdlog::error(
@@ -1127,6 +1139,11 @@ private:
             }
 
             Result<T> result;
+            long long queryMs = 0;
+            long long queryUs = 0;
+            long long releaseUs = 0;
+            long long totalMs = 0;
+            long long totalUs = 0;
             {
                 auto conn = std::move(connResult).value();
                 conn->touch();
@@ -1138,42 +1155,58 @@ private:
                     result = Error{ErrorCode::DatabaseError, e.what()};
                 }
                 const auto queryEnd = std::chrono::steady_clock::now();
-                const auto queryMs =
+                queryMs =
                     std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - queryStart)
                         .count();
-                const auto totalMs =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - attemptStart)
+                queryUs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(queryEnd - queryStart)
                         .count();
+            }
+            const auto releaseEnd = std::chrono::steady_clock::now();
+            releaseUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(releaseEnd - attemptStart)
+                    .count() -
+                acquireUs - queryUs;
+            if (releaseUs < 0) {
+                releaseUs = 0;
+            }
+            totalMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(releaseEnd - attemptStart)
+                    .count();
+            totalUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(releaseEnd - attemptStart)
+                    .count();
 
-                if (metadata_trace_enabled()) {
-                    auto op = current_metadata_op();
-                    if (result.has_value()) {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} query_ms={} total_ms={} ok=true",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
-                            totalMs);
-                    } else {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} query_ms={} total_ms={} ok=false error='{}'",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
-                            totalMs, result.error().message);
-                    }
-                }
-
+            if (metadata_trace_enabled()) {
+                auto op = current_metadata_op();
                 if (result.has_value()) {
-                    if (attempt > 0) {
-                        // Log successful retry at debug level
-                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                      "after {} retries",
-                                      route, attempt);
-                    }
-                    if constexpr (std::is_void_v<T>) {
-                        return Result<void>();
-                    } else {
-                        return result.value();
-                    }
+                    spdlog::info(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                        "total_ms={} total_us={} ok=true",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                        queryMs, queryUs, releaseUs, totalMs, totalUs);
+                } else {
+                    spdlog::info(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                        "total_ms={} total_us={} ok=false error='{}'",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                        queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
+                }
+            }
+
+            if (result.has_value()) {
+                if (attempt > 0) {
+                    // Log successful retry at debug level
+                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                  "after {} retries",
+                                  route, attempt);
+                }
+                if constexpr (std::is_void_v<T>) {
+                    return Result<void>();
+                } else {
+                    return result.value();
                 }
             }
 
@@ -1215,6 +1248,13 @@ private:
             int jitter = static_cast<int>(baseDelayMs * 0.25);
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);
+            if (metadata_trace_enabled()) {
+                auto op = current_metadata_op();
+                spdlog::info(
+                    "MetadataRepository::executeQueryOnPool retry route='{}' op='{}' attempt={} "
+                    "sleep_ms={} retryable=true lock_error={}",
+                    route, op.empty() ? "(unknown)" : op, attempt + 1, delayMs, isLockError);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
 
