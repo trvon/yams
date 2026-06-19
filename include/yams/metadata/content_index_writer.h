@@ -33,6 +33,8 @@ public:
     ContentIndexWriter& operator=(const ContentIndexWriter&) = delete;
 
     std::future<Result<void>> submit(std::vector<BatchContentEntry> entries);
+    /// Stops the worker and joins it. Single-owner contract: shutdown() and the destructor must be
+    /// invoked by the one owning thread, not called concurrently from multiple threads.
     void shutdown();
 
 private:

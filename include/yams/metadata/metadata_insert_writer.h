@@ -42,6 +42,8 @@ public:
 
     std::future<Result<int64_t>> submit(BatchDocumentInsert record);
     Result<void> flush();
+    /// Stops the worker and joins it. Single-owner contract: shutdown() and the destructor must be
+    /// invoked by the one owning thread, not called concurrently from multiple threads.
     void shutdown();
 
 private:

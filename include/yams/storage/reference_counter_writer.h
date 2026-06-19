@@ -59,6 +59,8 @@ public:
 
     std::future<Result<void>> submit(RefTransactionBatch batch);
     Result<void> flush();
+    /// Stops the worker and joins it. Single-owner contract: shutdown() and the destructor must be
+    /// invoked by the one owning thread, not called concurrently from multiple threads.
     void shutdown();
 
 private:

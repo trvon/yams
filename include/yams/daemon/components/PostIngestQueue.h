@@ -29,7 +29,7 @@ class IContentStore;
 namespace yams::metadata {
 class MetadataRepository;
 class ContentIndexWriter;
-}
+} // namespace yams::metadata
 
 namespace yams::extraction {
 class IContentExtractor;
@@ -659,8 +659,13 @@ private:
     };
 
     struct PreparedDispatchPlan {
+        bool dispatchKg{false};
+        bool dispatchSymbol{false};
+        bool dispatchEntity{false};
+        bool dispatchTitle{false};
         bool dispatchEmbed{false};
         bool loadContentForNonEmbedding{false};
+        std::string symbolLanguage;
     };
 
     PreparedDispatchPlan buildDispatchPlan(const PreparedMetadataEntry& prepared,
@@ -670,6 +675,7 @@ private:
         const std::string& hash,
         std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>>& contentByHash);
     void dispatchNonEmbeddingStages(const PreparedMetadataEntry& prepared,
+                                    const PreparedDispatchPlan& plan,
                                     std::shared_ptr<std::vector<std::byte>> contentBytes,
                                     DispatchTimingSet& timings);
 

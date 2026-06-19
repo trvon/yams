@@ -271,8 +271,17 @@ void RefCounterWriter::run() {
         detail::recordRefCounterWriterValue("writer_batch_ops", opCount);
 
         const auto commitStart = std::chrono::steady_clock::now();
-        auto result = counter_->commitTransactionBatches(
-            std::span<const RefTransactionBatch>(batches.data(), batches.size()));
+        // Guard the (potentially throwing) commit so an unexpected exception cannot terminate the
+        // worker thread or strand the in-flight promises.
+        Result<void> result = Result<void>();
+        try {
+            result = counter_->commitTransactionBatches(
+                std::span<const RefTransactionBatch>(batches.data(), batches.size()));
+        } catch (const std::exception& ex) {
+            result = Error{ErrorCode::InternalError, ex.what()};
+        } catch (...) {
+            result = Error{ErrorCode::InternalError, "ref counter commit threw unknown exception"};
+        }
         detail::recordRefCounterWriterTiming("commit_batches_total", commitStart);
 
         const auto lastSequence = items.back().sequence;

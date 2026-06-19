@@ -733,6 +733,38 @@ ReadySingleFileAddPlan selectReadySingleFileAddPlan(const AddDocumentRequest& re
     return plan;
 }
 
+// Centralized add-request routing classification: async queue (directories, recursive, daemon not
+// ready, or default single-file) vs synchronous store (sync env / waitForProcessing). Keeps the
+// previous effective routing; only consolidates where the decision is made.
+struct AddRoutingPlan {
+    bool async{true};
+    std::string asyncQueueMessage{"Ingestion accepted for asynchronous processing."};
+    bool countDeferred{false};
+    bool isDir{false};
+};
+
+AddRoutingPlan selectAddRoutingPlan(const AddDocumentRequest& req, bool isDir, bool daemonReady) {
+    AddRoutingPlan plan;
+    plan.isDir = isDir;
+    // Directories, recursive adds, or a not-yet-ready daemon always go to the async queue.
+    if (isDir || req.recursive || !daemonReady) {
+        plan.async = true;
+        plan.countDeferred = true;
+        plan.asyncQueueMessage =
+            (isDir || req.recursive)
+                ? "Directory ingestion accepted for asynchronous processing."
+                : "Ingestion accepted for asynchronous processing (daemon initializing).";
+        return plan;
+    }
+    // Single file, daemon ready: async by default unless sync was requested.
+    const auto single = selectReadySingleFileAddPlan(req);
+    plan.async = !single.synchronous;
+    plan.countDeferred = false;
+    plan.isDir = false;
+    plan.asyncQueueMessage = std::string(single.asyncQueueMessage);
+    return plan;
+}
+
 ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest& req, bool isDir) {
     ImmediateAddFingerprint fingerprint;
     if (isDir || req.recursive) {
@@ -1446,24 +1478,13 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
             }
 
-            // For directories or if daemon not ready, use async queue
-            if (isDir || req.recursive || !daemonReady) {
+            // Centralized routing: directories/recursive/not-ready and default single-file adds go
+            // to the async queue; only sync-env / waitForProcessing take the synchronous path.
+            const auto routing = selectAddRoutingPlan(req, isDir, daemonReady);
+            if (routing.async) {
                 co_return co_await enqueueAddDocumentOrReject(
-                    serviceManager_, state_, req, channelCapacity,
-                    (isDir || req.recursive)
-                        ? "Directory ingestion accepted for asynchronous processing."
-                        : "Ingestion accepted for asynchronous processing (daemon initializing).",
-                    /*countDeferred=*/true, isDir);
-            }
-
-            // For single files when daemon is ready, prefer async queueing by default
-            // to avoid blocking WorkCoordinator request threads under multi-client load.
-            // Set YAMS_SYNC_SINGLE_FILE_ADD=1/true to restore synchronous behavior.
-            const auto addPlan = selectReadySingleFileAddPlan(req);
-            if (!addPlan.synchronous) {
-                co_return co_await enqueueAddDocumentOrReject(
-                    serviceManager_, state_, req, channelCapacity, addPlan.asyncQueueMessage,
-                    /*countDeferred=*/false, /*isDir=*/false);
+                    serviceManager_, state_, req, channelCapacity, routing.asyncQueueMessage,
+                    routing.countDeferred, routing.isDir);
             }
 
             // Optional sync fallback path (diagnostics/compat only)

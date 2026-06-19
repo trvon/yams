@@ -1,9 +1,9 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-06-09
-**Last Updated**: 2026-06-09
-**YAMS Version**: 0.16.0
-**Build Configuration**: Release (`meson compile -C build/release`)
+**Last Updated**: 2026-06-19
+**YAMS Version**: 0.17.0
+**Build Configuration**: Release microbenchmarks (`meson compile -C build/release`); live-mirror suite (`meson compile -C builddir`)
 **Host**: Apple M4 Max, macOS, Clang 21, 16 cores
 
 ## Contents
@@ -17,44 +17,93 @@
 
 ## Executive Summary
 
-- Coverage: API, metadata, core, IPC, tree, WriteCoordinator, multi-client, local storage, grep, and search microbenchmarks.
-- Medium-document ingest: `11.5 ops/s` p50.
-- IPC streaming: below May 9 baselines in the ASAN+coverage lane.
+- Coverage: API, metadata, core, IPC, tree, WriteCoordinator, multi-client, local storage, grep, search microbenchmarks, and live-mirror ingestion/retrieval.
+- Medium-document ingest (`api_benchmarks`, clean release): `363.6 ops/s` p50.
+- IPC streaming (clean release): `StreamingFramer_32x10` 22,857 ops/s, `UnaryFramer_8KB` 233,046 ops/s — above the May 9 baselines.
 - Multi-client ingest: clean through 16 clients; 32 clients failed with 416 add failures.
 - Mixed read/write search p95: 525 ms in the 4-client case, 41 ms in the 16-client preseeded case.
 - Grep microbenchmarks: literal search is now close to `std::find`; newline scan still trails `memchr` on this host.
-- High-entropy Zstd L3: 132.06 ms p50 for 1 MiB.
+- High-entropy Zstd L3 (1 MiB): 0.11 ms p50, 9,308 ops/s (incompressible input, ratio ~1.0).
+- Live-mirror suite (June 19, M4 Max, Simeon embeddings): 500-document ingestion completed in ~983 ms median (~509 docs/s) — improved from the June 18 1,086 ms / 460.4 docs/s baseline via the dedicated-writer ingestion centralization (MetadataInsertWriter + ContentIndexWriter); retrieval over 200 queries holds MRR 1.0 and Recall@10 0.1628.
 
 ## Latest Local Refresh
 
 Throughput values use p50 latency where available.
 
+### Live-Mirror Ingestion And Retrieval (2026-06-19)
+
+Validated artifact: `/tmp/yams_live_mirror_suite_20260619_162112` (suite ingestion run 1,059 ms).
+Ingestion repeats (steady-state, poll 10 ms): 1,017 / 936 / 983 ms → median **~983 ms**.
+
+Configuration:
+
+- Build dir: `builddir`
+- Dataset: synthetic live-mirror workload
+- Corpus: 500 documents
+- Retrieval queries: 200
+- Top K: 10
+- Embeddings: real Simeon (`YAMS_EMBED_BACKEND=simeon`, `YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=0`)
+- Core systems enabled: plugin discovery, Glint, semantic graph/topology, post-ingest pipeline
+- Change since last refresh: write-path centralization onto dedicated-thread writers
+  (`MetadataInsertWriter` coalesces document inserts; `ContentIndexWriter` moves content-index
+  commits off the shared io_context). The synchronous store path is now well below the embedding/KG
+  enrichment floor — wall is enrichment-bound (`embedding_generation` / `kg_extraction` ≈ wall;
+  `metadata_storage` ≈ 0.6× wall).
+
+| Workload | Result | Notes |
+|----------|-------:|-------|
+| Ingestion wall time | ~983 ms median | `ingestion_e2e.json`; suite run 1,059 ms (vs 1,086 ms June 18) |
+| Ingestion throughput | ~509 docs/s | 500-document run (vs 460.4 docs/s June 18) |
+| Retrieval MRR | 1.0000 | `stage_trace.jsonl` `hybrid_summary` |
+| Retrieval MAP | 1.0000 | Hybrid search |
+| Retrieval nDCG@10 | 1.0000 | Hybrid search |
+| Retrieval Precision@10 | 1.0000 | Hybrid search |
+| Retrieval Recall@10 | 0.1628 | Synthetic qrels are broad; exact grep baseline shares this recall ceiling |
+
+Post-ingest timing signal from the suite ingestion run (1,059 ms):
+
+| Phase | Total | Calls | Notes |
+|-------|------:|------:|-------|
+| `process_batch` | 549.3 ms | 128 | Full post-ingest batch processing (was 703.6 ms) |
+| `commit_batch_results` | 385.9 ms | 128 | Content/FTS metadata writes (was 422.1 ms) |
+| `commit_content_index` | 383.3 ms | 128 | Now on the `ContentIndexWriter` thread (was 420.2 ms) |
+| `dispatch_successes` | 27.1 ms | 128 | DispatchPlan + io_context decongestion (was 194.8 ms) |
+| `prepare_metadata` | 135.1 ms | 128 | Extraction-result preparation |
+
+The retrieval stage trace contains a valid `hybrid_summary` event. The xctrace hot-zone export is usable for coarse direction (`total samples=95215000000`), with top visible samples in prune classification, SQLite VM execution, search internals, WAL checksum, and Simeon NEON dot product. Treat those samples as directional, not as a replacement for focused phase timings.
+
 ### API And Metadata
+
+Refreshed 2026-06-19 from a clean release build (`build/release`, `--with-tests`; a stale
+`-DTRACY_ENABLE` flag that blocked the benchmark compile was cleared). These microbenchmarks
+exercise ContentStore / MetadataRepository paths that are largely independent of the June 2026
+ingestion-pipeline centralization work; the gains versus the June 9 row mostly reflect the clean
+(non-instrumented) build rather than that work.
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `Ingestion_SmallDocument` | 0.32 ms | 3,163 ops/s | 1 KB document |
-| `Ingestion_MediumDocument` | 3.93 ms | 254.5 ops/s | 100 KB document |
-| `Metadata_SingleUpdate` | 14.87 ms | 6,723 ops/s | 100 updates/iteration over 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 3.10 ms | 161,429 ops/s | 500 metadata entries/batch |
+| `Ingestion_SmallDocument` | 0.20 ms | 5,068 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 2.75 ms | 363.6 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 6.36 ms | 15,711 ops/s | 100 updates/iteration over 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 2.14 ms | 234,048 ops/s | 500 metadata entries/batch |
 
 ### IPC Streaming
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `StreamingFramer_32x10_256B` | 0.62 ms | 17,739 ops/s | 10 chunks, 32 results/chunk |
-| `StreamingFramer_64x6_512B` | 1.29 ms | 5,416 ops/s | 6 chunks, 64 results/chunk |
-| `UnaryFramer_Success_8KB` | 0.01 ms | 183,908 ops/s | 8 KB payload |
+| `StreamingFramer_32x10_256B` | 0.48 ms | 22,857 ops/s | 10 chunks, 32 results/chunk |
+| `StreamingFramer_64x6_512B` | 1.01 ms | 6,908 ops/s | 6 chunks, 64 results/chunk |
+| `UnaryFramer_Success_8KB` | < 0.01 ms | 233,046 ops/s | 8 KB payload |
 
 ### Tree Builder
 
 | Files | Latency | Throughput | Notes |
 |-------|--------:|-----------:|-------|
-| 100 | 28.0 ms | 3,569/s | 512-byte files |
-| 500 | 135.9 ms | 3,676/s | 512-byte files |
-| 1,000 | 233.3 ms | 4,285/s | 512-byte files |
-| 5,000 | 1,178.5 ms | 4,242/s | 512-byte files |
-| 10,000 | 2,322.6 ms | 4,305/s | linear scaling still holds |
+| 100 | 28.5 ms | 3,505/s | 512-byte files |
+| 500 | 98.1 ms | 5,098/s | 512-byte files |
+| 1,000 | 200.2 ms | 4,994/s | 512-byte files |
+| 5,000 | 955.6 ms | 5,232/s | 512-byte files |
+| 10,000 | 1,935.1 ms | 5,167/s | linear scaling still holds |
 
 ### WriteCoordinator
 
@@ -68,14 +117,17 @@ Throughput values use p50 latency where available.
 
 ### Headline API And IPC Throughput
 
-| Benchmark | Oct 2025 | Jan 2026 | Apr 30 | May 9 | June 9 Local | May 9 -> June 9 |
-|-----------|---------:|---------:|-------:|------:|-------------:|----------------:|
-| `Ingestion_SmallDocument` | 2,771 ops/s | 2,821 ops/s | 4,896 ops/s | 3,550 ops/s | 3,163 ops/s | -10.9% |
-| `Ingestion_MediumDocument` | 56 ops/s | 57 ops/s | 336 ops/s | 129 ops/s | 254.5 ops/s | +97.3% |
-| `Metadata_SingleUpdate` | 10,537 ops/s | 13,966 ops/s | 14,022 ops/s | 12,101 ops/s | 6,723 ops/s | -44.4% |
-| `Metadata_BulkUpdate(500)` | 7,823 ops/s | 51,341 ops/s | 196,852 ops/s | 102,742 ops/s | 161,429 ops/s | +57.1% |
-| `IPC StreamingFramer_32x10` | - | 3,732 ops/s | 20,976 ops/s | 5,837 ops/s | 17,739 ops/s | +203.9% |
-| `IPC UnaryFramer_8KB` | - | 10,088 ops/s | 221,453 ops/s | 15,889 ops/s | 183,908 ops/s | +1057.4% |
+| Benchmark | Jan 2026 | Apr 30 | May 9 | June 9 Local | June 19 (clean) | June 9 -> June 19 |
+|-----------|---------:|-------:|------:|-------------:|----------------:|------------------:|
+| `Ingestion_SmallDocument` | 2,821 ops/s | 4,896 ops/s | 3,550 ops/s | 3,163 ops/s | 5,068 ops/s | +60.2% |
+| `Ingestion_MediumDocument` | 57 ops/s | 336 ops/s | 129 ops/s | 254.5 ops/s | 363.6 ops/s | +42.9% |
+| `Metadata_SingleUpdate` | 13,966 ops/s | 14,022 ops/s | 12,101 ops/s | 6,723 ops/s | 15,711 ops/s | +133.7% |
+| `Metadata_BulkUpdate(500)` | 51,341 ops/s | 196,852 ops/s | 102,742 ops/s | 161,429 ops/s | 234,048 ops/s | +45.0% |
+| `IPC StreamingFramer_32x10` | 3,732 ops/s | 20,976 ops/s | 5,837 ops/s | 17,739 ops/s | 22,857 ops/s | +28.9% |
+| `IPC UnaryFramer_8KB` | 10,088 ops/s | 221,453 ops/s | 15,889 ops/s | 183,908 ops/s | 233,046 ops/s | +26.7% |
+
+The June 9 row was an instrumented/slower local run (the June 19 column is a clean release rebuild on
+the same host), so most of the June 9 → June 19 gain is the build state, not a specific code change.
 
 ### Previous Debug Refresh (M4, 2026-04-08)
 
@@ -128,12 +180,12 @@ Throughput values use p50 latency where available.
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
-| `Hashing_SHA256_1KB` | < 0.01 ms | 1,333,333 ops/s | tiny input overhead dominates |
-| `Hashing_SHA256_1MB` | 0.44 ms | 2,273 ops/s | about 2.27 GiB/s |
-| `Chunking_Rabin_1MB` | 1.57 ms | 59,960 chunks/s | 94 chunks/iteration |
-| `Compression_Zstd_10KB_Text_L3` | < 0.01 ms | 738,279 ops/s | 71-byte output |
-| `Compression_Zstd_1MB_Text_L9` | 0.26 ms | 3,801 ops/s | 158-byte output |
-| `Compression_Zstd_1MB_HighEntropy_L3` | 0.13 ms | 7,444 ops/s | not smaller than input |
+| `Hashing_SHA256_1KB` | < 0.01 ms | 1,777,778 ops/s | tiny input overhead dominates |
+| `Hashing_SHA256_1MB` | 0.30 ms | 3,286 ops/s | about 3.29 GiB/s |
+| `Chunking_Rabin_1MB` | 1.22 ms | 69,647 chunks/s | 94 chunks/iteration |
+| `Compression_Zstd_10KB_Text_L3` | < 0.01 ms | 1,000,000 ops/s | 71-byte output |
+| `Compression_Zstd_1MB_Text_L9` | 0.21 ms | 4,742 ops/s | 158-byte output |
+| `Compression_Zstd_1MB_HighEntropy_L3` | 0.11 ms | 9,308 ops/s | not smaller than input |
 
 ### Grep Algorithmic Microbenchmarks
 
@@ -170,3 +222,4 @@ Vectors/model loading disabled. In-process daemon harness. ASAN+coverage lane.
 ## Storage Backends
 
 See [Storage Backends](storage_backends.md) for local vs S3-compatible backend comparisons.
+docs/benchmarks/README.md 

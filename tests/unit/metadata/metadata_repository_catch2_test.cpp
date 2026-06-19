@@ -21,6 +21,7 @@
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/content_index_writer.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/metadata_repository.h>
@@ -4587,6 +4588,75 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
         auto doc = repo->getDocumentByHash("writer-hash-" + std::to_string(i));
         REQUIRE((doc.has_value()));
         CHECK((doc.value().has_value()));
+    }
+
+    pool->shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("ContentIndexWriter commits content-index chunks from concurrent submits",
+          "[metadata][batch][writer][content]") {
+    auto dbPath = tempDbPath("content_index_writer_test_");
+    ConnectionPoolConfig config;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
+    REQUIRE((pool->initialize().has_value()));
+    auto repo = std::make_shared<MetadataRepository>(*pool);
+    repo->initializeCounters();
+
+    constexpr int kDocs = 32;
+    std::vector<int64_t> docIds;
+    for (int i = 0; i < kDocs; ++i) {
+        DocumentInfo doc;
+        doc.sha256Hash = "ciw-hash-" + std::to_string(i);
+        doc.fileName = "ciw-" + std::to_string(i) + ".txt";
+        doc.fileSize = 100;
+        doc.mimeType = "text/plain";
+        doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = doc.createdTime;
+        doc.contentExtracted = false;
+        doc.extractionStatus = ExtractionStatus::Pending;
+        auto r = repo->insertDocument(doc);
+        REQUIRE((r.has_value()));
+        docIds.push_back(r.value());
+    }
+
+    {
+        ContentIndexWriter writer(repo);
+        std::atomic<int> next{0};
+        std::mutex futMutex;
+        std::vector<std::future<Result<void>>> collected;
+        std::vector<std::thread> submitters;
+        for (int t = 0; t < 6; ++t) {
+            submitters.emplace_back([&]() {
+                while (true) {
+                    int i = next.fetch_add(1);
+                    if (i >= kDocs)
+                        break;
+                    std::vector<BatchContentEntry> chunk{makeBatchContentEntry(
+                        docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
+                        "Content body " + std::to_string(i))};
+                    auto fut = writer.submit(std::move(chunk));
+                    std::lock_guard<std::mutex> lk(futMutex);
+                    collected.push_back(std::move(fut));
+                }
+            });
+        }
+        for (auto& th : submitters)
+            th.join();
+        for (auto& f : collected) {
+            auto r = f.get();
+            CHECK((r.has_value()));
+        }
+    }
+
+    // Every document is now FTS-indexed after the writer drains.
+    for (int i = 0; i < kDocs; ++i) {
+        auto fts = repo->hasFtsEntry(docIds[static_cast<size_t>(i)]);
+        REQUIRE((fts.has_value()));
+        CHECK((fts.value()));
     }
 
     pool->shutdown();

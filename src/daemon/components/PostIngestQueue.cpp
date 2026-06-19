@@ -1307,27 +1307,27 @@ std::shared_ptr<std::vector<std::byte>> PostIngestQueue::getOrLoadDispatchConten
 }
 
 void PostIngestQueue::dispatchNonEmbeddingStages(
-    const PreparedMetadataEntry& prepared, std::shared_ptr<std::vector<std::byte>> contentBytes,
-    DispatchTimingSet& timings) {
-    if (prepared.shouldDispatchKg) {
+    const PreparedMetadataEntry& prepared, const PreparedDispatchPlan& plan,
+    std::shared_ptr<std::vector<std::byte>> contentBytes, DispatchTimingSet& timings) {
+    if (plan.dispatchKg) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
                             std::vector<std::string>(prepared.tags), contentBytes);
         timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
-    if (prepared.shouldDispatchSymbol) {
+    if (plan.dispatchSymbol) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                                prepared.symbolLanguage, contentBytes);
+                                plan.symbolLanguage, contentBytes);
         timings.symbolDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
-    if (prepared.shouldDispatchEntity) {
+    if (plan.dispatchEntity) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.filePath,
                                 prepared.extension, contentBytes);
         timings.entityDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
-    if (prepared.shouldDispatchTitle) {
+    if (plan.dispatchTitle) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
                                prepared.fileName, prepared.filePath, prepared.language,
@@ -3297,7 +3297,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                                        : meta_->batchInsertContentAndIndex(chunk);
                 if (!batchResult) {
                     spdlog::error("[PostIngestQueue] Batch DB write failed for {} documents: {}",
-                                  chunk.size(), batchResult.error().message);
+                                  chunkSize, batchResult.error().message);
                     if (batchResult.error().message.find("database is locked") !=
                         std::string::npos) {
                         TuneAdvisor::reportDbLockError();
@@ -3397,9 +3397,14 @@ PostIngestQueue::PreparedDispatchPlan
 PostIngestQueue::buildDispatchPlan(const PreparedMetadataEntry& prepared, bool embedStageActive,
                                    bool hasEmbedQueue) const {
     return PreparedDispatchPlan{
+        .dispatchKg = prepared.shouldDispatchKg,
+        .dispatchSymbol = prepared.shouldDispatchSymbol,
+        .dispatchEntity = prepared.shouldDispatchEntity,
+        .dispatchTitle = prepared.shouldDispatchTitle,
         .dispatchEmbed = hasEmbedQueue && embedStageActive && prepared.shouldDispatchEmbed,
         .loadContentForNonEmbedding = !prepared.contentBytes && (prepared.shouldDispatchSymbol ||
                                                                  prepared.shouldDispatchEntity),
+        .symbolLanguage = prepared.symbolLanguage,
     };
 }
 
@@ -3564,7 +3569,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             contentBytes = getOrLoadDispatchContent(prepared.hash, contentByHash);
             dispatchTimings.contentLoad.add(std::chrono::steady_clock::now() - contentLoadStart);
         }
-        dispatchNonEmbeddingStages(prepared, contentBytes, dispatchTimings);
+        dispatchNonEmbeddingStages(prepared, dispatchPlan, contentBytes, dispatchTimings);
         const auto postConsumedStart = std::chrono::steady_clock::now();
         InternalEventBus::instance().incPostConsumed();
         dispatchTimings.postConsumed.add(std::chrono::steady_clock::now() - postConsumedStart);

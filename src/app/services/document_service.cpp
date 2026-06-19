@@ -656,6 +656,107 @@ buildIngestSnapshotRecord(const StoreDocumentRequest& req, const metadata::Docum
     return snapshotRecord;
 }
 
+// Build the DocumentInfo for a store(): path/name/extension, size, MIME detection (extension →
+// magic-number → buffer sniff), timestamps, and path-derived fields. Removes the inline temp file
+// (if any) after MIME detection, which needs the file to still exist. Behavior-preserving
+// extraction of the store() metadata-prepare block.
+inline metadata::DocumentInfo
+buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
+                  const std::string& hash, const std::optional<std::filesystem::path>& tmpToRemove,
+                  std::chrono::system_clock::time_point now) {
+    metadata::DocumentInfo info;
+    std::filesystem::path p = usePath;
+    // When content is provided directly, use the logical name as the canonical path so
+    // tree indexing and session diffs work for raw-text documents too.
+    if (!req.path.empty()) {
+        info.filePath = p.string();
+        // Use explicit name if provided, otherwise derive from path
+        if (!req.name.empty()) {
+            info.fileName = req.name;
+            std::filesystem::path np = req.name;
+            info.fileExtension = np.extension().string();
+        } else {
+            info.fileName = p.filename().string();
+            info.fileExtension = p.extension().string();
+        }
+    } else {
+        // Prefer the provided document name as both filePath and fileName
+        info.filePath = req.name;
+        info.fileName = req.name;
+        std::filesystem::path np = req.name;
+        info.fileExtension = np.extension().string();
+    }
+    std::error_code ec;
+    info.fileSize = static_cast<int64_t>(
+        std::filesystem::exists(p, ec) ? std::filesystem::file_size(p, ec) : req.content.size());
+    info.sha256Hash = hash;
+    // Detect MIME when not provided or generic
+    info.mimeType = !req.mimeType.empty() ? req.mimeType : "";
+    if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+        bool triedDetection = false;
+        if (!info.fileExtension.empty()) {
+            info.mimeType =
+                yams::detection::FileTypeDetector::getMimeTypeFromExtension(info.fileExtension);
+            if (!info.mimeType.empty() && info.mimeType != "application/octet-stream") {
+                triedDetection = true;
+            }
+        }
+        if (!triedDetection) {
+            try {
+                (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                auto& det = yams::detection::FileTypeDetector::instance();
+                if (auto sig = det.detectFromFile(p)) {
+                    if (!sig.value().mimeType.empty())
+                        info.mimeType = sig.value().mimeType;
+                }
+                if (info.mimeType.empty()) {
+                    const auto& extForMime =
+                        info.fileExtension.empty() ? p.extension().string() : info.fileExtension;
+                    info.mimeType =
+                        yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
+                }
+            } catch (...) {
+                // fallback below
+            }
+        }
+    }
+    if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+        // For extensionless inline content, sniff the provided bytes instead of
+        // assuming everything piped on stdin is text.
+        if (!req.content.empty() && info.fileExtension.empty()) {
+            try {
+                (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                auto& det = yams::detection::FileTypeDetector::instance();
+                auto bytes = std::as_bytes(std::span(req.content.data(), req.content.size()));
+                if (auto sig = det.detectFromBuffer(bytes)) {
+                    info.mimeType = sig.value().mimeType;
+                }
+            } catch (...) {
+            }
+        } else if (info.mimeType.empty())
+            info.mimeType = "application/octet-stream";
+    }
+
+    // Clean up temp file after MIME detection (needs the file to exist)
+    if (tmpToRemove) {
+        std::error_code rmEc;
+        std::filesystem::remove(*tmpToRemove, rmEc);
+    }
+
+    using std::chrono::floor;
+    using namespace std::chrono;
+    auto now_s = floor<seconds>(now);
+    info.createdTime = now_s;
+    info.modifiedTime = now_s;
+    info.indexedTime = now_s;
+    info.contentExtracted = isTextMime(info.mimeType);
+    info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
+                                                  : metadata::ExtractionStatus::Pending;
+
+    metadata::populatePathDerivedFields(info);
+    return info;
+}
+
 // Basic "tags" extraction heuristic from metadata rows
 inline std::vector<std::string>
 extractTags(const std::unordered_map<std::string, yams::metadata::MetadataValue>& all) {
@@ -1318,101 +1419,8 @@ public:
         // Best-effort: insert/update metadata repository entry
         if (ctx_.metadataRepo) {
             const auto metadataPrepareStart = std::chrono::steady_clock::now();
-            metadata::DocumentInfo info;
-            std::filesystem::path p = usePath;
-            // When content is provided directly, use the logical name as the canonical path so
-            // tree indexing and session diffs work for raw-text documents too.
-            if (!req.path.empty()) {
-                info.filePath = p.string();
-                // Use explicit name if provided, otherwise derive from path
-                if (!req.name.empty()) {
-                    info.fileName = req.name;
-                    std::filesystem::path np = req.name;
-                    info.fileExtension = np.extension().string();
-                } else {
-                    info.fileName = p.filename().string();
-                    info.fileExtension = p.extension().string();
-                }
-            } else {
-                // Prefer the provided document name as both filePath and fileName
-                info.filePath = req.name;
-                info.fileName = req.name;
-                std::filesystem::path np = req.name;
-                info.fileExtension = np.extension().string();
-            }
-            std::error_code ec;
-            info.fileSize = static_cast<int64_t>(std::filesystem::exists(p, ec)
-                                                     ? std::filesystem::file_size(p, ec)
-                                                     : req.content.size());
-            info.sha256Hash = out.hash;
-            // Detect MIME when not provided or generic
-            info.mimeType = !req.mimeType.empty() ? req.mimeType : "";
-            if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-                bool triedDetection = false;
-                if (!info.fileExtension.empty()) {
-                    info.mimeType = yams::detection::FileTypeDetector::getMimeTypeFromExtension(
-                        info.fileExtension);
-                    if (!info.mimeType.empty() && info.mimeType != "application/octet-stream") {
-                        triedDetection = true;
-                    }
-                }
-                if (!triedDetection) {
-                    try {
-                        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-                        auto& det = yams::detection::FileTypeDetector::instance();
-                        if (auto sig = det.detectFromFile(p)) {
-                            if (!sig.value().mimeType.empty())
-                                info.mimeType = sig.value().mimeType;
-                        }
-                        if (info.mimeType.empty()) {
-                            const auto& extForMime = info.fileExtension.empty()
-                                                         ? p.extension().string()
-                                                         : info.fileExtension;
-                            info.mimeType =
-                                yams::detection::FileTypeDetector::getMimeTypeFromExtension(
-                                    extForMime);
-                        }
-                    } catch (...) {
-                        // fallback below
-                    }
-                }
-            }
-            if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-                // For extensionless inline content, sniff the provided bytes instead of
-                // assuming everything piped on stdin is text.
-                if (!req.content.empty() && info.fileExtension.empty()) {
-                    try {
-                        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-                        auto& det = yams::detection::FileTypeDetector::instance();
-                        auto bytes =
-                            std::as_bytes(std::span(req.content.data(), req.content.size()));
-                        if (auto sig = det.detectFromBuffer(bytes)) {
-                            info.mimeType = sig.value().mimeType;
-                        }
-                    } catch (...) {
-                    }
-                } else if (info.mimeType.empty())
-                    info.mimeType = "application/octet-stream";
-            }
-
-            // Clean up temp file after MIME detection (needs the file to exist)
-            if (tmpToRemove) {
-                std::error_code ec;
-                std::filesystem::remove(*tmpToRemove, ec);
-            }
-
-            using std::chrono::floor;
-            using namespace std::chrono;
             auto now = std::chrono::system_clock::now();
-            auto now_s = floor<seconds>(now);
-            info.createdTime = now_s;
-            info.modifiedTime = now_s;
-            info.indexedTime = now_s;
-            info.contentExtracted = isTextMime(info.mimeType);
-            info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
-                                                          : metadata::ExtractionStatus::Pending;
-
-            metadata::populatePathDerivedFields(info);
+            auto info = buildDocumentInfo(req, usePath, out.hash, tmpToRemove, now);
 
             auto tagPairs = buildMetadataTagPairs(md);
             auto snapshotRecord = buildIngestSnapshotRecord(req, info, snapshotId, now);
@@ -1430,295 +1438,304 @@ public:
                 return Error{ErrorCode::InternalError,
                              "metadata insert writer unavailable in AppContext"};
             }
-            metadata::BatchDocumentInsert insertRecord{info, std::move(tagPairs),
-                                                       std::move(snapshotRecord),
-                                                       req.combineMetadataPathTree};
+            metadata::BatchDocumentInsert insertRecord{
+                info, std::move(tagPairs), std::move(snapshotRecord), req.combineMetadataPathTree};
             auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
             if (ins) {
                 int64_t docId = ins.value();
                 out.documentId = docId;
 
-                // Path-series versioning (best-effort)
-                const auto versioningStart = std::chrono::steady_clock::now();
-                try {
-                    auto* writeCoord = (ctx_.service_manager)
-                                           ? ctx_.service_manager->getWriteCoordinator()
-                                           : nullptr;
-                    if (writeCoord) {
-                        int64_t maxVersion = 0;
-                        std::optional<int64_t> prevLatestId;
-                        auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
-                        if (priorDoc && priorDoc.value().has_value()) {
-                            auto& prior = priorDoc.value().value();
-                            if (prior.sha256Hash != info.sha256Hash) {
-                                prevLatestId = prior.id;
-                                auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
-                                if (verRes && verRes.value().has_value()) {
-                                    try {
-                                        maxVersion = verRes.value().value().asInteger();
-                                    } catch (const std::exception& ex) {
-                                        spdlog::debug(
-                                            "Ignoring invalid prior version metadata for {}: {}",
-                                            prior.id, ex.what());
-                                    } catch (...) {
-                                        spdlog::debug(
-                                            "Ignoring invalid prior version metadata for {}",
-                                            prior.id);
-                                    }
-                                }
-                            }
-                        }
-                        if (!prevLatestId.has_value()) {
-                            auto prevListRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo,
-                                                                                 info.filePath);
-                            if (prevListRes) {
-                                for (const auto& d : prevListRes.value()) {
-                                    if (d.id == docId)
-                                        continue;
-                                    auto latestRes =
-                                        ctx_.metadataRepo->getMetadata(d.id, "is_latest");
-                                    if (latestRes && latestRes.value().has_value() &&
-                                        latestRes.value().value().asBoolean()) {
-                                        prevLatestId = d.id;
-                                    }
-                                    auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
-                                    if (verRes && verRes.value().has_value()) {
-                                        try {
-                                            int64_t v = verRes.value().value().asInteger();
-                                            if (v > maxVersion)
-                                                maxVersion = v;
-                                        } catch (const std::exception& ex) {
-                                            spdlog::debug("Ignoring invalid candidate version "
-                                                          "metadata for {}: {}",
-                                                          d.id, ex.what());
-                                        } catch (...) {
-                                            spdlog::debug("Ignoring invalid candidate version "
-                                                          "metadata for {}",
-                                                          d.id);
-                                        }
-                                    }
-                                    if (prevLatestId.has_value())
-                                        break;
-                                }
-                            }
-                        }
-
-                        int64_t newVersion = prevLatestId.has_value() ? maxVersion + 1 : 1;
-
-                        auto& vc = getVersioningCoalescer();
-                        if (prevLatestId.has_value()) {
-                            vc.addOp(daemon::SetMetadataBatchOp{{{*prevLatestId, "is_latest",
-                                                                  metadata::MetadataValue(false)}}},
-                                     writeCoord);
-
-                            metadata::DocumentRelationship rel;
-                            rel.parentId = *prevLatestId;
-                            rel.childId = docId;
-                            rel.relationshipType = metadata::RelationshipType::VersionOf;
-                            rel.createdTime = std::chrono::floor<std::chrono::seconds>(
-                                std::chrono::system_clock::now());
-                            vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, writeCoord);
-                        }
-
-                        vc.addOp(
-                            daemon::SetMetadataBatchOp{
-                                {{docId, "version", metadata::MetadataValue(newVersion)},
-                                 {docId, "is_latest", metadata::MetadataValue(true)},
-                                 {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
-                            writeCoord);
-                    } else {
-                        auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
-                        if (priorDoc && priorDoc.value().has_value()) {
-                            auto& prior = priorDoc.value().value();
-                            if (prior.sha256Hash != info.sha256Hash) {
-                                metadata::applyPathSeriesVersioning(*ctx_.metadataRepo,
-                                                                    info.filePath, docId, prior);
-                            }
-                        } else {
-                            metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
-                                                                docId, std::nullopt);
-                        }
-                    }
-                } catch (const std::exception& ex) {
-                    spdlog::debug("Failed to update versioning metadata for {}: {}", info.filePath,
-                                  ex.what());
-                } catch (...) {
-                    spdlog::debug("Failed to update versioning metadata for {}", info.filePath);
-                }
-                recordDocumentStorePhase("versioning", versioningStart);
-
-                // Update path tree for this document (best-effort, separate txn)
-                const auto pathTreeStart = std::chrono::steady_clock::now();
-                if (!req.combineMetadataPathTree) {
-                    try {
-                        auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
-                            info, docId, true /* isNewDocument */, std::span<const float>());
-                        if (!treeRes) {
-                            spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
-                                          treeRes.error().message);
-                        }
-                    } catch (const std::exception& ex) {
-                        // Non-fatal: path tree update is opportunistic
-                        spdlog::debug("Exception updating path tree for {}: {}", info.filePath,
-                                      ex.what());
-                    } catch (...) {
-                        // Non-fatal: path tree update is opportunistic
-                        spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
-                    }
-                }
-                recordDocumentStorePhase("path_tree", pathTreeStart);
-
-                // Keep the lightweight corpus graph in sync for single-document stores so
-                // embedded/mobile graph queries can resolve the stored document immediately.
-                const auto kgSyncStart = std::chrono::steady_clock::now();
-                if (ctx_.kgStore) {
-                    try {
-                        auto* writeCoord = (ctx_.service_manager)
-                                               ? ctx_.service_manager->getWriteCoordinator()
-                                               : nullptr;
-                        if (writeCoord) {
-                            std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
-                            std::string docNodeKey = std::string("doc:") + info.sha256Hash;
-                            std::string snapshotPathKey =
-                                std::string("path:") + snapshotId + ":" + info.filePath;
-                            std::string logicalPathKey =
-                                std::string("path:logical:") + info.filePath;
-
-                            metadata::KGNode blobNode;
-                            blobNode.nodeKey = blobNodeKey;
-                            blobNode.label = std::string(info.sha256Hash).substr(0, 16) + "...";
-                            blobNode.type = "blob";
-
-                            metadata::KGNode docNode;
-                            docNode.nodeKey = docNodeKey;
-                            docNode.label = info.filePath;
-                            docNode.type = "document";
-
-                            metadata::KGNode snapshotPathNode;
-                            snapshotPathNode.nodeKey = snapshotPathKey;
-                            snapshotPathNode.label = info.filePath;
-                            snapshotPathNode.type = "path";
-                            snapshotPathNode.properties =
-                                std::string("{\"snapshot_id\":\"") + snapshotId + "\",\"path\":\"" +
-                                info.filePath + "\",\"is_directory\":false}";
-
-                            metadata::KGNode logicalPathNode;
-                            logicalPathNode.nodeKey = logicalPathKey;
-                            logicalPathNode.label = info.filePath;
-                            logicalPathNode.type = "path";
-                            logicalPathNode.properties =
-                                std::string("{\"path\":\"") + info.filePath +
-                                "\",\"is_directory\":false,\"logical\":true}";
-
-                            auto& kc = getKgSyncCoalescer();
-                            kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
-                                                            std::move(snapshotPathNode),
-                                                            std::move(logicalPathNode)}},
-                                     writeCoord);
-
-                            daemon::DeferredEdgeOp pathVerEdge;
-                            pathVerEdge.srcNodeKey = logicalPathKey;
-                            pathVerEdge.dstNodeKey = snapshotPathKey;
-                            pathVerEdge.relation = "path_version";
-
-                            daemon::DeferredEdgeOp hasVerEdge;
-                            hasVerEdge.srcNodeKey = snapshotPathKey;
-                            hasVerEdge.dstNodeKey = blobNodeKey;
-                            hasVerEdge.relation = "has_version";
-                            hasVerEdge.properties = "{\"diff_id\":0}";
-
-                            kc.addOp(daemon::AddDeferredEdgesOp{{std::move(pathVerEdge),
-                                                                 std::move(hasVerEdge)}},
-                                     writeCoord);
-                        } else {
-                            auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
-                            if (!blobNodeResult) {
-                                spdlog::debug("Failed to ensure KG blob node for {}: {}",
-                                              info.sha256Hash.substr(0, 8),
-                                              blobNodeResult.error().message);
-                            } else {
-                                metadata::KGNode docNode;
-                                docNode.nodeKey = "doc:" + info.sha256Hash;
-                                docNode.label = info.filePath;
-                                docNode.type = "document";
-                                auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
-                                if (!docNodeIds) {
-                                    spdlog::debug("Failed to upsert KG doc node for {}: {}",
-                                                  info.sha256Hash.substr(0, 8),
-                                                  docNodeIds.error().message);
-                                }
-
-                                metadata::PathNodeDescriptor pathDesc;
-                                pathDesc.snapshotId = snapshotId;
-                                pathDesc.path = info.filePath;
-                                pathDesc.isDirectory = false;
-
-                                auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
-                                if (!pathNodeResult) {
-                                    spdlog::debug("Failed to ensure KG path node for {}: {}",
-                                                  info.filePath, pathNodeResult.error().message);
-                                } else {
-                                    auto linkResult = ctx_.kgStore->linkPathVersion(
-                                        pathNodeResult.value(), blobNodeResult.value(), 0);
-                                    if (!linkResult) {
-                                        spdlog::debug("Failed to link KG path version for "
-                                                      "{}: {}",
-                                                      info.filePath, linkResult.error().message);
-                                    }
-                                }
-                            }
-                        }
-                    } catch (const std::exception& ex) {
-                        spdlog::warn("Exception syncing KG for {}: {}", info.filePath, ex.what());
-                    }
-                }
-                recordDocumentStorePhase("kg_sync", kgSyncStart);
-
-                // Index document terms for fuzzy search through the centralized writer lane
-                // (best-effort; lookup remains read-only).
-                const auto fuzzyStart = std::chrono::steady_clock::now();
-                try {
-                    auto* writeCoord = (ctx_.service_manager)
-                                           ? ctx_.service_manager->getWriteCoordinator()
-                                           : nullptr;
-                    enqueueDocumentTermsForFuzzySearch(writeCoord, info);
-                } catch (const std::exception& ex) {
-                    spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", info.filePath,
-                                  ex.what());
-                }
-                recordDocumentStorePhase("fuzzy_enqueue", fuzzyStart);
-
-                // Synchronously persist extracted text for direct text adds so sync callers can
-                // search immediately without waiting for post-ingest indexing.
-                const auto inlineContentStart = std::chrono::steady_clock::now();
-                if (!req.skipInlineContentIndexing && isTextMime(info.mimeType)) {
-                    std::string extractedText;
-                    std::string extractionMethod;
-                    if (!req.content.empty()) {
-                        extractedText = req.content;
-                        extractionMethod = "inline_store_sync";
-                    } else {
-                        std::ifstream ifs(usePath, std::ios::binary);
-                        if (ifs.good()) {
-                            std::ostringstream oss;
-                            oss << ifs.rdbuf();
-                            extractedText = oss.str();
-                            extractionMethod = "text_store_sync";
-                        }
-                    }
-                    if (!extractedText.empty()) {
-                        (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId,
-                                                                info.fileName, extractedText,
-                                                                info.mimeType, extractionMethod);
-                    }
-                }
-                recordDocumentStorePhase("inline_content_index", inlineContentStart);
+                applyStoreVersioning(info, docId);
+                applyStorePathTree(req, info, docId);
+                syncStoreKnowledgeGraph(info, snapshotId);
+                enqueueStoreFuzzyTerms(info);
+                applyStoreInlineContentIndex(req, info, docId, usePath);
             }
         }
 
         recordDocumentStorePhase("store_total", storeTotalStart);
         return out;
+    }
+
+    // --- store() side-effect helpers (behavior-preserving extractions) ---
+
+    void applyStoreVersioning(const metadata::DocumentInfo& info, int64_t docId) {
+        // Path-series versioning (best-effort)
+        const auto versioningStart = std::chrono::steady_clock::now();
+        try {
+            auto* writeCoord =
+                (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
+            if (writeCoord) {
+                int64_t maxVersion = 0;
+                std::optional<int64_t> prevLatestId;
+                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                if (priorDoc && priorDoc.value().has_value()) {
+                    auto& prior = priorDoc.value().value();
+                    if (prior.sha256Hash != info.sha256Hash) {
+                        prevLatestId = prior.id;
+                        auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
+                        if (verRes && verRes.value().has_value()) {
+                            try {
+                                maxVersion = verRes.value().value().asInteger();
+                            } catch (const std::exception& ex) {
+                                spdlog::debug("Ignoring invalid prior version metadata for {}: {}",
+                                              prior.id, ex.what());
+                            } catch (...) {
+                                spdlog::debug("Ignoring invalid prior version metadata for {}",
+                                              prior.id);
+                            }
+                        }
+                    }
+                }
+                if (!prevLatestId.has_value()) {
+                    auto prevListRes =
+                        metadata::queryDocumentsByPattern(*ctx_.metadataRepo, info.filePath);
+                    if (prevListRes) {
+                        for (const auto& d : prevListRes.value()) {
+                            if (d.id == docId)
+                                continue;
+                            auto latestRes = ctx_.metadataRepo->getMetadata(d.id, "is_latest");
+                            if (latestRes && latestRes.value().has_value() &&
+                                latestRes.value().value().asBoolean()) {
+                                prevLatestId = d.id;
+                            }
+                            auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
+                            if (verRes && verRes.value().has_value()) {
+                                try {
+                                    int64_t v = verRes.value().value().asInteger();
+                                    if (v > maxVersion)
+                                        maxVersion = v;
+                                } catch (const std::exception& ex) {
+                                    spdlog::debug("Ignoring invalid candidate version "
+                                                  "metadata for {}: {}",
+                                                  d.id, ex.what());
+                                } catch (...) {
+                                    spdlog::debug("Ignoring invalid candidate version "
+                                                  "metadata for {}",
+                                                  d.id);
+                                }
+                            }
+                            if (prevLatestId.has_value())
+                                break;
+                        }
+                    }
+                }
+
+                int64_t newVersion = prevLatestId.has_value() ? maxVersion + 1 : 1;
+
+                auto& vc = getVersioningCoalescer();
+                if (prevLatestId.has_value()) {
+                    vc.addOp(daemon::SetMetadataBatchOp{{{*prevLatestId, "is_latest",
+                                                          metadata::MetadataValue(false)}}},
+                             writeCoord);
+
+                    metadata::DocumentRelationship rel;
+                    rel.parentId = *prevLatestId;
+                    rel.childId = docId;
+                    rel.relationshipType = metadata::RelationshipType::VersionOf;
+                    rel.createdTime =
+                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+                    vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, writeCoord);
+                }
+
+                vc.addOp(
+                    daemon::SetMetadataBatchOp{
+                        {{docId, "version", metadata::MetadataValue(newVersion)},
+                         {docId, "is_latest", metadata::MetadataValue(true)},
+                         {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
+                    writeCoord);
+            } else {
+                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                if (priorDoc && priorDoc.value().has_value()) {
+                    auto& prior = priorDoc.value().value();
+                    if (prior.sha256Hash != info.sha256Hash) {
+                        metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
+                                                            docId, prior);
+                    }
+                } else {
+                    metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath, docId,
+                                                        std::nullopt);
+                }
+            }
+        } catch (const std::exception& ex) {
+            spdlog::debug("Failed to update versioning metadata for {}: {}", info.filePath,
+                          ex.what());
+        } catch (...) {
+            spdlog::debug("Failed to update versioning metadata for {}", info.filePath);
+        }
+        recordDocumentStorePhase("versioning", versioningStart);
+    }
+
+    void applyStorePathTree(const StoreDocumentRequest& req, const metadata::DocumentInfo& info,
+                            int64_t docId) {
+        // Update path tree for this document (best-effort, separate txn)
+        const auto pathTreeStart = std::chrono::steady_clock::now();
+        if (!req.combineMetadataPathTree) {
+            try {
+                auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
+                    info, docId, true /* isNewDocument */, std::span<const float>());
+                if (!treeRes) {
+                    spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
+                                  treeRes.error().message);
+                }
+            } catch (const std::exception& ex) {
+                // Non-fatal: path tree update is opportunistic
+                spdlog::debug("Exception updating path tree for {}: {}", info.filePath, ex.what());
+            } catch (...) {
+                // Non-fatal: path tree update is opportunistic
+                spdlog::debug("Unknown exception updating path tree for {}", info.filePath);
+            }
+        }
+        recordDocumentStorePhase("path_tree", pathTreeStart);
+    }
+
+    void syncStoreKnowledgeGraph(const metadata::DocumentInfo& info,
+                                 const std::string& snapshotId) {
+        // Keep the lightweight corpus graph in sync for single-document stores so
+        // embedded/mobile graph queries can resolve the stored document immediately.
+        const auto kgSyncStart = std::chrono::steady_clock::now();
+        if (ctx_.kgStore) {
+            try {
+                auto* writeCoord =
+                    (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
+                if (writeCoord) {
+                    std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
+                    std::string docNodeKey = std::string("doc:") + info.sha256Hash;
+                    std::string snapshotPathKey =
+                        std::string("path:") + snapshotId + ":" + info.filePath;
+                    std::string logicalPathKey = std::string("path:logical:") + info.filePath;
+
+                    metadata::KGNode blobNode;
+                    blobNode.nodeKey = blobNodeKey;
+                    blobNode.label = std::string(info.sha256Hash).substr(0, 16) + "...";
+                    blobNode.type = "blob";
+
+                    metadata::KGNode docNode;
+                    docNode.nodeKey = docNodeKey;
+                    docNode.label = info.filePath;
+                    docNode.type = "document";
+
+                    metadata::KGNode snapshotPathNode;
+                    snapshotPathNode.nodeKey = snapshotPathKey;
+                    snapshotPathNode.label = info.filePath;
+                    snapshotPathNode.type = "path";
+                    snapshotPathNode.properties = std::string("{\"snapshot_id\":\"") + snapshotId +
+                                                  "\",\"path\":\"" + info.filePath +
+                                                  "\",\"is_directory\":false}";
+
+                    metadata::KGNode logicalPathNode;
+                    logicalPathNode.nodeKey = logicalPathKey;
+                    logicalPathNode.label = info.filePath;
+                    logicalPathNode.type = "path";
+                    logicalPathNode.properties = std::string("{\"path\":\"") + info.filePath +
+                                                 "\",\"is_directory\":false,\"logical\":true}";
+
+                    auto& kc = getKgSyncCoalescer();
+                    kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
+                                                    std::move(snapshotPathNode),
+                                                    std::move(logicalPathNode)}},
+                             writeCoord);
+
+                    daemon::DeferredEdgeOp pathVerEdge;
+                    pathVerEdge.srcNodeKey = logicalPathKey;
+                    pathVerEdge.dstNodeKey = snapshotPathKey;
+                    pathVerEdge.relation = "path_version";
+
+                    daemon::DeferredEdgeOp hasVerEdge;
+                    hasVerEdge.srcNodeKey = snapshotPathKey;
+                    hasVerEdge.dstNodeKey = blobNodeKey;
+                    hasVerEdge.relation = "has_version";
+                    hasVerEdge.properties = "{\"diff_id\":0}";
+
+                    kc.addOp(
+                        daemon::AddDeferredEdgesOp{{std::move(pathVerEdge), std::move(hasVerEdge)}},
+                        writeCoord);
+                } else {
+                    auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
+                    if (!blobNodeResult) {
+                        spdlog::debug("Failed to ensure KG blob node for {}: {}",
+                                      info.sha256Hash.substr(0, 8), blobNodeResult.error().message);
+                    } else {
+                        metadata::KGNode docNode;
+                        docNode.nodeKey = "doc:" + info.sha256Hash;
+                        docNode.label = info.filePath;
+                        docNode.type = "document";
+                        auto docNodeIds = ctx_.kgStore->upsertNodes({std::move(docNode)});
+                        if (!docNodeIds) {
+                            spdlog::debug("Failed to upsert KG doc node for {}: {}",
+                                          info.sha256Hash.substr(0, 8), docNodeIds.error().message);
+                        }
+
+                        metadata::PathNodeDescriptor pathDesc;
+                        pathDesc.snapshotId = snapshotId;
+                        pathDesc.path = info.filePath;
+                        pathDesc.isDirectory = false;
+
+                        auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+                        if (!pathNodeResult) {
+                            spdlog::debug("Failed to ensure KG path node for {}: {}", info.filePath,
+                                          pathNodeResult.error().message);
+                        } else {
+                            auto linkResult = ctx_.kgStore->linkPathVersion(
+                                pathNodeResult.value(), blobNodeResult.value(), 0);
+                            if (!linkResult) {
+                                spdlog::debug("Failed to link KG path version for "
+                                              "{}: {}",
+                                              info.filePath, linkResult.error().message);
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception& ex) {
+                spdlog::warn("Exception syncing KG for {}: {}", info.filePath, ex.what());
+            }
+        }
+        recordDocumentStorePhase("kg_sync", kgSyncStart);
+    }
+
+    void enqueueStoreFuzzyTerms(const metadata::DocumentInfo& info) {
+        // Index document terms for fuzzy search through the centralized writer lane
+        // (best-effort; lookup remains read-only).
+        const auto fuzzyStart = std::chrono::steady_clock::now();
+        try {
+            auto* writeCoord =
+                (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
+            enqueueDocumentTermsForFuzzySearch(writeCoord, info);
+        } catch (const std::exception& ex) {
+            spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", info.filePath, ex.what());
+        }
+        recordDocumentStorePhase("fuzzy_enqueue", fuzzyStart);
+    }
+
+    void applyStoreInlineContentIndex(const StoreDocumentRequest& req,
+                                      const metadata::DocumentInfo& info, int64_t docId,
+                                      const std::string& usePath) {
+        // Synchronously persist extracted text for direct text adds so sync callers can
+        // search immediately without waiting for post-ingest indexing.
+        const auto inlineContentStart = std::chrono::steady_clock::now();
+        if (!req.skipInlineContentIndexing && isTextMime(info.mimeType)) {
+            std::string extractedText;
+            std::string extractionMethod;
+            if (!req.content.empty()) {
+                extractedText = req.content;
+                extractionMethod = "inline_store_sync";
+            } else {
+                std::ifstream ifs(usePath, std::ios::binary);
+                if (ifs.good()) {
+                    std::ostringstream oss;
+                    oss << ifs.rdbuf();
+                    extractedText = oss.str();
+                    extractionMethod = "text_store_sync";
+                }
+            }
+            if (!extractedText.empty()) {
+                (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId, info.fileName,
+                                                        extractedText, info.mimeType,
+                                                        extractionMethod);
+            }
+        }
+        recordDocumentStorePhase("inline_content_index", inlineContentStart);
     }
 
     // Normalize common prefixed hash forms like "sha256:<hex>"

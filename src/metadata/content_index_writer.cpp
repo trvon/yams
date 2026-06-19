@@ -56,7 +56,17 @@ void ContentIndexWriter::run() {
             queue_.pop_front();
         }
 
-        auto result = repo_->batchInsertContentAndIndex(item.entries);
+        // Guard the (potentially throwing) commit so an unexpected exception cannot terminate the
+        // worker thread or strand the in-flight promise.
+        Result<void> result = Result<void>();
+        try {
+            result = repo_->batchInsertContentAndIndex(item.entries);
+        } catch (const std::exception& ex) {
+            result = Error{ErrorCode::InternalError, ex.what()};
+        } catch (...) {
+            result =
+                Error{ErrorCode::InternalError, "content index insert threw unknown exception"};
+        }
         item.promise.set_value(std::move(result));
     }
 

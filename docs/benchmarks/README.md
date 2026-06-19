@@ -10,7 +10,7 @@ Each page answers three things:
 
 ## Benchmark Docs
 
-- [Performance Report](performance_report.md) - canonical local benchmark summary and historical comparisons.
+- [Performance Report](performance_report.md) - canonical local benchmark summary, live-mirror ingestion/retrieval refresh, and historical comparisons.
 - [Tree Builder](performance_report.md#tree-builder) - tree construction throughput.
 - [WriteCoordinator](performance_report.md#writecoordinator) - ingest apply profile.
 - [LongMemEval_S Retrieval Quality Baseline](longmemeval_s_baseline.md) - dataset statistics and retrieval-quality baselines.

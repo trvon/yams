@@ -21,7 +21,8 @@ std::future<Result<int64_t>> readyFuture(Result<int64_t> result) {
 MetadataInsertWriter::MetadataInsertWriter(std::shared_ptr<MetadataRepository> repo)
     : MetadataInsertWriter(std::move(repo), Options{}) {}
 
-MetadataInsertWriter::MetadataInsertWriter(std::shared_ptr<MetadataRepository> repo, Options options)
+MetadataInsertWriter::MetadataInsertWriter(std::shared_ptr<MetadataRepository> repo,
+                                           Options options)
     : repo_(std::move(repo)), options_(options) {
     if (!repo_) {
         throw std::invalid_argument("MetadataInsertWriter requires a MetadataRepository");
@@ -95,21 +96,53 @@ void MetadataInsertWriter::run() {
             records.push_back(std::move(item.record));
         }
 
-        auto result = repo_->batchInsertDocumentsWithMetadata(records);
-
         const auto lastSequence = items.back().sequence;
-        if (result) {
+
+        // Do the (potentially throwing) batch insert inside a guard so an unexpected exception
+        // cannot terminate the worker thread or strand the in-flight promises.
+        bool batchThrew = false;
+        Result<std::vector<int64_t>> result = Error{ErrorCode::InternalError, "uninitialized"};
+        try {
+            result = repo_->batchInsertDocumentsWithMetadata(records);
+        } catch (const std::exception& ex) {
+            batchThrew = true;
+            spdlog::error("[MetadataInsertWriter] batch insert threw: {}", ex.what());
+        } catch (...) {
+            batchThrew = true;
+            spdlog::error("[MetadataInsertWriter] batch insert threw unknown exception");
+        }
+
+        if (!batchThrew && result) {
             const auto& ids = result.value();
             for (std::size_t i = 0; i < items.size(); ++i) {
-                if (i < ids.size()) {
-                    items[i].promise.set_value(Result<int64_t>(ids[i]));
-                } else {
-                    items[i].promise.set_value(Result<int64_t>(ErrorCode::InternalError));
+                items[i].promise.set_value(i < ids.size()
+                                               ? Result<int64_t>(ids[i])
+                                               : Result<int64_t>(ErrorCode::InternalError));
+            }
+        } else if (!batchThrew) {
+            // The batch transaction failed as a unit (e.g. one poison document rolling back its
+            // batch-mates). Retry each document individually so only the genuinely-failing document
+            // fails, preserving the pre-coalescing per-document isolation.
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                Result<int64_t> single = Error{ErrorCode::InternalError, "uninitialized"};
+                try {
+                    auto& rec = records[i];
+                    TreeSnapshotRecord* snap =
+                        rec.snapshot.has_value() ? &rec.snapshot.value() : nullptr;
+                    single = repo_->insertDocumentWithMetadata(rec.info, rec.tags, snap,
+                                                               rec.updatePathTreeInTransaction);
+                } catch (const std::exception& ex) {
+                    single = Error{ErrorCode::InternalError, ex.what()};
+                } catch (...) {
+                    single = Error{ErrorCode::InternalError, "insert threw unknown exception"};
                 }
+                items[i].promise.set_value(std::move(single));
             }
         } else {
+            // Worker exception: fulfill every in-flight promise so callers do not block forever.
             for (auto& item : items) {
-                item.promise.set_value(Result<int64_t>(result.error()));
+                item.promise.set_value(Result<int64_t>(
+                    Error{ErrorCode::InternalError, "metadata insert writer worker exception"}));
             }
         }
 
