@@ -308,6 +308,7 @@ public:
         std::string filePath;
         std::vector<std::string> tags;
         std::shared_ptr<std::vector<std::byte>> contentBytes;
+        std::chrono::steady_clock::time_point enqueuedAt{};
     };
     struct SymbolExtractionJob {
         std::string hash;

@@ -28,7 +28,8 @@ class IContentStore;
 
 namespace yams::metadata {
 class MetadataRepository;
-}
+class ContentIndexWriter;
+} // namespace yams::metadata
 
 namespace yams::extraction {
 class IContentExtractor;
@@ -147,6 +148,10 @@ public:
         std::uint64_t calls{0};
         std::uint64_t totalMs{0};
         std::uint64_t maxMs{0};
+        std::uint64_t totalUs{0};
+        std::uint64_t maxUs{0};
+        std::int64_t firstStartMs{0};
+        std::int64_t lastEndMs{0};
     };
 
     struct BatchMetrics {
@@ -158,6 +163,11 @@ public:
         std::uint64_t embedDocsEmitted{0};
         std::uint64_t embedPreparedDocsEmitted{0};
         std::uint64_t embedHashOnlyDocsEmitted{0};
+        std::uint64_t contentIndexCalls{0};
+        std::uint64_t contentIndexEntries{0};
+        std::uint64_t contentIndexChunks{0};
+        std::uint64_t contentIndexMaxEntries{0};
+        std::uint64_t contentIndexMaxChunkEntries{0};
     };
 
     struct MetricsSnapshot {
@@ -464,6 +474,7 @@ private:
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
+    std::unique_ptr<metadata::ContentIndexWriter> contentIndexWriter_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     std::shared_ptr<GraphComponent> graphComponent_;
@@ -623,6 +634,50 @@ private:
     /// Process batch with work-stealing parallelization (default)
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void recordTiming(const std::string& name, std::chrono::steady_clock::time_point start);
+    void recordTimingAggregate(const std::string& name, std::uint64_t calls, std::uint64_t totalUs,
+                               std::uint64_t maxUs);
+
+    struct DispatchTimingAccumulator {
+        std::uint64_t calls{0};
+        std::uint64_t totalUs{0};
+        std::uint64_t maxUs{0};
+
+        void add(std::chrono::steady_clock::duration elapsed);
+    };
+
+    struct DispatchTimingSet {
+        DispatchTimingAccumulator setupConfig;
+        DispatchTimingAccumulator setupChunker;
+        DispatchTimingAccumulator postConsumed;
+        DispatchTimingAccumulator embedPrepare;
+        DispatchTimingAccumulator embedEnqueue;
+        DispatchTimingAccumulator contentLoad;
+        DispatchTimingAccumulator kgDispatch;
+        DispatchTimingAccumulator symbolDispatch;
+        DispatchTimingAccumulator entityDispatch;
+        DispatchTimingAccumulator titleDispatch;
+    };
+
+    struct PreparedDispatchPlan {
+        bool dispatchKg{false};
+        bool dispatchSymbol{false};
+        bool dispatchEntity{false};
+        bool dispatchTitle{false};
+        bool dispatchEmbed{false};
+        bool loadContentForNonEmbedding{false};
+        std::string symbolLanguage;
+    };
+
+    PreparedDispatchPlan buildDispatchPlan(const PreparedMetadataEntry& prepared,
+                                           bool embedStageActive, bool hasEmbedQueue) const;
+    void recordDispatchTimingSet(const DispatchTimingSet& timings);
+    std::shared_ptr<std::vector<std::byte>> getOrLoadDispatchContent(
+        const std::string& hash,
+        std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>>& contentByHash);
+    void dispatchNonEmbeddingStages(const PreparedMetadataEntry& prepared,
+                                    const PreparedDispatchPlan& plan,
+                                    std::shared_ptr<std::vector<std::byte>> contentBytes,
+                                    DispatchTimingSet& timings);
 
     /// Snapshot stage config under locks (symbol extension map + entity providers)
     struct StageConfigSnapshot {
@@ -656,6 +711,11 @@ private:
     std::atomic<std::uint64_t> embedDocsEmitted_{0};
     std::atomic<std::uint64_t> embedPreparedDocsEmitted_{0};
     std::atomic<std::uint64_t> embedHashOnlyDocsEmitted_{0};
+    std::atomic<std::uint64_t> contentIndexCalls_{0};
+    std::atomic<std::uint64_t> contentIndexEntries_{0};
+    std::atomic<std::uint64_t> contentIndexChunks_{0};
+    std::atomic<std::uint64_t> contentIndexMaxEntries_{0};
+    std::atomic<std::uint64_t> contentIndexMaxChunkEntries_{0};
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};

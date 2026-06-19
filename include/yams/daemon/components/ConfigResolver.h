@@ -65,6 +65,11 @@ public:
         bool overridden{false};
     };
 
+    struct EmbeddingDispatchPolicy {
+        EmbeddingSelectionPolicy selection{};
+        EmbeddingChunkingPolicy chunking{};
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> maxClusters;
@@ -121,6 +126,7 @@ public:
         std::optional<std::uint32_t> symbolConcurrent;
         std::optional<std::uint32_t> entityConcurrent;
         std::optional<std::uint32_t> titleConcurrent;
+        std::optional<std::uint32_t> batchSize;
     };
 
     struct SimeonEncoderPolicy {
@@ -391,6 +397,15 @@ public:
     static EmbeddingChunkingPolicy resolveEmbeddingChunkingPolicy();
 
     /**
+     * @brief Resolve cached embedding dispatch policy for hot ingest dispatch paths.
+     *
+     * Combines selection and chunking policy resolution behind a short-lived cache so
+     * per-document dispatch batches do not repeatedly parse config. TuneAdvisor caps
+     * and stage masks remain live reads at call sites.
+     */
+    static EmbeddingDispatchPolicy resolveEmbeddingDispatchPolicy();
+
+    /**
      * @brief Resolve topology-aware routing policy from config file.
      *
      * Reads [search.topology] keys. Callers apply these as defaults, then
@@ -525,6 +540,7 @@ public:
      * - tuning.post_ingest.symbol_concurrent   = int (1..32)
      * - tuning.post_ingest.entity_concurrent   = int (1..16)
      * - tuning.post_ingest.title_concurrent    = int (1..16)
+     * - tuning.post_ingest.batch_size          = int (1..256)
      */
     static PostIngestCaps resolvePostIngestCaps();
 

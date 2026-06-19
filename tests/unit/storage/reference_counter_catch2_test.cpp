@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 
+#include <array>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <thread>
 
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_counter_writer.h>
 #include <yams/storage/storage_engine.h>
 
 #include "../../common/test_helpers_catch2.h"
@@ -309,6 +311,109 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction commit",
     REQUIRE(stats.has_value());
     CHECK(stats.value().transactions == 1u);
     CHECK(stats.value().rollbacks == 0u);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter commitTransactionBatches commits logical transactions",
+                 "[storage][refcount][batch][catch2]") {
+    const std::string hash1 = generateHash(230);
+    const std::string hash2 = generateHash(231);
+    const std::string hash3 = generateHash(232);
+
+    RefTransactionBatch batch1;
+    batch1.operations.push_back({.type = RefDelta::Type::Increment,
+                                 .blockHash = hash1,
+                                 .compressedSize = 1024,
+                                 .uncompressedSize = 2048});
+    batch1.operations.push_back({.type = RefDelta::Type::Increment,
+                                 .blockHash = hash2,
+                                 .compressedSize = 512,
+                                 .uncompressedSize = 1024});
+
+    RefTransactionBatch batch2;
+    batch2.operations.push_back({.type = RefDelta::Type::Increment,
+                                 .blockHash = hash1,
+                                 .compressedSize = 1024,
+                                 .uncompressedSize = 2048});
+    batch2.operations.push_back({.type = RefDelta::Type::Increment,
+                                 .blockHash = hash3,
+                                 .compressedSize = 256,
+                                 .uncompressedSize = 256});
+
+    std::array<RefTransactionBatch, 2> batches{batch1, batch2};
+    auto result = refCounter->commitTransactionBatches(batches);
+    REQUIRE(result.has_value());
+
+    auto count1 = refCounter->getRefCount(hash1);
+    auto count2 = refCounter->getRefCount(hash2);
+    auto count3 = refCounter->getRefCount(hash3);
+    REQUIRE(count1.has_value());
+    REQUIRE(count2.has_value());
+    REQUIRE(count3.has_value());
+    CHECK(count1.value() == 2u);
+    CHECK(count2.value() == 1u);
+    CHECK(count3.value() == 1u);
+
+    auto stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().transactions == 2u);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture, "RefCounterWriter flush and shutdown drain work",
+                 "[storage][refcount][writer][catch2]") {
+    resetRefCounterWriterMetrics();
+    auto sharedCounter =
+        std::shared_ptr<ReferenceCounter>(refCounter.get(), [](ReferenceCounter*) {});
+    RefCounterWriter::Options options;
+    options.maxBatchCount = 16;
+    options.maxDelay = std::chrono::microseconds{50};
+    RefCounterWriter writer(sharedCounter, options);
+
+    std::vector<std::future<yams::Result<void>>> futures;
+    for (int i = 0; i < 8; ++i) {
+        RefTransactionBatch batch;
+        batch.operations.push_back({.type = RefDelta::Type::Increment,
+                                    .blockHash = generateHash(240 + i),
+                                    .compressedSize = 100 + static_cast<size_t>(i),
+                                    .uncompressedSize = 200 + static_cast<size_t>(i)});
+        futures.push_back(writer.submit(std::move(batch)));
+    }
+
+    auto flushResult = writer.flush();
+    REQUIRE(flushResult.has_value());
+
+    for (auto& future : futures) {
+        auto result = future.get();
+        REQUIRE(result.has_value());
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        auto count = refCounter->getRefCount(generateHash(240 + i));
+        REQUIRE(count.has_value());
+        CHECK(count.value() == 1u);
+    }
+
+    const auto writerTimings = getRefCounterWriterTimingsSnapshot();
+    REQUIRE(writerTimings.at("queue_wait").calls == 8u);
+    CHECK(writerTimings.at("commit_batches_total").calls >= 1u);
+    CHECK(writerTimings.at("batch_apply_ops").calls >= 1u);
+    CHECK(writerTimings.at("batch_sqlite_commit").calls >= 1u);
+
+    const auto writerValues = getRefCounterWriterValueMetricsSnapshot();
+    CHECK(writerValues.at("submitted_batches").total == 8u);
+    CHECK(writerValues.at("submitted_ops").total == 8u);
+    CHECK(writerValues.at("writer_batch_size").total == 8u);
+    CHECK(writerValues.at("writer_batch_ops").total == 8u);
+    CHECK(writerValues.at("committed_ops").total == 8u);
+
+    writer.shutdown();
+    RefTransactionBatch lateBatch;
+    lateBatch.operations.push_back({.type = RefDelta::Type::Increment,
+                                    .blockHash = generateHash(260),
+                                    .compressedSize = 1,
+                                    .uncompressedSize = 1});
+    auto late = writer.submit(std::move(lateBatch)).get();
+    CHECK_FALSE(late.has_value());
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction increment without size",

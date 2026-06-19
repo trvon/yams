@@ -1055,6 +1055,10 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             // App context wiring
             ctx->state.app_context.store = ctx->state.content_store;
             ctx->state.app_context.metadataRepo = ctx->state.metadata_repo;
+            if (ctx->state.metadata_repo) {
+                ctx->state.app_context.metadataInsertWriter =
+                    std::make_shared<yams::metadata::MetadataInsertWriter>(ctx->state.metadata_repo);
+            }
             ctx->state.app_context.kgStore = std::move(kgStore);
             ctx->state.app_context.graphQueryService =
                 yams::app::services::makeGraphQueryService(ctx->state.app_context);

@@ -16,6 +16,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace yams::storage {
@@ -26,6 +27,28 @@ class GarbageCollector;
 class StorageEngine;
 
 // Reference counting statistics
+struct RefCounterCommitPhaseTiming {
+    std::uint64_t calls{0};
+    std::uint64_t totalUs{0};
+    std::uint64_t maxUs{0};
+};
+
+struct RefDelta {
+    enum class Type { Increment, Decrement, Prune };
+    Type type{Type::Increment};
+    std::string blockHash;
+    size_t compressedSize{0};
+    size_t uncompressedSize{0};
+};
+
+struct RefTransactionBatch {
+    std::vector<RefDelta> operations;
+};
+
+void resetRefCounterCommitPhaseTimings();
+std::unordered_map<std::string, RefCounterCommitPhaseTiming>
+getRefCounterCommitPhaseTimingsSnapshot();
+
 struct RefCountStats {
     uint64_t totalBlocks;            // Total number of tracked blocks
     uint64_t totalReferences;        // Sum of all reference counts
@@ -261,6 +284,9 @@ public:
     };
 
     std::unique_ptr<ITransaction> beginTransaction() override;
+
+    // Apply multiple logical reference transactions under one SQLite transaction.
+    Result<void> commitTransactionBatches(std::span<const RefTransactionBatch> batches);
 
     // Maintenance operations
     Result<void> vacuum();     // Optimize database

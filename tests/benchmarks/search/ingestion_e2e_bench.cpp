@@ -29,12 +29,17 @@
 #include "tests/integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/api/content_store.h>
+#include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_counter_writer.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
@@ -120,9 +125,15 @@ public:
         // vector cleanup, etc.) affecting ingestion measurements.
         cfg.enableAutoRepair = false;
 
-        // Check if vectors are disabled (FTS-only mode)
+        // Benchmark embedding-mode contract:
+        // - YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 forces mock model provider
+        // - YAMS_DISABLE_VECTORS=1 also implies mock/FTS-only mode
+        const char* forceMockEmbeddings = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS");
+        const bool mockEmbeddingsRequested =
+            forceMockEmbeddings && std::string(forceMockEmbeddings) == "1";
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
+        vectorsDisabled = vectorsDisabled || mockEmbeddingsRequested;
 
         const char* benchModelEnv = std::getenv("YAMS_BENCH_EMBED_MODEL");
         std::string benchModel = benchModelEnv && *benchModelEnv ? benchModelEnv : "simeon-default";
@@ -135,7 +146,9 @@ public:
         if (vectorsDisabled) {
             cfg.useMockModelProvider = true;
             cfg.autoLoadPlugins = false;
-            spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
+            spdlog::info("Using mock model provider (YAMS_BENCH_FORCE_MOCK_EMBEDDINGS={} "
+                         "YAMS_DISABLE_VECTORS={})",
+                         mockEmbeddingsRequested ? 1 : 0, disableVectors ? disableVectors : "0");
         } else if (useSimeon) {
             // Simeon is built in and deterministic, so it is the preferred default for
             // ingestion profiling. Avoid plugin startup and ONNX model load noise.
@@ -458,6 +471,13 @@ struct BenchmarkResult {
     // Overall metrics
     int64_t total_duration_ms = 0;
     double throughput_docs_per_sec = 0.0;
+    bool pipeline_complete = false;
+    uint64_t expected_post = 0;
+    uint64_t expected_embed = 0;
+    uint64_t expected_kg = 0;
+    uint64_t observed_post = 0;
+    uint64_t observed_embed = 0;
+    uint64_t observed_kg = 0;
 
     // Per-stage metrics
     StageMetrics metadata_storage;
@@ -466,6 +486,17 @@ struct BenchmarkResult {
     StageMetrics kg_extraction;
     std::unordered_map<std::string, yams::daemon::EmbeddingService::PhaseTiming>
         embedding_phase_timings;
+    std::unordered_map<std::string, yams::app::services::DocumentStorePhaseTiming>
+        document_store_phase_timings;
+    std::unordered_map<std::string, yams::api::ContentStorePhaseTiming> content_store_phase_timings;
+    std::unordered_map<std::string, yams::metadata::MetadataInsertPhaseTiming>
+        metadata_insert_phase_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterCommitPhaseTiming>
+        ref_counter_commit_phase_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterWriterTiming>
+        ref_counter_writer_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterWriterValueMetric>
+        ref_counter_writer_value_metrics;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
 
     // Queue monitoring
@@ -474,6 +505,22 @@ struct BenchmarkResult {
     uint64_t max_embed_jobs = 0;
     uint64_t max_fts5_jobs = 0;
     uint64_t max_post_ingest = 0;
+    uint64_t max_kg_jobs = 0;
+    uint64_t max_symbol_jobs = 0;
+    uint64_t max_entity_jobs = 0;
+    uint64_t max_title_jobs = 0;
+    uint64_t final_kg_queued = 0;
+    uint64_t final_kg_consumed = 0;
+    uint64_t final_kg_dropped = 0;
+    uint64_t final_symbol_queued = 0;
+    uint64_t final_symbol_consumed = 0;
+    uint64_t final_symbol_dropped = 0;
+    uint64_t final_entity_queued = 0;
+    uint64_t final_entity_consumed = 0;
+    uint64_t final_entity_dropped = 0;
+    uint64_t final_title_queued = 0;
+    uint64_t final_title_consumed = 0;
+    uint64_t final_title_dropped = 0;
     uint64_t dropped_batches = 0;
 
     // WorkCoordinator metrics
@@ -489,6 +536,11 @@ struct BenchmarkResult {
 
         j["total_duration_ms"] = total_duration_ms;
         j["throughput_docs_per_sec"] = throughput_docs_per_sec;
+        j["pipeline_status"] = {
+            {"complete", pipeline_complete},    {"expected_post", expected_post},
+            {"observed_post", observed_post},   {"expected_embed", expected_embed},
+            {"observed_embed", observed_embed}, {"expected_kg", expected_kg},
+            {"observed_kg", observed_kg}};
 
         j["stages"] = {{"metadata_storage", metadata_storage.toJson()},
                        {"fts5_extraction", fts5_extraction.toJson()},
@@ -507,15 +559,100 @@ struct BenchmarkResult {
         }
         j["embedding_phase_timings"] = std::move(phaseTimings);
 
+        json docStoreTimings = json::object();
+        for (const auto& [phase, timing] : document_store_phase_timings) {
+            docStoreTimings[phase] = {{"calls", timing.calls},
+                                      {"total_ms", timing.totalMs},
+                                      {"max_ms", timing.maxMs},
+                                      {"avg_ms", timing.calls == 0
+                                                     ? 0.0
+                                                     : static_cast<double>(timing.totalMs) /
+                                                           static_cast<double>(timing.calls)}};
+        }
+        j["document_store_phase_timings"] = std::move(docStoreTimings);
+
+        json contentStoreTimings = json::object();
+        for (const auto& [phase, timing] : content_store_phase_timings) {
+            contentStoreTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_ms", timing.totalMs},
+                {"max_ms", timing.maxMs},
+                {"avg_ms", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalMs) /
+                                                   static_cast<double>(timing.calls)},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["content_store_phase_timings"] = std::move(contentStoreTimings);
+
+        json metadataInsertTimings = json::object();
+        for (const auto& [phase, timing] : metadata_insert_phase_timings) {
+            metadataInsertTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["metadata_insert_phase_timings"] = std::move(metadataInsertTimings);
+
+        json refCounterCommitTimings = json::object();
+        for (const auto& [phase, timing] : ref_counter_commit_phase_timings) {
+            refCounterCommitTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["ref_counter_commit_phase_timings"] = std::move(refCounterCommitTimings);
+
+        json refCounterWriterTimings = json::object();
+        for (const auto& [phase, timing] : ref_counter_writer_timings) {
+            refCounterWriterTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["ref_counter_writer_timings"] = std::move(refCounterWriterTimings);
+
+        json refCounterWriterValueMetrics = json::object();
+        for (const auto& [metric, value] : ref_counter_writer_value_metrics) {
+            refCounterWriterValueMetrics[metric] = {
+                {"calls", value.calls},
+                {"total", value.total},
+                {"max", value.max},
+                {"avg", value.calls == 0
+                            ? 0.0
+                            : static_cast<double>(value.total) / static_cast<double>(value.calls)}};
+        }
+        j["ref_counter_writer_value_metrics"] = std::move(refCounterWriterValueMetrics);
+
         json postTimings = json::object();
         for (const auto& [phase, timing] : post_ingest_metrics.timings) {
-            postTimings[phase] = {{"calls", timing.calls},
-                                  {"total_ms", timing.totalMs},
-                                  {"max_ms", timing.maxMs},
-                                  {"avg_ms", timing.calls == 0
-                                                 ? 0.0
-                                                 : static_cast<double>(timing.totalMs) /
-                                                       static_cast<double>(timing.calls)}};
+            postTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_ms", timing.totalMs},
+                {"max_ms", timing.maxMs},
+                {"avg_ms", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalMs) /
+                                                   static_cast<double>(timing.calls)},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)},
+                {"first_start_ms", timing.firstStartMs},
+                {"last_end_ms", timing.lastEndMs},
+                {"span_ms", nonNegativeDeltaMs(timing.lastEndMs, timing.firstStartMs)}};
         }
         j["post_ingest_phase_timings"] = std::move(postTimings);
         j["post_ingest_batch_metrics"] = {
@@ -526,14 +663,50 @@ struct BenchmarkResult {
             {"embed_jobs_emitted", post_ingest_metrics.batches.embedJobsEmitted},
             {"embed_docs_emitted", post_ingest_metrics.batches.embedDocsEmitted},
             {"embed_prepared_docs_emitted", post_ingest_metrics.batches.embedPreparedDocsEmitted},
-            {"embed_hash_only_docs_emitted", post_ingest_metrics.batches.embedHashOnlyDocsEmitted}};
+            {"embed_hash_only_docs_emitted", post_ingest_metrics.batches.embedHashOnlyDocsEmitted},
+            {"content_index_calls", post_ingest_metrics.batches.contentIndexCalls},
+            {"content_index_entries", post_ingest_metrics.batches.contentIndexEntries},
+            {"content_index_chunks", post_ingest_metrics.batches.contentIndexChunks},
+            {"content_index_max_entries", post_ingest_metrics.batches.contentIndexMaxEntries},
+            {"content_index_max_chunk_entries",
+             post_ingest_metrics.batches.contentIndexMaxChunkEntries},
+            {"content_index_avg_entries_per_call",
+             post_ingest_metrics.batches.contentIndexCalls == 0
+                 ? 0.0
+                 : static_cast<double>(post_ingest_metrics.batches.contentIndexEntries) /
+                       static_cast<double>(post_ingest_metrics.batches.contentIndexCalls)},
+            {"content_index_avg_entries_per_chunk",
+             post_ingest_metrics.batches.contentIndexChunks == 0
+                 ? 0.0
+                 : static_cast<double>(post_ingest_metrics.batches.contentIndexEntries) /
+                       static_cast<double>(post_ingest_metrics.batches.contentIndexChunks)}};
 
         j["queues"] = {{"max_store_document_tasks", max_store_document_tasks},
                        {"max_embed_jobs", max_embed_jobs},
                        {"max_fts5_jobs", max_fts5_jobs},
                        {"max_post_ingest", max_post_ingest},
+                       {"max_kg_jobs", max_kg_jobs},
+                       {"max_symbol_jobs", max_symbol_jobs},
+                       {"max_entity_jobs", max_entity_jobs},
+                       {"max_title_jobs", max_title_jobs},
                        {"dropped_batches", dropped_batches},
                        {"sample_count", queue_samples.size()}};
+        j["enrichment_status"] = {{"kg",
+                                   {{"queued", final_kg_queued},
+                                    {"consumed", final_kg_consumed},
+                                    {"dropped", final_kg_dropped}}},
+                                  {"symbol",
+                                   {{"queued", final_symbol_queued},
+                                    {"consumed", final_symbol_consumed},
+                                    {"dropped", final_symbol_dropped}}},
+                                  {"entity",
+                                   {{"queued", final_entity_queued},
+                                    {"consumed", final_entity_consumed},
+                                    {"dropped", final_entity_dropped}}},
+                                  {"title",
+                                   {{"queued", final_title_queued},
+                                    {"consumed", final_title_consumed},
+                                    {"dropped", final_title_dropped}}}};
 
         // Include first/last 5 samples for debugging
         if (!queue_samples.empty()) {
@@ -659,10 +832,17 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
         result.embedding_model = env;
     }
+    const char* forceMockEmbeddings = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS");
+    const bool mockEmbeddingsRequested =
+        forceMockEmbeddings && std::string(forceMockEmbeddings) == "1";
+    const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
+    const bool vectorsDisabled =
+        mockEmbeddingsRequested || (disableVectors && std::string(disableVectors) == "1");
     const bool simeonModel =
         result.embedding_model == "simeon-default" || result.embedding_model == "simeon";
-    result.embedding_backend = simeonModel ? "simeon" : "onnxruntime";
-    result.simeon_recipe = simeonModel ? yams::vector::simeonRecipeLabel() : "";
+    result.embedding_backend = vectorsDisabled ? "mock" : (simeonModel ? "simeon" : "onnxruntime");
+    result.simeon_recipe =
+        (!vectorsDisabled && simeonModel) ? yams::vector::simeonRecipeLabel() : "";
 
     spdlog::info("=== Ingestion E2E Benchmark ===");
     spdlog::info("Corpus size: {}", corpusSize);
@@ -710,6 +890,11 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             spdlog::warn("Model provider not available");
         }
         serviceManager->resetEmbeddingPhaseTimings();
+        yams::app::services::resetDocumentStorePhaseTimings();
+        yams::api::resetContentStorePhaseTimings();
+        yams::metadata::resetMetadataInsertPhaseTimings();
+        yams::storage::resetRefCounterCommitPhaseTimings();
+        yams::storage::resetRefCounterWriterMetrics();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
         }
@@ -721,8 +906,10 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     uint64_t baselineEmbedDropped = bus.embedDropped();
     uint64_t baselinePostConsumed = bus.postConsumed();
     uint64_t baselinePostDropped = bus.postDropped();
-    spdlog::info("Baseline counters: embed={}, post={}", baselineEmbedConsumed,
-                 baselinePostConsumed);
+    uint64_t baselineKgConsumed = bus.kgConsumed();
+    uint64_t baselineKgDropped = bus.kgDropped();
+    spdlog::info("Baseline counters: embed={}, post={}, kg={}", baselineEmbedConsumed,
+                 baselinePostConsumed, baselineKgConsumed);
 
     // Phase 4: Ingest documents
     spdlog::info("Phase 4: Ingesting {} documents...", corpusSize);
@@ -734,7 +921,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     for (const auto& filename : corpus.createdFiles) {
         yams::daemon::AddDocumentRequest addReq;
         addReq.path = (corpusDir / filename).string();
-        addReq.noEmbeddings = false; // Full pipeline
+        addReq.noEmbeddings = vectorsDisabled;
 
         auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 30s);
         if (!addResult) {
@@ -768,17 +955,28 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     // Note: FTS5 indexing happens synchronously in post-ingest metadata stage (not via jobs)
     // So we only track post-ingest (metadata+FTS5) and embeddings completion
     uint64_t expectedPost = successCount;
-    uint64_t expectedEmbed = successCount;
+    uint64_t expectedEmbed = vectorsDisabled ? 0 : successCount;
+    uint64_t expectedKg = successCount;
+    result.expected_post = expectedPost;
+    result.expected_embed = expectedEmbed;
+    result.expected_kg = expectedKg;
 
     // Poll until all stages complete or timeout
     auto pipelineDeadline = std::chrono::steady_clock::now() + 60s;
     bool allStagesComplete = false;
+    QueueSnapshot lastSnap = initialSnap;
+    uint64_t lastEmbedProcessedDelta = 0;
+    uint64_t lastPostProcessedDelta = 0;
+    uint64_t lastEmbedDroppedDelta = 0;
+    uint64_t lastKgProcessedDelta = 0;
+    uint64_t lastKgDroppedDelta = 0;
 
     while (std::chrono::steady_clock::now() < pipelineDeadline && !allStagesComplete) {
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
 
         QueueSnapshot snap = captureQueueSnapshot();
         result.queue_samples.push_back(snap);
+        lastSnap = snap;
 
         // Update max queue depths (approximated by queued - consumed)
         // Use signed arithmetic to avoid underflow, then clamp to 0
@@ -792,12 +990,18 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.max_fts5_jobs = std::max(result.max_fts5_jobs, fts5Depth);
         result.max_embed_jobs = std::max(result.max_embed_jobs, embedDepth);
         result.max_post_ingest = std::max(result.max_post_ingest, postDepth);
+        result.max_kg_jobs = std::max(result.max_kg_jobs, snap.kg_jobs);
+        result.max_symbol_jobs = std::max(result.max_symbol_jobs, snap.symbol_jobs);
+        result.max_entity_jobs = std::max(result.max_entity_jobs, snap.entity_jobs);
+        result.max_title_jobs = std::max(result.max_title_jobs, snap.title_jobs);
 
         // Track dropped batches (excluding warmup baseline)
         uint64_t embedDroppedDelta = counterDelta(snap.embed_dropped, baselineEmbedDropped);
         uint64_t postDroppedDelta = counterDelta(snap.post_dropped, baselinePostDropped);
-        result.dropped_batches =
-            saturatedAdd(saturatedAdd(snap.fts5_dropped, embedDroppedDelta), postDroppedDelta);
+        uint64_t kgDroppedDelta = counterDelta(snap.kg_dropped, baselineKgDropped);
+        result.dropped_batches = saturatedAdd(
+            saturatedAdd(saturatedAdd(snap.fts5_dropped, embedDroppedDelta), postDroppedDelta),
+            kgDroppedDelta);
 
         // Check if all stages have processed all documents (relative to baseline)
         // FTS5 happens in post-ingest, so we only check post and embed completion
@@ -805,16 +1009,25 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             counterDelta(snap.embed_consumed, baselineEmbedConsumed), embedDroppedDelta);
         uint64_t postProcessedDelta =
             saturatedAdd(counterDelta(snap.post_consumed, baselinePostConsumed), postDroppedDelta);
+        uint64_t kgProcessedDelta =
+            saturatedAdd(counterDelta(snap.kg_consumed, baselineKgConsumed), kgDroppedDelta);
+        lastEmbedProcessedDelta = embedProcessedDelta;
+        lastPostProcessedDelta = postProcessedDelta;
+        lastKgProcessedDelta = kgProcessedDelta;
+        lastEmbedDroppedDelta = embedDroppedDelta;
+        lastKgDroppedDelta = kgDroppedDelta;
 
         bool embedComplete = embedProcessedDelta >= expectedEmbed;
         bool postComplete = postProcessedDelta >= expectedPost;
+        bool kgComplete = kgProcessedDelta >= expectedKg;
 
-        allStagesComplete = embedComplete && postComplete;
+        allStagesComplete = embedComplete && postComplete && kgComplete;
 
         if (nonNegativeDeltaMs(snap.timestamp_ms, initialSnap.timestamp_ms) % 1000 <
             pollIntervalMs) {
-            spdlog::info("Pipeline status: post={}/{} (includes FTS5) embed={}/{}",
-                         postProcessedDelta, expectedPost, embedProcessedDelta, expectedEmbed);
+            spdlog::info("Pipeline status: post={}/{} (includes FTS5) embed={}/{} kg={}/{}",
+                         postProcessedDelta, expectedPost, embedProcessedDelta, expectedEmbed,
+                         kgProcessedDelta, expectedKg);
         }
 
         if (allStagesComplete) {
@@ -838,16 +1051,57 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             result.kg_extraction.name = "kg_extraction";
             result.kg_extraction.start_ms = ingestStartMs;
             result.kg_extraction.end_ms = now;
-            result.kg_extraction.count = counterDelta(snap.post_consumed, baselinePostConsumed);
-            result.kg_extraction.failures = postDroppedDelta;
+            result.kg_extraction.count = counterDelta(snap.kg_consumed, baselineKgConsumed);
+            result.kg_extraction.failures = kgDroppedDelta;
 
             spdlog::info("All pipeline stages complete!");
             break;
         }
     }
 
+    result.pipeline_complete = allStagesComplete;
+    result.observed_post = lastPostProcessedDelta;
+    result.observed_embed = lastEmbedProcessedDelta;
+    result.observed_kg = lastKgProcessedDelta;
+    result.final_kg_queued = lastSnap.kg_queued;
+    result.final_kg_consumed = lastSnap.kg_consumed;
+    result.final_kg_dropped = lastSnap.kg_dropped;
+    result.final_symbol_queued = lastSnap.symbol_queued;
+    result.final_symbol_consumed = lastSnap.symbol_consumed;
+    result.final_symbol_dropped = lastSnap.symbol_dropped;
+    result.final_entity_queued = lastSnap.entity_queued;
+    result.final_entity_consumed = lastSnap.entity_consumed;
+    result.final_entity_dropped = lastSnap.entity_dropped;
+    result.final_title_queued = lastSnap.title_queued;
+    result.final_title_consumed = lastSnap.title_consumed;
+    result.final_title_dropped = lastSnap.title_dropped;
+
     if (!allStagesComplete) {
-        spdlog::warn("Pipeline completion timeout after 60s");
+        spdlog::warn("Pipeline completion timeout after 60s (post={}/{} embed={}/{} kg={}/{})",
+                     lastPostProcessedDelta, expectedPost, lastEmbedProcessedDelta, expectedEmbed,
+                     lastKgProcessedDelta, expectedKg);
+
+        // Preserve partial pipeline evidence instead of leaving stage metrics at zero. A timeout is
+        // still a failure, but partial counters identify which PostIngestQueue branch stalled.
+        const int64_t now = nowMs();
+        result.fts5_extraction.name = "fts5_extraction";
+        result.fts5_extraction.start_ms = ingestStartMs;
+        result.fts5_extraction.end_ms = now;
+        result.fts5_extraction.count = lastSnap.fts5_consumed;
+        result.fts5_extraction.failures = lastSnap.fts5_dropped;
+
+        result.embedding_generation.name = "embedding_generation";
+        result.embedding_generation.start_ms = ingestStartMs;
+        result.embedding_generation.end_ms = now;
+        result.embedding_generation.count =
+            counterDelta(lastSnap.embed_consumed, baselineEmbedConsumed);
+        result.embedding_generation.failures = lastEmbedDroppedDelta;
+
+        result.kg_extraction.name = "kg_extraction";
+        result.kg_extraction.start_ms = ingestStartMs;
+        result.kg_extraction.end_ms = now;
+        result.kg_extraction.count = counterDelta(lastSnap.kg_consumed, baselineKgConsumed);
+        result.kg_extraction.failures = lastKgDroppedDelta;
     }
 
     int64_t totalEndMs = nowMs();
@@ -856,6 +1110,16 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.total_duration_ms > 0 ? successCount / (result.total_duration_ms / 1000.0) : 0.0;
     if (serviceManager) {
         result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
+        result.document_store_phase_timings =
+            yams::app::services::getDocumentStorePhaseTimingsSnapshot();
+        result.content_store_phase_timings = yams::api::getContentStorePhaseTimingsSnapshot();
+        result.metadata_insert_phase_timings =
+            yams::metadata::getMetadataInsertPhaseTimingsSnapshot();
+        result.ref_counter_commit_phase_timings =
+            yams::storage::getRefCounterCommitPhaseTimingsSnapshot();
+        result.ref_counter_writer_timings = yams::storage::getRefCounterWriterTimingsSnapshot();
+        result.ref_counter_writer_value_metrics =
+            yams::storage::getRefCounterWriterValueMetricsSnapshot();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }

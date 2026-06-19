@@ -7,9 +7,11 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/plugins/abi.h>
 #include <yams/plugins/entity_extractor_v2.h>
-#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
 #include "gliner_session.h"
 
@@ -43,6 +45,26 @@ struct GlintPluginContext {
 static GlintPluginContext& get_ctx() {
     static GlintPluginContext* ctx = new GlintPluginContext();
     return *ctx;
+}
+
+void ensure_plugin_logger() {
+    try {
+        if (spdlog::default_logger()) {
+            return;
+        }
+        auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("yams_glint", sink);
+        logger->set_level(spdlog::level::info);
+        spdlog::set_default_logger(std::move(logger));
+    } catch (const spdlog::spdlog_ex&) {
+        if (auto logger = spdlog::get("yams_glint")) {
+            spdlog::set_default_logger(std::move(logger));
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[Glint] Failed to initialize plugin logger: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "[Glint] Failed to initialize plugin logger: unknown error\n");
+    }
 }
 
 char* dup_cstr(const std::string& s) {
@@ -255,6 +277,8 @@ YAMS_PLUGIN_API const char* yams_plugin_get_manifest_json(void) {
 
 YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* host_context) {
     (void)host_context;
+
+    ensure_plugin_logger();
 
     // Parse configuration
     if (config_json && *config_json) {

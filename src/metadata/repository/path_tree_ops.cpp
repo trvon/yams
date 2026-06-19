@@ -1,7 +1,6 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -436,53 +435,62 @@ Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& i
         const bool isAbsolute = !info.filePath.empty() && info.filePath.front() == '/';
 
         auto findStmtRes =
-            db.prepare("SELECT node_id, parent_id, path_segment, full_path, doc_count, "
-                       "centroid_weight, centroid FROM path_tree_nodes "
-                       "WHERE parent_id IS ? AND path_segment = ?");
+            db.prepareCached("SELECT node_id, parent_id, path_segment, full_path, doc_count, "
+                             "centroid_weight, centroid FROM path_tree_nodes "
+                             "WHERE parent_id IS ? AND path_segment = ?");
         if (!findStmtRes)
             return findStmtRes.error();
-        auto findStmt = std::move(findStmtRes).value();
+        auto findStmtHolder = std::move(findStmtRes).value();
+        auto& findStmt = *findStmtHolder;
 
-        auto insertStmtRes = db.prepare("INSERT OR IGNORE INTO path_tree_nodes "
-                                        "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
+        auto insertStmtRes =
+            db.prepareCached("INSERT OR IGNORE INTO path_tree_nodes "
+                             "(parent_id, path_segment, full_path) VALUES (?, ?, ?)");
         if (!insertStmtRes)
             return insertStmtRes.error();
-        auto insertStmt = std::move(insertStmtRes).value();
+        auto insertStmtHolder = std::move(insertStmtRes).value();
+        auto& insertStmt = *insertStmtHolder;
 
-        auto selectStmtRes = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
-                                        "doc_count, centroid_weight, centroid "
-                                        "FROM path_tree_nodes WHERE full_path = ?");
+        auto selectStmtRes = db.prepareCached("SELECT node_id, parent_id, path_segment, full_path, "
+                                              "doc_count, centroid_weight, centroid "
+                                              "FROM path_tree_nodes WHERE full_path = ?");
         if (!selectStmtRes)
             return selectStmtRes.error();
-        auto selectStmt = std::move(selectStmtRes).value();
+        auto selectStmtHolder = std::move(selectStmtRes).value();
+        auto& selectStmt = *selectStmtHolder;
 
-        auto assocInsertRes =
-            db.prepare("INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) "
-                       "VALUES (?, ?)");
+        auto assocInsertRes = db.prepareCached(
+            "INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) "
+            "VALUES (?, ?)");
         if (!assocInsertRes)
             return assocInsertRes.error();
-        auto assocStmt = std::move(assocInsertRes).value();
+        auto assocStmtHolder = std::move(assocInsertRes).value();
+        auto& assocStmt = *assocStmtHolder;
 
-        auto docCountRes = db.prepare("UPDATE path_tree_nodes "
-                                      "SET doc_count = doc_count + 1, last_updated = unixepoch() "
-                                      "WHERE node_id = ?");
+        auto docCountRes =
+            db.prepareCached("UPDATE path_tree_nodes "
+                             "SET doc_count = doc_count + 1, last_updated = unixepoch() "
+                             "WHERE node_id = ?");
         if (!docCountRes)
             return docCountRes.error();
-        auto docCountStmt = std::move(docCountRes).value();
+        auto docCountStmtHolder = std::move(docCountRes).value();
+        auto& docCountStmt = *docCountStmtHolder;
 
-        auto centroidSelectRes =
-            db.prepare("SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
+        auto centroidSelectRes = db.prepareCached(
+            "SELECT centroid, centroid_weight FROM path_tree_nodes WHERE node_id = ?");
         if (!centroidSelectRes)
             return centroidSelectRes.error();
-        auto centroidSelStmt = std::move(centroidSelectRes).value();
+        auto centroidSelStmtHolder = std::move(centroidSelectRes).value();
+        auto& centroidSelStmt = *centroidSelStmtHolder;
 
         auto centroidUpdateRes =
-            db.prepare("UPDATE path_tree_nodes "
-                       "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
-                       "WHERE node_id = ?");
+            db.prepareCached("UPDATE path_tree_nodes "
+                             "SET centroid = ?, centroid_weight = ?, last_updated = unixepoch() "
+                             "WHERE node_id = ?");
         if (!centroidUpdateRes)
             return centroidUpdateRes.error();
-        auto centroidUpdStmt = std::move(centroidUpdateRes).value();
+        auto centroidUpdStmtHolder = std::move(centroidUpdateRes).value();
+        auto& centroidUpdStmt = *centroidUpdStmtHolder;
 
         int64_t parentNodeId = kPathTreeNullParent;
         std::string currentPath = isAbsolute ? std::string("/") : std::string{};

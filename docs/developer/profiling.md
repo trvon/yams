@@ -21,7 +21,7 @@ The `Profiling` build type enables instrumentation for various profiling tools:
 
 ```bash
 # Build with profiling support
-./setup.sh Profiling
+meson setup build/profiling --buildtype=debugoptimized -Denable-profiling=true
 
 # Compile
 meson compile -C build/profiling
@@ -31,7 +31,7 @@ This build:
 - Uses Debug as base (symbols + assertions enabled)
 - Enables Tracy profiler integration
 - Includes test binaries for benchmarking
-- Outputs to `build/profiling/` directory
+- Common output directory: `build/profiling/` (or any Meson build dir configured with `-Denable-profiling=true`)
 
 ## Tracy Profiler
 
@@ -40,15 +40,15 @@ Tracy provides real-time, low-overhead performance profiling with frame-by-frame
 ### Setup
 
 1. **Download Tracy**: Get the profiler from https://github.com/wolfpld/tracy/releases
-2. **Build with Tracy**: `./setup.sh Profiling`
+2. **Build with Tracy**: `meson setup build/profiling --buildtype=debugoptimized -Denable-profiling=true`
 3. **Start Tracy Server**: Run the Tracy GUI application
-4. **Run YAMS**: Tracy automatically connects and captures data
+4. **Run YAMS**: Tracy captures when a compatible GUI or capture tool is attached; xctrace remains the most reliable automated path on macOS
 
 ### Usage Example
 
 ```bash
 # Build with profiling
-./setup.sh Profiling
+meson setup build/profiling --buildtype=debugoptimized -Denable-profiling=true
 meson compile -C build/profiling
 
 # Run commands (Tracy server should be running)
@@ -84,7 +84,7 @@ Valgrind provides detailed memory profiling, leak detection, and cache analysis.
 
 ```bash
 # Build profiling binary
-./setup.sh Profiling
+meson setup build/profiling --buildtype=debugoptimized -Denable-profiling=true
 meson compile -C build/profiling
 
 # Run with Valgrind
@@ -125,7 +125,7 @@ massif-visualizer massif.out.*
 
 #### Daemon under Massif (startup + ingest)
 
-1. Build the profiling daemon: `./setup.sh Profiling && meson compile -C build/profiling`
+1. Build the profiling daemon: `meson setup build/profiling --buildtype=debugoptimized -Denable-profiling=true && meson compile -C build/profiling`
 2. Run the daemon under Massif and give it a few minutes to bring up plugins, repair, and model loads:
    ```bash
    timeout 600s valgrind --tool=massif --stacks=yes --time-unit=ms --detailed-freq=10 \

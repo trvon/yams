@@ -113,11 +113,6 @@ struct DeleteEdgesByRelationOp {
 };
 struct DeleteOrphanedEdgesOp {};
 struct DeleteOrphanedDocEntitiesOp {};
-struct InsertDocumentOp {
-    metadata::DocumentInfo info;
-    std::vector<std::pair<std::string, metadata::MetadataValue>> tags;
-    std::optional<metadata::TreeSnapshotRecord> snapshot;
-};
 struct UpdateRepairStatusOp {
     std::vector<std::string> hashes;
     metadata::RepairStatus status;
@@ -160,7 +155,7 @@ using WriteOp =
                  AddDeferredDocEntitiesOp, UpsertSymbolMetadataOp, DeleteDocEntitiesForDocumentOp,
                  DeleteNodeByIdOp, DeleteNodesForDocumentHashOp, DeleteEdgesForSourceFileOp,
                  DeleteEdgesByRelationOp, DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp,
-                 InsertDocumentOp, UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
+                 UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
                  UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp,
                  InsertRelationshipOp, AddSymSpellTermsOp>;
@@ -309,7 +304,6 @@ private:
                          DeleteOrphanedEdgesOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteOrphanedDocEntitiesOp& op);
-    Result<void> applyMetadataOp(InsertDocumentOp& op);
     Result<void> applyMetadataOp(UpdateRepairStatusOp& op);
     Result<void> applyMetadataOp(UpsertTreeSnapshotOp& op);
     Result<void> applyMetadataOp(SetMetadataBatchOp& op);

@@ -39,6 +39,7 @@ yams_storage_engine = static_library('yams_storage_engine',
 yams_reference_counter = static_library('yams_reference_counter',
   [
     'reference_counter.cpp',
+    'reference_counter_writer.cpp',
     'reference_db.cpp',
     'garbage_collector.cpp',
   ],

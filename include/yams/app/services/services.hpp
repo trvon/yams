@@ -9,6 +9,7 @@
 #include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/downloader/downloader.hpp>
+#include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_engine.h>
@@ -101,6 +102,11 @@ struct AppContext {
     boost::asio::any_io_executor workerExecutor;
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;
+    // Long-lived shared insert writer: coalesces concurrent document inserts into batched
+    // transactions. Owned by the host (ServiceManager / YamsCLI / mobile state) and shared here so
+    // per-task DocumentService copies use the one instance. store() requires this when metadataRepo
+    // is present.
+    std::shared_ptr<metadata::MetadataInsertWriter> metadataInsertWriter;
     std::shared_ptr<search::SearchEngine> searchEngine;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
@@ -311,7 +317,8 @@ public:
     // Skips heavy plugins (e.g., PDF) and large binaries.
     // Returns ok when indexing was performed or safely skipped.
     virtual Result<void> lightIndexForHash(const std::string& hash,
-                                           std::size_t maxBytes = 2 * 1024 * 1024) = 0;
+                                           std::size_t maxBytes = static_cast<std::size_t>(2) *
+                                                                  1024U * 1024U) = 0;
 };
 
 // ===========================
@@ -450,8 +457,10 @@ struct StoreDocumentRequest {
     std::string sessionId;     // session to associate document with
     bool bypassSession{false}; // skip session tagging even if session is active
 
-    // Embedding control
-    bool noEmbeddings{false}; // disable embedding generation
+    // Embedding/indexing control
+    bool noEmbeddings{false};              // disable embedding generation
+    bool skipInlineContentIndexing{false}; // async caller will dispatch post-ingest content index
+    bool combineMetadataPathTree{false};   // async caller may fold path-tree into metadata txn
 
     // Optional hash hint computed by the daemon front door before enqueueing async ingest.
     // When the backing file still matches the captured fingerprint, the content store can
@@ -1021,6 +1030,15 @@ public:
 /**
  * Factory functions to construct service implementations from shared context.
  */
+struct DocumentStorePhaseTiming {
+    std::uint64_t calls{0};
+    std::uint64_t totalMs{0};
+    std::uint64_t maxMs{0};
+};
+
+void resetDocumentStorePhaseTimings();
+std::unordered_map<std::string, DocumentStorePhaseTiming> getDocumentStorePhaseTimingsSnapshot();
+
 std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
 std::shared_ptr<IEmbeddingService> makeEmbeddingService(const AppContext& ctx);
 std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);

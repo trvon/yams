@@ -127,9 +127,7 @@ TEST_CASE("MCP Schema - Internal tools contain all individual ops",
     std::vector<std::string> expected = {"search",
                                          "grep",
                                          "download",
-                                         "download_status",
-                                         "download_list_jobs",
-                                         "download_cancel",
+                                         "download_jobs",
                                          "session_start",
                                          "session_stop",
                                          "session_pin",
@@ -438,26 +436,15 @@ TEST_CASE("MCP Download - relative staging config does not hard-fail in unwritab
     fs::remove_all(root, cleanup_ec);
 }
 
-TEST_CASE("MCP Schema - Download job tools expose expected params",
+TEST_CASE("MCP Schema - Download jobs tool exposes expected params",
           "[mcp][schema][download-jobs][catch2]") {
     auto server = ServerUnderTest::make();
     json tools = server->testListInternalTools();
 
-    auto statusTool = findTool(tools, "download_status");
-    REQUIRE(statusTool.has_value());
-    auto statusProps = toolProps(*statusTool);
-    REQUIRE(statusProps.has_value());
-    CHECK(hasProp(*statusProps, "job_id"));
-
-    auto listTool = findTool(tools, "download_list_jobs");
-    REQUIRE(listTool.has_value());
-    auto listProps = toolProps(*listTool);
-    REQUIRE(listProps.has_value());
-    CHECK(listProps->empty());
-
-    auto cancelTool = findTool(tools, "download_cancel");
-    REQUIRE(cancelTool.has_value());
-    auto cancelProps = toolProps(*cancelTool);
-    REQUIRE(cancelProps.has_value());
-    CHECK(hasProp(*cancelProps, "job_id"));
+    auto tool = findTool(tools, "download_jobs");
+    REQUIRE(tool.has_value());
+    auto props = toolProps(*tool);
+    REQUIRE(props.has_value());
+    CHECK(hasProp(*props, "action"));
+    CHECK(hasProp(*props, "job_id"));
 }

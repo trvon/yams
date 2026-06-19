@@ -54,8 +54,6 @@ Strict mode: `[daemon].plugin_dir_strict = true` or `YAMS_PLUGIN_DIR_STRICT=1`. 
 | `content_extractor_v1` | `include/yams/plugins/content_extractor_v1.h`       | Document text extraction     |
 | `symbol_extractor_v1`  | `include/yams/plugins/symbol_extractor_v1.h`        | Source / binary symbols      |
 | `entity_extractor_v2`  | `include/yams/plugins/entity_extractor_v2.h`        | Named entity extraction      |
-| `search_provider_v1`   | `include/yams/plugins/search_provider_v1.h`         | Search backend               |
-| `graph_adapter_v1`     | See [docs/api/graph_adapter_v1.md](api/graph_adapter_v1.md) | KG adapter           |
 | `model_provider_v1`    | `include/yams/ml/`                                  | Embedding model provider     |
 | `object_storage_v1`    | See [docs/api/storage_plugin_v1.md](api/storage_plugin_v1.md) | Object storage       |
 

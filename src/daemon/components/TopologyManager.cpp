@@ -6,10 +6,12 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <yams/core/assert.hpp>
+#include <yams/profiling.h>
 
 #include <yams/daemon/components/TopologyTuner.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/topological_quality.h>
 #include <yams/vector/vector_database.h>
 
@@ -57,6 +59,7 @@ std::string computeCellIdentity() {
 TopologyManager::TopologyManager(Dependencies deps) : deps_(std::move(deps)) {}
 
 void TopologyManager::markDirty(const std::string& hash) {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::markDirty");
     if (hash.empty())
         return;
     std::lock_guard<std::mutex> lock(dirtyMutex_);
@@ -69,6 +72,7 @@ void TopologyManager::markDirty(const std::string& hash) {
 }
 
 void TopologyManager::markDirtyBatch(const std::vector<std::string>& hashes) {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::markDirtyBatch");
     if (hashes.empty())
         return;
     std::lock_guard<std::mutex> lock(dirtyMutex_);
@@ -84,6 +88,7 @@ void TopologyManager::markDirtyBatch(const std::vector<std::string>& hashes) {
 }
 
 std::vector<std::string> TopologyManager::getOverlayHashes(std::size_t limit) const {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::getOverlayHashes");
     std::vector<std::string> hashes;
     std::lock_guard<std::mutex> lock(dirtyMutex_);
     hashes.reserve(std::min(limit, dirtyHashes_.size()));
@@ -96,6 +101,7 @@ std::vector<std::string> TopologyManager::getOverlayHashes(std::size_t limit) co
 }
 
 std::vector<std::string> TopologyManager::drainDirtyHashes() {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::drainDirtyHashes");
     std::lock_guard<std::mutex> lock(dirtyMutex_);
     std::vector<std::string> hashes(dirtyHashes_.begin(), dirtyHashes_.end());
     dirtyHashes_.clear();
@@ -103,6 +109,7 @@ std::vector<std::string> TopologyManager::drainDirtyHashes() {
 }
 
 void TopologyManager::restoreDirtyHashes(const std::vector<std::string>& hashes) {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::restoreDirtyHashes");
     if (hashes.empty())
         return;
     std::lock_guard<std::mutex> lock(dirtyMutex_);
@@ -117,11 +124,13 @@ void TopologyManager::restoreDirtyHashes(const std::vector<std::string>& hashes)
 }
 
 bool TopologyManager::hasDirtyHashes() const {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::hasDirtyHashes");
     std::lock_guard<std::mutex> lock(dirtyMutex_);
     return !dirtyHashes_.empty();
 }
 
 bool TopologyManager::tryScheduleRebuild() {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::tryScheduleRebuild");
     if (!autoRebuildEnabled_.load(std::memory_order_acquire)) {
         return false;
     }
@@ -147,6 +156,7 @@ bool TopologyManager::tryScheduleRebuild() {
 }
 
 void TopologyManager::clearScheduled() {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::clearScheduled");
     // Audit-fix #1: stamp rebuild-end timestamp so the throttle window starts
     // from the moment the prior rebuild finished (not from when it started).
     lastRebuildEndSteadyMillis_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -154,9 +164,12 @@ void TopologyManager::clearScheduled() {
                                           .count(),
                                       std::memory_order_release);
     rebuildScheduled_.store(false, std::memory_order_release);
+    YAMS_DCHECK(!rebuildScheduled_.load(std::memory_order_acquire),
+                "rebuildScheduled must be false after clearScheduled");
 }
 
 TopologyManager::TelemetrySnapshot TopologyManager::getTelemetrySnapshot() const {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::getTelemetrySnapshot");
     TelemetrySnapshot snapshot;
     {
         std::lock_guard<std::mutex> lock(telemetryMutex_);
@@ -190,6 +203,7 @@ TopologyManager::TelemetrySnapshot TopologyManager::getTelemetrySnapshot() const
 }
 
 void TopologyManager::setTopologyTuner(std::shared_ptr<TopologyTuner> tuner) {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::setTopologyTuner");
     std::lock_guard<std::mutex> lock(tunerMutex_);
     tuner_ = std::move(tuner);
     tunerCurrentArmId_.clear();
@@ -729,12 +743,14 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
 }
 
 std::uint64_t TopologyManager::nowUnixSeconds() {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::nowUnixSeconds");
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count());
 }
 
 std::uint64_t TopologyManager::nowUnixMillis() {
+    YAMS_ZONE_SCOPED_N("TopologyMgr::nowUnixMillis");
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count());

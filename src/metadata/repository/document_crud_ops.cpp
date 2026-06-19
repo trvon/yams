@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -33,6 +34,64 @@ using repository::rollbackIgnoringErrors;
 using repository::scope_exit;
 
 namespace {
+
+struct AtomicMetadataInsertPhaseTiming {
+    std::atomic<std::uint64_t> calls{0};
+    std::atomic<std::uint64_t> totalUs{0};
+    std::atomic<std::uint64_t> maxUs{0};
+};
+
+constexpr std::array<std::string_view, 11> kMetadataInsertPhaseNames{"prepare_writes",
+                                                                     "begin",
+                                                                     "insert_lookup_document",
+                                                                     "apply_metadata_writes",
+                                                                     "upsert_snapshot",
+                                                                     "path_tree",
+                                                                     "path_tree_savepoint",
+                                                                     "path_tree_upsert",
+                                                                     "path_tree_release",
+                                                                     "commit",
+                                                                     "cache_update"};
+
+std::array<AtomicMetadataInsertPhaseTiming, kMetadataInsertPhaseNames.size()>&
+metadataInsertTimings() {
+    static std::array<AtomicMetadataInsertPhaseTiming, kMetadataInsertPhaseNames.size()> timings;
+    return timings;
+}
+
+std::optional<std::size_t> metadataInsertPhaseIndex(std::string_view phase) {
+    for (std::size_t i = 0; i < kMetadataInsertPhaseNames.size(); ++i) {
+        if (kMetadataInsertPhaseNames[i] == phase) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void updateMaxRelaxed(std::atomic<std::uint64_t>& target, std::uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void recordMetadataInsertPhase(std::string_view phase,
+                               std::chrono::steady_clock::time_point start) {
+    const auto index = metadataInsertPhaseIndex(phase);
+    if (!index) {
+        return;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    const auto us = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsed));
+    auto& timing = metadataInsertTimings()[*index];
+    timing.calls.fetch_add(1, std::memory_order_relaxed);
+    timing.totalUs.fetch_add(us, std::memory_order_relaxed);
+    updateMaxRelaxed(timing.maxUs, us);
+}
+
 void applyExtensionStatsDelta(std::atomic<uint64_t>& codeCounter,
                               std::atomic<uint64_t>& proseCounter,
                               std::atomic<uint64_t>& binaryCounter, std::string_view ext,
@@ -205,10 +264,9 @@ struct DeleteDocumentsBatchResult {
 
 Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const DocumentInfo& info,
                                                            bool hasPathIndexing) {
-    std::string sql =
-        "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
-        "file_size, sha256_hash, mime_type, created_time, modified_time, "
-        "indexed_time, content_extracted, extraction_status, extraction_error";
+    std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
+                      "file_size, sha256_hash, mime_type, created_time, modified_time, "
+                      "indexed_time, content_extracted, extraction_status, extraction_error";
     if (hasPathIndexing) {
         sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
     }
@@ -260,10 +318,8 @@ Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const D
     return std::pair<int64_t, bool>{docId, false};
 }
 
-Result<MetadataTagDelta>
-applyDocumentMetadataWrites(Database& db,
-                            const std::vector<repository::MetadataWriteEntry>& dedupedWrites,
-                            int64_t docId) {
+Result<MetadataTagDelta> applyDocumentMetadataWrites(
+    Database& db, const std::vector<repository::MetadataWriteEntry>& dedupedWrites, int64_t docId) {
     if (dedupedWrites.empty()) {
         return MetadataTagDelta{};
     }
@@ -274,6 +330,113 @@ applyDocumentMetadataWrites(Database& db,
         writeDocId = docId;
     }
     return repository::upsertMetadataWritesWithTagDelta(db, writesForDoc);
+}
+
+std::vector<std::string> splitPathTreeSegments(std::string_view normalizedPath) {
+    std::vector<std::string> segments;
+    std::string segment;
+    for (const char ch : normalizedPath) {
+        if (ch == '/') {
+            if (!segment.empty()) {
+                segments.push_back(segment);
+                segment.clear();
+            }
+        } else {
+            segment.push_back(ch);
+        }
+    }
+    if (!segment.empty()) {
+        segments.push_back(segment);
+    }
+    return segments;
+}
+
+Result<void> bindPathTreeParentId(Statement& stmt, int index, int64_t parentId) {
+    if (parentId == PathTreeNode::kNullParent) {
+        return stmt.bind(index, nullptr);
+    }
+    return stmt.bind(index, parentId);
+}
+
+Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const DocumentInfo& info,
+                                                    int64_t documentId) {
+    if (info.filePath.empty()) {
+        return Result<void>();
+    }
+
+    const auto segments = splitPathTreeSegments(info.filePath);
+    if (segments.empty()) {
+        return Result<void>();
+    }
+
+    YAMS_TRY_UNWRAP(findStmtHolder, db.prepareCached("SELECT node_id FROM path_tree_nodes "
+                                                     "WHERE parent_id IS ? AND path_segment = ?"));
+    auto& findStmt = *findStmtHolder;
+    YAMS_TRY_UNWRAP(insertStmtHolder,
+                    db.prepareCached("INSERT OR IGNORE INTO path_tree_nodes "
+                                     "(parent_id, path_segment, full_path) VALUES (?, ?, ?)"));
+    auto& insertStmt = *insertStmtHolder;
+    YAMS_TRY_UNWRAP(selectStmtHolder,
+                    db.prepareCached("SELECT node_id FROM path_tree_nodes WHERE full_path = ?"));
+    auto& selectStmt = *selectStmtHolder;
+    YAMS_TRY_UNWRAP(assocStmtHolder,
+                    db.prepareCached("INSERT OR IGNORE INTO path_tree_node_documents "
+                                     "(node_id, document_id) VALUES (?, ?)"));
+    auto& assocStmt = *assocStmtHolder;
+    YAMS_TRY_UNWRAP(docCountStmtHolder,
+                    db.prepareCached("UPDATE path_tree_nodes "
+                                     "SET doc_count = doc_count + 1, last_updated = unixepoch() "
+                                     "WHERE node_id = ?"));
+    auto& docCountStmt = *docCountStmtHolder;
+
+    int64_t parentNodeId = PathTreeNode::kNullParent;
+    std::string currentPath =
+        !info.filePath.empty() && info.filePath.front() == '/' ? std::string("/") : std::string{};
+
+    for (const auto& part : segments) {
+        if (!currentPath.empty() && currentPath.back() != '/') {
+            currentPath.push_back('/');
+        }
+        currentPath += part;
+
+        YAMS_TRY(findStmt.reset());
+        YAMS_TRY(bindPathTreeParentId(findStmt, 1, parentNodeId));
+        YAMS_TRY(findStmt.bind(2, part));
+        YAMS_TRY_UNWRAP(foundNode, findStmt.step());
+
+        int64_t nodeId = 0;
+        if (foundNode) {
+            nodeId = findStmt.getInt64(0);
+        } else {
+            YAMS_TRY(insertStmt.reset());
+            YAMS_TRY(bindPathTreeParentId(insertStmt, 1, parentNodeId));
+            YAMS_TRY(insertStmt.bind(2, part));
+            YAMS_TRY(insertStmt.bind(3, currentPath));
+            YAMS_TRY(insertStmt.execute());
+
+            YAMS_TRY(selectStmt.reset());
+            YAMS_TRY(selectStmt.bind(1, currentPath));
+            YAMS_TRY_UNWRAP(selectedNode, selectStmt.step());
+            if (!selectedNode) {
+                return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
+            }
+            nodeId = selectStmt.getInt64(0);
+        }
+
+        YAMS_TRY(assocStmt.reset());
+        YAMS_TRY(assocStmt.bind(1, nodeId));
+        YAMS_TRY(assocStmt.bind(2, documentId));
+        YAMS_TRY(assocStmt.execute());
+        if (db.changes() > 0) {
+            YAMS_TRY(docCountStmt.reset());
+            YAMS_TRY(docCountStmt.bind(1, nodeId));
+            YAMS_TRY(docCountStmt.execute());
+        }
+
+        parentNodeId = nodeId;
+    }
+
+    return Result<void>();
 }
 
 Result<void> upsertTreeSnapshotRow(Database& db, const TreeSnapshotRecord& snapshot) {
@@ -320,6 +483,28 @@ Result<void> upsertTreeSnapshotRow(Database& db, const TreeSnapshotRecord& snaps
     return snapStmt.execute();
 }
 } // namespace
+
+void resetMetadataInsertPhaseTimings() {
+    for (auto& timing : metadataInsertTimings()) {
+        timing.calls.store(0, std::memory_order_relaxed);
+        timing.totalUs.store(0, std::memory_order_relaxed);
+        timing.maxUs.store(0, std::memory_order_relaxed);
+    }
+}
+
+std::unordered_map<std::string, MetadataInsertPhaseTiming> getMetadataInsertPhaseTimingsSnapshot() {
+    std::unordered_map<std::string, MetadataInsertPhaseTiming> snapshot;
+    snapshot.reserve(kMetadataInsertPhaseNames.size());
+    const auto& timings = metadataInsertTimings();
+    for (std::size_t i = 0; i < kMetadataInsertPhaseNames.size(); ++i) {
+        snapshot.emplace(
+            std::string(kMetadataInsertPhaseNames[i]),
+            MetadataInsertPhaseTiming{timings[i].calls.load(std::memory_order_relaxed),
+                                      timings[i].totalUs.load(std::memory_order_relaxed),
+                                      timings[i].maxUs.load(std::memory_order_relaxed)});
+    }
+    return snapshot;
+}
 
 // Document operations
 Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
@@ -433,20 +618,24 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 
 Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
     const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
-    TreeSnapshotRecord* snapshot) {
+    TreeSnapshotRecord* snapshot, bool updatePathTreeInTransaction) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocumentWithMetadata");
 
+    const auto prepareWritesStart = std::chrono::steady_clock::now();
     std::vector<repository::MetadataWriteEntry> metadataWrites;
     metadataWrites.reserve(tags.size());
     for (const auto& [key, value] : tags) {
         metadataWrites.emplace_back(0, key, value);
     }
     const auto dedupedMetadataWrites = repository::deduplicateMetadataWrites(metadataWrites);
+    recordMetadataInsertPhase("prepare_writes", prepareWritesStart);
 
     auto result = executeQuery<InsertDocumentWithMetadataResult>(
         [&](Database& db) -> Result<InsertDocumentWithMetadataResult> {
             // Keep retry ownership at executeQueryOnPool and avoid stacking inner BEGIN retries.
+            const auto beginStart = std::chrono::steady_clock::now();
             YAMS_TRY(beginTransaction(db));
+            recordMetadataInsertPhase("begin", beginStart);
             bool committed = false;
             auto rollback = scope_exit([&] {
                 if (!committed) {
@@ -454,20 +643,49 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 }
             });
 
-            YAMS_TRY_UNWRAP(inserted,
-                            insertOrLookupDocumentRow(db, info, hasPathIndexing_));
+            const auto insertLookupStart = std::chrono::steady_clock::now();
+            YAMS_TRY_UNWRAP(inserted, insertOrLookupDocumentRow(db, info, hasPathIndexing_));
+            recordMetadataInsertPhase("insert_lookup_document", insertLookupStart);
             const auto [docId, insertedNewDocument] = inserted;
 
+            const auto metadataWritesStart = std::chrono::steady_clock::now();
             YAMS_TRY_UNWRAP(metadataTagDelta,
                             applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+            recordMetadataInsertPhase("apply_metadata_writes", metadataWritesStart);
             const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
 
             if (snapshot) {
+                const auto snapshotStart = std::chrono::steady_clock::now();
                 snapshot->ingestDocumentId = docId;
                 YAMS_TRY(upsertTreeSnapshotRow(db, *snapshot));
+                recordMetadataInsertPhase("upsert_snapshot", snapshotStart);
             }
 
+            if (updatePathTreeInTransaction) {
+                const auto pathTreeStart = std::chrono::steady_clock::now();
+                const auto pathTreeSavepointStart = std::chrono::steady_clock::now();
+                YAMS_TRY(db.execute("SAVEPOINT yams_inline_path_tree"));
+                recordMetadataInsertPhase("path_tree_savepoint", pathTreeSavepointStart);
+
+                const auto pathTreeUpsertStart = std::chrono::steady_clock::now();
+                auto pathTreeResult = upsertPathTreeForDocumentInTransaction(db, info, docId);
+                recordMetadataInsertPhase("path_tree_upsert", pathTreeUpsertStart);
+                const auto pathTreeReleaseStart = std::chrono::steady_clock::now();
+                if (pathTreeResult) {
+                    YAMS_TRY(db.execute("RELEASE SAVEPOINT yams_inline_path_tree"));
+                } else {
+                    (void)db.execute("ROLLBACK TO SAVEPOINT yams_inline_path_tree");
+                    (void)db.execute("RELEASE SAVEPOINT yams_inline_path_tree");
+                    spdlog::debug("Failed to update path tree for {}: {}", info.filePath,
+                                  pathTreeResult.error().message);
+                }
+                recordMetadataInsertPhase("path_tree_release", pathTreeReleaseStart);
+                recordMetadataInsertPhase("path_tree", pathTreeStart);
+            }
+
+            const auto commitStart = std::chrono::steady_clock::now();
             YAMS_TRY(commitOrRollback(db));
+            recordMetadataInsertPhase("commit", commitStart);
             committed = true;
 
             return InsertDocumentWithMetadataResult{docId, insertedNewDocument, metadataTagDelta,
@@ -478,6 +696,7 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
         return result.error();
     }
 
+    const auto cacheUpdateStart = std::chrono::steady_clock::now();
     const auto& update = result.value();
     if (update.insertedNewDocument) {
         cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
@@ -517,7 +736,125 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                     "metadata tag counter invariant violated: tagCount >= docsWithTags");
         metadataChangeCounter_.fetch_add(update.metadataWriteCount, std::memory_order_release);
     }
+    recordMetadataInsertPhase("cache_update", cacheUpdateStart);
     return update.docId;
+}
+
+Result<std::vector<int64_t>>
+MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::batchInsertDocumentsWithMetadata");
+    if (items.empty()) {
+        return std::vector<int64_t>{};
+    }
+
+    auto result = executeQuery<std::vector<InsertDocumentWithMetadataResult>>(
+        [&](Database& db) -> Result<std::vector<InsertDocumentWithMetadataResult>> {
+            const auto beginStart = std::chrono::steady_clock::now();
+            YAMS_TRY(beginTransaction(db));
+            recordMetadataInsertPhase("begin", beginStart);
+            bool committed = false;
+            auto rollback = scope_exit([&] {
+                if (!committed) {
+                    rollbackIgnoringErrors(db);
+                }
+            });
+
+            std::vector<InsertDocumentWithMetadataResult> perDoc;
+            perDoc.reserve(items.size());
+
+            for (auto& item : items) {
+                std::vector<repository::MetadataWriteEntry> metadataWrites;
+                metadataWrites.reserve(item.tags.size());
+                for (const auto& [key, value] : item.tags) {
+                    metadataWrites.emplace_back(0, key, value);
+                }
+                const auto dedupedMetadataWrites =
+                    repository::deduplicateMetadataWrites(metadataWrites);
+
+                YAMS_TRY_UNWRAP(inserted,
+                                insertOrLookupDocumentRow(db, item.info, hasPathIndexing_));
+                const auto [docId, insertedNewDocument] = inserted;
+
+                YAMS_TRY_UNWRAP(metadataTagDelta,
+                                applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+                const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
+
+                if (item.snapshot.has_value()) {
+                    item.snapshot->ingestDocumentId = docId;
+                    YAMS_TRY(upsertTreeSnapshotRow(db, *item.snapshot));
+                }
+
+                if (item.updatePathTreeInTransaction) {
+                    YAMS_TRY(db.execute("SAVEPOINT yams_inline_path_tree"));
+                    auto pathTreeResult =
+                        upsertPathTreeForDocumentInTransaction(db, item.info, docId);
+                    if (pathTreeResult) {
+                        YAMS_TRY(db.execute("RELEASE SAVEPOINT yams_inline_path_tree"));
+                    } else {
+                        (void)db.execute("ROLLBACK TO SAVEPOINT yams_inline_path_tree");
+                        (void)db.execute("RELEASE SAVEPOINT yams_inline_path_tree");
+                        spdlog::debug("Failed to update path tree for {}: {}", item.info.filePath,
+                                      pathTreeResult.error().message);
+                    }
+                }
+
+                perDoc.push_back(InsertDocumentWithMetadataResult{
+                    docId, insertedNewDocument, metadataTagDelta, metadataWriteCount});
+            }
+
+            const auto commitStart = std::chrono::steady_clock::now();
+            YAMS_TRY(commitOrRollback(db));
+            recordMetadataInsertPhase("commit", commitStart);
+            committed = true;
+            return perDoc;
+        });
+
+    if (!result) {
+        return result.error();
+    }
+
+    const auto& perDoc = result.value();
+    std::vector<int64_t> ids;
+    ids.reserve(perDoc.size());
+    for (std::size_t i = 0; i < perDoc.size(); ++i) {
+        const auto& update = perDoc[i];
+        const auto& info = items[i].info;
+        ids.push_back(update.docId);
+        if (update.insertedNewDocument) {
+            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+            cachedTotalSizeBytes_.fetch_add(
+                static_cast<uint64_t>(std::max<int64_t>(info.fileSize, 0)),
+                std::memory_order_relaxed);
+            applyExtensionStatsDelta(cachedCodeDocCount_, cachedProseDocCount_,
+                                     cachedBinaryDocCount_, info.fileExtension, 1);
+            cachedPathDepthSum_.fetch_add(static_cast<uint64_t>(std::max(info.pathDepth, 0)),
+                                          std::memory_order_relaxed);
+            updateCachedPathDepthMax(cachedPathDepthMax_,
+                                     static_cast<uint64_t>(std::max(info.pathDepth, 0)));
+            {
+                std::lock_guard<std::mutex> lock(extensionStatsMutex_);
+                updateExtensionCountMap(cachedExtensionCounts_, info.fileExtension, 1);
+            }
+            if (info.contentExtracted) {
+                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (update.metadataWriteCount > 0) {
+            signalCorpusStatsStale();
+            if (update.metadataTagDelta.tagCountDelta > 0) {
+                cachedTagCount_.fetch_add(
+                    static_cast<uint64_t>(update.metadataTagDelta.tagCountDelta),
+                    std::memory_order_relaxed);
+            }
+            if (update.metadataTagDelta.docsWithTagsDelta > 0) {
+                cachedDocsWithTags_.fetch_add(
+                    static_cast<uint64_t>(update.metadataTagDelta.docsWithTagsDelta),
+                    std::memory_order_relaxed);
+            }
+            metadataChangeCounter_.fetch_add(update.metadataWriteCount, std::memory_order_release);
+        }
+    }
+    return ids;
 }
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {

@@ -1,6 +1,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/storage/reference_counter.h>
+#include <yams/storage/reference_counter_writer.h>
 #include <yams/storage/reference_db.h>
 #include <yams/storage/storage_engine.h>
 
@@ -12,10 +13,12 @@ namespace yamsfmt = std;
 #include <spdlog/fmt/fmt.h>
 namespace yamsfmt = fmt;
 #endif
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <thread>
 
 #ifdef __linux__
@@ -31,6 +34,83 @@ namespace yamsfmt = fmt;
 #endif
 
 namespace yams::storage {
+
+namespace {
+
+struct AtomicRefCounterCommitPhaseTiming {
+    std::atomic<std::uint64_t> calls{0};
+    std::atomic<std::uint64_t> totalUs{0};
+    std::atomic<std::uint64_t> maxUs{0};
+};
+
+constexpr std::array<std::string_view, 8> kRefCounterCommitPhaseNames{
+    "db_mutex_wait", "begin",        "apply_ops",    "prune_refs",
+    "audit_rows",    "update_state", "update_stats", "sqlite_commit"};
+
+std::array<AtomicRefCounterCommitPhaseTiming, kRefCounterCommitPhaseNames.size()>&
+refCounterCommitTimings() {
+    static std::array<AtomicRefCounterCommitPhaseTiming, kRefCounterCommitPhaseNames.size()>
+        timings;
+    return timings;
+}
+
+std::optional<std::size_t> refCounterCommitPhaseIndex(std::string_view phase) {
+    for (std::size_t i = 0; i < kRefCounterCommitPhaseNames.size(); ++i) {
+        if (kRefCounterCommitPhaseNames[i] == phase) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void updateMaxRelaxed(std::atomic<std::uint64_t>& target, std::uint64_t value) {
+    auto current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void recordRefCounterCommitPhase(std::string_view phase,
+                                 std::chrono::steady_clock::time_point start) {
+    const auto index = refCounterCommitPhaseIndex(phase);
+    if (!index) {
+        return;
+    }
+    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+    const auto us = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsedUs));
+    auto& timing = refCounterCommitTimings()[*index];
+    timing.calls.fetch_add(1, std::memory_order_relaxed);
+    timing.totalUs.fetch_add(us, std::memory_order_relaxed);
+    updateMaxRelaxed(timing.maxUs, us);
+}
+
+} // namespace
+
+void resetRefCounterCommitPhaseTimings() {
+    for (auto& timing : refCounterCommitTimings()) {
+        timing.calls.store(0, std::memory_order_relaxed);
+        timing.totalUs.store(0, std::memory_order_relaxed);
+        timing.maxUs.store(0, std::memory_order_relaxed);
+    }
+}
+
+std::unordered_map<std::string, RefCounterCommitPhaseTiming>
+getRefCounterCommitPhaseTimingsSnapshot() {
+    std::unordered_map<std::string, RefCounterCommitPhaseTiming> snapshot;
+    snapshot.reserve(kRefCounterCommitPhaseNames.size());
+    const auto& timings = refCounterCommitTimings();
+    for (std::size_t i = 0; i < kRefCounterCommitPhaseNames.size(); ++i) {
+        snapshot.emplace(
+            std::string(kRefCounterCommitPhaseNames[i]),
+            RefCounterCommitPhaseTiming{timings[i].calls.load(std::memory_order_relaxed),
+                                        timings[i].totalUs.load(std::memory_order_relaxed),
+                                        timings[i].maxUs.load(std::memory_order_relaxed)});
+    }
+    return snapshot;
+}
 
 // Implementation details
 struct ReferenceCounter::Impl {
@@ -86,6 +166,7 @@ static std::filesystem::path findReferenceSchemaSql() {
     std::vector<fs::path> searchPaths;
 
     // 1. Check environment variable
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): process config is read during initialization.
     if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
         searchPaths.push_back(fs::path(dataDir) / "reference_schema.sql");
         searchPaths.push_back(fs::path(dataDir) / "sql" / "reference_schema.sql");
@@ -125,8 +206,8 @@ static std::filesystem::path findReferenceSchemaSql() {
                                   "reference_schema.sql");
         }
 #endif
-    } catch (...) {
-        // Ignore errors in getting executable path
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+        // Ignore errors in getting executable path.
     }
 
     // 3. Check common installation paths
@@ -142,6 +223,7 @@ static std::filesystem::path findReferenceSchemaSql() {
     searchPaths.push_back("../../../sql/reference_schema.sql");
 
     // 5. Check in home directory
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): process config is read during initialization.
     if (const char* home = std::getenv("HOME")) {
         searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "sql" /
                               "reference_schema.sql");
@@ -472,6 +554,30 @@ std::unique_ptr<StatementCache> createReferenceStatementCache(Database& db) {
         LIMIT ?
     )");
 
+    stmtCache->get("insert_transaction", R"(
+        INSERT INTO ref_transactions (start_timestamp, state)
+        VALUES (strftime('%s', 'now'), 'PENDING')
+    )");
+
+    stmtCache->get("update_transaction", R"(
+        UPDATE ref_transactions
+        SET commit_timestamp = strftime('%s', 'now'), state = ?
+        WHERE transaction_id = ?
+    )");
+
+    stmtCache->get("insert_op", R"(
+        INSERT INTO ref_transaction_ops
+        (transaction_id, block_hash, operation, delta, block_size, timestamp)
+        VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'))
+    )");
+
+    stmtCache->get("update_stats", R"(
+        UPDATE ref_statistics
+        SET stat_value = stat_value + ?,
+            updated_at = strftime('%s', 'now')
+        WHERE stat_name = ?
+    )");
+
     return stmtCache;
 }
 
@@ -509,7 +615,7 @@ Result<void> ReferenceCounter::executeSchemaMigrations() {
         try {
             pImpl->db->execute("ALTER TABLE block_references ADD COLUMN uncompressed_size INTEGER");
             spdlog::info("Added uncompressed_size column to block_references table");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Column already exists, ignore.
         }
 
@@ -525,14 +631,12 @@ Result<void> ReferenceCounter::executeSchemaMigrations() {
 Result<void> ReferenceCounter::increment(std::string_view blockHash, size_t compressedSize,
                                          size_t uncompressedSize) {
     YAMS_DCHECK(compressedSize > 0, "Compressed block size must be positive");
-    YAMS_DCHECK(uncompressedSize >= compressedSize,
-                "Uncompressed size must be >= compressed size");
+    YAMS_DCHECK(uncompressedSize >= compressedSize, "Uncompressed size must be >= compressed size");
     if (compressedSize == 0) {
         return Error{ErrorCode::InvalidArgument, "Compressed block size must be positive"};
     }
     if (uncompressedSize < compressedSize) {
-        return Error{ErrorCode::InvalidArgument,
-                     "Uncompressed size must be >= compressed size"};
+        return Error{ErrorCode::InvalidArgument, "Uncompressed size must be >= compressed size"};
     }
     try {
         std::unique_lock lock(pImpl->dbMutex);
@@ -724,10 +828,8 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
         // Don't start SQLite transaction yet - operations will be batched and applied during commit
         {
             std::unique_lock lock(counter_->pImpl->dbMutex);
-            auto stmt = counter_->pImpl->db->prepare(R"(
-                INSERT INTO ref_transactions (start_timestamp, state)
-                VALUES (strftime('%s', 'now'), 'PENDING')
-            )");
+            auto stmt = counter_->pImpl->stmtCache->get(
+                ReferenceCounter::Impl::INSERT_TRANSACTION_STMT, "");
             stmt.execute();
 
             // Get the assigned transaction ID
@@ -746,8 +848,8 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
 ReferenceCounter::Transaction::~Transaction() {
     try {
         rollback();
-    } catch (...) {
-        // Suppress exceptions in destructor
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+        // Suppress exceptions in destructor.
     }
 }
 
@@ -770,7 +872,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
     if (this != &other) {
         try {
             rollback();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Move assignment is noexcept; rollback failures are best-effort cleanup here.
         }
 
@@ -841,13 +943,18 @@ Result<void> ReferenceCounter::Transaction::commit() {
     }
 
     try {
+        const auto dbMutexWaitStart = std::chrono::steady_clock::now();
         std::unique_lock lock(counter_->pImpl->dbMutex);
+        recordRefCounterCommitPhase("db_mutex_wait", dbMutexWaitStart);
 
         // Start SQLite transaction for atomic operation application
+        const auto beginStart = std::chrono::steady_clock::now();
         counter_->pImpl->db->beginTransaction();
+        recordRefCounterCommitPhase("begin", beginStart);
 
         try {
             // Apply all queued operations atomically
+            const auto applyOpsStart = std::chrono::steady_clock::now();
             for (const auto& op : operations_) {
                 if (op.type == Operation::Type::Increment) {
                     auto stmt =
@@ -863,8 +970,10 @@ Result<void> ReferenceCounter::Transaction::commit() {
                     stmt.execute();
                 }
             }
+            recordRefCounterCommitPhase("apply_ops", applyOpsStart);
 
             // Prune reference rows for blocks garbage-collected from storage
+            const auto pruneRefsStart = std::chrono::steady_clock::now();
             if (!prunedHashes_.empty()) {
                 auto pruneStmt =
                     counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::PRUNE_REF_STMT, "");
@@ -874,38 +983,46 @@ Result<void> ReferenceCounter::Transaction::commit() {
                     pruneStmt.execute();
                 }
             }
+            recordRefCounterCommitPhase("prune_refs", pruneRefsStart);
 
             // Record all operations in audit log during commit
-            for (const auto& op : operations_) {
-                auto stmt = counter_->pImpl->db->prepare(R"(
-                    INSERT INTO ref_transaction_ops
-                    (transaction_id, block_hash, operation, delta, block_size, timestamp)
-                    VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'))
-                )");
-                stmt.bind(1, transactionId_);
-                stmt.bind(2, op.blockHash);
-                stmt.bind(3, std::string(op.type == Operation::Type::Increment ? "INCREMENT"
-                                                                               : "DECREMENT"));
-                stmt.bind(4,
-                          1); // Schema requires positive delta - operation type indicates direction
-                stmt.bind(5, static_cast<int64_t>(op.compressedSize));
-                stmt.execute();
+            const auto auditRowsStart = std::chrono::steady_clock::now();
+            if (!operations_.empty()) {
+                auto stmt =
+                    counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::INSERT_OP_STMT, "");
+                for (const auto& op : operations_) {
+                    stmt.reset();
+                    stmt.bind(1, transactionId_);
+                    stmt.bind(2, op.blockHash);
+                    stmt.bind(3, op.type == Operation::Type::Increment
+                                     ? std::string_view{"INCREMENT"}
+                                     : std::string_view{"DECREMENT"});
+                    // Schema requires positive delta; operation type indicates direction.
+                    stmt.bind(4, 1);
+                    stmt.bind(5, static_cast<int64_t>(op.compressedSize));
+                    stmt.execute();
+                }
             }
+            recordRefCounterCommitPhase("audit_rows", auditRowsStart);
 
             // Update transaction state
-            auto stmt = counter_->pImpl->db->prepare(R"(
-                UPDATE ref_transactions 
-                SET commit_timestamp = strftime('%s', 'now'), state = 'COMMITTED'
-                WHERE transaction_id = ?
-            )");
-            stmt.bind(1, transactionId_);
+            const auto updateStateStart = std::chrono::steady_clock::now();
+            auto stmt = counter_->pImpl->stmtCache->get(
+                ReferenceCounter::Impl::UPDATE_TRANSACTION_STMT, "");
+            stmt.bind(1, std::string_view{"COMMITTED"});
+            stmt.bind(2, transactionId_);
             stmt.execute();
+            recordRefCounterCommitPhase("update_state", updateStateStart);
 
             // Update statistics
+            const auto updateStatsStart = std::chrono::steady_clock::now();
             counter_->updateStatistics("transactions_completed", 1);
+            recordRefCounterCommitPhase("update_stats", updateStatsStart);
 
             // Commit SQLite transaction
+            const auto sqliteCommitStart = std::chrono::steady_clock::now();
             counter_->pImpl->db->commit();
+            recordRefCounterCommitPhase("sqlite_commit", sqliteCommitStart);
 
             active_ = false;
             committed_ = true;
@@ -942,12 +1059,10 @@ void ReferenceCounter::Transaction::rollback() {
         std::unique_lock lock(counter_->pImpl->dbMutex);
 
         // Update transaction state (no SQLite transaction to rollback since operations were queued)
-        auto stmt = counter_->pImpl->db->prepare(R"(
-            UPDATE ref_transactions 
-            SET state = 'ROLLED_BACK'
-            WHERE transaction_id = ?
-        )");
-        stmt.bind(1, transactionId_);
+        auto stmt =
+            counter_->pImpl->stmtCache->get(ReferenceCounter::Impl::UPDATE_TRANSACTION_STMT, "");
+        stmt.bind(1, std::string_view{"ROLLED_BACK"});
+        stmt.bind(2, transactionId_);
         stmt.execute();
 
         // Update statistics
@@ -977,12 +1092,7 @@ bool ReferenceCounter::Transaction::isActive() const {
 // Update statistics
 Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int64_t delta) {
     try {
-        auto stmt = pImpl->db->prepare(R"(
-            UPDATE ref_statistics 
-            SET stat_value = stat_value + ?,
-                updated_at = strftime('%s', 'now')
-            WHERE stat_name = ?
-        )");
+        auto stmt = pImpl->stmtCache->get(ReferenceCounter::Impl::UPDATE_STATS_STMT, "");
         stmt.bind(1, delta);
         stmt.bind(2, statName);
         stmt.execute();
@@ -991,6 +1101,116 @@ Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int
     } catch (const std::exception& e) {
         spdlog::error("Failed to update statistic {}: {}", statName, e.what());
         return Result<void>(ErrorCode::DatabaseError);
+    }
+}
+
+Result<void>
+ReferenceCounter::commitTransactionBatches(std::span<const RefTransactionBatch> batches) {
+    if (batches.empty()) {
+        return {};
+    }
+
+    try {
+        const auto dbMutexWaitStart = std::chrono::steady_clock::now();
+        std::unique_lock lock(pImpl->dbMutex);
+        detail::recordRefCounterWriterTiming("batch_db_mutex_wait", dbMutexWaitStart);
+
+        const auto beginStart = std::chrono::steady_clock::now();
+        pImpl->db->beginTransaction();
+        detail::recordRefCounterWriterTiming("batch_begin", beginStart);
+
+        try {
+            auto insertTxnStmt = pImpl->stmtCache->get(Impl::INSERT_TRANSACTION_STMT, "");
+            auto incrementStmt = pImpl->stmtCache->get(Impl::INCREMENT_STMT, "");
+            auto decrementStmt = pImpl->stmtCache->get(Impl::DECREMENT_STMT, "");
+            auto pruneStmt = pImpl->stmtCache->get(Impl::PRUNE_REF_STMT, "");
+            auto insertOpStmt = pImpl->stmtCache->get(Impl::INSERT_OP_STMT, "");
+            auto updateTxnStmt = pImpl->stmtCache->get(Impl::UPDATE_TRANSACTION_STMT, "");
+            auto updateStatsStmt = pImpl->stmtCache->get(Impl::UPDATE_STATS_STMT, "");
+
+            for (const auto& batch : batches) {
+                insertTxnStmt.reset();
+                insertTxnStmt.execute();
+                const auto transactionId = pImpl->db->lastInsertRowId();
+
+                const auto applyOpsStart = std::chrono::steady_clock::now();
+                for (const auto& op : batch.operations) {
+                    switch (op.type) {
+                        case RefDelta::Type::Increment:
+                            incrementStmt.reset();
+                            incrementStmt.bind(1, op.blockHash);
+                            incrementStmt.bind(2, static_cast<int64_t>(op.compressedSize));
+                            incrementStmt.bind(3, static_cast<int64_t>(op.uncompressedSize));
+                            incrementStmt.execute();
+                            break;
+                        case RefDelta::Type::Decrement:
+                            decrementStmt.reset();
+                            decrementStmt.bind(1, op.blockHash);
+                            decrementStmt.execute();
+                            break;
+                        case RefDelta::Type::Prune:
+                            pruneStmt.reset();
+                            pruneStmt.bind(1, op.blockHash);
+                            pruneStmt.execute();
+                            break;
+                    }
+                    detail::recordRefCounterWriterValue("committed_ops", 1);
+                }
+                detail::recordRefCounterWriterTiming("batch_apply_ops", applyOpsStart);
+
+                const auto auditRowsStart = std::chrono::steady_clock::now();
+                for (const auto& op : batch.operations) {
+                    insertOpStmt.reset();
+                    insertOpStmt.bind(1, transactionId);
+                    insertOpStmt.bind(2, op.blockHash);
+                    switch (op.type) {
+                        case RefDelta::Type::Increment:
+                            insertOpStmt.bind(3, std::string_view{"INCREMENT"});
+                            insertOpStmt.bind(4, 1);
+                            insertOpStmt.bind(5, static_cast<int64_t>(op.compressedSize));
+                            break;
+                        case RefDelta::Type::Decrement:
+                            insertOpStmt.bind(3, std::string_view{"DECREMENT"});
+                            insertOpStmt.bind(4, 1);
+                            insertOpStmt.bind(5, static_cast<int64_t>(op.compressedSize));
+                            break;
+                        case RefDelta::Type::Prune:
+                            insertOpStmt.bind(3, std::string_view{"PRUNE"});
+                            insertOpStmt.bind(4, 1);
+                            insertOpStmt.bind(5, static_cast<int64_t>(op.compressedSize));
+                            break;
+                    }
+                    insertOpStmt.execute();
+                }
+                detail::recordRefCounterWriterTiming("batch_audit_rows", auditRowsStart);
+
+                const auto updateStateStart = std::chrono::steady_clock::now();
+                updateTxnStmt.reset();
+                updateTxnStmt.bind(1, std::string_view{"COMMITTED"});
+                updateTxnStmt.bind(2, transactionId);
+                updateTxnStmt.execute();
+                detail::recordRefCounterWriterTiming("batch_update_state", updateStateStart);
+
+                const auto updateStatsStart = std::chrono::steady_clock::now();
+                updateStatsStmt.reset();
+                updateStatsStmt.bind(1, int64_t{1});
+                updateStatsStmt.bind(2, std::string_view{"transactions_completed"});
+                updateStatsStmt.execute();
+                detail::recordRefCounterWriterTiming("batch_update_stats", updateStatsStart);
+            }
+
+            const auto sqliteCommitStart = std::chrono::steady_clock::now();
+            pImpl->db->commit();
+            detail::recordRefCounterWriterTiming("batch_sqlite_commit", sqliteCommitStart);
+            return {};
+        } catch (const std::exception&) {
+            pImpl->db->rollback();
+            throw;
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to commit {} reference transaction batches: {}", batches.size(),
+                      e.what());
+        return Result<void>(ErrorCode::TransactionFailed);
     }
 }
 

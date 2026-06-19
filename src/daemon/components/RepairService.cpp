@@ -28,6 +28,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/profiling.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -379,12 +380,14 @@ RepairService::~RepairService() {
 }
 
 std::shared_ptr<metadata::IMetadataRepository> RepairService::getMetadataRepoForRepair() const {
+    YAMS_ZONE_SCOPED_N("RepairSvc::getMetadataRepoForRepair");
     if (!ctx_.getMetadataRepo)
         return nullptr;
     return std::static_pointer_cast<metadata::IMetadataRepository>(ctx_.getMetadataRepo());
 }
 
 void RepairService::start() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::start");
     if (!cfg_.enable || running_.exchange(true))
         return;
     if (state_) {
@@ -434,6 +437,7 @@ void RepairService::start() {
 }
 
 void RepairService::stop() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::stop");
     if (!running_.exchange(false))
         return;
     if (state_) {
@@ -460,6 +464,7 @@ void RepairService::stop() {
 // ============================================================================
 
 boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdownState) {
+    YAMS_ZONE_SCOPED_N("RepairSvc::backgroundLoop");
     using namespace std::chrono_literals;
     auto ex = co_await boost::asio::this_coro::executor;
     boost::asio::steady_timer timer(ex);
@@ -695,6 +700,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 }
 
 boost::asio::awaitable<void> RepairService::spawnInitialScan() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::spawnInitialScan");
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
         if (!meta)
@@ -804,6 +810,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
 }
 
 boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::processPathTreeRepair");
     using namespace std::chrono_literals;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
@@ -854,6 +861,7 @@ boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
 }
 
 void RepairService::performVectorCleanup() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::performVectorCleanup");
     if (vectorsDisabledByEnv())
         return;
     try {
@@ -986,6 +994,7 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
 }
 
 void RepairService::updateProgressPct() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::updateProgressPct");
     if (!state_)
         return;
     auto tot = totalBacklog_.load(std::memory_order_relaxed);
@@ -999,6 +1008,7 @@ void RepairService::updateProgressPct() {
 }
 
 void RepairService::beginRepairOperation(std::string_view operation) {
+    YAMS_ZONE_SCOPED_N("RepairSvc::beginRepairOperation");
     if (!state_)
         return;
     state_->stats.repairCurrentOperationCode.store(repairOperationCode(operation),
@@ -1008,6 +1018,7 @@ void RepairService::beginRepairOperation(std::string_view operation) {
 }
 
 void RepairService::endRepairOperation() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::endRepairOperation");
     if (!state_)
         return;
     state_->stats.repairCurrentOperationCode.store(0, std::memory_order_relaxed);

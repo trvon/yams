@@ -499,6 +499,21 @@ std::optional<std::vector<int64_t>> MetadataRepository::getCachedFtsIndexedIds()
     return ids;
 }
 
+std::optional<std::vector<uint8_t>>
+MetadataRepository::getCachedFtsIndexedStates(std::span<const int64_t> docIds) const {
+    if (!ftsIndexedIdsCacheReady_.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+
+    std::shared_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
+    std::vector<uint8_t> states;
+    states.reserve(docIds.size());
+    for (const auto docId : docIds) {
+        states.push_back(ftsIndexedIdsCache_.find(docId) != ftsIndexedIdsCache_.end() ? 1u : 0u);
+    }
+    return states;
+}
+
 void MetadataRepository::setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const {
     std::unique_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
     ftsIndexedIdsCache_.clear();
@@ -698,9 +713,22 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         int64_t precheckUs{0};
         int64_t contentUpsertUs{0};
         int64_t ftsUpsertUs{0};
+        int64_t ftsUpsertMaxUs{0};
+        std::size_t ftsUpsertSlowCount{0};
+        std::size_t ftsUpsertBoostedBytes{0};
         int64_t statusUpdateUs{0};
         int64_t commitUs{0};
+        int64_t executeQueryUs{0};
+        int64_t postResultUs{0};
+        int64_t invalidateQueryCacheUs{0};
+        int64_t signalCorpusStatsStaleUs{0};
+        int64_t counterUpdateUs{0};
+        int64_t noteFtsIndexedUs{0};
         std::size_t prechecks{0};
+        std::size_t ftsPrecheckCacheHits{0};
+        std::size_t ftsPrecheckCacheMisses{0};
+        uint64_t corpusStatsSignals{0};
+        uint64_t corpusStatsRedundantSignals{0};
         std::size_t contentUpserts{0};
         std::size_t ftsUpserts{0};
         std::size_t statusUpdates{0};
@@ -721,6 +749,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                           std::chrono::steady_clock::now() - start)
                           .count();
         }
+    };
+    auto nowForBatchTiming = [&]() {
+        return collectBatchContentTiming ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
     };
 
     constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
@@ -794,6 +826,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
     }
     addElapsedUs(phaseTimings.prepareInputUs, prepareStart);
 
+    const auto executeQueryStart = nowForBatchTiming();
     auto result = executeQuery<BatchContentDelta>([&](Database& db) -> Result<BatchContentDelta> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentTransaction");
         const auto transactionStart = std::chrono::steady_clock::now();
@@ -841,21 +874,94 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             ftsStmtOpt = std::move(ftsStmtResult);
         }
 
-        // Pre-check statement to determine counter increments before the combined UPDATE.
-        YAMS_TRY_UNWRAP(checkStmtResult, db.prepareCached(hasFts5 ? R"(
-                SELECT COALESCE(content_extracted, 0),
-                       CASE WHEN EXISTS(
-                           SELECT 1 FROM documents_fts WHERE rowid = documents.id
-                       ) THEN 1 ELSE 0 END
-                FROM documents WHERE id = ?
-            )"
-                                                                  : R"(
-                SELECT COALESCE(content_extracted, 0), 0
-                FROM documents WHERE id = ?
-            )"));
-        auto& checkStmt = *checkStmtResult;
-
         addElapsedUs(phaseTimings.prepareStatementsUs, prepareStatementsStart);
+
+        struct ExistingContentState {
+            bool contentExtracted = false;
+            bool ftsIndexed = false;
+        };
+        std::unordered_map<int64_t, ExistingContentState> existingStates;
+        const bool allPriorContentKnown = std::all_of(
+            preparedEntries.begin(), preparedEntries.end(),
+            [](const PreparedBatchContentEntry& entry) { return entry.priorStateKnown; });
+        std::vector<int64_t> precheckDocIds;
+        precheckDocIds.reserve(preparedEntries.size());
+        std::unordered_map<int64_t, std::size_t> firstPreparedIndexById;
+        firstPreparedIndexById.reserve(preparedEntries.size());
+        for (std::size_t i = 0; i < preparedEntries.size(); ++i) {
+            const auto documentId = preparedEntries[i].documentId;
+            precheckDocIds.push_back(documentId);
+            firstPreparedIndexById.emplace(documentId, i);
+        }
+        auto cachedFtsStates = hasFts5 ? getCachedFtsIndexedStates(std::span<const int64_t>{
+                                             precheckDocIds.data(), precheckDocIds.size()})
+                                       : std::optional<std::vector<uint8_t>>{};
+        if (hasFts5) {
+            if (cachedFtsStates) {
+                phaseTimings.ftsPrecheckCacheHits += preparedEntries.size();
+            } else {
+                phaseTimings.ftsPrecheckCacheMisses += preparedEntries.size();
+            }
+        }
+        const bool queryContentState = !allPriorContentKnown;
+        const bool queryFtsState = hasFts5 && !cachedFtsStates.has_value();
+        // Always precheck document existence. Besides counter state, this prevents stale
+        // post-ingest entries from creating orphan FTS rows after a document row has been deleted.
+        if (!preparedEntries.empty()) {
+            YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheckBatch");
+            const auto phaseStart = std::chrono::steady_clock::now();
+            std::string placeholders;
+            placeholders.reserve(preparedEntries.size() * 2);
+            for (std::size_t i = 0; i < preparedEntries.size(); ++i) {
+                if (i > 0) {
+                    placeholders += ',';
+                }
+                placeholders += '?';
+            }
+            std::string sql = "SELECT id";
+            if (queryContentState) {
+                sql += ", COALESCE(content_extracted, 0)";
+            }
+            if (queryFtsState) {
+                sql += ", CASE WHEN EXISTS(SELECT 1 FROM documents_fts WHERE rowid = documents.id) "
+                       "THEN 1 ELSE 0 END";
+            }
+            sql += " FROM documents WHERE id IN (";
+            sql += placeholders;
+            sql += ')';
+            YAMS_TRY_UNWRAP(checkStmt, db.prepare(sql));
+            for (std::size_t i = 0; i < preparedEntries.size(); ++i) {
+                YAMS_TRY(checkStmt.bind(static_cast<int>(i + 1), preparedEntries[i].documentId));
+            }
+            existingStates.reserve(preparedEntries.size());
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, checkStmt.step());
+                if (!hasRow) {
+                    break;
+                }
+                const auto documentId = checkStmt.getInt64(0);
+                const auto indexIt = firstPreparedIndexById.find(documentId);
+                if (indexIt == firstPreparedIndexById.end()) {
+                    continue;
+                }
+                const auto entryIndex = indexIt->second;
+                int column = 1;
+                ExistingContentState state{};
+                state.contentExtracted = queryContentState
+                                             ? checkStmt.getInt(column++) == 1
+                                             : preparedEntries[entryIndex].priorContentExtracted;
+                if (!hasFts5) {
+                    state.ftsIndexed = true;
+                } else if (queryFtsState) {
+                    state.ftsIndexed = checkStmt.getInt(column++) == 1;
+                } else {
+                    state.ftsIndexed = (*cachedFtsStates)[entryIndex] != 0u;
+                }
+                existingStates.emplace(documentId, state);
+                phaseTimings.prechecks++;
+            }
+            addElapsedUs(phaseTimings.precheckUs, phaseStart);
+        }
 
         std::vector<int64_t> statusUpdateIds;
         statusUpdateIds.reserve(preparedEntries.size());
@@ -872,33 +978,19 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             // Without FTS5 there is no documents_fts state to reconcile, so avoid
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
-            if (!entry.priorStateKnown || hasFts5) {
-                YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheck");
-                const auto phaseStart = std::chrono::steady_clock::now();
-                YAMS_TRY(checkStmt.reset());
-                YAMS_TRY(checkStmt.clearBindings());
-                YAMS_TRY(checkStmt.bind(1, entry.documentId));
-                auto checkStep = checkStmt.step();
-                if (!checkStep) {
-                    return checkStep.error();
-                }
-                if (checkStep.value()) {
-                    wasExtracted = checkStmt.getInt(0) == 1;
-                    wasIndexed = checkStmt.getInt(1) == 1;
-                    phaseTimings.prechecks++;
-                } else {
-                    // Post-ingest work can race with document deletion or duplicate-content
-                    // resolution. Do not create orphan content/FTS rows or advance counters
-                    // for a document row that no longer exists.
-                    spdlog::debug("MetadataRepository: skipping stale batch content entry for "
-                                  "missing document id {}",
-                                  entry.documentId);
-                    phaseTimings.staleSkipped++;
-                    addElapsedUs(phaseTimings.precheckUs, phaseStart);
-                    continue;
-                }
-                addElapsedUs(phaseTimings.precheckUs, phaseStart);
+            auto stateIt = existingStates.find(entry.documentId);
+            if (stateIt == existingStates.end()) {
+                // Post-ingest work can race with document deletion or duplicate-content
+                // resolution. Do not create orphan content/FTS rows or advance counters
+                // for a document row that no longer exists.
+                spdlog::debug("MetadataRepository: skipping stale batch content entry for "
+                              "missing document id {}",
+                              entry.documentId);
+                phaseTimings.staleSkipped++;
+                continue;
             }
+            wasExtracted = stateIt->second.contentExtracted;
+            wasIndexed = stateIt->second.ftsIndexed;
 
             {
                 YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentUpsertContent");
@@ -922,9 +1014,19 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 YAMS_TRY(
                     ftsStmt.bindAll(entry.documentId, entry.boostedContent, entry.sanitizedTitle));
                 YAMS_TRY(ftsStmt.execute());
+                const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - phaseStart)
+                                           .count();
+                const auto boundedUs = std::max<int64_t>(0, elapsedUs);
                 delta.indexedDocIds.push_back(entry.documentId);
                 phaseTimings.ftsUpserts++;
-                addElapsedUs(phaseTimings.ftsUpsertUs, phaseStart);
+                phaseTimings.ftsUpsertUs += boundedUs;
+                phaseTimings.ftsUpsertMaxUs = std::max(phaseTimings.ftsUpsertMaxUs, boundedUs);
+                phaseTimings.ftsUpsertBoostedBytes += entry.boostedContent.size();
+                constexpr int64_t kSlowFtsUpsertUs = 1000;
+                if (boundedUs >= kSlowFtsUpsertUs) {
+                    phaseTimings.ftsUpsertSlowCount++;
+                }
             }
 
             statusUpdateIds.push_back(entry.documentId);
@@ -1011,21 +1113,49 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         return delta;
     });
 
+    addElapsedUs(phaseTimings.executeQueryUs, executeQueryStart);
+
     if (result) {
-        invalidateQueryCache();
+        const auto postResultStart = nowForBatchTiming();
+        {
+            const auto phaseStart = nowForBatchTiming();
+            invalidateQueryCache();
+            addElapsedUs(phaseTimings.invalidateQueryCacheUs, phaseStart);
+        }
         // Signal corpus stats stale - batch content affects extractionCoverage stats
-        signalCorpusStatsStale();
+        {
+            const auto signalCountBefore = corpusStatsStaleSignals_.load(std::memory_order_relaxed);
+            const auto redundantCountBefore =
+                corpusStatsStaleRedundantSignals_.load(std::memory_order_relaxed);
+            const auto phaseStart = nowForBatchTiming();
+            signalCorpusStatsStale();
+            addElapsedUs(phaseTimings.signalCorpusStatsStaleUs, phaseStart);
+            phaseTimings.corpusStatsSignals =
+                corpusStatsStaleSignals_.load(std::memory_order_relaxed) - signalCountBefore;
+            phaseTimings.corpusStatsRedundantSignals =
+                corpusStatsStaleRedundantSignals_.load(std::memory_order_relaxed) -
+                redundantCountBefore;
+        }
 
         const auto& delta = result.value();
-        if (delta.newlyExtracted > 0) {
-            cachedExtractedCount_.fetch_add(delta.newlyExtracted, std::memory_order_relaxed);
+        {
+            const auto phaseStart = nowForBatchTiming();
+            if (delta.newlyExtracted > 0) {
+                cachedExtractedCount_.fetch_add(delta.newlyExtracted, std::memory_order_relaxed);
+            }
+            if (delta.newlyIndexed > 0) {
+                cachedIndexedCount_.fetch_add(delta.newlyIndexed, std::memory_order_relaxed);
+            }
+            addElapsedUs(phaseTimings.counterUpdateUs, phaseStart);
         }
-        if (delta.newlyIndexed > 0) {
-            cachedIndexedCount_.fetch_add(delta.newlyIndexed, std::memory_order_relaxed);
+        {
+            const auto phaseStart = nowForBatchTiming();
+            for (const auto docId : delta.indexedDocIds) {
+                noteFtsIndexedId(docId);
+            }
+            addElapsedUs(phaseTimings.noteFtsIndexedUs, phaseStart);
         }
-        for (const auto docId : delta.indexedDocIds) {
-            noteFtsIndexedId(docId);
-        }
+        addElapsedUs(phaseTimings.postResultUs, postResultStart);
         YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
                   static_cast<int64_t>(delta.newlyExtracted));
         YAMS_PLOT("metadata_repo::batch_content_newly_indexed",
@@ -1035,20 +1165,54 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         YAMS_PLOT("metadata_repo::batch_content_precheck_us", phaseTimings.precheckUs);
         YAMS_PLOT("metadata_repo::batch_content_content_upsert_us", phaseTimings.contentUpsertUs);
         YAMS_PLOT("metadata_repo::batch_content_fts_upsert_us", phaseTimings.ftsUpsertUs);
+        YAMS_PLOT("metadata_repo::batch_content_fts_upsert_max_us", phaseTimings.ftsUpsertMaxUs);
+        YAMS_PLOT("metadata_repo::batch_content_fts_upsert_slow_count",
+                  static_cast<int64_t>(phaseTimings.ftsUpsertSlowCount));
+        YAMS_PLOT("metadata_repo::batch_content_fts_upsert_boosted_bytes",
+                  static_cast<int64_t>(phaseTimings.ftsUpsertBoostedBytes));
         YAMS_PLOT("metadata_repo::batch_content_status_update_us", phaseTimings.statusUpdateUs);
+        YAMS_PLOT("metadata_repo::batch_content_execute_query_us", phaseTimings.executeQueryUs);
+        YAMS_PLOT("metadata_repo::batch_content_post_result_us", phaseTimings.postResultUs);
+        YAMS_PLOT("metadata_repo::batch_content_invalidate_query_cache_us",
+                  phaseTimings.invalidateQueryCacheUs);
+        YAMS_PLOT("metadata_repo::batch_content_signal_corpus_stats_stale_us",
+                  phaseTimings.signalCorpusStatsStaleUs);
+        YAMS_PLOT("metadata_repo::batch_content_counter_update_us", phaseTimings.counterUpdateUs);
+        YAMS_PLOT("metadata_repo::batch_content_note_fts_indexed_us",
+                  phaseTimings.noteFtsIndexedUs);
+        YAMS_PLOT("metadata_repo::batch_content_fts_precheck_cache_hits",
+                  static_cast<int64_t>(phaseTimings.ftsPrecheckCacheHits));
+        YAMS_PLOT("metadata_repo::batch_content_fts_precheck_cache_misses",
+                  static_cast<int64_t>(phaseTimings.ftsPrecheckCacheMisses));
+        YAMS_PLOT("metadata_repo::batch_content_corpus_stats_signals",
+                  static_cast<int64_t>(phaseTimings.corpusStatsSignals));
+        YAMS_PLOT("metadata_repo::batch_content_corpus_stats_redundant_signals",
+                  static_cast<int64_t>(phaseTimings.corpusStatsRedundantSignals));
         if (traceBatchContent) {
-            spdlog::info("MetadataRepository::batchInsertContentAndIndex phases entries={} "
-                         "prepare_us={} transaction_us={} begin_us={} fts_detect_us={} "
-                         "stmt_prepare_us={} precheck_us={} content_upsert_us={} "
-                         "fts_upsert_us={} status_update_us={} commit_us={} prechecks={} "
-                         "content_upserts={} fts_upserts={} status_updates={} stale_skipped={}",
-                         entries.size(), phaseTimings.prepareInputUs, phaseTimings.transactionUs,
-                         phaseTimings.beginUs, phaseTimings.detectFtsUs,
-                         phaseTimings.prepareStatementsUs, phaseTimings.precheckUs,
-                         phaseTimings.contentUpsertUs, phaseTimings.ftsUpsertUs,
-                         phaseTimings.statusUpdateUs, phaseTimings.commitUs, phaseTimings.prechecks,
-                         phaseTimings.contentUpserts, phaseTimings.ftsUpserts,
-                         phaseTimings.statusUpdates, phaseTimings.staleSkipped);
+            spdlog::info(
+                "MetadataRepository::batchInsertContentAndIndex phases entries={} "
+                "prepare_us={} transaction_us={} begin_us={} fts_detect_us={} "
+                "stmt_prepare_us={} precheck_us={} content_upsert_us={} "
+                "fts_upsert_us={} fts_upsert_max_us={} fts_upsert_slow_count={} "
+                "fts_upsert_boosted_bytes={} status_update_us={} commit_us={} execute_query_us={} "
+                "post_result_us={} invalidate_query_cache_us={} "
+                "signal_corpus_stats_stale_us={} counter_update_us={} "
+                "note_fts_indexed_us={} prechecks={} fts_precheck_cache_hits={} "
+                "fts_precheck_cache_misses={} corpus_stats_signals={} "
+                "corpus_stats_redundant_signals={} content_upserts={} fts_upserts={} "
+                "status_updates={} stale_skipped={}",
+                entries.size(), phaseTimings.prepareInputUs, phaseTimings.transactionUs,
+                phaseTimings.beginUs, phaseTimings.detectFtsUs, phaseTimings.prepareStatementsUs,
+                phaseTimings.precheckUs, phaseTimings.contentUpsertUs, phaseTimings.ftsUpsertUs,
+                phaseTimings.ftsUpsertMaxUs, phaseTimings.ftsUpsertSlowCount,
+                phaseTimings.ftsUpsertBoostedBytes, phaseTimings.statusUpdateUs,
+                phaseTimings.commitUs, phaseTimings.executeQueryUs, phaseTimings.postResultUs,
+                phaseTimings.invalidateQueryCacheUs, phaseTimings.signalCorpusStatsStaleUs,
+                phaseTimings.counterUpdateUs, phaseTimings.noteFtsIndexedUs, phaseTimings.prechecks,
+                phaseTimings.ftsPrecheckCacheHits, phaseTimings.ftsPrecheckCacheMisses,
+                phaseTimings.corpusStatsSignals, phaseTimings.corpusStatsRedundantSignals,
+                phaseTimings.contentUpserts, phaseTimings.ftsUpserts, phaseTimings.statusUpdates,
+                phaseTimings.staleSkipped);
         }
 
         const auto cachedIndexed = cachedIndexedCount_.load(std::memory_order_relaxed);
@@ -3138,9 +3302,14 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
 }
 
 void MetadataRepository::signalCorpusStatsStale() {
-    // Lightweight signal - just set the flag, don't recompute
-    // Actual recomputation is deferred to next getCorpusStats() call
-    corpusStatsStale_.store(true, std::memory_order_release);
+    // Lightweight signal - just set the flag, don't recompute.
+    // Actual recomputation is deferred to next getCorpusStats() call.
+    corpusStatsStaleSignals_.fetch_add(1, std::memory_order_relaxed);
+    bool expected = false;
+    if (!corpusStatsStale_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                   std::memory_order_acquire)) {
+        corpusStatsStaleRedundantSignals_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 // -----------------------------------------------------------------------------
