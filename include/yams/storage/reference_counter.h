@@ -16,6 +16,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace yams::storage {
@@ -26,6 +27,16 @@ class GarbageCollector;
 class StorageEngine;
 
 // Reference counting statistics
+struct RefCounterCommitPhaseTiming {
+    std::uint64_t calls{0};
+    std::uint64_t totalUs{0};
+    std::uint64_t maxUs{0};
+};
+
+void resetRefCounterCommitPhaseTimings();
+std::unordered_map<std::string, RefCounterCommitPhaseTiming>
+getRefCounterCommitPhaseTimingsSnapshot();
+
 struct RefCountStats {
     uint64_t totalBlocks;            // Total number of tracked blocks
     uint64_t totalReferences;        // Sum of all reference counts

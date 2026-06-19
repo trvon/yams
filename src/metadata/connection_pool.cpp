@@ -28,6 +28,29 @@ std::string getenvCopy(std::string_view name) {
     return std::string(env);
 }
 
+bool metadata_pool_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const std::string env = getenvCopy("YAMS_METADATA_TRACE");
+    bool enabled = !env.empty() && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+std::string_view pool_role(const ConnectionPoolConfig& config) {
+    if (config.readOnly) {
+        return "read";
+    }
+    if (config.maxConnections == 1) {
+        return "write";
+    }
+    return "mixed";
+}
+
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -267,6 +290,7 @@ Result<std::unique_ptr<PooledConnection>>
 ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority priority,
                         std::string_view callerTag, std::source_location callerLocation) {
     YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
+    const auto acquireRequestStart = std::chrono::steady_clock::now();
     const std::string effectiveTag = effectiveCallerTag(callerTag, callerLocation);
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -349,6 +373,20 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
                 activeConnections_++;
                 totalAcquired_++;
                 leased_.insert(pooledConn.get());
+                if (metadata_pool_trace_enabled()) {
+                    const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - acquireRequestStart)
+                                            .count();
+                    spdlog::info(
+                        "ConnectionPool::timeline event='acquire' pool='{}' tag='{}' "
+                        "priority='{}' wait_us={} active={} available={} total={} waiting={} "
+                        "created=true",
+                        pool_role(config_), effectiveTag,
+                        priority == ConnectionPriority::High ? "high" : "normal", waitUs,
+                        activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                        totalConnections_.load(std::memory_order_relaxed),
+                        waitingRequests_.load(std::memory_order_relaxed));
+                }
 
                 return pooledConn;
             } else {
@@ -480,6 +518,20 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
     leased_.insert(conn.get());
 
     waitingGuard.finish();
+
+    if (metadata_pool_trace_enabled()) {
+        const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - acquireRequestStart)
+                                .count();
+        spdlog::info("ConnectionPool::timeline event='acquire' pool='{}' tag='{}' priority='{}' "
+                     "wait_us={} active={} available={} total={} waiting={} created={}",
+                     pool_role(config_), effectiveTag,
+                     priority == ConnectionPriority::High ? "high" : "normal", waitUs,
+                     activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                     totalConnections_.load(std::memory_order_relaxed),
+                     waitingRequests_.load(std::memory_order_relaxed),
+                     foundValid ? "false" : "true");
+    }
 
     return conn;
 }
@@ -832,6 +884,17 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     available_.push(std::move(newConn));
     activeConnections_--;
     totalReleased_++;
+
+    if (metadata_pool_trace_enabled()) {
+        const auto& tag = conn->holderTag();
+        spdlog::info("ConnectionPool::timeline event='release' pool='{}' tag='{}' hold_us={} "
+                     "active={} available={} total={} waiting={} valid=true",
+                     pool_role(config_), tag.empty() ? "<untagged>" : tag,
+                     static_cast<unsigned long long>(holdMicros),
+                     activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                     totalConnections_.load(std::memory_order_relaxed),
+                     waitingRequests_.load(std::memory_order_relaxed));
+    }
 
     cv_.notify_one();
 }

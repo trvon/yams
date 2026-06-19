@@ -38,6 +38,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/storage/reference_counter.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
@@ -489,6 +490,8 @@ struct BenchmarkResult {
     std::unordered_map<std::string, yams::api::ContentStorePhaseTiming> content_store_phase_timings;
     std::unordered_map<std::string, yams::metadata::MetadataInsertPhaseTiming>
         metadata_insert_phase_timings;
+    std::unordered_map<std::string, yams::storage::RefCounterCommitPhaseTiming>
+        ref_counter_commit_phase_timings;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
 
     // Queue monitoring
@@ -565,13 +568,18 @@ struct BenchmarkResult {
 
         json contentStoreTimings = json::object();
         for (const auto& [phase, timing] : content_store_phase_timings) {
-            contentStoreTimings[phase] = {{"calls", timing.calls},
-                                          {"total_ms", timing.totalMs},
-                                          {"max_ms", timing.maxMs},
-                                          {"avg_ms", timing.calls == 0
-                                                         ? 0.0
-                                                         : static_cast<double>(timing.totalMs) /
-                                                               static_cast<double>(timing.calls)}};
+            contentStoreTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_ms", timing.totalMs},
+                {"max_ms", timing.maxMs},
+                {"avg_ms", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalMs) /
+                                                   static_cast<double>(timing.calls)},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
         }
         j["content_store_phase_timings"] = std::move(contentStoreTimings);
 
@@ -586,6 +594,18 @@ struct BenchmarkResult {
                                                    static_cast<double>(timing.calls)}};
         }
         j["metadata_insert_phase_timings"] = std::move(metadataInsertTimings);
+
+        json refCounterCommitTimings = json::object();
+        for (const auto& [phase, timing] : ref_counter_commit_phase_timings) {
+            refCounterCommitTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)}};
+        }
+        j["ref_counter_commit_phase_timings"] = std::move(refCounterCommitTimings);
 
         json postTimings = json::object();
         for (const auto& [phase, timing] : post_ingest_metrics.timings) {
@@ -828,6 +848,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         yams::app::services::resetDocumentStorePhaseTimings();
         yams::api::resetContentStorePhaseTimings();
         yams::metadata::resetMetadataInsertPhaseTimings();
+        yams::storage::resetRefCounterCommitPhaseTimings();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
         }
@@ -1048,6 +1069,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.content_store_phase_timings = yams::api::getContentStorePhaseTimingsSnapshot();
         result.metadata_insert_phase_timings =
             yams::metadata::getMetadataInsertPhaseTimingsSnapshot();
+        result.ref_counter_commit_phase_timings =
+            yams::storage::getRefCounterCommitPhaseTimingsSnapshot();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }

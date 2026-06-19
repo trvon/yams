@@ -22,6 +22,8 @@ struct ContentStorePhaseTiming {
     std::uint64_t calls{0};
     std::uint64_t totalMs{0};
     std::uint64_t maxMs{0};
+    std::uint64_t totalUs{0};
+    std::uint64_t maxUs{0};
 };
 
 void resetContentStorePhaseTimings();

@@ -54,6 +54,8 @@ struct AtomicContentStorePhaseTiming {
     std::atomic<std::uint64_t> calls{0};
     std::atomic<std::uint64_t> totalMs{0};
     std::atomic<std::uint64_t> maxMs{0};
+    std::atomic<std::uint64_t> totalUs{0};
+    std::atomic<std::uint64_t> maxUs{0};
 };
 
 constexpr std::array<std::string_view, 9> kContentStorePhaseNames{
@@ -87,14 +89,17 @@ void recordContentStorePhase(std::string_view phase, std::chrono::steady_clock::
     if (!index) {
         return;
     }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - start)
-                             .count();
-    const auto ms = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsed));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    const auto ms = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsedMs));
+    const auto us = static_cast<std::uint64_t>(std::max<int64_t>(0, elapsedUs));
     auto& timing = contentStoreTimings()[*index];
     timing.calls.fetch_add(1, std::memory_order_relaxed);
     timing.totalMs.fetch_add(ms, std::memory_order_relaxed);
+    timing.totalUs.fetch_add(us, std::memory_order_relaxed);
     updateMaxRelaxed(timing.maxMs, ms);
+    updateMaxRelaxed(timing.maxUs, us);
 }
 
 } // namespace
@@ -104,6 +109,8 @@ void resetContentStorePhaseTimings() {
         timing.calls.store(0, std::memory_order_relaxed);
         timing.totalMs.store(0, std::memory_order_relaxed);
         timing.maxMs.store(0, std::memory_order_relaxed);
+        timing.totalUs.store(0, std::memory_order_relaxed);
+        timing.maxUs.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -115,7 +122,9 @@ std::unordered_map<std::string, ContentStorePhaseTiming> getContentStorePhaseTim
         snapshot.emplace(std::string(kContentStorePhaseNames[i]),
                          ContentStorePhaseTiming{timings[i].calls.load(std::memory_order_relaxed),
                                                  timings[i].totalMs.load(std::memory_order_relaxed),
-                                                 timings[i].maxMs.load(std::memory_order_relaxed)});
+                                                 timings[i].maxMs.load(std::memory_order_relaxed),
+                                                 timings[i].totalUs.load(std::memory_order_relaxed),
+                                                 timings[i].maxUs.load(std::memory_order_relaxed)});
     }
     return snapshot;
 }
