@@ -330,8 +330,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             std::visit(
                 [&](const auto& concrete) {
                     using T = std::decay_t<decltype(concrete)>;
-                    if constexpr (std::is_same_v<T, InsertDocumentOp> ||
-                                  std::is_same_v<T, UpdateRepairStatusOp> ||
+                    if constexpr (std::is_same_v<T, UpdateRepairStatusOp> ||
                                   std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                   std::is_same_v<T, SetMetadataBatchOp> ||
                                   std::is_same_v<T, UpdateExtractionStatusOp> ||
@@ -374,8 +373,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     [&](auto& concrete) -> void {
                         using T = std::decay_t<decltype(concrete)>;
                         Result<void> r;
-                        if constexpr (std::is_same_v<T, InsertDocumentOp> ||
-                                      std::is_same_v<T, UpdateRepairStatusOp> ||
+                        if constexpr (std::is_same_v<T, UpdateRepairStatusOp> ||
                                       std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, SetMetadataBatchOp> ||
                                       std::is_same_v<T, UpdateExtractionStatusOp> ||
@@ -486,8 +484,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     [&](auto& concrete) -> void {
                         using T = std::decay_t<decltype(concrete)>;
                         Result<void> r;
-                        if constexpr (std::is_same_v<T, InsertDocumentOp> ||
-                                      std::is_same_v<T, UpsertTreeSnapshotOp> ||
+                        if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
                             r = applyMetadataOp(concrete);
@@ -1008,24 +1005,6 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.docEntitiesDeleted +=
             static_cast<std::uint64_t>(std::max<std::int64_t>(0, r.value()));
-    }
-    return Result<void>();
-}
-
-Result<void> WriteCoordinator::applyMetadataOp(InsertDocumentOp& op) {
-    if (!meta_)
-        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
-    metadata::MetadataOpScope opScope("wc_insert_document");
-    metadata::TreeSnapshotRecord* snapshotPtr =
-        op.snapshot.has_value() ? &op.snapshot.value() : nullptr;
-    auto r = meta_->insertDocumentWithMetadata(op.info, op.tags, snapshotPtr);
-    if (!r)
-        return r.error();
-    {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.documentsInserted++;
-        if (op.snapshot.has_value())
-            stats_.treeSnapshotsWritten++;
     }
     return Result<void>();
 }

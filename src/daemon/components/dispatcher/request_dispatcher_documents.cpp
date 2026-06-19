@@ -705,6 +705,34 @@ tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
     co_return false;
 }
 
+struct ReadySingleFileAddPlan {
+    bool synchronous{false};
+    std::string_view asyncQueueMessage{"Ingestion accepted for asynchronous processing."};
+};
+
+bool envRequestsSyncSingleFileAdd() {
+    const char* envSync = std::getenv("YAMS_SYNC_SINGLE_FILE_ADD");
+    if (!envSync || !*envSync) {
+        return false;
+    }
+    std::string value(envSync);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+ReadySingleFileAddPlan selectReadySingleFileAddPlan(const AddDocumentRequest& req) {
+    ReadySingleFileAddPlan plan;
+    plan.synchronous = envRequestsSyncSingleFileAdd();
+
+    // Respect callers that explicitly request processing completion before returning. The async
+    // queue path acknowledges ingestion early and cannot satisfy that contract.
+    if (req.waitForProcessing) {
+        plan.synchronous = true;
+    }
+    return plan;
+}
+
 ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest& req, bool isDir) {
     ImmediateAddFingerprint fingerprint;
     if (isDir || req.recursive) {
@@ -1431,26 +1459,10 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             // For single files when daemon is ready, prefer async queueing by default
             // to avoid blocking WorkCoordinator request threads under multi-client load.
             // Set YAMS_SYNC_SINGLE_FILE_ADD=1/true to restore synchronous behavior.
-            bool syncSingleFileAdd = false;
-            if (const char* envSync = std::getenv("YAMS_SYNC_SINGLE_FILE_ADD");
-                envSync && *envSync) {
-                std::string value(envSync);
-                std::transform(value.begin(), value.end(), value.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                syncSingleFileAdd =
-                    (value == "1" || value == "true" || value == "yes" || value == "on");
-            }
-
-            // Respect callers that explicitly request processing completion before returning.
-            // The async queue path acknowledges ingestion early and cannot satisfy that contract.
-            if (req.waitForProcessing) {
-                syncSingleFileAdd = true;
-            }
-
-            if (!syncSingleFileAdd) {
+            const auto addPlan = selectReadySingleFileAddPlan(req);
+            if (!addPlan.synchronous) {
                 co_return co_await enqueueAddDocumentOrReject(
-                    serviceManager_, state_, req, channelCapacity,
-                    "Ingestion accepted for asynchronous processing.",
+                    serviceManager_, state_, req, channelCapacity, addPlan.asyncQueueMessage,
                     /*countDeferred=*/false, /*isDir=*/false);
             }
 

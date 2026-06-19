@@ -1521,6 +1521,9 @@ ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
         if (auto it = kv.find("tuning.post_ingest.title_concurrent"); it != kv.end()) {
             caps.titleConcurrent = parseBounded(it->second, 1, 16);
         }
+        if (auto it = kv.find("tuning.post_ingest.batch_size"); it != kv.end()) {
+            caps.batchSize = parseBounded(it->second, 1, 256);
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for post-ingest caps: {}", e.what());
     }

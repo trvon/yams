@@ -75,6 +75,7 @@ namespace yams::api {
 class IContentStore;
 }
 namespace yams::metadata {
+class MetadataInsertWriter;
 class Database;
 class ConnectionPool;
 class MetadataRepository;
@@ -742,6 +743,7 @@ private:
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<WriteCoordinator> writeCoordinator_;
+    std::shared_ptr<metadata::MetadataInsertWriter> metadataInsertWriter_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;

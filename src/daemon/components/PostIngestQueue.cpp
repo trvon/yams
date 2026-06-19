@@ -34,6 +34,7 @@
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
+#include <yams/metadata/content_index_writer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/profiling.h>
@@ -52,6 +53,23 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
+
+struct PostIngestBatchPolicy {
+    // Keep extraction scheduling and content-index DB commit sizing separate. The extraction
+    // batch size remains TuneAdvisor-driven and pressure-adaptive; content-index commits keep
+    // the existing 128-entry transaction cap until a typed config/tuning change is validated.
+    std::size_t minParallelPrepareTasks{4};
+    std::size_t maxContentIndexEntriesPerTxn{128};
+};
+
+PostIngestBatchPolicy resolvePostIngestBatchPolicy() {
+    return {};
+}
+
+bool shouldPrepareSequentially(std::uint32_t maxWorkers, std::size_t taskCount,
+                               const PostIngestBatchPolicy& policy) {
+    return maxWorkers <= 1 || taskCount < policy.minParallelPrepareTasks;
+}
 
 std::string normalizeGraphPath(const std::string& path) {
     if (path.empty()) {
@@ -316,6 +334,9 @@ PostIngestQueue::PostIngestQueue(
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
       entityCoordinator_(entityCoordinator), capacity_(capacity ? capacity : 1000) {
+    if (meta_) {
+        contentIndexWriter_ = std::make_unique<metadata::ContentIndexWriter>(meta_);
+    }
     refreshStageAvailability();
     initializeChannels();
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
@@ -3250,7 +3271,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         }
 
         const auto contentWriteStart = std::chrono::steady_clock::now();
-        constexpr std::size_t kMaxContentEntriesPerTxn = 128;
+        const auto batchPolicy = resolvePostIngestBatchPolicy();
         contentIndexCalls_.fetch_add(1, std::memory_order_relaxed);
         contentIndexEntries_.fetch_add(static_cast<std::uint64_t>(successes.size()),
                                        std::memory_order_relaxed);
@@ -3260,8 +3281,10 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         committed.reserve(successes.size());
         {
             metadata::MetadataOpScope metadataScope("daemon_post_ingest_batch_content");
-            for (std::size_t off = 0; off < entries.size(); off += kMaxContentEntriesPerTxn) {
-                const auto end = std::min(entries.size(), off + kMaxContentEntriesPerTxn);
+            for (std::size_t off = 0; off < entries.size();
+                 off += batchPolicy.maxContentIndexEntriesPerTxn) {
+                const auto end =
+                    std::min(entries.size(), off + batchPolicy.maxContentIndexEntriesPerTxn);
                 const auto chunkSize = end - off;
                 contentIndexChunks_.fetch_add(1, std::memory_order_relaxed);
                 yams::core::atomic_max(contentIndexMaxChunkEntries_,
@@ -3269,7 +3292,9 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                 std::vector<metadata::BatchContentEntry> chunk(
                     std::make_move_iterator(entries.begin() + static_cast<long>(off)),
                     std::make_move_iterator(entries.begin() + static_cast<long>(end)));
-                auto batchResult = meta_->batchInsertContentAndIndex(chunk);
+                auto batchResult = contentIndexWriter_
+                                       ? contentIndexWriter_->submit(std::move(chunk)).get()
+                                       : meta_->batchInsertContentAndIndex(chunk);
                 if (!batchResult) {
                     spdlog::error("[PostIngestQueue] Batch DB write failed for {} documents: {}",
                                   chunk.size(), batchResult.error().message);
@@ -3366,6 +3391,16 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
     if (!failures.empty()) {
         recordTiming("commit_failures", failureWriteStart);
     }
+}
+
+PostIngestQueue::PreparedDispatchPlan
+PostIngestQueue::buildDispatchPlan(const PreparedMetadataEntry& prepared, bool embedStageActive,
+                                   bool hasEmbedQueue) const {
+    return PreparedDispatchPlan{
+        .dispatchEmbed = hasEmbedQueue && embedStageActive && prepared.shouldDispatchEmbed,
+        .loadContentForNonEmbedding = !prepared.contentBytes && (prepared.shouldDispatchSymbol ||
+                                                                 prepared.shouldDispatchEntity),
+    };
 }
 
 void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes) {
@@ -3496,7 +3531,9 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     };
 
     for (const auto& prepared : successes) {
-        if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
+        const auto dispatchPlan =
+            buildDispatchPlan(prepared, embedStageActive, static_cast<bool>(embedQ));
+        if (dispatchPlan.dispatchEmbed) {
             const auto embedPrepareStart = std::chrono::steady_clock::now();
             auto preparedDoc = makePreparedDoc(prepared);
             dispatchTimings.embedPrepare.add(std::chrono::steady_clock::now() - embedPrepareStart);
@@ -3522,7 +3559,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         }
 
         std::shared_ptr<std::vector<std::byte>> contentBytes = prepared.contentBytes;
-        if (!contentBytes && (prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity)) {
+        if (dispatchPlan.loadContentForNonEmbedding) {
             const auto contentLoadStart = std::chrono::steady_clock::now();
             contentBytes = getOrLoadDispatchContent(prepared.hash, contentByHash);
             dispatchTimings.contentLoad.add(std::chrono::steady_clock::now() - contentLoadStart);
@@ -3610,8 +3647,9 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     }
 
     // Get current concurrency limits from TuneAdvisor
+    const auto batchPolicy = resolvePostIngestBatchPolicy();
     const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
-    if (maxWorkers <= 1 || tasks.size() < 4) {
+    if (shouldPrepareSequentially(maxWorkers, tasks.size(), batchPolicy)) {
         // Sequential path: process tasks one by one
         std::vector<PreparedMetadataEntry> allSuccesses;
         std::vector<ExtractionFailure> allFailures;

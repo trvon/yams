@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <future>
 #include <optional>
 #include <thread>
 #include <variant>
@@ -21,6 +22,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
@@ -4442,5 +4444,153 @@ TEST_CASE("MetadataRepository: removeFromIndexByHashBatch reports actual FTS rem
     REQUIRE((afterNotIndexed.has_value()));
     CHECK_FALSE(afterIndexed.value());
     CHECK_FALSE(afterNotIndexed.value());
+}
+
+TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces inserts",
+          "[metadata][batch][insert]") {
+    MetadataRepositoryFixture fix;
+
+    auto makeItem = [](const std::string& path, const std::string& hash, const std::string& tagKey,
+                       const std::string& tagVal, bool pathTree) {
+        BatchDocumentInsert item;
+        item.info = makeDocumentWithPath(path, hash);
+        item.tags.emplace_back(tagKey, MetadataValue(tagVal));
+        item.updatePathTreeInTransaction = pathTree;
+        return item;
+    };
+
+    std::vector<BatchDocumentInsert> items;
+    items.push_back(makeItem("repo/batch/a.txt", "batch-hash-a", "stage", "alpha", true));
+    items.push_back(makeItem("repo/batch/b.txt", "batch-hash-b", "stage", "beta", true));
+    items.push_back(makeItem("repo/batch/c.txt", "batch-hash-c", "stage", "gamma", true));
+
+    // Attach a snapshot to the middle item.
+    TreeSnapshotRecord snap;
+    snap.snapshotId = "batch-snap-1";
+    snap.rootTreeHash = "batch-root-hash";
+    snap.createdTime = 1700000000;
+    snap.metadata["directory_path"] = "repo/batch";
+    items[1].snapshot = snap;
+
+    auto batchResult = fix.repository_->batchInsertDocumentsWithMetadata(items);
+    REQUIRE((batchResult.has_value()));
+    auto ids = batchResult.value();
+    REQUIRE((ids.size() == 3));
+
+    SECTION("ids are valid, distinct, and resolve to the right documents") {
+        std::vector<int64_t> sorted = ids;
+        std::sort(sorted.begin(), sorted.end());
+        CHECK((std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end()));
+        for (auto id : ids) {
+            CHECK((id > 0));
+        }
+        const std::vector<std::string> hashes = {"batch-hash-a", "batch-hash-b", "batch-hash-c"};
+        for (std::size_t i = 0; i < hashes.size(); ++i) {
+            auto doc = fix.repository_->getDocumentByHash(hashes[i]);
+            REQUIRE((doc.has_value()));
+            REQUIRE((doc.value().has_value()));
+            CHECK((doc.value().value().id == ids[i]));
+        }
+    }
+
+    SECTION("metadata tags are persisted for each document") {
+        const std::vector<std::pair<int64_t, std::string>> expected = {
+            {ids[0], "alpha"}, {ids[1], "beta"}, {ids[2], "gamma"}};
+        for (const auto& [id, val] : expected) {
+            auto mv = fix.repository_->getMetadata(id, "stage");
+            REQUIRE((mv.has_value()));
+            REQUIRE((mv.value().has_value()));
+            CHECK((mv.value().value().value == val));
+        }
+    }
+
+    SECTION("snapshot attached to one item is committed and bound to its document") {
+        // All-or-nothing batch committed (batchResult ok), so the tree_snapshots row was written
+        // without constraint failure. Verify the in-transaction wiring set ingestDocumentId.
+        REQUIRE((items[1].snapshot.has_value()));
+        REQUIRE((items[1].snapshot->ingestDocumentId.has_value()));
+        CHECK((items[1].snapshot->ingestDocumentId.value() == ids[1]));
+    }
+
+    SECTION("existing-hash item in a later batch dedups to the same id") {
+        std::vector<BatchDocumentInsert> dupItems;
+        dupItems.push_back(makeItem("repo/batch/a.txt", "batch-hash-a", "stage", "alpha", true));
+        auto dupResult = fix.repository_->batchInsertDocumentsWithMetadata(dupItems);
+        REQUIRE((dupResult.has_value()));
+        REQUIRE((dupResult.value().size() == 1));
+        CHECK((dupResult.value()[0] == ids[0]));
+    }
+
+    SECTION("empty batch is a no-op success") {
+        std::vector<BatchDocumentInsert> empty;
+        auto emptyResult = fix.repository_->batchInsertDocumentsWithMetadata(empty);
+        REQUIRE((emptyResult.has_value()));
+        CHECK((emptyResult.value().empty()));
+    }
+}
+
+TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-doc ids",
+          "[metadata][batch][writer]") {
+    auto dbPath = tempDbPath("metadata_insert_writer_test_");
+    ConnectionPoolConfig config;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
+    REQUIRE((pool->initialize().has_value()));
+    auto repo = std::make_shared<MetadataRepository>(*pool);
+
+    constexpr int kDocs = 64;
+    {
+        MetadataInsertWriter writer(repo);
+
+        // Submit from several threads to exercise concurrent coalescing.
+        std::atomic<int> next{0};
+        std::mutex futMutex;
+        std::vector<std::future<Result<int64_t>>> collected;
+        collected.reserve(kDocs);
+        constexpr int kThreads = 8;
+        std::vector<std::thread> submitters;
+        for (int t = 0; t < kThreads; ++t) {
+            submitters.emplace_back([&]() {
+                while (true) {
+                    int i = next.fetch_add(1);
+                    if (i >= kDocs)
+                        break;
+                    BatchDocumentInsert item;
+                    item.info = makeDocumentWithPath("repo/writer/doc-" + std::to_string(i) + ".txt",
+                                                     "writer-hash-" + std::to_string(i));
+                    item.tags.emplace_back("idx", MetadataValue(std::to_string(i)));
+                    auto fut = writer.submit(std::move(item));
+                    std::lock_guard<std::mutex> lk(futMutex);
+                    collected.push_back(std::move(fut));
+                }
+            });
+        }
+        for (auto& th : submitters)
+            th.join();
+
+        std::vector<int64_t> ids;
+        ids.reserve(kDocs);
+        for (auto& f : collected) {
+            auto r = f.get();
+            REQUIRE((r.has_value()));
+            CHECK((r.value() > 0));
+            ids.push_back(r.value());
+        }
+        REQUIRE((static_cast<int>(ids.size()) == kDocs));
+        std::sort(ids.begin(), ids.end());
+        CHECK((std::adjacent_find(ids.begin(), ids.end()) == ids.end()));
+    }
+
+    // All documents are durable after the writer drains.
+    for (int i = 0; i < kDocs; ++i) {
+        auto doc = repo->getDocumentByHash("writer-hash-" + std::to_string(i));
+        REQUIRE((doc.has_value()));
+        CHECK((doc.value().has_value()));
+    }
+
+    pool->shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 // NOLINTEND(bugprone-chained-comparison)

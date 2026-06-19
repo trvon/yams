@@ -28,6 +28,7 @@ class IContentStore;
 
 namespace yams::metadata {
 class MetadataRepository;
+class ContentIndexWriter;
 }
 
 namespace yams::extraction {
@@ -473,6 +474,7 @@ private:
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
+    std::unique_ptr<metadata::ContentIndexWriter> contentIndexWriter_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     std::shared_ptr<GraphComponent> graphComponent_;
@@ -656,6 +658,13 @@ private:
         DispatchTimingAccumulator titleDispatch;
     };
 
+    struct PreparedDispatchPlan {
+        bool dispatchEmbed{false};
+        bool loadContentForNonEmbedding{false};
+    };
+
+    PreparedDispatchPlan buildDispatchPlan(const PreparedMetadataEntry& prepared,
+                                           bool embedStageActive, bool hasEmbedQueue) const;
     void recordDispatchTimingSet(const DispatchTimingSet& timings);
     std::shared_ptr<std::vector<std::byte>> getOrLoadDispatchContent(
         const std::string& hash,

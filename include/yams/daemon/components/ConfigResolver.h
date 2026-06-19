@@ -126,6 +126,7 @@ public:
         std::optional<std::uint32_t> symbolConcurrent;
         std::optional<std::uint32_t> entityConcurrent;
         std::optional<std::uint32_t> titleConcurrent;
+        std::optional<std::uint32_t> batchSize;
     };
 
     struct SimeonEncoderPolicy {
@@ -539,6 +540,7 @@ public:
      * - tuning.post_ingest.symbol_concurrent   = int (1..32)
      * - tuning.post_ingest.entity_concurrent   = int (1..16)
      * - tuning.post_ingest.title_concurrent    = int (1..16)
+     * - tuning.post_ingest.batch_size          = int (1..256)
      */
     static PostIngestCaps resolvePostIngestCaps();
 

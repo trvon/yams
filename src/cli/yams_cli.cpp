@@ -894,6 +894,10 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_ = std::make_shared<app::services::AppContext>();
         appContext_->store = getContentStore();
         appContext_->metadataRepo = getMetadataRepository();
+        if (appContext_->metadataRepo) {
+            appContext_->metadataInsertWriter =
+                std::make_shared<metadata::MetadataInsertWriter>(appContext_->metadataRepo);
+        }
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
         appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
 

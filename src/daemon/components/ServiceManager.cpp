@@ -99,6 +99,7 @@
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
+#include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/migration.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
@@ -1158,6 +1159,10 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
     if (writeCoordinator_) {
         writeCoordinator_->shutdown();
         writeCoordinator_.reset();
+    }
+    if (metadataInsertWriter_) {
+        metadataInsertWriter_->shutdown();
+        metadataInsertWriter_.reset();
     }
 }
 
@@ -2367,6 +2372,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         }
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
+
+    // Initialize the metadata insert writer: a long-lived dedicated-thread component that coalesces
+    // concurrent document inserts into batched transactions. Shared via AppContext so per-task
+    // DocumentService instances reuse the one writer.
+    if (auto metaRepo = getMetadataRepo()) {
+        metadataInsertWriter_ = std::make_shared<metadata::MetadataInsertWriter>(metaRepo);
+        spdlog::info("[ServiceManager] Phase: MetadataInsertWriter Initialized.");
+    }
 
     // Initialize WriteCoordinator for serialized metadata/KG writes (internal infrastructure).
     try {
@@ -3816,6 +3829,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;
+    ctx.metadataInsertWriter = metadataInsertWriter_;
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
     ctx.kgStore = getKgStore(); // PBI-043: tree diff KG integration

@@ -666,6 +666,9 @@ int main(int argc, char* argv[]) {
                 applyIfNoEnv("YAMS_POST_TITLE_CONCURRENT", caps.titleConcurrent,
                              &yams::daemon::TuneAdvisor::setPostTitleConcurrent,
                              "postTitleConcurrent");
+                applyIfNoEnv("YAMS_POST_INGEST_BATCH_SIZE", caps.batchSize,
+                             &yams::daemon::TuneAdvisor::setPostIngestBatchSize,
+                             "postIngestBatchSize");
             }
 
             // Apply [gradient_limiter] overrides to TuneAdvisor if present

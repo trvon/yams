@@ -286,29 +286,11 @@ public:
         recordContentStorePhase("chunk_store_refs", chunkStoreStart);
 
         const auto manifestCreateStart = std::chrono::steady_clock::now();
-        // Convert Chunk vector to ChunkRef vector
-        std::vector<manifest::ChunkRef> chunkRefs;
-        chunkRefs.reserve(chunks.size());
-        for (const auto& chunk : chunks) {
-            chunkRefs.push_back({chunk.hash, chunk.offset, static_cast<uint32_t>(chunk.size)});
-        }
-
-        // Create and store manifest
-        auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
-        if (!manifestResult) {
-            rollbackStore();
-            return Result<StoreResult>(manifestResult.error());
-        }
-
-        auto& manifest = manifestResult.value();
-
-        // Store manifest
-        auto manifestData = manifestManager_->serialize(manifest);
+        auto manifestData = createSerializedManifest(fileInfo, chunks);
         if (!manifestData) {
             rollbackStore();
             return Result<StoreResult>(manifestData.error());
         }
-
         recordContentStorePhase("manifest_create", manifestCreateStart);
 
         const auto manifestStoreStart = std::chrono::steady_clock::now();
@@ -620,24 +602,7 @@ public:
                           .createdAt = metadata.createdAt,
                           .originalName = metadata.name};
 
-        // Convert Chunk vector to ChunkRef vector
-        std::vector<manifest::ChunkRef> chunkRefs;
-        chunkRefs.reserve(chunks.size());
-        for (const auto& chunk : chunks) {
-            chunkRefs.push_back({chunk.hash, chunk.offset, static_cast<uint32_t>(chunk.size)});
-        }
-
-        // Create and store manifest
-        auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
-        if (!manifestResult) {
-            rollbackStore();
-            return Result<StoreResult>(manifestResult.error());
-        }
-
-        auto& manifest = manifestResult.value();
-
-        // Serialize and store manifest
-        auto manifestData = manifestManager_->serialize(manifest);
+        auto manifestData = createSerializedManifest(fileInfo, chunks);
         if (!manifestData) {
             rollbackStore();
             return Result<StoreResult>(manifestData.error());
@@ -1250,6 +1215,27 @@ private:
         stats_.retrieveOperations += retrieveOps;
         stats_.deleteOperations += deleteOps;
         stats_.lastOperation = std::chrono::system_clock::now();
+    }
+
+    Result<std::vector<std::byte>>
+    createSerializedManifest(const FileInfo& fileInfo, std::span<const chunking::Chunk> chunks) {
+        std::vector<manifest::ChunkRef> chunkRefs;
+        chunkRefs.reserve(chunks.size());
+        for (const auto& chunk : chunks) {
+            chunkRefs.push_back({chunk.hash, chunk.offset, static_cast<uint32_t>(chunk.size)});
+        }
+
+        auto manifestResult = manifestManager_->createManifest(fileInfo, chunkRefs);
+        if (!manifestResult) {
+            return Result<std::vector<std::byte>>(manifestResult.error());
+        }
+
+        auto manifestData = manifestManager_->serialize(manifestResult.value());
+        if (!manifestData) {
+            return Result<std::vector<std::byte>>(manifestData.error());
+        }
+
+        return manifestData.value();
     }
 
     Result<void> commitReferenceBatch(const storage::RefTransactionBatch& batch) {

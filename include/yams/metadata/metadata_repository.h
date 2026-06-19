@@ -105,6 +105,13 @@ struct TreeSnapshotRecord {
     std::unordered_map<std::string, std::string> metadata;
 };
 
+struct BatchDocumentInsert {
+    DocumentInfo info;
+    std::vector<std::pair<std::string, MetadataValue>> tags;
+    std::optional<TreeSnapshotRecord> snapshot;
+    bool updatePathTreeInTransaction = false;
+};
+
 /**
  * @brief Derived snapshot info from document metadata (for snapshots not in tree_snapshots)
  *
@@ -567,6 +574,19 @@ public:
     Result<int64_t> insertDocumentWithMetadata(
         const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
         TreeSnapshotRecord* snapshot = nullptr, bool updatePathTreeInTransaction = false);
+
+    /**
+     * @brief Insert multiple documents (+metadata/+snapshot/+path-tree) in ONE transaction.
+     *
+     * Coalesces N insertDocumentWithMetadata operations into a single BEGIN IMMEDIATE
+     * transaction, amortizing per-document commit cost across the whole batch. All-or-nothing:
+     * if any document fails, the entire transaction rolls back and an error is returned.
+     *
+     * @param items Documents to insert; each item's optional snapshot has its ingestDocumentId
+     *              set internally to the corresponding new docId.
+     * @return Document IDs in the same order as @p items (new or existing).
+     */
+    Result<std::vector<int64_t>> batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items);
 
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;

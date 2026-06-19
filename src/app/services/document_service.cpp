@@ -580,6 +580,82 @@ inline std::string makeTempFilePathFor(const std::string& name) {
     return tmp.string();
 }
 
+struct StoreInputResolution {
+    std::string usePath;
+    std::optional<std::filesystem::path> tmpToRemove;
+};
+
+Result<StoreInputResolution> resolveStoreInput(const StoreDocumentRequest& req) {
+    StoreInputResolution input;
+
+    if (!req.path.empty()) {
+        // Defensive: reject directory paths early; callers should use addDirectory.
+        if (std::error_code ec; std::filesystem::is_directory(req.path, ec)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Path is a directory; use addDirectory/recursive ingestion"};
+        }
+        input.usePath = req.path;
+        return input;
+    }
+
+    if (req.content.empty() || req.name.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'"};
+    }
+
+    // Write inline content to a temporary file so the content store and MIME detection paths share
+    // the same file-backed behavior. The caller removes tmpToRemove after MIME detection.
+    input.usePath = makeTempFilePathFor(req.name);
+    input.tmpToRemove = std::filesystem::path(input.usePath);
+    std::error_code ec;
+    if (!yams::common::ensureDirectories(input.tmpToRemove->parent_path())) {
+        return Error{ErrorCode::WriteError, "Failed to create directory for temporary file"};
+    }
+
+    std::ofstream ofs(input.usePath, std::ios::binary);
+    if (!ofs.good()) {
+        return Error{ErrorCode::WriteError, "Failed to create temporary file for content"};
+    }
+    ofs.write(req.content.data(), static_cast<std::streamsize>(req.content.size()));
+    ofs.flush();
+    if (!ofs.good()) {
+        ofs.close();
+        std::filesystem::remove(*input.tmpToRemove, ec);
+        return Error{ErrorCode::WriteError, "Failed to write content to temporary file"};
+    }
+
+    return input;
+}
+
+std::vector<std::pair<std::string, metadata::MetadataValue>>
+buildMetadataTagPairs(const api::ContentMetadata& metadata) {
+    std::vector<std::pair<std::string, metadata::MetadataValue>> tagPairs;
+    tagPairs.reserve(metadata.tags.size());
+    for (const auto& [key, value] : metadata.tags) {
+        tagPairs.emplace_back(key, metadata::MetadataValue(value));
+    }
+    return tagPairs;
+}
+
+metadata::TreeSnapshotRecord
+buildIngestSnapshotRecord(const StoreDocumentRequest& req, const metadata::DocumentInfo& info,
+                          const std::string& snapshotId,
+                          std::chrono::system_clock::time_point createdTime) {
+    metadata::TreeSnapshotRecord snapshotRecord;
+    snapshotRecord.snapshotId = snapshotId;
+    // ingestDocumentId is set by insertDocumentWithMetadata.
+    snapshotRecord.createdTime = yams::common::timePointToEpochSeconds(createdTime);
+    snapshotRecord.fileCount = 1;
+    snapshotRecord.totalBytes = info.fileSize;
+    snapshotRecord.metadata["directory_path"] = info.filePath;
+    if (!req.snapshotLabel.empty()) {
+        snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
+    }
+    if (!req.collection.empty()) {
+        snapshotRecord.metadata["collection"] = req.collection;
+    }
+    return snapshotRecord;
+}
+
 // Basic "tags" extraction heuristic from metadata rows
 inline std::vector<std::string>
 extractTags(const std::unordered_map<std::string, yams::metadata::MetadataValue>& all) {
@@ -1140,7 +1216,16 @@ private:
     }
 
 public:
-    explicit DocumentServiceImpl(const AppContext& ctx) : ctx_(ctx) {}
+    explicit DocumentServiceImpl(const AppContext& ctx) : ctx_(ctx) {
+        // Ensure an insert writer is always available wherever there is a metadata repository.
+        // Hosts (ServiceManager / YamsCLI / mobile) inject a shared, long-lived writer so per-task
+        // DocumentService instances coalesce together; for any context that did not provide one
+        // (tests, embedded callers), lazily create a per-service writer here.
+        if (!ctx_.metadataInsertWriter && ctx_.metadataRepo) {
+            ctx_.metadataInsertWriter =
+                std::make_shared<metadata::MetadataInsertWriter>(ctx_.metadataRepo);
+        }
+    }
 
     // Store: accept path or (content + name); apply tags/metadata; update repo entry
     Result<StoreDocumentResponse> store(const StoreDocumentRequest& req) override {
@@ -1197,39 +1282,12 @@ public:
             }
         }
 
-        std::string usePath;
-        std::optional<std::filesystem::path> tmpToRemove;
-
-        if (!req.path.empty()) {
-            // Defensive: reject directory paths early; callers should use addDirectory
-            if (std::error_code __ec; std::filesystem::is_directory(req.path, __ec)) {
-                return Error{ErrorCode::InvalidArgument,
-                             "Path is a directory; use addDirectory/recursive ingestion"};
-            }
-            usePath = req.path;
-        } else if (!req.content.empty() && !req.name.empty()) {
-            // Write content to a temp file
-            usePath = makeTempFilePathFor(req.name);
-            tmpToRemove = std::filesystem::path(usePath);
-            std::error_code ec;
-            if (!yams::common::ensureDirectories(tmpToRemove->parent_path())) {
-                return Error{ErrorCode::WriteError,
-                             "Failed to create directory for temporary file"};
-            }
-            std::ofstream ofs(usePath, std::ios::binary);
-            if (!ofs.good()) {
-                return Error{ErrorCode::WriteError, "Failed to create temporary file for content"};
-            }
-            ofs.write(req.content.data(), static_cast<std::streamsize>(req.content.size()));
-            ofs.flush();
-            if (!ofs.good()) {
-                ofs.close();
-                std::filesystem::remove(*tmpToRemove, ec);
-                return Error{ErrorCode::WriteError, "Failed to write content to temporary file"};
-            }
-        } else {
-            return Error{ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'"};
+        auto input = resolveStoreInput(req);
+        if (!input) {
+            return input.error();
         }
+        std::string usePath = std::move(input.value().usePath);
+        std::optional<std::filesystem::path> tmpToRemove = std::move(input.value().tmpToRemove);
 
         const auto contentStoreStart = std::chrono::steady_clock::now();
         auto storeRes = ctx_.store->store(usePath, md);
@@ -1356,36 +1414,26 @@ public:
 
             metadata::populatePathDerivedFields(info);
 
-            // Build metadata tags as key-value pairs for the combined insert
-            std::vector<std::pair<std::string, metadata::MetadataValue>> tagPairs;
-            tagPairs.reserve(md.tags.size());
-            for (const auto& [k, v] : md.tags) {
-                tagPairs.emplace_back(k, metadata::MetadataValue(v));
-            }
-
-            // Build snapshot record for the combined insert
-            metadata::TreeSnapshotRecord snapshotRecord;
-            snapshotRecord.snapshotId = snapshotId;
-            // ingestDocumentId is set by insertDocumentWithMetadata
-            snapshotRecord.createdTime = yams::common::timePointToEpochSeconds(now);
-            snapshotRecord.fileCount = 1;
-            snapshotRecord.totalBytes = info.fileSize;
-            snapshotRecord.metadata["directory_path"] = info.filePath;
-            if (!req.snapshotLabel.empty()) {
-                snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
-            }
-            if (!req.collection.empty()) {
-                snapshotRecord.metadata["collection"] = req.collection;
-            }
+            auto tagPairs = buildMetadataTagPairs(md);
+            auto snapshotRecord = buildIngestSnapshotRecord(req, info, snapshotId, now);
 
             recordDocumentStorePhase("metadata_prepare", metadataPrepareStart);
 
-            // Single-transaction insert: document + metadata + snapshot in one
-            // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
+            // Single-transaction insert (document + metadata + snapshot, one BEGIN IMMEDIATE)
+            // routed through the shared MetadataInsertWriter, which coalesces concurrent inserts
+            // into batched transactions. submit().get() blocks until this document is committed
+            // (immediate-visibility preserved); the writer runs on its own thread so this is
+            // deadlock-free even when store() runs on the daemon io_context.
             metadata::MetadataOpScope metadataScope("app_store_document");
             const auto repoInsertStart = std::chrono::steady_clock::now();
-            auto ins = ctx_.metadataRepo->insertDocumentWithMetadata(
-                info, tagPairs, &snapshotRecord, req.combineMetadataPathTree);
+            if (!ctx_.metadataInsertWriter) {
+                return Error{ErrorCode::InternalError,
+                             "metadata insert writer unavailable in AppContext"};
+            }
+            metadata::BatchDocumentInsert insertRecord{info, std::move(tagPairs),
+                                                       std::move(snapshotRecord),
+                                                       req.combineMetadataPathTree};
+            auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
             if (ins) {
                 int64_t docId = ins.value();
