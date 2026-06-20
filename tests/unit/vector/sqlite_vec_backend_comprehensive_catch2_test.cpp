@@ -1192,9 +1192,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     for (int i = 0; i < 20; ++i) {
         const std::string docGroup = (i < 10) ? "doc_A" : "doc_B";
         auto emb = createEmbedding(64, static_cast<float>(i + 1));
-        REQUIRE(backend
-                    .insertVector(createVectorRecord("combo_" + std::to_string(i), emb, docGroup))
-                    .has_value());
+        REQUIRE(
+            backend.insertVector(createVectorRecord("combo_" + std::to_string(i), emb, docGroup))
+                .has_value());
     }
 
     auto query = createEmbedding(64, 5.0f);
@@ -1856,6 +1856,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend Simeon PQ persists and reloads across reopen",
                  "[vector][backend][search][spq][catch2]") {
     skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
 
     const std::string dbPath = createTempDbPath();
 

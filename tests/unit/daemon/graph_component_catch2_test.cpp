@@ -12,6 +12,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -1240,14 +1242,16 @@ TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to defini
     REQUIRE(result.has_value());
     CHECK(result.value().referencesLinked == 1);
 
-    auto edges = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    auto edges =
+        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
     REQUIRE(edges.has_value());
     REQUIRE(edges.value().size() == 1);
     CHECK(edges.value().front().dstNodeId == canonicalId.value());
 
     // Idempotent: a second pass adds no duplicate edge.
     REQUIRE(component.reconcileSymbolReferences(false).has_value());
-    auto edges2 = fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
+    auto edges2 =
+        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
     REQUIRE(edges2.has_value());
     CHECK(edges2.value().size() == 1);
 
@@ -1260,7 +1264,8 @@ TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to defini
     REQUIRE(ref2.has_value());
     auto dry = component.reconcileSymbolReferences(true);
     REQUIRE(dry.has_value());
-    auto edgesDry = fixture.kgStore->getEdgesFrom(ref2.value(), std::string_view("resolves_to"), 10, 0);
+    auto edgesDry =
+        fixture.kgStore->getEdgesFrom(ref2.value(), std::string_view("resolves_to"), 10, 0);
     REQUIRE(edgesDry.has_value());
     CHECK(edgesDry.value().empty());
 }
@@ -1369,8 +1374,8 @@ TEST_CASE("GraphComponent: repairGraph removes orphaned KG nodes after document 
     canonical.nodeKey = "function:gone@" + filePath;
     canonical.label = "gone";
     canonical.type = "function";
-    canonical.properties = std::string(R"({"qualified_name":"gone","file_path":")") + filePath +
-                           R"("})";
+    canonical.properties =
+        nlohmann::json{{"qualified_name", "gone"}, {"file_path", filePath}}.dump();
     REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
 
     // Delete the backing document row -> both nodes are now orphaned.
@@ -1428,8 +1433,8 @@ TEST_CASE("GraphComponent: repairGraph removes dangling resolves_to after canoni
     canonical.nodeKey = "function:demo::callee3@" + filePath;
     canonical.label = "callee3";
     canonical.type = "function";
-    canonical.properties = std::string(R"({"qualified_name":"demo::callee3","file_path":")") +
-                           filePath + R"("})";
+    canonical.properties =
+        nlohmann::json{{"qualified_name", "demo::callee3"}, {"file_path", filePath}}.dump();
     REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
 
     KGNode placeholder;
