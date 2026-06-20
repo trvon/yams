@@ -13,10 +13,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "tests/integration/daemon/test_async_helpers.h"
-#include "tests/integration/daemon/test_daemon_harness.h"
 #include "common/fixture_manager.h"
 #include "common/test_helpers_catch2.h"
+#include "tests/integration/daemon/test_async_helpers.h"
+#include "tests/integration/daemon/test_daemon_harness.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -239,7 +239,7 @@ TEST_CASE_METHOD(CorpusRelevanceFixture, "Collection: --collection scopes to one
     CAPTURE(onlyA);
     REQUIRE_FALSE(onlyA.empty());
     for (const auto& p : onlyA) {
-        REQUIRE(p.find("coll_b_doc") == std::string::npos);
+        REQUIRE((p.find("coll_b_doc") == std::string::npos));
     }
     bool aPresent = false;
     for (const auto& p : onlyA)
@@ -252,16 +252,16 @@ TEST_CASE_METHOD(CorpusRelevanceFixture, "Collection: --collection scopes to one
 TEST_CASE_METHOD(CorpusRelevanceFixture, "Path scope: pathPatterns constrains subtree, no starve",
                  "[integration][search][scope][relevance]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
-    addContent("scopeAalpha.txt", "scoped body zpathscoped one");
-    addContent("scopeBbeta.txt", "scoped body zpathscoped two");
+    addContent("scopea_alpha.txt", "scoped body zpathscoped one");
+    addContent("scopeb_beta.txt", "scoped body zpathscoped two");
 
-    auto onlyA = keywordHitsPath("zpathscoped", {"*scopeA*"});
+    auto onlyA = keywordHitsPath("zpathscoped", {"*scopea*"});
     CAPTURE(onlyA);
     REQUIRE_FALSE(onlyA.empty()); // must not starve: scoped query returns in-scope docs
     bool aSeen = false;
     for (const auto& p : onlyA) {
-        REQUIRE(p.find("scopeB") == std::string::npos);
-        aSeen = aSeen || p.find("scopeA") != std::string::npos;
+        REQUIRE((p.find("scopeb") == std::string::npos));
+        aSeen = aSeen || p.find("scopea") != std::string::npos;
     }
     REQUIRE(aSeen);
 }
@@ -282,7 +282,7 @@ TEST_CASE_METHOD(CorpusRelevanceFixture, "Noise: gitignored .claude tree is not 
     auto hits = keywordHits("znoisetok", /*collection=*/"");
     CAPTURE(hits);
     for (const auto& p : hits) {
-        REQUIRE(p.find(".claude") == std::string::npos);
+        REQUIRE((p.find(".claude") == std::string::npos));
     }
 }
 

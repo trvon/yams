@@ -9,6 +9,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -515,8 +517,11 @@ TEST_CASE("GraphContextService impact finds callers through symbol_reference pla
     callerVersion.nodeKey = "function:demo::caller@" + callerPath.string() + "@snap:abc";
     callerVersion.label = "caller";
     callerVersion.type = "function_version";
-    callerVersion.properties = std::string("{\"qualified_name\":\"demo::caller\",\"file_path\":\"") +
-                               callerPath.string() + "\",\"start_line\":1,\"end_line\":1}";
+    callerVersion.properties = nlohmann::json{{"qualified_name", "demo::caller"},
+                                              {"file_path", callerPath.string()},
+                                              {"start_line", 1},
+                                              {"end_line", 1}}
+                                   .dump();
     auto callerId = fixture.kgStore->upsertNode(callerVersion);
     REQUIRE((callerId.has_value()));
 
@@ -608,9 +613,11 @@ TEST_CASE("GraphContextService impact bridges placeholders across multiple hops"
         node.nodeKey = "function:" + qualified + "@" + path.string() + "@snap:" + simple;
         node.label = simple;
         node.type = "function_version";
-        node.properties = std::string("{\"qualified_name\":\"") + qualified +
-                          "\",\"file_path\":\"" + path.string() +
-                          "\",\"start_line\":1,\"end_line\":1}";
+        node.properties = nlohmann::json{{"qualified_name", qualified},
+                                         {"file_path", path.string()},
+                                         {"start_line", 1},
+                                         {"end_line", 1}}
+                              .dump();
         auto id = fixture.kgStore->upsertNode(node);
         REQUIRE((id.has_value()));
         return id.value();
@@ -707,8 +714,7 @@ TEST_CASE("GraphContextService affectedTests maps changed files to tests",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;
     auto srcPath = fixture.writeSource("src/widget.cpp", {"int widget() { return 1; }"});
-    auto testPath =
-        fixture.writeSource("tests/widget_test.cpp", {"void t() { widget(); }"});
+    auto testPath = fixture.writeSource("tests/widget_test.cpp", {"void t() { widget(); }"});
     auto srcSym = fixture.symbol(srcPath, "widget", "demo::widget", 1, 1);
     auto testSym = fixture.symbol(testPath, "t", "demo::t", 1, 1);
     fixture.upsertSymbols({srcSym, testSym});

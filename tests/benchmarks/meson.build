@@ -246,7 +246,18 @@ if benchmark_dep.found()
   fts5_indexing_bench = executable('fts5_indexing_bench',
     files('fts5_indexing_bench.cpp'),
     include_directories: incs,
-    dependencies: [benchmark_main_dep, benchmark_dep, dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps,
+    # Keep project/Conan dependencies before benchmark. On macOS runners,
+    # benchmark may resolve from Homebrew and add /opt/homebrew/include ahead
+    # of Conan's fmt; spdlog then sees the wrong fmt headers and fails to
+    # compile fmt::basic_format_string references.
+    dependencies: [
+      dependency('yams_metadata'),
+      dependency('yams_search'),
+      dependency('yams_daemon'),
+      dependency('spdlog'),
+      benchmark_main_dep,
+      benchmark_dep,
+    ] + tracy_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
     install: false,
   )
