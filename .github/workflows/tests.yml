@@ -125,6 +125,8 @@ jobs:
     env:
       BUILD_DIR: builddir
       YAMS_DISABLE_FAISS: 1
+      YAMS_CONAN_COMPILER_VERSION: ${{ matrix.conan_compiler_version || '' }}
+      YAMS_MSBUILD_VS_VERSION: ${{ matrix.msbuild_vs_version || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -154,10 +156,12 @@ jobs:
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-dcheck=true"
           - suffix: windows-x86_64
-            runs_on: windows-latest
+            runs_on: windows-2025-vs2026
             conan_host_profile: ./conan/profiles/host-windows-msvc
             conan_arch: x86_64
             needs_rosetta: false
+            conan_compiler_version: '195'
+            msbuild_vs_version: '18'
             build_type: Debug
             coverage: false
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-dcheck=true"
@@ -374,7 +378,7 @@ jobs:
         run: |
           echo "Conan cache hit: ${{ steps.cache_conan.outputs.cache-hit }}"
           du -sh ~/.conan2/p 2>/dev/null || true
-          ls ~/.conan2/r 2>/dev/null | head || true
+          find ~/.conan2/r -maxdepth 1 -mindepth 1 -print 2>/dev/null | head || true
       - name: Cache ccache
         if: matrix.suffix != 'linux-arm64'
         uses: actions/cache@v4
@@ -434,11 +438,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro" >> $GITHUB_ENV
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_COMPRESS=1"
+            echo "CCACHE_MAXSIZE=5G"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,file_macro"
+          } >> "$GITHUB_ENV"
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
 
@@ -550,7 +556,8 @@ jobs:
           # that setup.sh used for meson setup (Conan provides meson 1.10.x which
           # creates build.dat incompatible with older system meson).
           CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
-          if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; source "${CONAN_BUILD_ENV}"; set -u; fi
+          # shellcheck source=/dev/null
+          if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; . "${CONAN_BUILD_ENV}"; set -u; fi
           if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ] || \
              [ "${{ matrix.suffix }}" = "linux-x86_64-ubsan" ]; then
             $ARCH_PREFIX meson compile -C builddir \
@@ -644,7 +651,8 @@ jobs:
           done
           if [ -n "$CONAN_BUILD_ENV" ]; then
             set +u
-            source "$CONAN_BUILD_ENV"
+            # shellcheck source=/dev/null
+            . "$CONAN_BUILD_ENV"
             set -u
           fi
           # Run unit and integration tests (TSAN disabled in CI). ASAN is a sanitizer smoke lane;
@@ -723,7 +731,8 @@ jobs:
           done
           if [ -n "$CONAN_BUILD_ENV" ]; then
             set +u
-            source "$CONAN_BUILD_ENV"
+            # shellcheck source=/dev/null
+            . "$CONAN_BUILD_ENV"
             set -u
           fi
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)

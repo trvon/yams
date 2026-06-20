@@ -1,7 +1,6 @@
-{# windows-latest (= windows-2022) ships VS 2022 with the v143 toolset at #}
-{# 14.44.x (MSVC compiler.version=194). Its 14.50 entries are runtime libs #}
-{# only — no 14.5 toolset on disk. Default to 194 here; users with a true #}
-{# 14.5 toolset (e.g. windows-2025-vs2026) can opt back in via env. #}
+{# Default to the VS 2022 / v143 toolset for local compatibility. #}
+{# CI jobs running on windows-2025-vs2026 override these values with #}
+{# YAMS_CONAN_COMPILER_VERSION=195 and YAMS_MSBUILD_VS_VERSION=18. #}
 {% set compiler_version = os.getenv("YAMS_CONAN_COMPILER_VERSION", "194") %}
 {% set compiler_version_int = compiler_version | int %}
 {% set vs_version = os.getenv("YAMS_MSBUILD_VS_VERSION", "17") %}
