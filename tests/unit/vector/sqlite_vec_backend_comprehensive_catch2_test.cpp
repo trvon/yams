@@ -1918,6 +1918,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "VectorIndexManager delegates to backend correctly",
                  "[vector][regression][index_manager][catch2]") {
+    skipIfNeeded();
     SqliteVecBackend::Config config;
     config.embedding_dim = 64;
     SqliteVecBackend backend(config);
@@ -1945,6 +1946,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "VectorIndexManager delegates to backe
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persists across reopen",
                  "[vector][regression][vec0_persist][catch2]") {
+    skipIfNeeded();
     std::string dbPath = createTempDbPath();
 
     // Build: create tables, insert vectors, build index, close
@@ -1984,6 +1986,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persi
 TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend threaded ANN build produces correct search results",
                  "[vector][regression][vec0_parallel][catch2]") {
+    skipIfNeeded();
     SqliteVecBackend::Config config;
     config.embedding_dim = 64;
     config.search_engine = VectorSearchEngine::Vec0L2;

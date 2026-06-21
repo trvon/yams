@@ -333,8 +333,10 @@ private:
     std::shared_ptr<ShutdownState> shutdownState_;
     VectorIndexCoordinator* coordinator_{nullptr}; // not owned; injected via context
 
-    // On-demand repair serialization (only one RPC repair at a time)
-    std::mutex repairMutex_;
+    // On-demand repair serialization (only one RPC repair at a time).
+    // Serialization uses the atomic gate below (not a mutex) because the async
+    // repair coroutine holds the guard across co_await points and may resume on a
+    // different thread — a std::mutex unlocked off-thread aborts under MSVC.
     std::atomic<bool> repairInProgress_{false};
     std::mutex activeRepairMutex_;
     std::condition_variable activeRepairCv_;
