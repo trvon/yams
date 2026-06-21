@@ -1031,8 +1031,13 @@ void RepairService::endRepairOperation() {
 
 RepairResponse RepairService::executeRepair(const RepairRequest& request, ProgressFn progress,
                                             std::atomic<bool>* cancelRequested) {
-    std::unique_lock<std::mutex> lock(repairMutex_, std::try_to_lock);
-    if (!lock.owns_lock()) {
+    // Serialize repairs via an atomic gate (one repair RPC at a time). An atomic
+    // is used rather than a std::mutex because the async twin holds this guard
+    // across co_await suspension points; a mutex would be unlocked on a different
+    // thread than locked, which aborts under MSVC's checked std::mutex.
+    bool repairExpected = false;
+    if (!repairInProgress_.compare_exchange_strong(repairExpected, true,
+                                                   std::memory_order_acq_rel)) {
         // Another repair RPC is already running — return immediately.
         RepairResponse busy;
         busy.success = false;
@@ -1042,7 +1047,6 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
         return busy;
     }
 
-    repairInProgress_.store(true, std::memory_order_release);
     if (state_) {
         state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
     }
@@ -1218,8 +1222,14 @@ finalize:
 boost::asio::awaitable<RepairResponse>
 RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progress,
                                   std::atomic<bool>* cancelRequested) {
-    std::unique_lock<std::mutex> lock(repairMutex_, std::try_to_lock);
-    if (!lock.owns_lock()) {
+    // Serialize repairs via an atomic gate (one repair RPC at a time). This guard
+    // is held across co_await suspension points and the coroutine may resume on a
+    // different worker thread, so a std::mutex must NOT be used here: its RAII
+    // unlock would run on a non-owning thread and abort under MSVC's checked
+    // std::mutex. The atomic gate is thread-agnostic; InProgressGuard clears it.
+    bool repairExpected = false;
+    if (!repairInProgress_.compare_exchange_strong(repairExpected, true,
+                                                   std::memory_order_acq_rel)) {
         RepairResponse busy;
         busy.success = false;
         busy.errors.push_back(
@@ -1228,7 +1238,6 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
         co_return busy;
     }
 
-    repairInProgress_.store(true, std::memory_order_release);
     if (state_) {
         state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
     }
