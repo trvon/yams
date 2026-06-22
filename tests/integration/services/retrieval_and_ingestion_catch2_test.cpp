@@ -21,8 +21,8 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_future.hpp>
 
-#include "../daemon/test_daemon_harness.h"
 #include "../../common/test_helpers_catch2.h"
+#include "../daemon/test_daemon_harness.h"
 #include "common/capability.h"
 #include "common/fixture_manager.h"
 
@@ -318,7 +318,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     greq.metadataOnly = false;
     auto gres = rsvc.get(greq, ropts);
     REQUIRE(gres);
-    CHECK(gres.value().name == "hello.txt");
+    CHECK((gres.value().name == "hello.txt"));
 
     // 5) Grep for pattern
     yams::app::services::GrepOptions gpreq;
@@ -339,7 +339,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     // 6) Name-smart get
     auto gname = rsvc.getByNameSmart("hello.txt", false, true, false, std::string{}, ropts, {});
     REQUIRE(gname);
-    CHECK(gname.value().name == "hello.txt");
+    CHECK((gname.value().name == "hello.txt"));
 
     // 7) Chunked buffer get
     yams::app::services::GetInitOptions ginit;
@@ -347,7 +347,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     ropts.requestTimeoutMs = 30000;
     auto chunked = rsvc.getChunkedBuffer(ginit, 8, ropts);
     REQUIRE(chunked);
-    CHECK(chunked.value().content.size() <= 8u);
+    CHECK((chunked.value().content.size() <= 8u));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddBatchPreservesOrderAndMixedResults",
@@ -436,15 +436,16 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddBatchPreservesOrderAndMi
     CHECK((getBRes.value().name == "b.txt"));
 }
 
-TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "SearchPersistsRetrievalServedFeedbackEvent",
+TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
+                 "SearchDoesNotPersistRetrievalServedFeedbackEvent",
                  "[integration][services][retrieval][feedback]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     REQUIRE(startDaemon());
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
-    REQUIRE(ctx.metadataRepo != nullptr);
+    REQUIRE((ctx.metadataRepo != nullptr));
 
     using yams::app::services::DocumentIngestionService;
 
@@ -476,6 +477,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "SearchPersistsRetrievalServ
     cfg.requestTimeout = 5000ms;
     auto client = std::make_shared<yams::daemon::DaemonClient>(cfg);
 
+    auto beforeEvents = ctx.metadataRepo->getRecentFeedbackEvents(50);
+    REQUIRE(beforeEvents);
+    const auto beforeCount = std::count_if(
+        beforeEvents.value().begin(), beforeEvents.value().end(), [](const auto& event) {
+            return event.eventType == "retrieval_served" && event.source == "daemon";
+        });
+
     yams::daemon::SearchRequest req;
     req.query = "trace feedback body";
     req.limit = 10;
@@ -492,20 +500,18 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "SearchPersistsRetrievalServ
         },
         boost::asio::detached);
 
-    REQUIRE(fut.wait_for(5s) == std::future_status::ready);
+    REQUIRE((fut.wait_for(5s) == std::future_status::ready));
     auto searchRes = fut.get();
     REQUIRE(searchRes);
 
-    auto events = ctx.metadataRepo->getRecentFeedbackEvents(50);
-    REQUIRE(events);
-    REQUIRE_FALSE(events.value().empty());
-
-    auto it = std::find_if(events.value().begin(), events.value().end(), [](const auto& event) {
-        return event.eventType == "retrieval_served" && event.source == "daemon";
-    });
-    REQUIRE(it != events.value().end());
-    CHECK_FALSE(it->traceId.empty());
-    CHECK(it->payloadJson.find("trace feedback body") != std::string::npos);
+    auto afterEvents = ctx.metadataRepo->getRecentFeedbackEvents(50);
+    REQUIRE(afterEvents);
+    const auto afterCount = std::count_if(
+        afterEvents.value().begin(), afterEvents.value().end(), [](const auto& event) {
+            return event.eventType == "retrieval_served" && event.source == "daemon";
+        });
+    CHECK((afterCount == beforeCount));
+    CHECK((searchRes.value().searchStats["phase_dispatch_feedback_us"] == "0"));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "StatsZeroThenGrowthAndUnreachableHints",
@@ -518,7 +524,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "StatsZeroThenGrowthAndUnrea
     using yams::app::services::StatsRequest;
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
     auto statsSvc = makeStatsService(ctx);
 
@@ -546,8 +552,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "StatsZeroThenGrowthAndUnrea
 
     auto s2 = statsSvc->getStats(StatsRequest{});
     REQUIRE(s2);
-    CHECK(s2.value().totalObjects >= baseObjects);
-    CHECK(s2.value().totalBytes >= baseBytes);
+    CHECK((s2.value().totalObjects >= baseObjects));
+    CHECK((s2.value().totalBytes >= baseBytes));
 
     // Unreachable daemon should fail cleanly
     {
@@ -604,7 +610,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddDirectoryWithPatternsAnd
     const auto& firstResp = addRes.value();
     // Directory ingestion is async: immediate response has documentsAdded=0
     // Actual indexing happens asynchronously; we verify via list operations after quiescence
-    CHECK(firstResp.documentsUpdated == 0);
+    CHECK((firstResp.documentsUpdated == 0));
 
     waitForPostIngestQuiescent(socketPath_, storageDir_, 7000ms);
 
@@ -650,8 +656,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddDirectoryWithPatternsAnd
     CHECK(std::find(keepCppEntry.tags.begin(), keepCppEntry.tags.end(), "code") !=
           keepCppEntry.tags.end());
     auto cppMeta = keepCppEntry.metadata.find("pbi");
-    REQUIRE(cppMeta != keepCppEntry.metadata.end());
-    CHECK(cppMeta->second == "002");
+    REQUIRE((cppMeta != keepCppEntry.metadata.end()));
+    CHECK((cppMeta->second == "002"));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "LightIndexInvalidHashTolerantError",
@@ -660,7 +666,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "LightIndexInvalidHashTolera
     REQUIRE(startDaemon());
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
@@ -694,7 +700,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "IndexingAddDirectoryVerifyA
     std::ofstream(dir / "b.bin") << std::string(4, '\0');
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
     auto idxSvc = makeIndexingService(ctx);
 
@@ -719,7 +725,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "IndexingAddDirectoryVerifyA
     if (resp.filesProcessed == 0) {
         SKIP("IndexingService processed=0 (capability gap)");
     }
-    CHECK(resp.filesIndexed + resp.filesFailed + resp.filesSkipped >= 1);
+    CHECK((resp.filesIndexed + resp.filesFailed + resp.filesSkipped >= 1));
     if (resp.filesIndexed == 0 && resp.filesFailed > 0) {
         SKIP("IndexingService reports failure for all files.");
     }
@@ -756,7 +762,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalGetToFileWritesCon
     auto outPath = testRoot_ / "out_one.txt";
 
     if (auto chunked = rsvc.getChunkedBuffer(gi, 8, ro); chunked) {
-        CHECK(chunked.value().content.size() > 0u);
+        CHECK((chunked.value().content.size() > 0u));
         return;
     }
     auto wr = rsvc.getToFile(gi, outPath, ro);
@@ -772,7 +778,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalGetToFileWritesCon
     if (ec) {
         SKIP("Cannot stat output path: " + ec.message());
     }
-    CHECK(sz > 0u);
+    CHECK((sz > 0u));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "BinaryChunkedGetBytesRoundTrip",
@@ -827,8 +833,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "BinaryChunkedGetBytesRoundT
     if (out.empty()) {
         SKIP("Chunked retrieval returned empty content.");
     }
-    REQUIRE(bytes.size() >= out.size());
-    CHECK(out == bytes.substr(0, out.size()));
+    REQUIRE((bytes.size() >= out.size()));
+    CHECK((out == bytes.substr(0, out.size())));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListRespectsLimitAndPattern",
@@ -871,9 +877,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListRespectsLimitA
     auto lres = rsvc.list(lreq, ro);
     REQUIRE(lres);
     const auto& items = lres.value().items;
-    REQUIRE(items.size() <= 1);
+    REQUIRE((items.size() <= 1));
     for (const auto& e : items) {
-        CHECK(e.name.rfind(".md") != std::string::npos);
+        CHECK((e.name.rfind(".md") != std::string::npos));
     }
 }
 
@@ -917,8 +923,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListEchoesTotalCou
     auto lr = rsvc.list(lq, ro);
     REQUIRE(lr);
     const auto& resp = lr.value();
-    CHECK(resp.items.size() <= static_cast<size_t>(lq.limit));
-    CHECK(resp.totalCount >= static_cast<uint64_t>(resp.items.size()));
+    CHECK((resp.items.size() <= static_cast<size_t>(lq.limit)));
+    CHECK((resp.totalCount >= static_cast<uint64_t>(resp.items.size())));
     for (const auto& e : resp.items) {
         CHECK_FALSE(e.name.empty());
         CHECK_FALSE(e.path.empty());
@@ -958,7 +964,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
             barrierStats.lastPostIngestDrained, barrierStats.lastIndexVisible);
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
     auto docSvc = makeDocumentService(ctx);
 
@@ -1019,7 +1025,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AppDocumentListEchoDetailsA
     REQUIRE(ing.addViaDaemon(opts));
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
     auto docSvc = makeDocumentService(ctx);
 
@@ -1033,14 +1039,14 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AppDocumentListEchoDetailsA
     auto r1 = docSvc->list(rq);
     REQUIRE(r1);
     const auto& resp = r1.value();
-    REQUIRE(resp.documents.size() <= 2);
-    CHECK(resp.totalFound >= resp.documents.size());
+    REQUIRE((resp.documents.size() <= 2));
+    CHECK((resp.totalFound >= resp.documents.size()));
 
     // Burst: call list repeatedly
     for (int i = 0; i < 25; ++i) {
         auto ri = docSvc->list(rq);
         REQUIRE(ri);
-        CHECK(ri.value().documents.size() <= 2);
+        CHECK((ri.value().documents.size() <= 2));
     }
 }
 
@@ -1053,9 +1059,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     using yams::app::services::DocumentIngestionService;
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
-    REQUIRE(ctx.metadataRepo != nullptr);
+    REQUIRE((ctx.metadataRepo != nullptr));
 
     const std::string snapshotId =
         "it-snap-nondir-" +
@@ -1106,13 +1112,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     REQUIRE(snaps);
     auto it = std::find_if(snaps.value().begin(), snaps.value().end(),
                            [&](const auto& rec) { return rec.snapshotId == snapshotId; });
-    REQUIRE(it != snaps.value().end());
-    CHECK(it->metadata.count("snapshot_label") > 0);
-    CHECK(it->metadata.at("snapshot_label") == snapshotLabel);
+    REQUIRE((it != snaps.value().end()));
+    CHECK((it->metadata.count("snapshot_label") > 0));
+    CHECK((it->metadata.at("snapshot_label") == snapshotLabel));
 
     auto docsByLabel = ctx.metadataRepo->findDocumentsBySnapshotLabel(snapshotLabel);
     REQUIRE(docsByLabel);
-    CHECK(docsByLabel.value().size() >= 3);
+    CHECK((docsByLabel.value().size() >= 3));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
@@ -1124,9 +1130,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     using yams::app::services::DocumentIngestionService;
 
     auto* sm = daemon()->getServiceManager();
-    REQUIRE(sm != nullptr);
+    REQUIRE((sm != nullptr));
     auto ctx = sm->getAppContext();
-    REQUIRE(ctx.metadataRepo != nullptr);
+    REQUIRE((ctx.metadataRepo != nullptr));
 
     const std::string snapshotId =
         "it-snap-dir-" +
@@ -1169,9 +1175,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     REQUIRE(snaps);
     auto it = std::find_if(snaps.value().begin(), snaps.value().end(),
                            [&](const auto& rec) { return rec.snapshotId == snapshotId; });
-    REQUIRE(it != snaps.value().end());
-    CHECK(it->metadata.count("snapshot_label") > 0);
-    CHECK(it->metadata.at("snapshot_label") == snapshotLabel);
+    REQUIRE((it != snaps.value().end()));
+    CHECK((it->metadata.count("snapshot_label") > 0));
+    CHECK((it->metadata.at("snapshot_label") == snapshotLabel));
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "StressTail",
@@ -1216,5 +1222,5 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "StressTail",
             ++ok;
         std::this_thread::sleep_for(5ms);
     }
-    CHECK(ok > 0);
+    CHECK((ok > 0));
 }

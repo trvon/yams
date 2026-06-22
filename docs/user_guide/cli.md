@@ -5,6 +5,7 @@ A practical, task-focused reference for the `yams` command-line interface.
 This document covers global flags, environment variables, and each subcommand with usage notes and examples. It is structured so tools can extract command-specific sections.
 
 For help:
+
 - `yams --help` - Show all available commands
 - `yams <command> --help` - Show command-specific help
 
@@ -34,6 +35,7 @@ yams [OPTIONS] <command> [command-options]
 ## Commands
 
 ### Core Operations
+
 - `init` - Initialize YAMS storage and configuration
 - `add` - Add document(s) or directory to content store
 - `get` - Retrieve a document from content store
@@ -43,16 +45,19 @@ yams [OPTIONS] <command> [command-options]
 - `update` - Update metadata for existing document
 
 ### Search & Discovery
+
 - `search` - Search documents by query (semantic + keyword)
 - `grep` - Search for regex patterns within file contents
 - `tree` - Inspect aggregated path tree statistics
 - `graph` - Inspect knowledge graph relationships
 
 ### Collections & Snapshots
+
 - `restore` - Restore documents from collections/snapshots to filesystem
 - `diff` - Compare two snapshots and show file changes
 
 ### System Management
+
 - `daemon` - Manage YAMS daemon process (start/stop/restart/status)
 - `doctor` - Diagnose system health, connectivity, and repair issues
 - `status` - Show quick system status and health overview
@@ -61,6 +66,7 @@ yams [OPTIONS] <command> [command-options]
 - `auth` - Manage authentication keys and tokens
 
 ### Advanced Features
+
 - `model` - Download and manage ONNX embedding models
 - `plugin, plugins` - Manage plugins (list/scan/load/unload/trust)
 - `session` - Manage interactive session selectors and warming
@@ -71,10 +77,12 @@ yams [OPTIONS] <command> [command-options]
 - `dr` - Disaster recovery operations (plugin-gated)
 
 ### User Interface
+
 - `serve` - Start MCP (Model Context Protocol) server
 - `completion` - Generate shell completion scripts (bash/zsh/fish/powershell)
 
 ### Utilities
+
 - `uninstall` - Remove YAMS from your system
 
 ---
@@ -84,9 +92,11 @@ yams [OPTIONS] <command> [command-options]
 Initialize YAMS storage and configuration (interactive or non-interactive).
 
 Synopsis:
+
 - yams init [OPTIONS]
 
 Options:
+
 - --non-interactive
   - Run without prompts, using defaults and passed flags.
 - --auto
@@ -101,6 +111,7 @@ Options:
   - Create and trust a local plugins directory (`~/.local/lib/yams/plugins`).
 
 Notes:
+
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
 - Interactive mode prompts for optional model, grammar, and agent-skill setup.
@@ -108,6 +119,7 @@ Notes:
 - Use `yams watch` to enable auto-ingest for existing projects.
 
 Examples:
+
 ```bash
 # Interactive initialization
 yams init
@@ -132,10 +144,12 @@ yams init --print
 Enable or disable session-based auto-ingest for a project.
 
 Synopsis:
+
 - yams watch [OPTIONS]
 - yams watch --stop [OPTIONS]
 
 Options:
+
 - --start
   - Enable watch (default)
 - --stop
@@ -154,11 +168,13 @@ Options:
   - Max time to wait for daemon readiness (0 to skip)
 
 Notes:
+
 - If the session does not exist, `yams watch` creates it and sets watch settings.
 - If no root is provided, the git root is used when available.
 - `yams watch` waits for daemon readiness by default to avoid ingesting while the daemon is still initializing.
 
 Examples:
+
 ```bash
 # Enable watch for the current project (auto session)
 yams watch
@@ -181,6 +197,7 @@ Manual indexing (when watch is disabled)
 Use YAMS to index code updates if auto-ingest is not enabled.
 
 Examples:
+
 ```bash
 # Index entire source tree (initial import)
 yams add src/ --recursive --include="*.cpp,*.hpp,*.h" --tags "code,source"
@@ -197,17 +214,20 @@ yams update --name path/to/file.cpp --metadata "updated=$(date -Iseconds)"
 ```
 
 Tips:
+
 - Prefer comma-separated patterns with --include for multiple file types.
 - Tag code consistently (e.g., code,source; code,headers) to improve later queries.
 
 Add a document to the store from a file or stdin.
 
 Synopsis:
+
 - yams add <path> [options]
 - yams add <paths...> [options]
 - yams add - [options]    # read from stdin
 
 Options:
+
 - -n, --name <name>
   - Set the document name (especially useful for stdin input)
 - -t, --tags <tags>
@@ -238,6 +258,7 @@ Options:
   - Add to global memory (bypass active session)
 
 Description:
+
 - Ingests the specified file or standard input and stores it in the content-addressed store.
 - Rich metadata support for tagging, naming, and custom properties.
 - Content is automatically indexed for full-text and fuzzy search.
@@ -248,6 +269,7 @@ Description:
 - **Git integration:** When run in a git repository, snapshot metadata includes the current commit hash and branch name.
 
 Examples:
+
 ```bash
 # Basic document addition (automatic snapshot created)
 yams add ./README.md
@@ -270,18 +292,21 @@ yams add src/ --recursive --include="*.cpp,*.h" --tags "code,source"
 **Automatic Snapshot Workflows:**
 
 1. **Initial import (automatic snapshot):**
+
    ```bash
    yams add . --recursive --include="*.cpp,*.h,*.md" --snapshot-label "Initial import"
    # → Snapshot: 2025-10-01T09:00:00.000Z
    ```
 
 2. **After making changes (automatic snapshot):**
+
    ```bash
    yams add . --recursive --include="*.cpp,*.h,*.md" --snapshot-label "Added new feature"
    # → Snapshot: 2025-10-01T14:30:00.000Z
    ```
 
 3. **Compare any two snapshots:**
+
    ```bash
    # List all snapshots to find IDs
    yams list --snapshots
@@ -291,12 +316,14 @@ yams add src/ --recursive --include="*.cpp,*.h" --tags "code,source"
    ```
 
 4. **View snapshot timeline:**
+
    ```bash
    yams list --snapshots
    # Shows chronological list of all automatic snapshots
    ```
 
 **Performance Notes:**
+
 - Tree building adds ~5-10% overhead to `yams add` but enables O(log n) diff operations.
 - Trees are stored once in CAS and deduplicated across snapshots.
 - For large repositories (>10K files), tree-based diff is 10-100x faster than flat comparison.
@@ -309,10 +336,12 @@ yams add src/ --recursive --include="*.cpp,*.h" --tags "code,source"
 Retrieve a document by hash or name for downloading.
 
 Synopsis:
+
 - yams get <hash> [options]
 - yams get --name <name> [options]
 
 Options:
+
 - --name <name>
   - Retrieve document by name instead of hash
 - -o, --output <path>
@@ -325,11 +354,13 @@ Options:
   - Depth of graph traversal, 1-5 (default: 1)
 
 Description:
+
 - Downloads content by hash or name.
 - For viewing content directly, use the `cat` command instead.
 - Supports both stdout redirection and explicit output file specification.
 
 Examples:
+
 ```
 yams get abcd1234... -o output.txt
 yams get --name "document.pdf" -o restored.pdf
@@ -344,11 +375,13 @@ yams get abcd1234... --verbose
 Show related documents, symbols, and source context from the knowledge graph (read-only).
 
 Synopsis:
+
 - yams graph <hash> [--depth N]
 - yams graph --name <path|name> [--depth N]
 - yams graph --explore <symbol|file|query> [--max-files N]
 
 Options:
+
 - --explore <symbol|file|query>
   - Build agent-oriented graph context: ranked symbols, relationships, and line-numbered snippets.
 - --max-files <N>
@@ -361,11 +394,13 @@ Options:
   - Verbose header details.
 
 Description:
+
 - `--explore` is the preferred follow-up from search/grep hints when an agent needs source context.
 - Traditional hash/name/node traversal mirrors the graph view available in `get --graph` without fetching content.
 - Uses knowledge-graph symbol metadata where available and falls back to warnings when source snippets cannot be read.
 
 Examples:
+
 ```
 yams graph --explore "processTask" --max-files 3
 yams graph --explore "src/app/services/search_service.cpp"
@@ -380,19 +415,23 @@ yams graph --name "docs/readme.md" --depth 3
 Display document content to stdout.
 
 Synopsis:
+
 - yams cat <hash>
 - yams cat --name <name>
 
 Options:
+
 - --name <name>
   - Display document by name instead of hash
 
 Description:
+
 - Outputs content directly to stdout for viewing or piping.
 - Silent operation - no status messages (ideal for piping).
 - Use `get` command for downloading files.
 
 Examples:
+
 ```
 yams cat abcd1234...
 yams cat --name "notes.txt"
@@ -403,17 +442,20 @@ yams cat --name "script.sh" | bash
 ---
 
 ## delete {#cmd-delete}
+
 ## rm {#cmd-rm}
 
 Delete documents by hash, name, or pattern. (Alias: `rm`)
 
 Synopsis:
+
 - yams delete <hash> [options]
 - yams delete --name <name> [options]
 - yams delete --names <name1,name2,...> [options]
 - yams delete --pattern <pattern> [options]
 
 Options:
+
 - --name <name>
   - Delete a document by its name
 - --names <names>
@@ -430,6 +472,7 @@ Options:
   - Show detailed deletion progress
 
 Description:
+
 - Supports deletion by hash (original behavior), name, multiple names, or pattern matching.
 - When deleting by name and multiple documents have the same name, you'll be prompted to confirm unless --force is used.
 - Pattern matching supports standard glob patterns (* for any characters, ? for single character).
@@ -437,6 +480,7 @@ Description:
 - Bulk deletions show progress and report both successes and failures.
 
 Examples:
+
 ```
 # Delete by hash (original)
 yams delete abcd1234...
@@ -463,14 +507,17 @@ yams delete --names "file1.txt,file2.txt" --verbose
 ---
 
 ## list {#cmd-list}
+
 ## ls {#cmd-ls}
 
 List stored documents with rich metadata display. (Alias: `ls`)
 
 Synopsis:
+
 - yams list [options]
 
 Options:
+
 - --format <format>
   - Output format: table | json | csv | minimal (default: table)
 - -l, --limit <number>
@@ -497,6 +544,7 @@ Options:
   - Disable content previews
 
 Description:
+
 - Displays documents with names, types, sizes, content snippets, and timestamps.
 - Rich table format shows stable NAME, TYPE, SIZE, SNIPPET, and WHEN columns.
 - By default, a compact detail line shows tags plus key metadata (`owner`, `source`) under each row when present.
@@ -508,6 +556,7 @@ Description:
 - `--show-metadata` prints metadata even without `--verbose` for table output.
 
 Examples:
+
 ```
 yams list
 yams ls  # Using alias
@@ -525,6 +574,7 @@ yams list --format json --show-metadata | jq '.documents[] | {name,metadata,tags
 The `list` command uses tree-based path indexing for efficient queries on large repositories. Path patterns with wildcards (`*`, `**`) automatically leverage tree structures for O(log n) performance:
 
 **Pattern-based queries** (tree-optimized):
+
 ```bash
 # List all documents under docs/ directory (recursive)
 yams list --name "docs/**"
@@ -537,6 +587,7 @@ yams list --name "project/bin/*"
 ```
 
 **Combining patterns with filters** (tree query + filtering):
+
 ```bash
 # Documents under docs/ with specific tag
 yams list --name "docs/**" --tags "api"
@@ -555,6 +606,7 @@ yams list --name "src/**" --tags "test" --extension ".cpp" --mime "text/x-c++"
 ```
 
 **Performance notes:**
+
 - Tree queries with path prefixes: ~160 μs per query (6.25k queries/sec)
 - Tree queries with filters: 100-126 μs per query (up to 10k queries/sec)
 - Filters can improve performance by reducing result set size
@@ -562,6 +614,7 @@ yams list --name "src/**" --tags "test" --extension ".cpp" --mime "text/x-c++"
 - Patterns are automatically canonicalized on macOS to handle `/var` → `/private/var` symlinks
 
 **Best practices:**
+
 - Prefer tree-based patterns (`path/**`) over substring matches for better performance
 - Combine multiple filters to narrow results efficiently
 - Use `--format json` with tree queries for programmatic processing
@@ -571,6 +624,7 @@ yams list --name "src/**" --tags "test" --extension ".cpp" --mime "text/x-c++"
 The `list` command has been enhanced with smart snapshot and file history capabilities:
 
 **List all snapshots:**
+
 ```bash
 yams list --snapshots
 yams list --snapshots --format json
@@ -578,6 +632,7 @@ yams list --snapshots --collection myproject
 ```
 
 **Show file history across snapshots:**
+
 ```bash
 # Shows timeline of changes (Added, Modified, Renamed) across all snapshots
 yams list src/main.cpp
@@ -592,6 +647,7 @@ yams list src/main.cpp
 ```
 
 **Show file at specific snapshot:**
+
 ```bash
 yams list src/main.cpp --snapshot-id=v1.0
 
@@ -605,6 +661,7 @@ yams list src/main.cpp --snapshot-id=v1.0
 ```
 
 **Compare file between snapshots (inline diff):**
+
 ```bash
 yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
 
@@ -622,6 +679,7 @@ yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
 ```
 
 **Smart behavior:**
+
 - `yams list` → List all documents
 - `yams list --snapshots` → List all available snapshots
 - `yams list <directory>` → List indexed descendants under that directory (default `--limit 100`, use `--offset` to paginate)
@@ -641,9 +699,11 @@ Compare two snapshots and show file changes with tree diff.
 **New in snapshot improvements:** Efficient snapshot comparison using Merkle tree diffs with rename detection.
 
 Synopsis:
+
 - yams diff <snapshotA> <snapshotB> [options]
 
 Options:
+
 - --format <format>
   - Output format: tree (default) | flat | json
   - tree: Structured diff with rename detection (recommended)
@@ -666,6 +726,7 @@ Options:
   - Show detailed information including file hashes
 
 Description:
+
 - Compares two snapshots and displays changes using efficient tree diff algorithm.
 - **Rename detection:** Automatically detects moved/renamed files by matching content hashes.
 - **O(log n) subtree matching:** Unchanged subtrees are skipped for performance.
@@ -673,6 +734,7 @@ Description:
 - Tree format is the default and recommended for most use cases.
 
 Examples:
+
 ```bash
 # Basic diff
 yams diff v1.0 v1.1
@@ -743,11 +805,13 @@ yams diff v1.0 v1.1 -v
 ```
 
 **Performance Notes:**
+
 - Tree diff is computed in O(log n) time when trees are pre-built during `yams add`.
 - If trees don't exist, they will be computed on-demand (may be slower for large snapshots).
 - Use `--no-renames` to skip rename detection for faster results on very large diffs.
 
 **See Also:**
+
 - `yams list --snapshots` - List available snapshots
 - `yams list <file>` - Show file history across snapshots
 - `yams add --snapshot-id` - Create snapshots
@@ -755,16 +819,19 @@ yams diff v1.0 v1.1 -v
 ---
 
 ## search {#cmd-search}
+
 Note: Default search type is hybrid. When strict/hybrid returns zero results, the CLI auto-retries with fuzzy (similarity 0.7).
 
 YAMS-first code search
 Always use YAMS to search the indexed codebase (no external grep/find/rg).
 
 Notes:
+
 - If results are empty, ensure the repo is indexed (`yams add ...`) and the daemon is ready (`yams status`).
 - Scope searches to the repo with `--cwd` or `--path` when multiple projects share a storage.
 
 Examples:
+
 ```bash
 # List only file paths for efficient context
 yams search "IndexingPipeline" --paths-only
@@ -787,6 +854,7 @@ yams search --query-file - --paths-only < /tmp/query.txt
 ```
 
 Hints:
+
 - Prefer hybrid or fuzzy search for exploratory queries; narrow with exact keywords as you iterate.
 - Combine with --paths-only to feed subsequent yams get calls.
 - Session helpers (experimental): Use `yams session add|list|rm-path|warm` to manage hot data. See PROMPT docs for examples: ../PROMPT-eng.md and ../PROMPT.md
@@ -794,12 +862,14 @@ Hints:
 Search for documents with advanced query capabilities.
 
 Synopsis:
+
 - yams search "<query>" [options]
 - yams search -q "<query>" [options]
 - yams search --stdin [options]
 - yams search --query-file <path> [options]
 
 Options:
+
 - -q, --query <text>
   - Provide the query as an option (useful when it starts with '-')
 - --stdin
@@ -826,6 +896,7 @@ Options:
   - Show N lines before and after match (default: 0)
 
 Description:
+
 - Supports both exact keyword searches and fuzzy approximate matching.
 - Fuzzy search uses BK-tree indexing for efficient similarity matching with configurable thresholds.
 - Full-text search with FTS5 indexing provides fast document content queries with robust special character handling.
@@ -838,6 +909,7 @@ Description:
 - Verbosity control: concise output by default, detailed output with --verbose flag.
 
 Examples:
+
 ```
 # Text search
 yams search "database performance"
@@ -863,6 +935,7 @@ Regex across indexed code (YAMS only, hybrid by default)
 Use YAMS grep for project-wide regex; avoid system utilities for repository queries.
 
 Examples:
+
 ```bash
 # Find class definitions
 yams grep "class\\s+IndexingPipeline" --include="**/*.hpp,**/*.cpp"
@@ -875,6 +948,7 @@ yams grep "##\\s+(watch|git|sync)\\b" --include="**/*.md"
 ```
 
 Notes:
+
 - Default mode is hybrid: regex plus semantic suggestions; use --regex-only to disable. Tune with --semantic-limit (default: 10).
 - Semantic suggestions are also shown in -l/--files-with-matches, -L/--files-without-match, --paths-only, and -c/--count modes. Regex counts only reflect text matches.
 - Hot/Cold modes: control behavior via environment variables. For grep, set YAMS_GREP_MODE=hot_only|cold_only|auto (hot uses extracted text cache; cold scans CAS bytes). For list, use YAMS_LIST_MODE, and for retrieval (cat/get), use YAMS_RETRIEVAL_MODE.
@@ -884,9 +958,11 @@ Notes:
 Search for regex patterns within file contents.
 
 Synopsis:
+
 - yams grep <pattern> [paths...] [options]
 
 Options:
+
 - -A, --after <N>
   - Show N lines after match (default: 0)
 - -B, --before <N>
@@ -919,6 +995,7 @@ Options:
   - Alias for --max-count
 
 Description:
+
 - Searches through the content of all indexed files using regular expressions.
 - Supports standard grep-like options for context, case sensitivity, and output control.
 - Automatically highlights matches when outputting to a terminal.
@@ -926,6 +1003,7 @@ Description:
 - Uses ECMAScript regex syntax for pattern matching.
 
 Examples:
+
 ```
 # Basic pattern search
 yams grep "TODO"
@@ -951,6 +1029,7 @@ yams grep "\bclass\s+\w+Command\b" --color=always
 Manage YAMS configuration settings.
 
 Subcommands:
+
 - get <key>
   - Print a configuration value.
 - set <key> <value>
@@ -979,6 +1058,7 @@ Subcommands:
   - Check if config needs migration.
 
 Examples:
+
 ```bash
 yams config list
 yams config get core.data_dir
@@ -996,6 +1076,7 @@ yams config grammar download cpp      # Download C++ grammar
 Manage authentication material (keys, tokens, API keys). Availability and exact options depend on your build.
 
 Examples:
+
 ```
 yams auth --help
 ```
@@ -1007,14 +1088,17 @@ yams auth --help
 Show storage statistics and health.
 
 Synopsis:
+
 - yams stats [options]
 
 Description:
+
 - Adaptive default view: when relevant, includes Recommendations and Service Status along with the compact footer; use -v for full System Health and detailed sections.
 - Telemetry includes auto-repair counters (repair_queue_depth, repair_batches_attempted, repair_embeddings_generated, repair_failed_operations), latency percentiles (p50/p95), top_slowest components, and not_ready flags.
 - Use --json for machine-readable output.
 
 Examples:
+
 ```
 yams stats
 yams stats -v
@@ -1028,12 +1112,15 @@ yams stats --json
 Remove YAMS data/config from the system.
 
 Synopsis:
+
 - yams uninstall [--force]
 
 Warning:
+
 - This is destructive. Make sure you have backups.
 
 Examples:
+
 ```
 yams uninstall
 yams uninstall --force
@@ -1046,9 +1133,11 @@ yams uninstall --force
 Run metadata migrations if any are pending.
 
 Synopsis:
+
 - yams migrate
 
 Examples:
+
 ```
 yams migrate
 ```
@@ -1060,10 +1149,12 @@ yams migrate
 Update metadata for existing documents.
 
 Synopsis:
+
 - yams update <hash> --metadata <key=value>...
 - yams update --name <name> --metadata <key=value>...
 
 Options:
+
 - hash
   - Document hash (full or partial) to update
 - --name <name>
@@ -1074,6 +1165,7 @@ Options:
   - Show detailed update information
 
 Notes:
+
 - Either hash or --name must be specified, but not both
 - Multiple metadata pairs can be updated in a single command
 - Existing metadata values will be overwritten
@@ -1081,6 +1173,7 @@ Notes:
 - If multiple documents have the same name, you'll be prompted to use the hash
 
 Examples:
+
 ```
 # Update by hash
 yams update fc8fc5fa --metadata "status=completed" --metadata "reviewed=true"
@@ -1102,23 +1195,27 @@ yams update --name "task-001.md" --metadata "status=in_progress" --metadata "ass
 Manage embedding models: list installed, download new, inspect, and verify runtime.
 
 Synopsis:
+
 - yams model list
 - yams model download <name> [--url <onnx_url>]
 - yams model info <name>
 - yams model check
 
 Description:
+
 - list: Shows locally available models (autodiscovers ~/.yams/models/<name>/model.onnx and other configured roots)
 - download: Fetches a model by name; use --url to override with a custom ONNX URL
 - info: Prints details for a model (dimensionality, path, notes when available)
 - check: Verifies ONNX runtime support, plugin directory status, and autodiscovery paths
 
 Configuring the preferred model:
+
 - yams config embeddings model <name>  # sets embeddings.preferred_model
 - embeddings.model_path can point to the models root; name-based resolution order:
   configured root → ~/.yams/models → models/ → /usr/local/share/yams/models
 
 Examples:
+
 ```
 yams model list
 yams model download all-MiniLM-L6-v2
@@ -1135,6 +1232,7 @@ yams config embeddings model all-MiniLM-L6-v2
 Manage plugins: scanning, trust policy, load/unload, install, and info.
 
 Synopsis:
+
 - yams plugin list
 - yams plugin scan [--dir DIR] [TARGET]
 - yams plugin info <name>
@@ -1149,6 +1247,7 @@ Synopsis:
 - yams plugin search <query>
 
 Subcommands:
+
 - list: Show loaded plugins and their interfaces.
 - scan: Inspect directories for plugins without initializing; prints name/version/ABI.
 - info: Show manifest/health JSON for a loaded plugin.
@@ -1165,11 +1264,13 @@ Subcommands:
 - verify: Verify plugin signature/hash (stub).
 
 Notes:
+
 - Default discovery roots: persisted trusted paths plus built-in defaults (`$HOME/.local/lib/yams/plugins`, `/opt/homebrew/lib/yams/plugins` on macOS, `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`, `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`). Strict mode (`YAMS_PLUGIN_DIR_STRICT=1` or `daemon.plugin_dir_strict=true`) disables built-in defaults.
 - The daemon prefers host-backed `model_provider_v1` when an ONNX plugin is trusted/loaded; otherwise it falls back to the legacy registry or mock/null provider.
 - Disable plugin subsystem: start the daemon with `--no-plugins`.
 
 Examples:
+
 ```bash
 # Discover and trust a system plugins directory
 yams plugin scan
@@ -1196,6 +1297,7 @@ yams plugin unload onnx
 Diagnose daemon connectivity, model/provider readiness, vector DB dimensions, and plugins. Includes repair helpers.
 
 Synopsis:
+
 - yams doctor [OPTIONS]
 - yams doctor daemon
 - yams doctor plugin [<path|name>]
@@ -1208,6 +1310,7 @@ Synopsis:
 - yams doctor tuning
 
 Subcommands:
+
 - daemon: Check daemon socket and status
 - plugin: Check a specific plugin (.so/.wasm or by name)
 - plugins: Show plugin summary (loaded + scan)
@@ -1219,6 +1322,7 @@ Subcommands:
 - tuning: Auto-configure [tuning] based on system baseline
 
 Options:
+
 - --json: Output results in JSON format
 - --fix: Fix everything (embeddings + FTS5)
 - --fix-config-dims: Align config embedding dims to target (non-interactive)
@@ -1227,17 +1331,20 @@ Options:
 - --stop-daemon: Attempt to stop daemon before DB operations
 
 Highlights:
+
 - Summary shows daemon status, vector DB dimension vs model target, and loaded plugins.
 - Knowledge Graph section appears when available; if empty, recommends:
   `yams doctor repair --graph` to build from tags/metadata.
 
 Repair options:
+
 - --embeddings: Generate missing document embeddings (daemon streaming when available; local fallback).
 - --fts5: Rebuild the text index best-effort.
 - --graph: Construct/repair the knowledge graph from tags/metadata.
 - --all: Run all repair operations.
 
 Examples:
+
 ```bash
 yams doctor
 yams doctor --json
@@ -1258,9 +1365,11 @@ yams doctor tuning
 Run storage/database maintenance and (optionally) embedding generation.
 
 Synopsis:
+
 - yams repair [OPTIONS]
 
 Options:
+
 - --orphans: Clean orphaned metadata entries
 - --chunks: Remove orphaned chunk files and reclaim space
 - --mime: Fix missing MIME types in documents
@@ -1281,10 +1390,12 @@ Options:
 - -v, --verbose: Show detailed progress
 
 Notes:
+
 - By default, embedding repair targets text-like MIME types only; binaries (PDFs/images) are skipped unless explicitly included with --include-mime.
 - PDF text extraction and embedding depend on build configuration (PDF support must be available).
 
 Examples:
+
 ```bash
 yams repair --all --dry-run
 yams repair --orphans --chunks --optimize --force
@@ -1301,19 +1412,23 @@ yams repair --path-tree
 Show service readiness, subsystem health, and runtime stats (daemon-aware).
 
 Synopsis:
+
 - yams status
 
 Description:
+
 - Prints a concise services summary (e.g., ✓ Content | ✓ Repo | ✓ Search | ⚠ (N) Models)
 - During initialization, shows a WAIT line with not-ready components and progress
 - Exposes fields such as running/ready state, uptime, request counts, active connections, memory, CPU, and version when available
 - Highlights top slowest components and actionable recommendations when relevant
 
 Tips:
+
 - Use yams stats -v for detailed system health, recommendations, and service status sections.
 - Bootstrap status file: ~/.local/state/yams/yams-daemon.status.json
 
 Examples:
+
 ```
 yams status
 ```
@@ -1325,22 +1440,26 @@ yams status
 Control the background daemon (if included in your build).
 
 Synopsis:
+
 - yams daemon start
 - yams daemon stop
 - yams daemon status
 - yams daemon restart
 
 Description:
+
 - start/stop/restart the daemon process
 - status shows readiness and subsystem overview similar to yams status
 
 Notes:
+
 - When client/daemon protocol versions differ, a one-time warning may be shown; upgrade the daemon if features appear limited.
 - Runtime mode selection supports socket and embedded in-process transports.
 - Set `YAMS_EMBEDDED=1|true|on|yes` to force in-process mode, `0|false|off|no` to force socket mode, or `auto` to probe.
 - Config fallback: `[daemon].mode = "embedded" | "socket" | "auto"`.
 
 Examples:
+
 ```
 yams daemon status
 yams daemon restart
@@ -1353,15 +1472,18 @@ yams daemon restart
 Start the MCP (Model Context Protocol) server over stdio.
 
 Synopsis:
+
 - yams serve [OPTIONS]
 
 Options:
+
 - --daemon-socket <path>
   - Override daemon socket path (env: YAMS_DAEMON_SOCKET)
 - --verbose
   - Show startup banner and enable info-level logging (default: quiet mode)
 
 Description:
+
 - Exposes YAMS functionality through the Model Context Protocol for AI tool integration.
 - Uses stdio transport (JSON-RPC over stdin/stdout) for direct AI integration.
 - Provides search, retrieval, and document management capabilities to AI systems.
@@ -1369,6 +1491,7 @@ Description:
 - Server runs quietly by default; use --verbose for startup banner.
 
 Examples:
+
 ```bash
 # Start MCP server (default quiet mode)
 yams serve
@@ -1387,12 +1510,14 @@ yams serve --daemon-socket /tmp/yams.sock
 Generate shell completion scripts for popular shells.
 
 Synopsis:
+
 - yams completion bash
 - yams completion zsh
 - yams completion fish
 - yams completion powershell
 
 Notes:
+
 - Bash: if bash-completion isn't installed, a minimal fallback is baked into the script.
 - Zsh: the generated script auto-runs compinit if needed to prevent "_arguments: command not found".
 - Fish: installs via standard fish completions.
@@ -1401,6 +1526,7 @@ Notes:
 ### Installation Instructions
 
 **Bash (Linux/macOS):**
+
 ```bash
 # Quick use without installing
 source <(yams completion bash)
@@ -1417,6 +1543,7 @@ Note: Homebrew installs the bash completion file, but your shell still needs bas
 startup support enabled.
 
 **Zsh (Linux/macOS):**
+
 ```bash
 # Quick use without installing
 autoload -U compinit && compinit
@@ -1435,6 +1562,7 @@ autoload -U compinit && compinit
 ```
 
 The generated completions now support nested subcommands and nested leaf values such as:
+
 - `yams config embeddings ...`
 - `yams doctor embeddings ...`
 - `yams plugin trust ...`
@@ -1443,6 +1571,7 @@ The generated completions now support nested subcommands and nested leaf values 
 - `yams config search path-tree enable --mode <Tab>`
 
 **Fish:**
+
 ```bash
 yams completion fish > ~/.config/fish/completions/yams.fish
 ```
@@ -1451,6 +1580,7 @@ If you are not using Homebrew's fish package, make sure your `fish_complete_path
 includes the directory where the completion file is installed.
 
 **PowerShell (Windows/Linux/macOS):**
+
 ```powershell
 # Quick use for current session
 Invoke-Expression (yams completion powershell | Out-String)
@@ -1487,7 +1617,6 @@ yams plugins trust
 yams daemon start --log-level 
 yams config search path-tree enable --mode 
 ```
-
 
 ## Symbol Extraction {#symbol-extraction}
 
@@ -1526,6 +1655,7 @@ Snapshots provide point-in-time captures of your repository content. YAMS automa
 ### Basic Workflow
 
 **1. Initial import (automatic snapshot):**
+
 ```bash
 # Capture current state of source code
 yams add . --recursive \
@@ -1537,6 +1667,7 @@ yams add . --recursive \
 ```
 
 **2. Make changes to your codebase:**
+
 ```bash
 # Edit files, add features, fix bugs...
 vim src/main.cpp
@@ -1544,6 +1675,7 @@ git commit -am "Added new feature"
 ```
 
 **3. Capture updated state (automatic snapshot):**
+
 ```bash
 # Just add again - snapshot created automatically
 yams add . --recursive \
@@ -1555,6 +1687,7 @@ yams add . --recursive \
 ```
 
 **4. Compare snapshots:**
+
 ```bash
 # List snapshots to find timestamp IDs
 yams list --snapshots
@@ -1583,6 +1716,7 @@ yams diff 2025-10-01T09:00:00.000Z 2025-10-01T14:30:00.000Z
 ### Snapshot Discovery
 
 **List all snapshots:**
+
 ```bash
 yams list --snapshots
 
@@ -1594,11 +1728,13 @@ yams list --snapshots
 ```
 
 **Filter by collection:**
+
 ```bash
 yams list --snapshots --collection=releases
 ```
 
 **JSON output for tools:**
+
 ```bash
 yams list --snapshots --format=json | jq '.[] | select(.label | contains("release"))'
 ```
@@ -1606,6 +1742,7 @@ yams list --snapshots --format=json | jq '.[] | select(.label | contains("releas
 ### File History Tracking
 
 **View file history across snapshots:**
+
 ```bash
 yams list src/main.cpp
 
@@ -1618,6 +1755,7 @@ yams list src/main.cpp
 ```
 
 **View file at specific snapshot:**
+
 ```bash
 # See metadata
 yams list src/main.cpp --snapshot-id=v1.0
@@ -1630,6 +1768,7 @@ yams get --name src/main.cpp --snapshot-id=v1.0 -o main-v1.0.cpp
 ```
 
 **Inline diff between snapshots:**
+
 ```bash
 yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
 
@@ -1639,6 +1778,7 @@ yams list src/main.cpp --snapshot-id=v1.0 --compare-to=v1.1
 ### Advanced Diff Operations
 
 **Filter by file type:**
+
 ```bash
 # Show only C++ changes
 yams diff v1.0 v1.1 --include="*.cpp,*.hpp"
@@ -1648,6 +1788,7 @@ yams diff v1.0 v1.1 --exclude="build/**,*.o"
 ```
 
 **Filter by change type:**
+
 ```bash
 # Show only added files
 yams diff v1.0 v1.1 --type=added
@@ -1657,6 +1798,7 @@ yams diff v1.0 v1.1 --type=renamed
 ```
 
 **Summary statistics:**
+
 ```bash
 yams diff v1.0 v1.1 --stats
 
@@ -1670,6 +1812,7 @@ yams diff v1.0 v1.1 --stats
 ```
 
 **JSON output for tools:**
+
 ```bash
 yams diff v1.0 v1.1 --format=json > diff.json
 
@@ -1678,6 +1821,7 @@ jq '.changes[] | select(.type == "modified")' diff.json
 ```
 
 **Verbose output with hashes:**
+
 ```bash
 yams diff v1.0 v1.1 -v
 
@@ -1687,6 +1831,7 @@ yams diff v1.0 v1.1 -v
 ### Collections and Organization
 
 **Organize snapshots by collection:**
+
 ```bash
 # Development snapshots
 yams add src/ --recursive --collection=dev --snapshot-id=dev-2025-10-01
@@ -1699,6 +1844,7 @@ yams add . --recursive --collection=releases --snapshot-id=v2.0 --snapshot-label
 ```
 
 **Compare within collections:**
+
 ```bash
 yams list --snapshots --collection=releases
 yams diff v1.0 v2.0  # Compare releases
@@ -1707,6 +1853,7 @@ yams diff v1.0 v2.0  # Compare releases
 ### Restoration Workflows
 
 **Restore entire snapshot:**
+
 ```bash
 # Restore to specific directory
 yams restore --snapshot-id=v1.0 --output=./restore-v1.0
@@ -1719,6 +1866,7 @@ yams restore --snapshot-id=v1.0 --output=. --overwrite
 ```
 
 **Selective restoration:**
+
 ```bash
 # Restore only specific file types
 yams restore --snapshot-id=v1.0 \
@@ -1732,6 +1880,7 @@ yams restore --snapshot-id=v1.0 \
 ```
 
 **Restore by collection:**
+
 ```bash
 yams restore --collection=releases --output=./releases
 ```
@@ -1739,17 +1888,20 @@ yams restore --collection=releases --output=./releases
 ### Performance Characteristics
 
 **Tree-based diff performance:**
+
 - **Small changes (< 1%)**: O(log n) subtree matching, ~100x faster than flat diff
 - **Large changes (> 50%)**: Approaches O(n) but still faster due to hash-based comparison
 - **Rename detection**: Hash-based matching is O(n) but only runs on Added/Deleted pairs
 
 **Storage efficiency:**
+
 - Merkle trees are stored once in CAS and deduplicated across snapshots
 - Unchanged subtrees share the same tree hash (deduplication)
 - Tree overhead: ~5-10% additional storage for large repositories
 - Diff computation: ~5-10% slower during `yams add --snapshot-id` (tree building)
 
 **Optimization tips:**
+
 - Use `--exclude` patterns to skip build artifacts, caches, and temporary files
 - Use `--no-renames` for faster diff when rename tracking isn't needed
 - Pre-build trees during snapshot creation for instant diff operations
@@ -1758,6 +1910,7 @@ yams restore --collection=releases --output=./releases
 
 **Automatic git integration:**
 When `yams add` runs in a git repository, snapshot metadata automatically includes:
+
 - `git_commit`: Current commit hash (e.g., `abc123def456`)
 - `git_branch`: Current branch name (e.g., `main`, `develop`)
 - `git_remote`: Remote repository URL (if configured)
@@ -1765,6 +1918,7 @@ When `yams add` runs in a git repository, snapshot metadata automatically includ
 This creates a natural bidirectional link between YAMS snapshots and git history.
 
 **Snapshot on git commit (hook):**
+
 ```bash
 #!/bin/bash
 # Hook: .git/hooks/post-commit
@@ -1776,6 +1930,7 @@ yams add . --recursive \
 ```
 
 **Snapshot on git tag:**
+
 ```bash
 #!/bin/bash
 # Hook: .git/hooks/post-tag
@@ -1787,6 +1942,7 @@ yams add . --recursive \
 ```
 
 **Daily snapshots:**
+
 ```bash
 #!/bin/bash
 # Cron: daily snapshot at midnight
@@ -1800,6 +1956,7 @@ yams add . --recursive \
 ### Troubleshooting
 
 **Missing trees:**
+
 ```bash
 # If diff is slow, trees may not exist
 # Rebuild trees for existing snapshots (not yet exposed via CLI).
@@ -1807,6 +1964,7 @@ yams add . --recursive \
 ```
 
 **Large diff output:**
+
 ```bash
 # Use filters to reduce output
 yams diff v1.0 v2.0 --type=modified --include="src/**"
@@ -1814,6 +1972,7 @@ yams diff v1.0 v2.0 --stats  # Summary only
 ```
 
 **Restore conflicts:**
+
 ```bash
 # Preview first
 yams restore --snapshot-id=v1.0 --output=./test --dry-run
@@ -1840,12 +1999,14 @@ yams restore --snapshot-id=v1.0 --output=. --overwrite
 Download an artifact and store it into YAMS, or manage daemon-tracked download jobs.
 
 Synopsis:
+
 - `yams download <url> [options]`
 - `yams download --status <job-id> [--json]`
 - `yams download --list-jobs [--json]`
 - `yams download --cancel <job-id> [--json]`
 
 Options:
+
 - `<url>`
   - Artifact URL to download.
 - `--checksum <algo:hex>`
@@ -1860,6 +2021,7 @@ Options:
   - Emit structured output for direct download results or job/status queries.
 
 Description:
+
 - Default behavior is store-only: downloaded content is verified and finalized into YAMS CAS.
 - The daemon path is policy-gated and disabled by default.
 - When daemon download is enabled, accepted requests are backgrounded as tracked jobs.
@@ -1875,12 +2037,14 @@ Description:
   - arbitrary export paths, custom headers, proxy overrides, and broader transport tuning are not part of the daemon job surface
 
 Notes:
+
 - The daemon feature gate is `YAMS_ENABLE_DAEMON_DOWNLOAD`.
 - A successful daemon-backed start returns a `jobId`; use that with `--status` or `--cancel`.
 - `cancel` is cooperative: the job transitions to `canceled`, and active downloader work is asked to stop.
 - Resume-by-job is not implemented yet; current downloader resume behavior is still internal to the downloader layer.
 
 Examples:
+
 ```bash
 # Direct store-only download
 yams download "https://example.com/archive.tar.gz" --checksum sha256:<hex>
@@ -1901,6 +2065,7 @@ yams download --cancel job-123
 ## Tips
 
 YAMS-first workflow
+
 - Always search the codebase with YAMS (search/grep). Do not use system grep/find/rg for repository queries.
 - Enable auto-ingest with `yams watch` when possible; otherwise re-index with `yams add`.
 - Use --paths-only for path lists you can pipe into further commands or editors.
@@ -1919,4 +2084,4 @@ YAMS-first workflow
 - **Docs:** [yamsmemory.ai](https://yamsmemory.ai)
 - **GitHub:** [github.com/trvon/yams](https://github.com/trvon/yams)
 - **Discord:** [discord.gg/rTBmRHdTEc](https://discord.gg/rTBmRHdTEc)
-docs/user_guide/cli.md 
+docs/user_guide/cli.md

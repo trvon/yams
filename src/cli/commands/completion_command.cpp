@@ -1361,12 +1361,6 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
     oss << "            @{ Name = 'powershell'; Description = 'PowerShell completion' }\n";
     oss << "        )\n";
 
-    // tree command
-    oss << "        'tree' = @(\n";
-    oss << "            @{ Name = '--depth'; Alias = '-L'; Description = 'Max depth' }\n";
-    oss << "            @{ Name = '--json'; Description = 'JSON output' }\n";
-    oss << "        )\n";
-
     // diff command
     oss << "        'diff' = @(\n";
     oss << "            @{ Name = '--format'; Description = 'Output format'; Values = "

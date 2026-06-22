@@ -31,7 +31,6 @@ std::unique_ptr<ICommand> createPluginCommand();
 std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createDiffCommand();
-std::unique_ptr<ICommand> createTreeCommand();
 std::unique_ptr<ICommand> createTuneCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
@@ -54,7 +53,6 @@ constexpr auto kCoreCommandRegistrations = std::to_array<CommandRegistration>({
     {"cat", &createCatCommand},
     {"delete", &createDeleteCommand},
     {"list", &createListCommand},
-    {"tree", &createTreeCommand},
     {"search", &createSearchCommand},
     {"grep", &createGrepCommand},
 });

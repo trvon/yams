@@ -13,9 +13,9 @@ struct CommandCatalogEntry {
 };
 
 #ifdef YAMS_BUILD_MCP_SERVER
-inline constexpr std::array<CommandCatalogEntry, 30> kTopLevelCommands = {{
-#else
 inline constexpr std::array<CommandCatalogEntry, 29> kTopLevelCommands = {{
+#else
+inline constexpr std::array<CommandCatalogEntry, 28> kTopLevelCommands = {{
 #endif
     {"init", "Initialize YAMS storage and configuration"},
     {"add", "Add files or content to YAMS"},
@@ -24,7 +24,6 @@ inline constexpr std::array<CommandCatalogEntry, 29> kTopLevelCommands = {{
     {"cat", "Display document content to stdout"},
     {"delete", "Delete content from YAMS"},
     {"list", "List stored documents"},
-    {"tree", "Show a tree view of stored content"},
     {"search", "Search documents by query"},
     {"grep", "Search document content with grep-style matching"},
     {"config", "Manage YAMS configuration settings"},

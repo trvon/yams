@@ -1,5 +1,4 @@
 // Split from RequestDispatcher.cpp: search handler
-#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -77,6 +76,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             serviceReq.metadataFilters.emplace_back("collection", req.collection);
         }
 
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only daemon compatibility env override.
         if (const char* disVec = std::getenv("YAMS_DISABLE_VECTOR");
             disVec && *disVec && std::string(disVec) != "0" && std::string(disVec) != "false") {
             serviceReq.type = "metadata";
@@ -121,62 +121,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
                                    std::chrono::steady_clock::now() - mapSortStart)
                                    .count();
 
-        int64_t feedbackMs = 0;
-        int64_t feedbackUs = 0;
-
-        if (appContext.metadataRepo) {
-            const auto feedbackStart = std::chrono::steady_clock::now();
-            // Feedback events are non-critical telemetry (used for RLHM tuning).
-            // Skip entirely when ResourceGovernor reports pressure to avoid blocking
-            // a worker thread in sqlite3_step() during the write. Even with best-effort
-            // writes, the busy_timeout can block for up to 2s per call.
-            bool skipFeedback = false;
-            try {
-                auto level = ResourceGovernor::instance().getPressureLevel();
-                skipFeedback = (level >= ResourcePressureLevel::Warning);
-            } catch (...) {
-                // ResourceGovernor not initialized — skip to be safe
-                skipFeedback = true;
-            }
-
-            if (!skipFeedback) {
-                metadata::FeedbackEvent event;
-                event.eventId = yams::core::generateUUID();
-                event.traceId = traceId;
-                event.createdAt = std::chrono::time_point_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now());
-                event.source = "daemon";
-                event.eventType = "retrieval_served";
-
-                nlohmann::json payload;
-                payload["query"] = req.query;
-                payload["search_type"] = serviceReq.type;
-                payload["limit"] = req.limit;
-                payload["total_count"] = serviceResp.total;
-                payload["elapsed_ms"] = serviceResp.executionTimeMs;
-                payload["session_name"] = req.sessionName;
-                payload["use_session"] = req.useSession;
-                payload["global_search"] = req.globalSearch;
-                nlohmann::json servedIds = nlohmann::json::array();
-                for (const auto& r : results) {
-                    servedIds.push_back(r.id);
-                }
-                payload["served_result_ids"] = std::move(servedIds);
-                event.payloadJson = payload.dump();
-
-                auto ins = appContext.metadataRepo->insertFeedbackEvent(event);
-                if (!ins) {
-                    spdlog::debug("Dropped retrieval_served feedback event for trace_id={} : {}",
-                                  traceId, ins.error().message);
-                }
-            }
-            feedbackMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - feedbackStart)
-                             .count();
-            feedbackUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                             std::chrono::steady_clock::now() - feedbackStart)
-                             .count();
-        }
+        // Search is a read path. Do not append retrieval_served telemetry here:
+        // it makes idle-ish retrieval mutate yams.db and grow the WAL for data
+        // that is not needed to serve results or status diagnostics. Explicit
+        // feedback APIs (MCP/tune) still write feedback_events when callers opt in.
+        constexpr int64_t feedbackMs = 0;
+        constexpr int64_t feedbackUs = 0;
 
         const auto responseStart = std::chrono::steady_clock::now();
         auto response = yams::daemon::dispatch::makeSearchResponse(
