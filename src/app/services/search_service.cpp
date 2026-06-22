@@ -2202,6 +2202,7 @@ private:
         }
 
         // Session-isolated memory filtering (PBI-082)
+        bool sessionFilterApplied = false;
         if (!req.globalSearch && req.useSession) {
             std::string sessionId = req.sessionName;
             if (sessionId.empty()) {
@@ -2231,6 +2232,7 @@ private:
                         }
                         docIds = std::move(intersected);
                     }
+                    sessionFilterApplied = true;
                     spdlog::debug("[SearchService] Session filter: {} docs in session '{}'",
                                   docIds->size(), sessionId);
                 }
@@ -2508,7 +2510,19 @@ private:
                              "Full-text search failed: " + r.error().message};
             }
 
-            const auto& res = r.value();
+            auto effectiveResults = r.value();
+            const bool pathOnlyPrefilter =
+                !searchReq.pathPatterns.empty() && searchReq.tags.empty() &&
+                searchReq.metadataFilters.empty() && !sessionFilterApplied;
+            if (effectiveResults.totalCount == 0 && docIds.has_value() && pathOnlyPrefilter) {
+                auto unfiltered = ctx_.metadataRepo->search(
+                    processedQuery, static_cast<int>(searchReq.limit), 0, std::nullopt);
+                if (unfiltered) {
+                    effectiveResults = std::move(unfiltered.value());
+                }
+            }
+
+            const auto& res = effectiveResults;
             YAMS_PLOT("search_service::fulltext_total", static_cast<double>(res.totalCount));
             auto overlayResults =
                 collectRecentLexicalOverlayResults(searchReq, recentLexicalDeltaHashes);

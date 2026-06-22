@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,19 @@ struct DaemonSearchResult {
     bool usedLiteralTextRetry{false};
     int attempts{0};
 };
+
+namespace detail {
+
+using DaemonSearchCaller =
+    std::function<boost::asio::awaitable<Result<yams::daemon::SearchResponse>>(
+        const yams::daemon::SearchRequest&)>;
+
+// Testable retry core shared by daemon_search(). Production callers should use daemon_search().
+boost::asio::awaitable<Result<DaemonSearchResult>>
+daemon_search_with_callers(DaemonSearchOptions opts, bool enableStreaming,
+                           DaemonSearchCaller unaryCall, DaemonSearchCaller streamingCall);
+
+} // namespace detail
 
 // Runs daemon search using the same retry behavior as the CLI:
 // - tries streamingSearch when enabled

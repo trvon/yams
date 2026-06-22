@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -26,7 +27,19 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 using namespace yams::downloader;
 
+namespace yams::downloader {
+std::unique_ptr<IDiskWriter> makeDiskWriter();
+std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
+std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
+std::unique_ptr<IRateLimiter> makeRateLimiter();
+} // namespace yams::downloader
+
 namespace {
+
+// Catch2 assertion macros decompose comparisons for diagnostics, which triggers
+// clang-tidy chained-comparison false positives. This migrated test also has a
+// few harmless integer-size fixture constants.
+// NOLINTBEGIN(bugprone-chained-comparison, bugprone-implicit-widening-of-multiplication-result)
 
 // Helper to generate a unique temporary directory for tests
 fs::path make_temp_dir(const std::string& prefix = "yams-dl-test-") {
@@ -426,8 +439,8 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         REQUIRE(parsed.lastModified.has_value());
-        CHECK(*parsed.etag == "abc123-xyz");
-        CHECK(*parsed.lastModified == "Tue, 19 Aug 2025 09:00:00 GMT");
+        CHECK((*parsed.etag == "abc123-xyz"));
+        CHECK((*parsed.lastModified == "Tue, 19 Aug 2025 09:00:00 GMT"));
     }
 
     SECTION("Handles missing values") {
@@ -446,8 +459,8 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
         REQUIRE(parsed.lastModified.has_value());
-        CHECK(*parsed.etag == "W/\"weak-etag-value\"");
-        CHECK(*parsed.lastModified == "Wed, 20 Aug 2025 00:00:00 GMT");
+        CHECK((*parsed.etag == "W/\"weak-etag-value\""));
+        CHECK((*parsed.lastModified == "Wed, 20 Aug 2025 00:00:00 GMT"));
     }
 
     SECTION("First occurrence wins") {
@@ -455,21 +468,21 @@ TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]"
 
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
-        CHECK(*parsed.etag == "first-etag");
+        CHECK((*parsed.etag == "first-etag"));
     }
 
     SECTION("Strips quotes from ETag") {
         std::vector<std::string> headers = {"ETag: \"quoted-etag\""};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
-        CHECK(*parsed.etag == "quoted-etag");
+        CHECK((*parsed.etag == "quoted-etag"));
     }
 
     SECTION("Handles unquoted ETag") {
         std::vector<std::string> headers = {"ETag: unquoted-etag"};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
-        CHECK(*parsed.etag == "unquoted-etag");
+        CHECK((*parsed.etag == "unquoted-etag"));
     }
 }
 
@@ -487,8 +500,8 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
         yams::downloader::IResumeStore::State state;
         state.etag = std::string("abc123etag");
         state.lastModified = std::string("Tue, 19 Aug 2025 09:00:00 GMT");
-        state.totalBytes = 1024 * 1024 * 5;
-        state.completedRanges = {{0, 256 * 1024}, {256 * 1024, 512 * 1024}};
+        state.totalBytes = 1024ull * 1024ull * 5ull;
+        state.completedRanges = {{0, 256ull * 1024ull}, {256ull * 1024ull, 512ull * 1024ull}};
 
         auto saveRes = store.save("https://example.com/file.bin", state);
         REQUIRE(saveRes.ok());
@@ -501,10 +514,10 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
         const auto& got = *loadRes.value();
         REQUIRE(got.etag.has_value());
         REQUIRE(got.lastModified.has_value());
-        CHECK(*got.etag == *state.etag);
-        CHECK(*got.lastModified == *state.lastModified);
-        CHECK(got.totalBytes == state.totalBytes);
-        REQUIRE(got.completedRanges.size() == state.completedRanges.size());
+        CHECK((*got.etag == *state.etag));
+        CHECK((*got.lastModified == *state.lastModified));
+        CHECK((got.totalBytes == state.totalBytes));
+        REQUIRE((got.completedRanges.size() == state.completedRanges.size()));
     }
 
     SECTION("Remove entry") {
@@ -528,7 +541,7 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
         CHECK_FALSE(la.value().has_value());
         REQUIRE(lb.value().has_value());
         CHECK(lb.value()->etag.has_value());
-        CHECK(*lb.value()->etag == "to-be-removed");
+        CHECK((*lb.value()->etag == "to-be-removed"));
     }
 
     SECTION("Multiple URLs") {
@@ -546,7 +559,7 @@ TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
             auto result = store2.load("http://example.com/file" + std::to_string(i));
             REQUIRE(result.ok());
             REQUIRE(result.value().has_value());
-            CHECK(*result.value()->etag == "etag-" + std::to_string(i));
+            CHECK((*result.value()->etag == "etag-" + std::to_string(i)));
         }
     }
 
@@ -572,17 +585,17 @@ TEST_CASE("CAS Helpers: Path and ID formatting", "[downloader][cas]") {
 
     SECTION("CAS path includes shard directories") {
         auto path = yams::downloader::casPathForSha256(objectsDir, digest);
-        CHECK(path.generic_string().find("sha256/01/23/0123456789abcdef") != std::string::npos);
+        CHECK((path.generic_string().find("sha256/01/23/0123456789abcdef") != std::string::npos));
     }
 
     SECTION("SHA256 ID format") {
         auto id = yams::downloader::makeSha256Id(digest);
-        CHECK(id == "sha256:" + digest);
+        CHECK((id == "sha256:" + digest));
     }
 
     SECTION("Empty digest") {
         auto id = yams::downloader::makeSha256Id("");
-        CHECK(id == "sha256:");
+        CHECK((id == "sha256:"));
     }
 }
 
@@ -630,28 +643,28 @@ TEST_CASE("DownloadManager: Resume functionality", "[downloader][resume]") {
         REQUIRE(result.ok());
         auto final = result.value();
 
-        REQUIRE(httpPtr->requestedOffsets.size() == 1);
-        CHECK(httpPtr->requestedOffsets.front() == 5);
+        REQUIRE((httpPtr->requestedOffsets.size() == 1));
+        CHECK((httpPtr->requestedOffsets.front() == 5));
 
         REQUIRE_FALSE(resumePtr->savedStates.empty());
         const auto& lastState = resumePtr->savedStates.back();
-        REQUIRE(lastState.completedRanges.size() == 1);
-        CHECK(lastState.completedRanges.front().first == 0);
-        CHECK(lastState.completedRanges.front().second == 10);
+        REQUIRE((lastState.completedRanges.size() == 1));
+        CHECK((lastState.completedRanges.front().first == 0));
+        CHECK((lastState.completedRanges.front().second == 10));
 
         REQUIRE(resumePtr->removedUrl.has_value());
-        CHECK(*resumePtr->removedUrl == req.url);
+        CHECK((*resumePtr->removedUrl == req.url));
 
         REQUIRE_FALSE(diskPtr->lastFinalPath().empty());
         std::ifstream finalFile(diskPtr->lastFinalPath(), std::ios::binary);
         REQUIRE(finalFile.good());
         std::string contents((std::istreambuf_iterator<char>(finalFile)),
                              std::istreambuf_iterator<char>());
-        CHECK(contents == "HELLOWORLD");
+        CHECK((contents == "HELLOWORLD"));
 
         CHECK(final.hash ==
               "sha256:0b21b7db59cd154904fac6336fa7d2be1bab38d632794f281549584068cdcb74");
-        CHECK(final.sizeBytes == 10);
+        CHECK((final.sizeBytes == 10));
     }
 
     SECTION("Uses a stable resume session id for the same URL") {
@@ -696,7 +709,7 @@ TEST_CASE("DownloadManager: Resume functionality", "[downloader][resume]") {
         auto secondResult = secondManager->download(req);
         REQUIRE(secondResult.ok());
         REQUIRE_FALSE(secondDisk->lastSessionId().empty());
-        CHECK(secondDisk->lastSessionId() == firstDisk->lastSessionId());
+        CHECK((secondDisk->lastSessionId() == firstDisk->lastSessionId()));
     }
 
     // Cleanup
@@ -829,7 +842,7 @@ TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") 
             std::ifstream in(exportPath, std::ios::binary);
             exported.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         }
-        CHECK(exported == "OLD");
+        CHECK((exported == "OLD"));
 
         json metaUpdated;
         {
@@ -839,16 +852,16 @@ TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") 
         }
         REQUIRE(metaUpdated.contains("hash"));
         REQUIRE(metaUpdated.contains("etag"));
-        CHECK(metaUpdated["etag"].get<std::string>() == "tag-777");
+        CHECK((metaUpdated["etag"].get<std::string>() == "tag-777"));
 
         REQUIRE_FALSE(diskPtr->lastFinalPath().empty());
         std::ifstream casFile(diskPtr->lastFinalPath(), std::ios::binary);
         std::string casData((std::istreambuf_iterator<char>(casFile)),
                             std::istreambuf_iterator<char>());
-        CHECK(casData == "ABCDE");
+        CHECK((casData == "ABCDE"));
 
         CHECK(resumePtr->savedStates.empty());
-        CHECK(httpPtr->requestedOffsets.size() == 1);
+        CHECK((httpPtr->requestedOffsets.size() == 1));
     }
 
     // Cleanup
@@ -879,7 +892,7 @@ TEST_CASE("DownloadManager: Cooperative cancellation stops fetch", "[downloader]
     bool canceled = true;
     auto result = dm->download(req, {}, [&]() { return canceled; });
     REQUIRE_FALSE(result.ok());
-    CHECK(result.error().code == ErrorCode::OperationCancelled);
+    CHECK((result.error().code == ErrorCode::OperationCancelled));
     CHECK(httpPtr->cancelObserved);
 
     std::error_code ec;
@@ -903,10 +916,10 @@ TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
                       contentType, filename, TlsConfig{}, std::nullopt, true,
                       std::chrono::milliseconds{1000});
 
-        CHECK(adapter.probeCallCount == 1);
-        CHECK(resumeSupported == true);
+        CHECK((adapter.probeCallCount == 1));
+        CHECK((resumeSupported == true));
         CHECK(contentLength.has_value());
-        CHECK(*contentLength == 1000);
+        CHECK((*contentLength == 1000));
     }
 
     SECTION("Tracks fetch calls") {
@@ -922,11 +935,11 @@ TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
         adapter.fetchRange("http://test.com", {}, 0, 9, TlsConfig{}, std::nullopt,
                            std::chrono::milliseconds{1000}, sink, nullptr, nullptr);
 
-        CHECK(adapter.fetchCallCount == 1);
-        CHECK(adapter.requestedOffsets.size() == 1);
-        CHECK(adapter.requestedOffsets[0] == 0);
-        CHECK(adapter.requestedSizes[0] == 9);
-        CHECK(received.size() == 9);
+        CHECK((adapter.fetchCallCount == 1));
+        CHECK((adapter.requestedOffsets.size() == 1));
+        CHECK((adapter.requestedOffsets[0] == 0));
+        CHECK((adapter.requestedSizes[0] == 9));
+        CHECK((received.size() == 9));
     }
 }
 
@@ -942,9 +955,9 @@ TEST_CASE("TrackingResumeStore: Tracking verification", "[downloader][resume][tr
         store.load("http://url2.com");
         store.load("http://url1.com");
 
-        CHECK(store.loadUrls.size() == 3);
-        CHECK(store.loadUrls[0] == "http://url1.com");
-        CHECK(store.loadUrls[1] == "http://url2.com");
+        CHECK((store.loadUrls.size() == 3));
+        CHECK((store.loadUrls[0] == "http://url1.com"));
+        CHECK((store.loadUrls[1] == "http://url2.com"));
     }
 
     SECTION("Tracks save calls") {
@@ -955,16 +968,16 @@ TEST_CASE("TrackingResumeStore: Tracking verification", "[downloader][resume][tr
         state.totalBytes = 200;
         store.save("http://url2.com", state);
 
-        CHECK(store.savedUrls.size() == 2);
-        CHECK(store.savedStates.size() == 2);
-        CHECK(store.savedStates[0].totalBytes == 100);
-        CHECK(store.savedStates[1].totalBytes == 200);
+        CHECK((store.savedUrls.size() == 2));
+        CHECK((store.savedStates.size() == 2));
+        CHECK((store.savedStates[0].totalBytes == 100));
+        CHECK((store.savedStates[1].totalBytes == 200));
     }
 
     SECTION("Tracks remove calls") {
         store.remove("http://removed.com");
         REQUIRE(store.removedUrl.has_value());
-        CHECK(*store.removedUrl == "http://removed.com");
+        CHECK((*store.removedUrl == "http://removed.com"));
     }
 
     SECTION("Initial state returned on load") {
@@ -976,8 +989,124 @@ TEST_CASE("TrackingResumeStore: Tracking verification", "[downloader][resume][tr
         auto result = store.load("http://any.com");
         REQUIRE(result.ok());
         REQUIRE(result.value().has_value());
-        CHECK(result.value()->totalBytes == 500);
-        CHECK(*result.value()->etag == "initial-etag");
+        CHECK((result.value()->totalBytes == 500));
+        CHECK((*result.value()->etag == "initial-etag"));
+    }
+}
+
+// =============================================================================
+// Concrete downloader component tests
+// =============================================================================
+
+TEST_CASE("Concrete downloader components cover storage resume integrity and rate limits",
+          "[downloader][concrete]") {
+    SECTION("InMemoryResumeStore rejects empty keys and round-trips state") {
+        auto store = makeInMemoryResumeStore();
+        REQUIRE((store != nullptr));
+
+        auto emptyLoad = store->load("");
+        CHECK_FALSE(emptyLoad.ok());
+        CHECK((emptyLoad.error().code == ErrorCode::InvalidArgument));
+
+        IResumeStore::State state;
+        state.etag = "etag-1";
+        state.lastModified = "Mon, 01 Jan 2024 00:00:00 GMT";
+        state.totalBytes = 42;
+        state.completedRanges = {{0, 10}, {10, 32}};
+        REQUIRE(store->save("https://example.test/file", state).ok());
+
+        auto loaded = store->load("https://example.test/file");
+        REQUIRE(loaded.ok());
+        REQUIRE(loaded.value().has_value());
+        CHECK((loaded.value()->etag == state.etag));
+        CHECK((loaded.value()->lastModified == state.lastModified));
+        CHECK((loaded.value()->totalBytes == 42));
+        CHECK((loaded.value()->completedRanges == state.completedRanges));
+
+        store->remove("https://example.test/file");
+        auto removed = store->load("https://example.test/file");
+        REQUIRE(removed.ok());
+        CHECK_FALSE(removed.value().has_value());
+    }
+
+    SECTION("OpenSSL integrity verifier hashes bytes and resets after finalize") {
+        auto verifier = makeIntegrityVerifierSha256Only();
+        REQUIRE((verifier != nullptr));
+        verifier->reset(HashAlgo::Sha256);
+        auto data = to_bytes("abc");
+        verifier->update(data);
+        auto sum = verifier->finalize();
+        CHECK((sum.algo == HashAlgo::Sha256));
+        CHECK((sum.hex == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+
+        verifier->update(data);
+        auto sum2 = verifier->finalize();
+        CHECK((sum2.hex == sum.hex));
+    }
+
+    SECTION("RateLimiter supports unlimited and cooperative cancellation fast paths") {
+        auto limiter = makeRateLimiter();
+        REQUIRE((limiter != nullptr));
+        limiter->setLimits(RateLimit{});
+        const auto start = std::chrono::steady_clock::now();
+        limiter->acquire(1024, [] { return false; });
+        CHECK((std::chrono::steady_clock::now() - start < std::chrono::milliseconds(100)));
+
+        RateLimit limited;
+        limited.globalBps = 1;
+        limiter->setLimits(limited);
+        bool cancelled = false;
+        limiter->acquire(1024, [&] {
+            cancelled = true;
+            return true;
+        });
+        CHECK(cancelled);
+    }
+
+    SECTION("DiskWriter stages writes and finalizes into SHA-256 CAS layout") {
+        auto tempDir = make_temp_dir("yams-dl-concrete-");
+        StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+        auto writer = makeDiskWriter();
+        REQUIRE((writer != nullptr));
+
+        auto staging = writer->createStagingFile(storage, "session-abc", "part");
+        REQUIRE(staging.ok());
+        CHECK((staging.value().extension() == ".part"));
+        CHECK(fs::exists(staging.value()));
+
+        auto data = to_bytes("abc");
+        REQUIRE(writer->writeAt(staging.value(), 0, data).ok());
+        REQUIRE(writer->sync(staging.value(), storage).ok());
+
+        const std::string digest =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        auto finalPath = writer->finalizeToCas(staging.value(), digest, storage);
+        REQUIRE(finalPath.ok());
+        CHECK((finalPath.value() == casPathForSha256(storage.objectsDir, digest)));
+        CHECK(fs::exists(finalPath.value()));
+        CHECK_FALSE(fs::exists(staging.value()));
+
+        std::ifstream in(finalPath.value(), std::ios::binary);
+        std::string contents((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+        CHECK((contents == "abc"));
+
+        std::uint64_t currentSize = 0;
+        auto resumed =
+            writer->createOrOpenStagingFile(storage, "session-resume", ".tmp", 4096, currentSize);
+        REQUIRE(resumed.ok());
+        CHECK((currentSize == 0));
+        REQUIRE(writer->writeAt(resumed.value(), 4, data).ok());
+        auto reopened = writer->createOrOpenStagingFile(storage, "session-resume", ".tmp",
+                                                        std::nullopt, currentSize);
+        REQUIRE(reopened.ok());
+        CHECK((reopened.value() == resumed.value()));
+        CHECK((currentSize >= 7));
+        writer->cleanup(reopened.value());
+        CHECK_FALSE(fs::exists(reopened.value()));
+
+        std::error_code ec;
+        fs::remove_all(tempDir, ec);
     }
 }
 
@@ -1008,7 +1137,7 @@ TEST_CASE("FakeDiskWriter: Operations", "[downloader][disk]") {
         writeResult = writer.writeAt(staging.value(), 5, data2);
         REQUIRE(writeResult.ok());
 
-        CHECK(writer.stagedData().size() == 10);
+        CHECK((writer.stagedData().size() == 10));
     }
 
     SECTION("Handles initial data") {
@@ -1017,7 +1146,7 @@ TEST_CASE("FakeDiskWriter: Operations", "[downloader][disk]") {
         auto result =
             writer.createOrOpenStagingFile(storage, "session-789", ".part", 100, currentSize);
         REQUIRE(result.ok());
-        CHECK(currentSize == 6);
+        CHECK((currentSize == 6));
     }
 
     // Cleanup
@@ -1041,7 +1170,7 @@ TEST_CASE("Downloader: Edge cases", "[downloader][edge]") {
         TrackingResumeStore store;
         auto result = store.load(longUrl);
         CHECK(result.ok());
-        CHECK(store.loadUrls[0] == longUrl);
+        CHECK((store.loadUrls[0] == longUrl));
     }
 
     SECTION("Unicode in URL") {
@@ -1051,7 +1180,7 @@ TEST_CASE("Downloader: Edge cases", "[downloader][edge]") {
         state.totalBytes = 100;
         auto saveResult = store.save(unicodeUrl, state);
         CHECK(saveResult.ok());
-        CHECK(store.savedUrls[0] == unicodeUrl);
+        CHECK((store.savedUrls[0] == unicodeUrl));
     }
 }
 
@@ -1067,7 +1196,7 @@ TEST_CASE("HTTP header parsing edge cases", "[downloader][http][edge]") {
         std::vector<std::string> headers = {"InvalidHeaderNoColon", "ETag: valid-etag"};
         auto parsed = parse_http_headers_for_meta(headers);
         REQUIRE(parsed.etag.has_value());
-        CHECK(*parsed.etag == "valid-etag");
+        CHECK((*parsed.etag == "valid-etag"));
     }
 
     SECTION("Empty header value") {

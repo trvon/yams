@@ -4,6 +4,7 @@
 // Covers: MessageFramer, ProtoSerializer, response_of.hpp, getMessageType, getRequestName
 
 #include <atomic>
+#include <csignal>
 #include <filesystem>
 #include <random>
 #include <thread>
@@ -25,6 +26,17 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace {
+#ifndef _WIN32
+struct SigpipeIgnoreGuard {
+    SigpipeIgnoreGuard() : previous_(std::signal(SIGPIPE, SIG_IGN)) {}
+    ~SigpipeIgnoreGuard() { std::signal(SIGPIPE, previous_); }
+    using Handler = void (*)(int);
+    Handler previous_{};
+};
+
+const SigpipeIgnoreGuard kSigpipeIgnoreGuard;
+#endif
+
 // Helper to create messages with Request/Response payloads
 Message makeMessageWith(Request r, uint64_t id = 42) {
     Message m;

@@ -15,7 +15,9 @@ static bool is_parse_like_error(const yams::Error& err) {
 }
 
 boost::asio::awaitable<Result<DaemonSearchResult>>
-daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool enableStreaming) {
+detail::daemon_search_with_callers(DaemonSearchOptions opts, bool enableStreaming,
+                                   detail::DaemonSearchCaller unaryCall,
+                                   detail::DaemonSearchCaller streamingCall) {
     yams::daemon::SearchRequest req;
     req.query = opts.query;
     req.limit = opts.limit;
@@ -41,8 +43,8 @@ daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool
     auto callOnce = [&](const yams::daemon::SearchRequest& r)
         -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
         if (enableStreaming)
-            co_return co_await client.streamingSearch(r);
-        co_return co_await client.call(r);
+            co_return co_await streamingCall(r);
+        co_return co_await unaryCall(r);
     };
 
     DaemonSearchResult out;
@@ -82,6 +84,20 @@ daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool
     }
 
     co_return err;
+}
+
+boost::asio::awaitable<Result<DaemonSearchResult>>
+daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool enableStreaming) {
+    auto unaryCall = [&client](const yams::daemon::SearchRequest& r)
+        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+        co_return co_await client.call(r);
+    };
+    auto streamingCall = [&client](const yams::daemon::SearchRequest& r)
+        -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
+        co_return co_await client.streamingSearch(r);
+    };
+    co_return co_await detail::daemon_search_with_callers(
+        std::move(opts), enableStreaming, std::move(unaryCall), std::move(streamingCall));
 }
 
 } // namespace yams::cli::search_runner

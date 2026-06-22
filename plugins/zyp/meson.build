@@ -5,6 +5,11 @@ if not get_option ('plugin-zyp')
 subdir_done()
 endif
 
+if host_machine.system() == 'darwin' and get_option('b_coverage')
+  warning('Skipping zyp plugin in macOS coverage builds: Clang gcov runtime cannot link with the zyp bundle/benchmark.')
+  subdir_done()
+endif
+
 #Find Zig compiler(requires 0.15.x; zpdf is not Zig 0.16 - compatible yet)
 zig = find_program('zig', required: false)
 if not zig.found()

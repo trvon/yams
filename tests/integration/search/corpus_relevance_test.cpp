@@ -252,10 +252,16 @@ TEST_CASE_METHOD(CorpusRelevanceFixture, "Collection: --collection scopes to one
 TEST_CASE_METHOD(CorpusRelevanceFixture, "Path scope: pathPatterns constrains subtree, no starve",
                  "[integration][search][scope][relevance]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
-    addContent("scopea_alpha.txt", "scoped body zpathscoped one");
-    addContent("scopeb_beta.txt", "scoped body zpathscoped two");
+    fixtures().createTextFixture("scopea/alpha.txt", "scoped body zpathscoped one");
+    fixtures().createTextFixture("scopeb/beta.txt", "scoped body zpathscoped two");
+    addDirectory(fixtures().root() / "scopea");
+    addDirectory(fixtures().root() / "scopeb");
 
-    auto onlyA = keywordHitsPath("zpathscoped", {"*scopea*"});
+    auto all = keywordHits("zpathscoped", /*collection=*/"", 20s);
+    CAPTURE(all);
+    REQUIRE_FALSE(all.empty());
+
+    auto onlyA = keywordHitsPath("zpathscoped", {"**scopea**"}, 20s);
     CAPTURE(onlyA);
     REQUIRE_FALSE(onlyA.empty()); // must not starve: scoped query returns in-scope docs
     bool aSeen = false;

@@ -57,10 +57,10 @@ TEST_CASE("ResultFusion keeps and penalizes high-confidence vector-only results"
         makeComponent("doc-vector-high", 0.95f, ComponentResult::Source::Vector, 0));
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() > 0U);
-    REQUIRE(results.size() < 2U);
-    CHECK(results[0].document.sha256Hash.compare("doc-vector-high") == 0);
-    CHECK(std::fabs(results[0].score - 0.475) < 1e-6);
+    REQUIRE((results.size() > 0U));
+    REQUIRE((results.size() < 2U));
+    CHECK((results[0].document.sha256Hash.compare("doc-vector-high") == 0));
+    CHECK((std::fabs(results[0].score - 0.475) < 1e-6));
 }
 
 TEST_CASE("ResultFusion boosts anchored hybrid agreement", "[search][fusion][catch2]") {
@@ -79,12 +79,12 @@ TEST_CASE("ResultFusion boosts anchored hybrid agreement", "[search][fusion][cat
     components.push_back(makeComponent("doc-hybrid", 0.80f, ComponentResult::Source::Vector, 0));
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() > 0U);
-    REQUIRE(results.size() < 2U);
+    REQUIRE((results.size() > 0U));
+    REQUIRE((results.size() < 2U));
 
     const double baseScore = 1.6;
-    CHECK(results[0].score > baseScore);
-    CHECK(std::fabs(results[0].score - 1.76) < 1e-6);
+    CHECK((results[0].score > baseScore));
+    CHECK((std::fabs(results[0].score - 1.76) < 1e-6));
 }
 
 TEST_CASE("Weighted reciprocal favors lexical over pure vector at equal rank",
@@ -105,9 +105,9 @@ TEST_CASE("Weighted reciprocal favors lexical over pure vector at equal rank",
     components.push_back(makeComponent("doc-vector", 1.00f, ComponentResult::Source::Vector, 0));
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() > 1U);
+    REQUIRE((results.size() > 1U));
 
-    CHECK(results[0].document.sha256Hash.compare("doc-text") == 0);
+    CHECK((results[0].document.sha256Hash.compare("doc-text") == 0));
 }
 
 TEST_CASE("ResultFusion default strategy honors component weights", "[search][fusion][catch2]") {
@@ -126,8 +126,8 @@ TEST_CASE("ResultFusion default strategy honors component weights", "[search][fu
     components.push_back(makeComponent("doc-vector", 1.00f, ComponentResult::Source::Vector, 0));
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() == 2U);
-    CHECK(results[0].document.sha256Hash == "doc-vector");
+    REQUIRE((results.size() == 2U));
+    CHECK((results[0].document.sha256Hash == "doc-vector"));
 }
 
 TEST_CASE("ResultFusion COMB_MNZ backfills snippet from later anchored component",
@@ -153,8 +153,8 @@ TEST_CASE("ResultFusion COMB_MNZ backfills snippet from later anchored component
     components.push_back(text);
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() == 1U);
-    CHECK(results[0].snippet == "anchored snippet");
+    REQUIRE((results.size() == 1U));
+    CHECK((results[0].snippet == "anchored snippet"));
 }
 
 TEST_CASE("ResultFusion COMB_MNZ semantic rescue can retain below-threshold vector-only docs",
@@ -186,8 +186,8 @@ TEST_CASE("ResultFusion COMB_MNZ semantic rescue can retain below-threshold vect
     rescued.rank = 150;
 
     auto results = fusion.fuse({lexical, rescued});
-    REQUIRE(results.size() == 1U);
-    CHECK(results[0].document.sha256Hash == "doc-semantic");
+    REQUIRE((results.size() == 1U));
+    CHECK((results[0].document.sha256Hash == "doc-semantic"));
 }
 
 TEST_CASE("ResultFusion COMB_MNZ prefers stronger raw vector docs for semantic rescue",
@@ -233,9 +233,9 @@ TEST_CASE("ResultFusion COMB_MNZ prefers stronger raw vector docs for semantic r
     rescueWeak.rank = 10;
 
     auto results = fusion.fuse({lexicalA, lexicalB, rescueStrong, rescueWeak});
-    REQUIRE(results.size() == 2U);
-    CHECK(results[0].document.sha256Hash == "doc-lexical-a");
-    CHECK(results[1].document.sha256Hash == "doc-semantic-strong");
+    REQUIRE((results.size() == 2U));
+    CHECK((results[0].document.sha256Hash == "doc-lexical-a"));
+    CHECK((results[1].document.sha256Hash == "doc-semantic-strong"));
 }
 
 TEST_CASE("ResultFusion semantic rescue keeps rescued docs competitive for rerank window",
@@ -264,9 +264,9 @@ TEST_CASE("ResultFusion semantic rescue keeps rescued docs competitive for reran
         makeComponent("doc-semantic", 0.80f, ComponentResult::Source::Vector, 150);
 
     auto results = fusion.fuse({lexicalA, lexicalB, lexicalC, rescued});
-    REQUIRE(results.size() == 3U);
-    CHECK(results[0].document.sha256Hash == "doc-lexical-a");
-    CHECK(results[1].document.sha256Hash == "doc-semantic");
+    REQUIRE((results.size() == 3U));
+    CHECK((results[0].document.sha256Hash == "doc-lexical-a"));
+    CHECK((results[1].document.sha256Hash == "doc-semantic"));
 }
 
 // P7: convex fusion — normalized per-component scores combined with component weights.
@@ -295,13 +295,13 @@ TEST_CASE("ResultFusion CONVEX normalizes per-component scores and applies weigh
     components.push_back(makeComponent("docB", 0.50f, ComponentResult::Source::Vector, 0));
 
     auto results = fusion.fuse(components);
-    REQUIRE(results.size() == 2U);
-    CHECK(results[0].document.sha256Hash == "docA");
-    CHECK(results[1].document.sha256Hash == "docB");
+    REQUIRE((results.size() == 2U));
+    CHECK((results[0].document.sha256Hash == "docA"));
+    CHECK((results[1].document.sha256Hash == "docB"));
     // docA score: textWeight*(0.80/0.80) + vectorWeight*(0.25/0.50) = 0.60 + 0.20 = 0.80
-    CHECK(std::fabs(results[0].score - 0.80) < 1e-6);
+    CHECK((std::fabs(results[0].score - 0.80) < 1e-6));
     // docB score: textWeight*(0.40/0.80) + vectorWeight*(0.50/0.50) = 0.30 + 0.40 = 0.70
-    CHECK(std::fabs(results[1].score - 0.70) < 1e-6);
+    CHECK((std::fabs(results[1].score - 0.70) < 1e-6));
 }
 
 TEST_CASE("ResultFusion CONVEX handles empty input and zero-weight components",
@@ -323,6 +323,68 @@ TEST_CASE("ResultFusion CONVEX handles empty input and zero-weight components",
     // Text has zero weight → doc gets a 0 score; fusion machinery may still admit it as a
     // candidate, but when it does, the score must be 0.
     if (!results.empty()) {
-        CHECK(std::fabs(results[0].score) < 1e-6);
+        CHECK((std::fabs(results[0].score) < 1e-6));
     }
+}
+
+TEST_CASE("ResultFusion covers empty input and remaining strategy branches",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 10;
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+    cfg.textWeight = 1.0f;
+    cfg.vectorWeight = 0.5f;
+    cfg.rrfK = 1.0f;
+
+    ResultFusion emptyFusion(cfg);
+    CHECK(emptyFusion.fuse({}).empty());
+
+    std::vector<ComponentResult> components;
+    components.push_back(makeComponent("doc-a", 0.9f, ComponentResult::Source::Text, 0));
+    components.push_back(makeComponent("doc-b", 0.8f, ComponentResult::Source::Vector, 1));
+    components.push_back(makeComponent("doc-a", 0.7f, ComponentResult::Source::PathTree, 2));
+
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+    ResultFusion reciprocal(cfg);
+    auto reciprocalResults = reciprocal.fuse(components);
+    REQUIRE((reciprocalResults.size() == 2U));
+    CHECK((reciprocalResults.front().document.sha256Hash == "doc-a"));
+
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
+    cfg.weightedLinearZScorePoolSize = 10;
+    ResultFusion convex(cfg);
+    auto convexResults = convex.fuse(components);
+    REQUIRE((convexResults.size() == 2U));
+    CHECK((convexResults.front().score >= convexResults.back().score));
+
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
+    cfg.weightedLinearZScoreUseZScore = false;
+    ResultFusion linear(cfg);
+    auto linearResults = linear.fuse(components);
+    REQUIRE((linearResults.size() == 2U));
+    CHECK((linearResults.front().score >= linearResults.back().score));
+}
+
+TEST_CASE("ResultFusion inline helpers cover relief and rescue calculations",
+          "[search][fusion][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.enableStrongVectorOnlyRelief = false;
+    cfg.vectorOnlyPenalty = 0.25f;
+    CHECK((strongVectorOnlyReliefStrength(cfg, 1.0, 0) == 0.0));
+    CHECK((effectiveVectorOnlyPenalty(cfg, 1.0, 0) == Catch::Approx(0.25)));
+
+    cfg.enableStrongVectorOnlyRelief = true;
+    cfg.strongVectorOnlyMinScore = 0.90f;
+    cfg.strongVectorOnlyTopRank = 3;
+    cfg.strongVectorOnlyPenalty = 0.90f;
+    CHECK((strongVectorOnlyReliefEligible(cfg, 0.95, 10)));
+    CHECK((effectiveVectorOnlyPenalty(cfg, 0.95, 10) > 0.25));
+
+    cfg.enableReranking = true;
+    cfg.rerankTopK = 7;
+    cfg.maxResults = 20;
+    CHECK((semanticRescueWindowLimit(cfg) == 7U));
+    cfg.enableReranking = false;
+    CHECK((semanticRescueWindowLimit(cfg) == 20U));
 }
