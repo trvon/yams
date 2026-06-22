@@ -27,6 +27,7 @@ yams watch                     # Auto-index on file changes
 yams grep "pattern" --cwd .    # Code pattern search scoped to current project
 yams grep -e "--flag" --cwd .  # Explicit pattern for leading '-' text
 yams grep -g "*.cpp" "TODO"   # rg-style glob filtering
+yams grep --minimal "TODO"     # Compact grep-style output
 yams search "query"            # Semantic/hybrid search
 
 # Graph
@@ -35,6 +36,7 @@ yams graph --name <file>       # Raw file relationships
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
 yams graph --search "pattern"  # Search nodes by label
+# graph owns path/tree/topology inspection; retired tree is not top-level
 
 # Agent storage
 yams list --format json        # Scriptable list output
@@ -89,7 +91,8 @@ yams list --limit 10           # Recent indexed files
 1. **Code patterns** → `yams grep` (fast, regex/literal; use `--cwd .` for repo scoping)
 2. **Semantic/concept** → `yams search` (embeddings/hybrid)
 3. **Codebase shape / blast radius** → `yams graph --explore` from a search/grep hit
-4. **No results from grep** → Try `yams search`, then follow `graph_explore_hint` when present
+4. **Path/tree/topology inspection** → use `yams graph`, not retired top-level `tree`
+5. **No results from grep** → Try `yams search`, then follow `graph_explore_hint` when present
 
 ### grep (Code Search)
 
@@ -109,12 +112,19 @@ yams grep "import" --ext py
 # rg-style glob filter (repeatable)
 yams grep -g "src/**/*.cpp" "TODO"
 
+# Compact grep-style output (default is richer agent context)
+yams grep --minimal "TODO" -g "src/**/*.cpp"
+
 # Scope to current working directory or an explicit directory
 yams grep "TODO" --cwd .
 yams grep "TODO" --cwd src/daemon
 
 # Literal text (no regex)
 yams grep "user?.name" -F
+
+# Per-file match cap: --limit is an alias for -m/--max-count, not global
+# Use search/list --limit for global result caps.
+yams grep "TODO" -m 5
 
 # Pattern starts with '-': use -- or explicit -e/--regexp
 yams grep -- "--tags|foo" --include="docs/**/*.md"
@@ -263,6 +273,7 @@ yams graph --explore "RequestHandler" --json
 ```
 
 Notes:
+
 - `yams search` and `yams grep` results may emit `graph_explore_hint`; run that exact command before broad local search.
 - `--explore` is budgeted for agents: entry symbols, related files, relationship summaries, and line-numbered snippets.
 - If `--explore` fails or looks stale, fall back to raw traversal plus local reads.
@@ -334,6 +345,7 @@ The MCP server exposes a small composite tool surface.
 | `mcp.echo` | Echo utility |
 
 Notes:
+
 - `query` and `execute` accept arrays (`steps` / `operations`) and run them in order.
 - Each `query.steps[i]` result is available to later steps via `$prev` (e.g., `$prev.results[0].hash`).
 - Use `describe` to discover the parameter schema for an operation at runtime.

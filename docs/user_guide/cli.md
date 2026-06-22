@@ -47,9 +47,8 @@ yams [OPTIONS] <command> [command-options]
 ### Search & Discovery
 
 - `search` - Search documents by query (semantic + keyword)
-- `grep` - Search for regex patterns within file contents
-- `tree` - Inspect aggregated path tree statistics
-- `graph` - Inspect knowledge graph relationships
+- `grep` - Search for regex patterns within file contents with an rg-compatible flag subset
+- `graph` - Inspect knowledge graph relationships, path/tree structure, and topology
 
 ### Collections & Snapshots
 
@@ -949,10 +948,14 @@ yams grep "##\\s+(watch|git|sync)\\b" --include="**/*.md"
 
 Notes:
 
+- `grep` intentionally mirrors common ripgrep muscle memory for core flags: `-e/--regexp`, `-g/--glob`, `-F/--fixed-strings`, `-i`, `-w`, `-v`, `-n`, `-H`, `--no-filename`, `-c`, `-l`, `-L`, `-A/-B/-C`, `-m/--max-count`, and `--color`.
+- Default output is YAMS-rich/LLM-friendly context; use `--minimal` when you want grep-style compact output.
 - Default mode is hybrid: regex plus semantic suggestions; use --regex-only to disable. Tune with --semantic-limit (default: 10).
 - Semantic suggestions are also shown in -l/--files-with-matches, -L/--files-without-match, --paths-only, and -c/--count modes. Regex counts only reflect text matches.
 - Hot/Cold modes: control behavior via environment variables. For grep, set YAMS_GREP_MODE=hot_only|cold_only|auto (hot uses extracted text cache; cold scans CAS bytes). For list, use YAMS_LIST_MODE, and for retrieval (cat/get), use YAMS_RETRIEVAL_MODE.
-- --include accepts comma-separated globs or repeated usage; prefer quoting patterns.
+- `--include` accepts comma-separated globs or repeated usage; `-g/--glob` is the rg-style alias. Prefer quoting patterns.
+- `--live` falls back to scanning the working tree when indexed grep has no hits; use `--no-live` for indexed-only behavior.
+- Scope to the current project with `--here`, or pass an optional root with `--cwd [path]`.
 - Pair with yams search --paths-only to scope subsequent grep runs.
 
 Search for regex patterns within file contents.
@@ -987,12 +990,28 @@ Options:
   - Show only filenames with matches
 - -L, --files-without-match
   - Show only filenames without matches
+- -e, --regexp <pattern>
+  - Explicit pattern option; use this when the pattern starts with `-` or to avoid positional ambiguity.
+- -g, --glob <glob>
+  - rg-compatible glob filter; repeatable and merged with --include.
+- --include <glob>
+  - File patterns to include, comma-separated or repeated.
+- -F, --fixed-strings
+  - Treat pattern as literal text, not regex.
+- --minimal
+  - Use compact grep-style output instead of the default rich context.
+- --live / --no-live
+  - Enable or disable live working-tree fallback after indexed no-hit results.
+- --cwd [path]
+  - Scope grep to a directory. With no value, scopes to the current working directory.
+- --here
+  - Scope grep to the current working directory.
 - --color <mode>
   - Color mode: always, never, auto (default: auto)
 - --max-count <N>
-  - Stop after N matches per file
+  - Stop after N matches per file. This matches ripgrep's per-file `-m/--max-count` behavior and is not a global result cap.
 - --limit <N>
-  - Alias for --max-count
+  - Compatibility alias for --max-count; it is also a per-file match cap, unlike `search --limit` and `list --limit`.
 
 Description:
 

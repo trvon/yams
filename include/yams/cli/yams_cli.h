@@ -137,6 +137,12 @@ public:
     Result<void> ensureStorageInitialized();
 
     /**
+     * Ensure only metadata DB access is initialized.
+     * Use for read-only metadata commands that do not need CAS, refs DB, KG, vectors, or plugins.
+     */
+    Result<void> ensureMetadataInitialized();
+
+    /**
      * Fast path for metadata value counts query.
      * Opens database directly without full storage initialization.
      * Use this for simple read-only metadata queries to avoid the overhead

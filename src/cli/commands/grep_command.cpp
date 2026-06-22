@@ -300,11 +300,12 @@ public:
             ->default_val("auto")
             ->check(CLI::IsMember({"always", "never", "auto"}));
 
-        cmd->add_option("-m,--max-count", maxCount_, "Stop after N matches per file")
+        cmd->add_option("-m,--max-count", maxCount_,
+                        "Stop after N matches per file (rg-compatible; not a global result cap)")
             ->default_val(20);
 
         cmd->add_option("--limit", maxCount_,
-                        "Alias: stop after N matches per file (same as --max-count)")
+                        "Alias for --max-count: per-file match cap, not a global result cap")
             ->default_val(20);
 
         cmd->add_flag(
@@ -452,11 +453,7 @@ public:
                 sessionPatterns_.clear();
             }
 
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Grep failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            cli_->setPendingCommand(this);
         });
     }
 

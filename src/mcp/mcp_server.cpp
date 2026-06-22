@@ -234,51 +234,6 @@ loadSuggestContextSuppressionState(metadata::MetadataRepository& repo, std::stri
     return state;
 }
 
-void recordSuggestContextServed(
-    metadata::MetadataRepository& repo, const MCPSuggestContextRequest& req,
-    std::string_view normalizedQuery,
-    const std::vector<MCPSuggestContextResponse::Suggestion>& suggestions) {
-    if (req.sessionName.empty() || normalizedQuery.empty() || suggestions.empty()) {
-        return;
-    }
-
-    std::unordered_set<std::string> snapshotIds;
-    std::unordered_set<std::string> resultIds;
-    nlohmann::json snapshotArray = nlohmann::json::array();
-    nlohmann::json resultArray = nlohmann::json::array();
-
-    for (const auto& suggestion : suggestions) {
-        if (!suggestion.snapshotId.empty() && snapshotIds.insert(suggestion.snapshotId).second) {
-            snapshotArray.push_back(suggestion.snapshotId);
-        }
-        for (const auto& supporting : suggestion.supportingResults) {
-            if (!supporting.id.empty() && resultIds.insert(supporting.id).second) {
-                resultArray.push_back(supporting.id);
-            }
-        }
-    }
-
-    if (snapshotArray.empty() && resultArray.empty()) {
-        return;
-    }
-
-    metadata::FeedbackEvent event;
-    event.eventId = yams::core::generateUUID();
-    event.traceId = yams::core::generateUUID();
-    event.createdAt =
-        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
-    event.source = "mcp";
-    event.eventType = "suggest_context_served";
-    event.payloadJson = nlohmann::json{{"query", req.query},
-                                       {"normalized_query", normalizedQuery},
-                                       {"session_name", req.sessionName},
-                                       {"use_session", req.useSession},
-                                       {"global_search", req.globalSearch},
-                                       {"snapshot_ids", std::move(snapshotArray)},
-                                       {"served_result_ids", std::move(resultArray)}}
-                            .dump();
-    (void)repo.insertFeedbackEvent(event);
-}
 #endif
 
 static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
@@ -5987,13 +5942,6 @@ void MCPServer::initializeToolRegistry() {
         }
         response.total = response.suggestions.size();
 
-        if (!req.sessionName.empty()) {
-            auto repoResult = ensureSuggestContextRepo(false);
-            if (repoResult && repoResult.value() != nullptr) {
-                recordSuggestContextServed(*repoResult.value(), req, suppressionQuery,
-                                           response.suggestions);
-            }
-        }
         co_return response;
     }
 
@@ -6164,10 +6112,6 @@ suggest_context_metadata_loaded:
 
     response.total = suggestions.size();
     response.suggestions = std::move(suggestions);
-    if (suggestContextRepo) {
-        recordSuggestContextServed(*suggestContextRepo, req, suppressionQuery,
-                                   response.suggestions);
-    }
     co_return response;
 #endif
         }

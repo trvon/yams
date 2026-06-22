@@ -6,6 +6,7 @@
 #include <map>
 #include <sstream>
 #include <yams/api/content_store_builder.h>
+#include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/command_catalog.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/daemon_helpers.h>
@@ -104,17 +105,6 @@ namespace yams::cli {
 
 namespace {
 
-bool cli_perf_trace_enabled() {
-    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    std::string value(raw);
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value == "1" || value == "true" || value == "on" || value == "yes";
-}
-
 void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions& opts) {
     const auto backend = yams::daemon::ConfigResolver::resolveEmbeddingBackend();
     const auto bm25Policy = yams::daemon::ConfigResolver::resolveSimeonBm25Policy();
@@ -134,24 +124,6 @@ void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions&
         lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
     }
     opts.simeonLexicalConfig = lexicalCfg;
-}
-
-void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
-                    std::string_view note = {}) {
-    if (!cli_perf_trace_enabled()) {
-        return;
-    }
-    if (note.empty()) {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()));
-    } else {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
-                     note.data());
-    }
-    std::fflush(stderr);
 }
 
 } // namespace
@@ -731,6 +703,38 @@ int YamsCLI::run(int argc, char* argv[]) {
         spdlog::error("Unexpected error: {}", e.what());
         return 1;
     }
+}
+
+Result<void> YamsCLI::ensureMetadataInitialized() {
+    if (metadataRepo_) {
+        return Result<void>();
+    }
+
+    auto dbPath = dataPath_ / "yams.db";
+    if (!std::filesystem::exists(dbPath)) {
+        return Error{ErrorCode::NotInitialized, "Metadata database not found: " + dbPath.string()};
+    }
+
+    database_ = std::make_shared<metadata::Database>();
+    auto dbResult = database_->open(dbPath.string(), metadata::ConnectionMode::ReadOnly);
+    if (!dbResult) {
+        return dbResult;
+    }
+
+    metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.maxConnections = 4;
+    poolConfig.minConnections = 1;
+    poolConfig.readOnly = true;
+    poolConfig.connectTimeout = std::chrono::seconds(30);
+
+    connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolConfig);
+    auto poolResult = connectionPool_->initialize();
+    if (!poolResult) {
+        return poolResult;
+    }
+
+    metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
+    return Result<void>();
 }
 
 Result<void> YamsCLI::ensureStorageInitialized() {

@@ -79,10 +79,10 @@ TEST_CASE("suggest_context ranks snapshot groups by accumulated evidence",
 
     auto result = future.get();
     REQUIRE(result.has_value());
-    REQUIRE(result.value().suggestions.size() == 2);
-    CHECK(result.value().suggestions[0].snapshotId == "snap-a");
-    CHECK(result.value().suggestions[0].supportingResultCount == 2);
-    CHECK(result.value().suggestions[0].score > result.value().suggestions[1].score);
+    REQUIRE((result.value().suggestions.size() == 2));
+    CHECK((result.value().suggestions[0].snapshotId == "snap-a"));
+    CHECK((result.value().suggestions[0].supportingResultCount == 2));
+    CHECK((result.value().suggestions[0].score > result.value().suggestions[1].score));
 }
 
 TEST_CASE("suggest_context respects limit in response", "[mcp][suggest_context][catch2]") {
@@ -110,8 +110,8 @@ TEST_CASE("suggest_context respects limit in response", "[mcp][suggest_context][
 
     auto result = future.get();
     REQUIRE(result.has_value());
-    CHECK(result.value().total == 1);
-    REQUIRE(result.value().suggestions.size() == 1);
+    CHECK((result.value().total == 1));
+    REQUIRE((result.value().suggestions.size() == 1));
 }
 
 TEST_CASE("suggest_context rejects empty query", "[mcp][suggest_context][catch2]") {
@@ -127,7 +127,7 @@ TEST_CASE("suggest_context rejects empty query", "[mcp][suggest_context][catch2]
 
     auto result = future.get();
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().message == "query is required");
+    CHECK((result.error().message == "query is required"));
 }
 
 TEST_CASE("suggest_context suppresses repeated snapshots from the latest matching session event",
@@ -189,15 +189,14 @@ TEST_CASE("suggest_context suppresses repeated snapshots from the latest matchin
 
     auto result = future.get();
     REQUIRE(result.has_value());
-    REQUIRE(result.value().suggestions.size() == 1);
-    CHECK(result.value().suggestions[0].snapshotId == "snap-b");
+    REQUIRE((result.value().suggestions.size() == 1));
+    CHECK((result.value().suggestions[0].snapshotId == "snap-b"));
 
     std::error_code ec;
     std::filesystem::remove_all(tempDir, ec);
 }
 
-TEST_CASE("suggest_context records served suggestions and suppresses an immediate repeat",
-          "[mcp][suggest_context][catch2]") {
+TEST_CASE("suggest_context does not record served suggestions", "[mcp][suggest_context][catch2]") {
     auto tempDir = yams::test::make_temp_dir("yams_mcp_suggest_context_record_");
     std::filesystem::create_directories(tempDir);
 
@@ -236,17 +235,13 @@ TEST_CASE("suggest_context records served suggestions and suppresses an immediat
 
         auto result = future.get();
         REQUIRE(result.has_value());
-        REQUIRE(result.value().suggestions.size() == 1);
-        CHECK(result.value().suggestions[0].snapshotId == "snap-a");
+        REQUIRE((result.value().suggestions.size() == 1));
+        CHECK((result.value().suggestions[0].snapshotId == "snap-a"));
     }
 
     auto events = repo.getRecentFeedbackEvents(5);
     REQUIRE(events.has_value());
-    auto it = std::find_if(events.value().begin(), events.value().end(), [](const auto& event) {
-        return event.eventType == "suggest_context_served" && event.source == "mcp";
-    });
-    REQUIRE(it != events.value().end());
-    CHECK(it->payloadJson.find("snap-a") != std::string::npos);
+    CHECK(events.value().empty());
 
     {
         boost::asio::io_context io;
@@ -256,8 +251,8 @@ TEST_CASE("suggest_context records served suggestions and suppresses an immediat
 
         auto result = future.get();
         REQUIRE(result.has_value());
-        CHECK(result.value().suggestions.empty());
-        CHECK(result.value().total == 0);
+        REQUIRE((result.value().suggestions.size() == 1));
+        CHECK((result.value().suggestions[0].snapshotId == "snap-a"));
     }
 
     std::error_code ec;

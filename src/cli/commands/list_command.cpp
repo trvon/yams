@@ -481,14 +481,16 @@ private:
      * 2. document metadata - snapshot_id from daemon file ingestion (yams add <files>)
      */
     Result<void> listAllSnapshots() {
-        auto appContext = cli_->getAppContext();
-        if (!appContext) {
-            return Error{ErrorCode::NotInitialized, "App context not available"};
+        auto ensured = cli_->ensureMetadataInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+        auto metaRepo = cli_->getMetadataRepository();
+        if (!metaRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository unavailable"};
         }
 
         try {
-            auto& metaRepo = appContext->metadataRepo;
-
             // Get rich tree snapshots first
             auto treeResult = metaRepo->listTreeSnapshots(limit_ > 0 ? limit_ : 100);
             if (!treeResult)

@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/platform/windows_init.h>
 #include <yams/version.hpp>
@@ -18,21 +19,6 @@
 
 namespace {
 
-void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
-                    std::string_view note);
-
-bool cli_perf_trace_enabled() {
-    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    std::string value(raw);
-    for (auto& ch : value) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    return value == "1" || value == "true" || value == "on" || value == "yes";
-}
-
 bool env_truthy(const char* raw) {
     if (raw == nullptr || *raw == '\0') {
         return false;
@@ -42,24 +28,6 @@ bool env_truthy(const char* raw) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
     return value == "1" || value == "true" || value == "on" || value == "yes";
-}
-
-void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
-                    std::string_view note = {}) {
-    if (!cli_perf_trace_enabled()) {
-        return;
-    }
-    if (note.empty()) {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()));
-    } else {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
-                     note.data());
-    }
-    std::fflush(stderr);
 }
 
 } // namespace
@@ -90,25 +58,27 @@ int main(int argc, char* argv[]) {
 #else
             std::cout << YAMS_VERSION_STRING << '\n';
 #endif
-            cli_perf_trace("main.total",
-                           std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - mainStart),
-                           "version_fast_path");
+            yams::cli::cli_perf_trace("main.total",
+                                      std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - mainStart),
+                                      "version_fast_path");
             return 0;
         }
 
         // Set up logging with conservative default; YamsCLI::run() adjusts based on flags
         spdlog::set_level(spdlog::level::warn);
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");
-        cli_perf_trace("main.logging", std::chrono::duration_cast<std::chrono::microseconds>(
-                                           std::chrono::steady_clock::now() - mainStart));
+        yams::cli::cli_perf_trace("main.logging",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - mainStart));
 
         // Create io_context for async operations
         const auto ioStart = std::chrono::steady_clock::now();
         boost::asio::io_context io_context;
         auto work_guard = boost::asio::make_work_guard(io_context);
-        cli_perf_trace("main.io_context", std::chrono::duration_cast<std::chrono::microseconds>(
-                                              std::chrono::steady_clock::now() - ioStart));
+        yams::cli::cli_perf_trace("main.io_context",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - ioStart));
 
         // Start worker threads
         const auto threadStart = std::chrono::steady_clock::now();
@@ -124,20 +94,22 @@ int main(int argc, char* argv[]) {
         for (unsigned int i = 0; i < thread_count; ++i) {
             threads.emplace_back([&io_context]() { io_context.run(); });
         }
-        cli_perf_trace("main.thread_pool",
-                       std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - threadStart),
-                       std::to_string(thread_count));
+        yams::cli::cli_perf_trace("main.thread_pool",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - threadStart),
+                                  std::to_string(thread_count));
 
         // Create and run CLI with executor
         const auto cliStart = std::chrono::steady_clock::now();
         yams::cli::YamsCLI cli(io_context.get_executor());
-        cli_perf_trace("main.cli_ctor", std::chrono::duration_cast<std::chrono::microseconds>(
-                                            std::chrono::steady_clock::now() - cliStart));
+        yams::cli::cli_perf_trace("main.cli_ctor",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - cliStart));
         const auto runStart = std::chrono::steady_clock::now();
         int result = cli.run(argc, argv);
-        cli_perf_trace("main.cli_run", std::chrono::duration_cast<std::chrono::microseconds>(
-                                           std::chrono::steady_clock::now() - runStart));
+        yams::cli::cli_perf_trace("main.cli_run",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - runStart));
 
         // Cleanup
         const auto cleanupStart = std::chrono::steady_clock::now();
@@ -147,10 +119,12 @@ int main(int argc, char* argv[]) {
             if (t.joinable())
                 t.join();
         }
-        cli_perf_trace("main.cleanup", std::chrono::duration_cast<std::chrono::microseconds>(
-                                           std::chrono::steady_clock::now() - cleanupStart));
-        cli_perf_trace("main.total", std::chrono::duration_cast<std::chrono::microseconds>(
-                                         std::chrono::steady_clock::now() - mainStart));
+        yams::cli::cli_perf_trace("main.cleanup",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - cleanupStart));
+        yams::cli::cli_perf_trace("main.total",
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - mainStart));
 
         return result;
 

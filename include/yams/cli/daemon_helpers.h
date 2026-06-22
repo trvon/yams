@@ -27,6 +27,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/app/services/retrieval_service.h>
+#include <yams/cli/cli_perf_trace.h>
 #include <yams/common/string_utils.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -775,31 +776,8 @@ inline std::string to_lower_copy(std::string value) {
 
 inline std::string trim_copy(std::string_view sv);
 
-inline bool cli_perf_trace_enabled() {
-    const char* raw = std::getenv("YAMS_CLI_PERF_TRACE");
-    if (raw == nullptr || *raw == '\0') {
-        return false;
-    }
-    std::string mode = yams::common::asciiToLowerCopy(raw);
-    return mode == "1" || mode == "true" || mode == "on" || mode == "yes";
-}
-
-inline void cli_perf_trace(std::string_view stage, std::chrono::microseconds elapsed,
-                           std::string_view note = {}) {
-    if (!cli_perf_trace_enabled()) {
-        return;
-    }
-    if (note.empty()) {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()));
-    } else {
-        std::fprintf(stderr, "[yams-cli-perf] stage=%.*s elapsed_us=%lld note=%.*s\n",
-                     static_cast<int>(stage.size()), stage.data(),
-                     static_cast<long long>(elapsed.count()), static_cast<int>(note.size()),
-                     note.data());
-    }
-}
+using yams::cli::cli_perf_trace;
+using yams::cli::cli_perf_trace_enabled;
 
 inline std::string trim_copy(std::string_view sv) {
     std::size_t start = 0;

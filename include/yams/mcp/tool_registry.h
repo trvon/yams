@@ -1,7 +1,11 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <cctype>
+#include <chrono>
 #include <concepts>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -22,6 +26,29 @@ namespace yams::mcp {
 using json = nlohmann::json;
 
 namespace detail {
+
+inline bool mcp_perf_trace_enabled() {
+    const char* raw = std::getenv("YAMS_MCP_PERF_TRACE"); // NOLINT(concurrency-mt-unsafe)
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    for (auto& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
+inline void mcp_perf_trace(std::string_view tool, std::string_view stage,
+                           std::chrono::microseconds elapsed) {
+    if (!mcp_perf_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[yams-mcp-perf] tool=%.*s stage=%.*s elapsed_us=%lld\n",
+                 static_cast<int>(tool.size()), tool.data(), static_cast<int>(stage.size()),
+                 stage.data(), static_cast<long long>(elapsed.count()));
+    std::fflush(stderr);
+}
 
 inline json makeTextContent(std::string text) {
     return json::array({json{{"type", "text"}, {"text", std::move(text)}}});
@@ -1527,27 +1554,57 @@ public:
 
     template <typename Handler>
     requires detail::SyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
-    explicit ToolWrapper(Handler&& handler) : handler_(HandlerFn(std::forward<Handler>(handler))) {}
+    explicit ToolWrapper(std::string toolName, Handler&& handler)
+        : toolName_(std::move(toolName)), handler_(HandlerFn(std::forward<Handler>(handler))) {}
 
     json operator()(const json& args) {
+        const auto totalStart = std::chrono::steady_clock::now();
         try {
+            const auto parseStart = std::chrono::steady_clock::now();
             auto req = RequestType::fromJson(args);
+            detail::mcp_perf_trace(toolName_, "parse",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - parseStart));
+
+            const auto handlerStart = std::chrono::steady_clock::now();
             auto result = handler_(req);
+            detail::mcp_perf_trace(toolName_, "handler",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - handlerStart));
 
             if (!result) {
+                detail::mcp_perf_trace(toolName_, "total",
+                                       std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - totalStart));
                 return detail::makeErrorResponse(std::string("Error: ") + result.error().message);
             }
 
-            return wrapToolResult(result.value().toJson());
+            const auto wrapStart = std::chrono::steady_clock::now();
+            auto payload = result.value().toJson();
+            auto wrapped = wrapToolResult(payload);
+            detail::mcp_perf_trace(toolName_, "wrap",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - wrapStart));
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
+            return wrapped;
 
         } catch (const json::exception& e) {
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
             return detail::makeErrorResponse(std::string("JSON error: ") + e.what());
         } catch (const std::exception& e) {
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
             return detail::makeErrorResponse(std::string("Error: ") + e.what());
         }
     }
 
 private:
+    std::string toolName_;
     HandlerFn handler_;
 };
 // Async tool wrapper template for coroutine-based handlers
@@ -1560,29 +1617,59 @@ public:
 
     template <typename Handler>
     requires detail::AsyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
-    explicit AsyncToolWrapper(Handler&& handler)
-        : handler_(AsyncHandlerFn(std::forward<Handler>(handler))) {}
+    explicit AsyncToolWrapper(std::string toolName, Handler&& handler)
+        : toolName_(std::move(toolName)), handler_(AsyncHandlerFn(std::forward<Handler>(handler))) {
+    }
 
     boost::asio::awaitable<json> operator()(const json& args) {
+        const auto totalStart = std::chrono::steady_clock::now();
         try {
+            const auto parseStart = std::chrono::steady_clock::now();
             auto req = RequestType::fromJson(args);
+            detail::mcp_perf_trace(toolName_, "parse",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - parseStart));
+
+            const auto handlerStart = std::chrono::steady_clock::now();
             auto result = co_await handler_(req);
+            detail::mcp_perf_trace(toolName_, "handler",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - handlerStart));
 
             if (!result) {
+                detail::mcp_perf_trace(toolName_, "total",
+                                       std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - totalStart));
                 co_return detail::makeErrorResponse(std::string("Error: ") +
                                                     result.error().message);
             }
 
-            co_return wrapToolResult(result.value().toJson());
+            const auto wrapStart = std::chrono::steady_clock::now();
+            auto payload = result.value().toJson();
+            auto wrapped = wrapToolResult(payload);
+            detail::mcp_perf_trace(toolName_, "wrap",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - wrapStart));
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
+            co_return wrapped;
 
         } catch (const json::exception& e) {
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
             co_return detail::makeErrorResponse(std::string("JSON error: ") + e.what());
         } catch (const std::exception& e) {
+            detail::mcp_perf_trace(toolName_, "total",
+                                   std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart));
             co_return detail::makeErrorResponse(std::string("Error: ") + e.what());
         }
     }
 
 private:
+    std::string toolName_;
     AsyncHandlerFn handler_;
 };
 
@@ -1603,15 +1690,15 @@ public:
     void registerTool(std::string_view name, Handler&& handler, json schema = {},
                       std::string description = {}, std::string title = {},
                       std::optional<ToolAnnotation> annotations = std::nullopt) {
-        auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::forward<Handler>(handler));
-        auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
-            return wrapper(args);
-        };
-
         // IMPORTANT: don't move handlerFn into emplace() before we know whether insertion will
         // happen. unordered_map::emplace may still consume/move arguments even on duplicate keys,
         // leaving handlerFn moved-from (and thus the stored handler empty).
         const std::string key(name);
+        auto wrapper =
+            AsyncToolWrapper<RequestType, ResponseType>(key, std::forward<Handler>(handler));
+        auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
+            return wrapper(args);
+        };
         auto it = handlers_.find(key);
         if (it == handlers_.end()) {
             auto [nit, inserted] = handlers_.emplace(key, std::move(handlerFn));
