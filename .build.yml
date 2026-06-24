@@ -361,6 +361,26 @@ tasks:
         echo "scripts/build-deb.sh not found; skipping distro package step"
       fi
 
+  - validate_packages: |
+      set -e
+      # Install + smoke-test the built packages in clean systemd containers.
+      # Requires privileged docker; skip gracefully when unavailable.
+      if [[ "${GIT_REF:-}" != refs/tags/* && "${RELEASE_CHANNEL:-}" != "nightly" && "${RELEASE_CHANNEL:-}" != "weekly" ]]; then
+        echo "Skipping package validation (not a tag/channel build)"
+        exit 0
+      fi
+      if [ -d yams ] && [ -f yams/meson.build ]; then
+        REPO_DIR="yams"
+      else
+        REPO_DIR="."
+      fi
+      cd "${REPO_DIR}"
+      if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        echo "docker unavailable; skipping systemd package validation lanes"
+        exit 0
+      fi
+      bash scripts/local-ci/package-validate.sh --build-dir "${BUILD_DIR}"
+
   - collect_artifacts: |
       set -e
       if [ -d yams ] && { [ -f yams/meson.build ] || [ -f yams/CMakeLists.txt ]; }; then

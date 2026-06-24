@@ -302,6 +302,9 @@ if host_machine.system() == 'linux'
   install_data('../../packaging/systemd/yams-daemon.service',
     install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
   )
+  install_data('../../packaging/systemd/80-yams.preset',
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system-preset'),
+  )
 endif
 
 # --- Windows: Copy runtime DLLs next to the daemon executable ---

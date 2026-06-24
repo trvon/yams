@@ -32,23 +32,31 @@ yams add /srv/docs --recursive --include="*.md" --tags "docs,import"
 
 ### Systemd Service
 
-Linux packages install a packaged daemon service:
+Linux packages install and **automatically enable + start** the daemon service on
+install (driven by the shipped systemd preset). To verify, or to re-enable manually:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now yams-daemon
-yams daemon status
+systemctl status yams-daemon
+sudo systemctl enable --now yams-daemon   # only needed if previously disabled
 ```
 
 Service defaults:
-- Data directory: `/var/lib/yams`
-- Socket: `/run/yams/yams-daemon.sock`
-- Logs: `/var/log/yams/daemon.log`
+- Runs as a transient `DynamicUser` (systemd-managed); no dedicated account is created
+- Data directory: `/var/lib/yams` (`StateDirectory`)
+- Socket: `/run/yams/yams-daemon.sock` (`RuntimeDirectory`)
+- Logs: `/var/log/yams/daemon.log` (`LogsDirectory`)
+- Config: resolved via XDG under the service `HOME=/var/lib/yams`
+  (`/var/lib/yams/.config/yams/config.toml`); none is shipped by the package
 
-The CLI auto-discovers the packaged daemon socket, so regular `yams` commands work without
-manually exporting `YAMS_DAEMON_SOCKET`.
+A non-root `yams` CLI resolves its socket from `$XDG_RUNTIME_DIR`/`/tmp`, **not** the
+system service socket. Point it at the packaged daemon explicitly:
 
-Customize with `/etc/yams/config.toml` or a systemd drop-in:
+```bash
+export YAMS_DAEMON_SOCKET=/run/yams/yams-daemon.sock
+yams daemon status
+```
+
+Customize the service with a systemd drop-in (preferred, survives upgrades):
 
 ```bash
 sudo systemctl edit yams-daemon

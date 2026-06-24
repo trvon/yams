@@ -1198,6 +1198,37 @@ jobs:
           fi
           echo "Linux package verification complete"
 
+      - name: Validate Linux package install (systemd lanes)
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.suffix }}" in
+            linux-x86_64) expected_arch="x86_64" ;;
+            linux-arm64) expected_arch="aarch64" ;;
+            *) echo "Skipping package install validation for suffix: ${{ matrix.suffix }}" >&2; exit 0 ;;
+          esac
+
+          host_arch="$(uname -m)"
+          if [ "${host_arch}" != "${expected_arch}" ]; then
+            echo "Runner arch (${host_arch}) != package arch (${expected_arch}); cannot run native systemd lane. Skipping." >&2
+            exit 0
+          fi
+
+          deb="$(ls -1 yams-*linux-${expected_arch}.deb 2>/dev/null | head -n1 || true)"
+          rpm="$(ls -1 yams-*linux-${expected_arch}.rpm 2>/dev/null | head -n1 || true)"
+
+          args=()
+          [ -n "${deb}" ] && args+=(--deb "${deb}")
+          [ -n "${rpm}" ] && args+=(--rpm "${rpm}")
+          if [ -z "${deb}" ] && [ -z "${rpm}" ]; then
+            echo "ERROR: no Linux packages found to validate" >&2
+            exit 1
+          fi
+
+          chmod +x scripts/local-ci/package-validate.sh
+          bash scripts/local-ci/package-validate.sh "${args[@]}"
+
   create-release:
     name: Create GitHub Release
     needs: [check-commits, build-release]

@@ -174,13 +174,27 @@ configure_conan_profile() {
 run_conan_install() {
   cd "${REPO_ROOT}"
   rm -rf "${BUILD_DIR}"
+  # Select the Conan profile by host architecture so native builds work on both
+  # x86_64 and arm64 (the x86_64 profile pins arch=x86_64 and emits -m64, which
+  # a native arm64 gcc rejects).
+  local conan_profile="conan/profiles/host-linux-gcc"
+  case "$(uname -m)" in
+    aarch64|arm64) conan_profile="conan/profiles/host-linux-gcc-arm" ;;
+  esac
+  echo "Using Conan profile: ${conan_profile} (host $(uname -m))"
+  local -a conan_extra=()
+  if [ -n "${CONAN_EXTRA_OPTS:-}" ]; then
+    # shellcheck disable=SC2206
+    conan_extra=(${CONAN_EXTRA_OPTS})
+  fi
   conan install . \
     -of "${BUILD_DIR}" \
-    -pr:h=./conan/profiles/host-linux-gcc \
-    -pr:b=./conan/profiles/host-linux-gcc \
+    -pr:h="./${conan_profile}" \
+    -pr:b="./${conan_profile}" \
     -s build_type=Release \
     -c tools.build:jobs="${CONAN_CPU_COUNT}" \
     -o "sqlite3/*:fts5=True" \
+    "${conan_extra[@]}" \
     --build=missing
 }
 
@@ -398,6 +412,7 @@ __DEBIAN_CONTROL__
       set -x
     fi
   fi
+  depends_fallback="${depends_fallback}, init-system-helpers (>= 1.51)"
   sed -i "s|@DEPENDENCIES@|${depends_fallback}|" "${control}"
 
   find "${work_dir}" -type d -exec chmod 0755 {} +
@@ -407,6 +422,79 @@ __DEBIAN_CONTROL__
       chmod 0755 "${bin}"
     done
   fi
+
+  # Maintainer scripts: register, enable (per systemd preset) and start the
+  # daemon on install; stop on remove; mask/purge on remove/purge. Modeled on
+  # dh_installsystemd output. The unit + 80-yams.preset ship via the meson
+  # install tree, so these scripts only drive systemd state.
+  cat > "${work_dir}/DEBIAN/postinst" <<'__DEB_POSTINST__'
+#!/bin/sh
+set -e
+
+UNIT=yams-daemon.service
+
+if [ "$1" = "configure" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null 2>&1 || true
+        deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+        if deb-systemd-helper --quiet was-enabled "$UNIT"; then
+            deb-systemd-helper enable "$UNIT" >/dev/null 2>&1 || true
+        else
+            deb-systemd-helper update-state "$UNIT" >/dev/null 2>&1 || true
+        fi
+        if [ -n "$2" ]; then
+            deb-systemd-invoke restart "$UNIT" >/dev/null 2>&1 || true
+        else
+            deb-systemd-invoke start "$UNIT" >/dev/null 2>&1 || true
+        fi
+    fi
+fi
+
+exit 0
+__DEB_POSTINST__
+
+  cat > "${work_dir}/DEBIAN/prerm" <<'__DEB_PRERM__'
+#!/bin/sh
+set -e
+
+UNIT=yams-daemon.service
+
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    if [ -d /run/systemd/system ]; then
+        deb-systemd-invoke stop "$UNIT" >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0
+__DEB_PRERM__
+
+  cat > "${work_dir}/DEBIAN/postrm" <<'__DEB_POSTRM__'
+#!/bin/sh
+set -e
+
+UNIT=yams-daemon.service
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ "$1" = "remove" ]; then
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+        deb-systemd-helper mask "$UNIT" >/dev/null 2>&1 || true
+    fi
+fi
+
+if [ "$1" = "purge" ]; then
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+        deb-systemd-helper purge "$UNIT" >/dev/null 2>&1 || true
+        deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0
+__DEB_POSTRM__
+
+  chmod 0755 "${work_dir}/DEBIAN/postinst" "${work_dir}/DEBIAN/prerm" "${work_dir}/DEBIAN/postrm"
 
   local deb_name="yams-${version}-linux-$(normalize_arch_label "${deb_arch}")".deb
   if command -v fakeroot >/dev/null 2>&1; then
@@ -457,6 +545,7 @@ package_rpm() {
     [usr/share/zsh]=1 [usr/share/zsh/site-functions]=1
     [usr/share/fish]=1 [usr/share/fish/vendor_completions.d]=1
     [usr/share/licenses]=1
+    [usr/lib/systemd]=1 [usr/lib/systemd/system]=1 [usr/lib/systemd/system-preset]=1
     [etc]=1 [var]=1
   )
   (
@@ -484,6 +573,9 @@ License: Apache-2.0
 URL: https://git.sr.ht/~trevon/yams
 Source0: %{name}-%{version}.tar.gz
 BuildArch: __RPM_ARCH__
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
 
 %description
 Yet Another Memory System (YAMS) provides content-addressed storage with deduplication and search designed for long-term large language model memory.
@@ -498,6 +590,30 @@ Yet Another Memory System (YAMS) provides content-addressed storage with dedupli
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
+
+# Scriptlets are hand-expanded equivalents of the systemd-rpm-macros
+# (%systemd_post / %systemd_preun / %systemd_postun_with_restart) so the rpm can
+# be cross-built on a host without systemd-rpm-macros. On first install we apply
+# the shipped preset (enable) and then start the unit; the explicit start is a
+# deliberate deviation from Fedora's "don't start on install" guidance.
+%post
+if [ $1 -eq 1 ] ; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl preset yams-daemon.service >/dev/null 2>&1 || true
+    systemctl start yams-daemon.service >/dev/null 2>&1 || true
+fi
+
+%preun
+if [ $1 -eq 0 ] ; then
+    systemctl --no-reload disable yams-daemon.service >/dev/null 2>&1 || true
+    systemctl stop yams-daemon.service >/dev/null 2>&1 || true
+fi
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ $1 -ge 1 ] ; then
+    systemctl try-restart yams-daemon.service >/dev/null 2>&1 || true
+fi
 
 %files -f %{_sourcedir}/filelist
 %defattr(-,root,root,-)
@@ -580,9 +696,22 @@ package_only_main() {
   exit 0
 }
 
+provision_main() {
+  # Install only the build toolchain + Conan, no build. Used to pre-bake a cached
+  # Docker builder image so the package list stays single-sourced in this script.
+  persist_env_defaults
+  ensure_base_packages
+  install_conan
+  echo "Provisioning complete."
+  exit 0
+}
+
 main() {
   if [ "${1:-}" = "package_only" ]; then
     package_only_main "$@"
+  fi
+  if [ "${1:-}" = "provision" ]; then
+    provision_main
   fi
 
   ensure_base_packages

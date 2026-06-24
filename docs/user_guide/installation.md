@@ -23,7 +23,17 @@ https://repo.yamsmemory.ai/aptrepo stable main" \
   | sudo tee /etc/apt/sources.list.d/yams.list
 
 sudo apt-get update && sudo apt-get install yams
-sudo systemctl enable --now yams-daemon   # optional
+# yams-daemon.service is enabled and started automatically on install.
+systemctl status yams-daemon              # verify it is active
+yams daemon status                        # see note below about the socket
+```
+
+The system service runs as a transient `DynamicUser` and listens on
+`/run/yams/yams-daemon.sock`. A non-root `yams` CLI does not look there by
+default, so point it at the system socket:
+
+```bash
+export YAMS_DAEMON_SOCKET=/run/yams/yams-daemon.sock
 yams daemon status
 ```
 
@@ -38,12 +48,16 @@ enabled=1
 gpgcheck=0
 REPO
 sudo dnf makecache && sudo dnf install yams
+# yams-daemon.service is enabled and started automatically on install.
+systemctl status yams-daemon
+export YAMS_DAEMON_SOCKET=/run/yams/yams-daemon.sock
+yams daemon status
 ```
 
 !!! note
-    Current CI installs the published `.rpm` artifact directly rather than pulling through repo metadata. The hosted `yumrepo/` path is documented but not covered by automated validation.
+    Release CI builds the `.deb`/`.rpm` artifacts and validates them by installing each into a clean systemd container and asserting that `yams-daemon.service` enables, starts, and serves over its socket. Reproduce the whole thing locally with one command: `bash scripts/local-ci/package-lane.sh` (builds the packages in a cached Docker builder, then runs the install + service smoke test). The validation installs the locally built artifact directly; the hosted `aptrepo/` and `yumrepo/` repo-metadata paths are documented but not exercised by that lane.
 
-Tested lanes: x86_64 `.deb` on Debian trixie and x86_64 `.rpm` on Fedora 42, both in clean systemd containers with `yams-daemon.service` enabled.
+Tested lanes: `.deb` on Debian trixie and `.rpm` on Fedora 42 (matching the runner architecture), both in clean systemd containers with `yams-daemon.service` enabled and started.
 
 ## Docker
 
