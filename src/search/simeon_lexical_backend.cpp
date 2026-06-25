@@ -647,6 +647,34 @@ SimeonLexicalBackend::score(std::string_view query,
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
 
+    // Hot-query score cache: avoid recomputing full-corpus BM25 for repeated
+    // queries. LRU eviction keeps memory bounded. Cached only when
+    // cfg_.score_cache_entries > 0 and no extra features are active.
+    const bool cacheable = cfg_.score_cache_entries > 0 && !cfg_.bm25_variants_rrf &&
+                           !cfg_.rm3_enabled && !cfg_.fragment_geometry_enabled &&
+                           (!concept_index_ || cfg_.concept_config.concept_weight <= 0.0f);
+    const std::string queryKey(query);
+    if (cacheable) {
+        auto it = score_cache_map_.find(queryKey);
+        if (it != score_cache_map_.end()) {
+            score_cache_list_.splice(score_cache_list_.begin(), score_cache_list_, it->second);
+            score_cache_hits_.fetch_add(1, std::memory_order_relaxed);
+            const auto& cached = it->second->second.scores;
+            std::vector<float> out;
+            out.reserve(candidate_doc_ids.size());
+            for (auto id : candidate_doc_ids) {
+                auto dit = doc_id_to_index_.find(id);
+                if (dit == doc_id_to_index_.end()) {
+                    out.push_back(0.0f);
+                    continue;
+                }
+                const auto di = dit->second;
+                out.push_back(di < cached.size() ? cached[di] : 0.0f);
+            }
+            return out;
+        }
+    }
+
     std::vector<float> full(doc_count_, 0.0f);
     std::vector<float> lexical;
     if (cfg_.bm25_variants_rrf && atire_index_) {
@@ -689,6 +717,21 @@ SimeonLexicalBackend::score(std::string_view query,
                 : (di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f);
         out.push_back(score);
     }
+
+    // Cache the full-corpus scores for future queries when cacheable.
+    if (cacheable) {
+        ScoreCacheEntry entry;
+        entry.scores = std::move(full);
+        entry.concept_count = concept_index_ ? concept_index_->size() : 0;
+        score_cache_list_.emplace_front(queryKey, std::move(entry));
+        score_cache_map_[queryKey] = score_cache_list_.begin();
+        // Evict oldest if over capacity.
+        while (score_cache_list_.size() > cfg_.score_cache_entries) {
+            score_cache_map_.erase(score_cache_list_.back().first);
+            score_cache_list_.pop_back();
+        }
+    }
+
     return out;
 }
 
@@ -1031,6 +1074,11 @@ SimeonLexicalBackend::searchTop(std::string_view query, std::size_t limit,
             TopCandidate{.document_id = index_to_doc_id_[idx], .score = score});
     }
     return out;
+}
+
+void SimeonLexicalBackend::clearScoreCache() {
+    score_cache_list_.clear();
+    score_cache_map_.clear();
 }
 
 } // namespace yams::search

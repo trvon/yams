@@ -12,7 +12,6 @@ Site landing: [index.md](index.md) • Project README: [../README.md](../README.
 | CLI reference     | [user_guide/cli.md](user_guide/cli.md)           |
 | MCP server        | [user_guide/mcp.md](user_guide/mcp.md)           |
 | Embeddings        | [user_guide/embeddings.md](user_guide/embeddings.md) |
-| Tutorials         | [user_guide/tutorials/](user_guide/tutorials/)   |
 | Tuning / diagnostics | [user_guide/cli.md](user_guide/cli.md) |
 | Plugins           | [PLUGINS.md](PLUGINS.md)                         |
 | Build from source | [BUILD.md](BUILD.md)                             |
@@ -36,12 +35,10 @@ Site landing: [index.md](index.md) • Project README: [../README.md](../README.
 | Design docs         | [design/](design/)                             |
 | ADRs                | [adrs/](adrs/)                                 |
 | RFCs                | [rfcs/](rfcs/)                                 |
-| Testing             | [testing/](testing/)                           |
-| CI                  | [ci/local-act.md](ci/local-act.md)             |
 
 ## External
 
-- SourceHut: https://sr.ht/~trvon/yams/
-- GitHub: https://github.com/trvon/yams
-- Releases: https://github.com/trvon/yams/releases
-- Issues: https://github.com/trvon/yams/issues
+- SourceHut: <https://sr.ht/~trvon/yams/>
+- GitHub: <https://github.com/trvon/yams>
+- Releases: <https://github.com/trvon/yams/releases>
+- Issues: <https://github.com/trvon/yams/issues>

@@ -1608,6 +1608,16 @@ if catch2_dep.found()
     install: false,
   )
 
+  # KG Write Buffer Tests (Catch2) - in-memory edge/entity coalescing
+  catch2_kg_write_buffer_exe = executable('catch2_kg_write_buffer',
+    files('unit/metadata/kg_write_buffer_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Database Tests(Catch2) - database operations, connection pool, migrations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2261,6 +2271,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'metadata', 'kg'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('kg_write_buffer', catch2_kg_write_buffer_exe,
+    suite: ['catch2', 'unit', 'metadata', 'kg'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('database', catch2_database_exe,

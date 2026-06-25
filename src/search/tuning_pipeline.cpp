@@ -12,6 +12,11 @@ bool isCodeProfileState(TuningState state) {
     return state == TuningState::SMALL_CODE || state == TuningState::LARGE_CODE;
 }
 
+// Forward declaration: defined after the intent layer.
+void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
+                              TunedParams& params, QueryPolicyResolution& /*resolution*/);
+void applyQueryComplexityLayer(std::string_view query, TunedParams& params);
+
 QueryRouteContext makeQueryRouteContext(std::optional<TuningState> state) {
     QueryRouteContext context;
     if (!state.has_value()) {
@@ -153,6 +158,18 @@ QueryPolicyResolution resolveQueryPolicy(std::string_view query,
         applyIntentLayer(resolution.routeDecision.intent.label, params);
     }
 
+    // Adaptive budget scaling: narrow queries (1-2 terms) get reduced
+    // vector/graph budget; complex queries (4+ terms) get expanded fusion.
+    if (baseConfig.enableAdaptiveBudgeting) {
+        applyAdaptiveBudgetLayer(query, baseConfig, params, resolution);
+    }
+
+    // Query complexity routing: skip expensive graph expansion for simple
+    // queries (single term, high IDF proxy via token count).
+    if (baseConfig.enableGraphQueryExpansion) {
+        applyQueryComplexityLayer(query, params);
+    }
+
     if (resolution.routeDecision.community.has_value()) {
         resolution.communityOverride =
             tuningOverrideForCommunity(resolution.routeDecision.community->label, baselineState);
@@ -291,7 +308,72 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 6: Community
+// Layer 6: Adaptive Budget (per-query component cap scaling)
+// ---------------------------------------------------------------------------
+
+void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
+                              TunedParams& params, QueryPolicyResolution& /*resolution*/) {
+    // Count whitespace-separated tokens as a proxy for query signal strength.
+    std::size_t tokenCount = 0;
+    bool inToken = false;
+    for (char c : query) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            inToken = false;
+        } else if (!inToken) {
+            inToken = true;
+            ++tokenCount;
+        }
+    }
+
+    if (tokenCount <= config.narrowQueryTokenThreshold) {
+        // Narrow query: reduce vector/graph budget (high signal, less fusion needed).
+        params.vectorMaxResults = static_cast<std::size_t>(
+            static_cast<float>(params.vectorMaxResults) * config.narrowQueryVectorReduction);
+        params.entityVectorMaxResults = static_cast<std::size_t>(
+            static_cast<float>(params.entityVectorMaxResults) * config.narrowQueryVectorReduction);
+    } else if (tokenCount >= config.complexQueryTokenThreshold) {
+        // Complex query: expand fusion/rerank budget.
+        params.fusionCandidateLimit = static_cast<std::size_t>(
+            static_cast<float>(params.fusionCandidateLimit) * config.complexQueryFusionExpansion);
+        params.rerankTopK = static_cast<std::size_t>(static_cast<float>(params.rerankTopK) *
+                                                     config.complexQueryFusionExpansion);
+    }
+
+    // Clamp to sane bounds.
+    params.vectorMaxResults = std::max(params.vectorMaxResults, std::size_t{4});
+    params.entityVectorMaxResults = std::max(params.entityVectorMaxResults, std::size_t{2});
+}
+
+// ---------------------------------------------------------------------------
+// Layer 6: Query Complexity
+// ---------------------------------------------------------------------------
+
+void applyQueryComplexityLayer(std::string_view query, TunedParams& params) {
+    // Count tokens as complexity proxy (same tokenizer as adaptive budget layer).
+    std::size_t tokenCount = 0;
+    bool inToken = false;
+    for (char c : query) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            inToken = false;
+        } else if (!inToken) {
+            inToken = true;
+            ++tokenCount;
+        }
+    }
+
+    if (tokenCount <= 1) {
+        // Simple single-term query: skip graph expansion (~10ms savings).
+        params.enableGraphQueryExpansion = false;
+        params.graphRerankTopN = 0;
+    } else if (tokenCount >= 5) {
+        // Complex multi-term query: expand graph budget.
+        params.graphMaxHops = 2;
+        params.graphMaxNeighbors = 32;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7: Community
 // ---------------------------------------------------------------------------
 
 void applyCommunityLayer(std::optional<TuningState> communityState, TuningState currentState,

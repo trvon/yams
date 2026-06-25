@@ -62,7 +62,6 @@ yams [OPTIONS] <command> [command-options]
 - `status` - Show quick system status and health overview
 - `stats` - Show detailed system statistics
 - `config` - Manage YAMS configuration settings
-- `auth` - Manage authentication keys and tokens
 
 ### Advanced Features
 
@@ -72,8 +71,6 @@ yams [OPTIONS] <command> [command-options]
 - `watch` - Enable session-based auto-ingest for a project
 - `download` - Download artifacts and store directly into YAMS
 - `repair` - Repair and maintain storage integrity
-- `migrate` - Migrate YAMS data and configuration
-- `dr` - Disaster recovery operations (plugin-gated)
 
 ### User Interface
 
@@ -81,8 +78,6 @@ yams [OPTIONS] <command> [command-options]
 - `completion` - Generate shell completion scripts (bash/zsh/fish/powershell)
 
 ### Utilities
-
-- `uninstall` - Remove YAMS from your system
 
 ---
 
@@ -1090,18 +1085,6 @@ yams config grammar download cpp      # Download C++ grammar
 
 ---
 
-## auth {#cmd-auth}
-
-Manage authentication material (keys, tokens, API keys). Availability and exact options depend on your build.
-
-Examples:
-
-```
-yams auth --help
-```
-
----
-
 ## stats {#cmd-stats}
 
 Show storage statistics and health.
@@ -1122,43 +1105,6 @@ Examples:
 yams stats
 yams stats -v
 yams stats --json
-```
-
----
-
-## uninstall {#cmd-uninstall}
-
-Remove YAMS data/config from the system.
-
-Synopsis:
-
-- yams uninstall [--force]
-
-Warning:
-
-- This is destructive. Make sure you have backups.
-
-Examples:
-
-```
-yams uninstall
-yams uninstall --force
-```
-
----
-
-## migrate {#cmd-migrate}
-
-Run metadata migrations if any are pending.
-
-Synopsis:
-
-- yams migrate
-
-Examples:
-
-```
-yams migrate
 ```
 
 ---

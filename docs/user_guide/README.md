@@ -44,7 +44,6 @@ yams doctor
 | CLI Reference | [cli.md](./cli.md) | All commands and options |
 | MCP Server | [mcp.md](./mcp.md) | Model Context Protocol integration |
 | Embeddings | [embeddings.md](./embeddings.md) | Vector search and model setup |
-| Tutorials | [tutorials](./tutorials/README.md) | Task-oriented guides |
 | Operations | [../admin/operations.md](../admin/operations.md) | Tuning, maintenance, configuration |
 
 ## Key Commands
@@ -167,4 +166,4 @@ yams repair --embeddings # Generate missing embeddings
 - **Docs:** [yamsmemory.ai](https://yamsmemory.ai)
 - **GitHub:** [github.com/trvon/yams](https://github.com/trvon/yams)
 - **Discord:** [discord.gg/rTBmRHdTEc](https://discord.gg/rTBmRHdTEc)
-docs/index.md 
+docs/index.md

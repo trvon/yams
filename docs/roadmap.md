@@ -18,6 +18,7 @@
 ## Current Release: v0.16.x
 
 ### Storage Engine
+
 - Content-addressed blobs (SHA-256), Rabin chunking, zstd/LZMA compression
 - WAL-backed SQLite metadata with FTS5 full-text index
 - Path tree indexing with `path_prefix`, `reverse_path`, `path_hash` indexes
@@ -27,6 +28,7 @@
 - Storage health checks, integrity/corruption detection, WAL flush on shutdown, and DB salvaging
 
 ### Search
+
 - **Hybrid search engine**: FTS5 keyword + vector similarity + Knowledge Graph fusion
   - Reciprocal Rank Fusion (RRF) with BM25 variant as default fusion strategy
   - WEIGHTED_MAX fusion strategy for benchmark corpora
@@ -45,6 +47,7 @@
 - **Fuzzy search**: BK-tree index with intelligent document prioritization
 
 ### Grep
+
 - **Literal extraction**: fast literal pre-filter from regex patterns with speed optimizations
 - **Boyer-Moore-Horspool**: optimized string search for patterns ≥3 characters
 - **SIMD newline scanning**: AVX2/SSE2/NEON with scalar fallback (4-8x speedup)
@@ -52,6 +55,7 @@
 - **FTS-first optimization**: uses FTS5 index for literal patterns before full scan
 
 ### CLI & MCP
+
 - CLI-first design; MCP server via stdio only (no HTTP/WebSocket in OSS)
 - MCP code mode (composite tools: query, execute, session)
 - `yams graph --explore`: agent-oriented graph context (ranked symbols, relationships, source snippets)
@@ -66,6 +70,7 @@
 - Autocomplete improvements with optimized corpus shell completion latency
 
 ### Daemon Architecture
+
 - **WorkCoordinator**: centralized thread pool with Boost.Asio strands
   - Hardware-aware sizing (8-32 threads based on CPU cores)
 - **Gradient2 adaptive concurrency limiters** (Netflix-style)
@@ -79,6 +84,7 @@
 - **Multi-client stability**: tested up to 16 concurrent clients
 
 ### Plugin System (ABI-stable C interface)
+
 - **ONNX Runtime provider**: all-MiniLM-L6-v2 (default), multi-qa-MiniLM-L6-cos-v1, nomic-embed-text-v1.5
   - Dynamic tensor padding (~70-85x throughput for short inputs)
   - Session reuse with 25x warm-cycle latency reduction
@@ -92,6 +98,7 @@
 ---
 
 ### Packaging & Distribution
+
 - **Build**: Meson + Conan 2.x; Release/Debug/Profiling configurations
 - **Linux**: deb (APT repo at repo.yamsmemory.ai), rpm (YUM repo), Docker (amd64/arm64)
 - **macOS**: Homebrew tap (`trvon/yams/yams`), pkg, zip (Apple Silicon + Intel)
@@ -103,28 +110,33 @@
 ## Planned
 
 ### Mobile App
+
 - [ ] Flutter-based mobile app with local corpus access
 - [ ] Memory picker and context injection UX
 - [ ] Conversation artifact write-back to YAMS
 - [ ] Local LLM hosting (Gemma) for on-device inference
 
 ### P2P Corpus Sync
+
 - [ ] Peer-to-peer corpus synchronization protocol ([draft design](design/sync-protocol.md))
 - [ ] Cross-device corpus replication
 - [ ] Conflict resolution for concurrent edits
 - [ ] Selective sync (collection/tag-based filtering)
 
 ### Mobile Bindings
+
 - [ ] Finalize C ABI contract for corpus access (`libyams_mobile`)
 - [ ] Backend parity: embedded and daemon behavior fully aligned
 - [ ] Ship `.xcframework` (iOS) and `.aar` (Android) packages
 - [ ] Flutter plugin consuming native corpus library
 
 ### Search & Retrieval
+
 - [ ] Vector search tuning recommendations (documentation)
 - [ ] Custom embedding model support
 
 ### Stability & Operations
+
 - [ ] Thread safety hardening (TSan enabled in CI)
 - [ ] Export/import snapshots preserving tags and edges
 - [x] Space reclamation and integrity verification CLI
@@ -132,9 +144,13 @@
 - [ ] Structured logging with trace correlation
 
 ### Documentation
-- [ ] P2P sync protocol specification
+
+- [x] P2P sync protocol specification
+  - Design doc: [design/sync-protocol.md](../design/sync-protocol.md)
+  - Note: the sync protocol implementation (P2P corpus replication, conflict resolution, selective sync) remains under the "P2P Corpus Sync" feature section above and is not yet built.
 
 ### Platform Expansion
+
 - [ ] Cross-repository search federation
 
 ---
