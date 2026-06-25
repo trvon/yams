@@ -9,6 +9,7 @@
 #include <yams/core/task.h>
 #include <yams/core/types.h>
 #include <yams/downloader/downloader.hpp>
+#include <yams/metadata/kg_write_buffer.h>
 #include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/query_concept_extractor.h>
@@ -110,7 +111,11 @@ struct AppContext {
     std::shared_ptr<search::SearchEngine> searchEngine;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore; // PBI-043: tree diff KG integration
-    std::shared_ptr<IGraphQueryService> graphQueryService;  // PBI-009: centralized graph queries
+    // In-memory write buffer for KG edges/entities during ingest.
+    // Accumulates per-document edge inserts and flushes in batch,
+    // avoiding one-at-a-time addEdgesUnique overhead.
+    std::shared_ptr<metadata::KGWriteBuffer> kgWriteBuffer;
+    std::shared_ptr<IGraphQueryService> graphQueryService; // PBI-009: centralized graph queries
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 

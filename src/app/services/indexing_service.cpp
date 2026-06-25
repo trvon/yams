@@ -359,6 +359,12 @@ public:
                                      response.snapshotId);
                         // PBI-043: Populate KG with path/blob nodes and relationships
                         if (ctx_.kgStore && !response.results.empty()) {
+                            // Initialize KG write buffer on first use.
+                            if (!ctx_.kgWriteBuffer && ctx_.kgStore) {
+                                ctx_.kgWriteBuffer =
+                                    std::make_shared<metadata::KGWriteBuffer>(*ctx_.kgStore);
+                            }
+
                             try {
                                 std::size_t kgNodesCreated = 0;
                                 std::size_t kgEdgesCreated = 0;
@@ -415,15 +421,28 @@ public:
                                         hasBlob.dstNodeId = blobNodeResult.value();
                                         hasBlob.relation = "has_blob";
                                         hasBlob.weight = 1.0f;
-                                        auto hasBlobResult =
-                                            ctx_.kgStore->addEdgesUnique({hasBlob});
-                                        if (!hasBlobResult) {
-                                            spdlog::debug("[IndexingService] KG has_blob edge "
-                                                          "failed for {}: {}",
-                                                          result.hash.substr(0, 8),
-                                                          hasBlobResult.error().message);
+                                        if (ctx_.kgWriteBuffer) {
+                                            auto r =
+                                                ctx_.kgWriteBuffer->addEdge(std::move(hasBlob));
+                                            if (!r) {
+                                                spdlog::debug("[IndexingService] KG buffer "
+                                                              "addEdge failed for {}: {}",
+                                                              result.hash.substr(0, 8),
+                                                              r.error().message);
+                                            } else {
+                                                kgEdgesCreated++;
+                                            }
                                         } else {
-                                            kgEdgesCreated++;
+                                            auto hasBlobResult =
+                                                ctx_.kgStore->addEdgesUnique({hasBlob});
+                                            if (!hasBlobResult) {
+                                                spdlog::debug("[IndexingService] KG has_blob edge "
+                                                              "failed for {}: {}",
+                                                              result.hash.substr(0, 8),
+                                                              hasBlobResult.error().message);
+                                            } else {
+                                                kgEdgesCreated++;
+                                            }
                                         }
                                     }
 
@@ -439,6 +458,15 @@ public:
                                     } else {
                                         kgEdgesCreated++;
                                     }
+                                }
+
+                                if (ctx_.kgWriteBuffer) {
+                                    auto flushResult = ctx_.kgWriteBuffer->flush();
+                                    if (!flushResult) {
+                                        spdlog::warn("[IndexingService] KG buffer flush failed: {}",
+                                                     flushResult.error().message);
+                                    }
+                                    kgEdgesCreated = ctx_.kgWriteBuffer->totalEdgesFlushed();
                                 }
 
                                 if (kgNodesCreated > 0 || kgEdgesCreated > 0) {
