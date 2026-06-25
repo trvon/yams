@@ -18,12 +18,16 @@ namespace yamsfmt = fmt;
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <limits>
 #include <optional>
 #include <random>
 #include <source_location>
 #include <thread>
+#include <unistd.h>
 
 namespace yams::storage {
 
@@ -286,6 +290,37 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         }
     }
 
+    // fsync temp file before rename: guarantees written data is durable
+    // before the atomic rename commits. Without this, a crash between rename
+    // and OS writeback loses data. SquirrelFS (2024) validates that
+    // write→fsync→rename is crash-consistent on modern filesystems.
+    if (pImpl->config.fsyncBeforeRename) {
+        int fd = ::open(tempPath.c_str(), O_RDONLY);
+        if (fd < 0) {
+            spdlog::warn("Failed to open temp file for fsync: {} ({})", tempPath.string(),
+                         strerror(errno));
+            std::filesystem::remove(tempPath);
+            return Result<void>(ErrorCode::PermissionDenied);
+        }
+#if __APPLE__
+        // F_FULLFSYNC is required on macOS for durable writes —
+        // fsync() alone only flushes to the drive cache, not to
+        // physical media. See Apple TN2250 and man fcntl.
+        if (::fcntl(fd, F_FULLFSYNC) != 0) {
+            spdlog::warn("F_FULLFSYNC failed on {}: {}", tempPath.string(), strerror(errno));
+            // Fall through to fsync as best-effort.
+        }
+#else
+        if (::fsync(fd) != 0) {
+            spdlog::warn("fsync failed on {}: {}", tempPath.string(), strerror(errno));
+            ::close(fd);
+            std::filesystem::remove(tempPath);
+            return Result<void>(ErrorCode::IOError);
+        }
+#endif
+        ::close(fd);
+    }
+
     // Temp file must exist and contain data before rename.
     YAMS_DCHECK(std::filesystem::exists(tempPath), "Temp file must exist after successful write");
 
@@ -369,6 +404,36 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
     return result;
 }
 
+std::vector<Result<void>> StorageEngine::storeBatch(
+    const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) {
+    if (items.empty())
+        return {};
+
+    // Launch parallel writes via storeAsync, respecting the concurrency cap.
+    // The mutex pool already serializes writes to the same hash. Different
+    // hashes are safe to write concurrently.
+    const std::size_t maxConcurrent = std::max<std::size_t>(1, pImpl->config.maxConcurrentWriters);
+    std::vector<Result<void>> results(items.size());
+    std::vector<std::future<Result<void>>> futures;
+    futures.reserve(items.size());
+
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        futures.push_back(storeAsync(items[i].first, std::span<const std::byte>(items[i].second)));
+        // Throttle: wait for oldest futures when at capacity.
+        if (futures.size() >= maxConcurrent) {
+            const auto oldest = i + 1 - futures.size();
+            results[oldest] = futures.front().get();
+            futures.erase(futures.begin());
+        }
+    }
+    // Drain remaining futures.
+    for (std::size_t i = items.size() - futures.size(); i < items.size(); ++i) {
+        results[i] = futures.front().get();
+        futures.erase(futures.begin());
+    }
+    return results;
+}
+
 Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view hash) const {
     // Allow manifest keys (hash.manifest) and regular hashes. Both forms must be hex-only
     // to keep sharded paths below the storage root.
@@ -436,7 +501,18 @@ Result<std::vector<std::byte>> StorageEngine::retrieve(std::string_view hash) co
     if (!rawResult) {
         return rawResult.error();
     }
-    return std::move(rawResult.value().data);
+    auto& data = rawResult.value().data;
+
+    // Optional content-integrity verification: recompute hash and compare.
+    if (pImpl->config.verifyReads) {
+        auto computed = crypto::SHA256Hasher::hash(data);
+        if (computed != hash) {
+            spdlog::error("Retrieve hash mismatch for {}: computed={}", hash, computed);
+            return Result<std::vector<std::byte>>(ErrorCode::HashMismatch);
+        }
+    }
+
+    return std::move(data);
 }
 
 Result<bool> StorageEngine::exists(std::string_view hash) const noexcept {

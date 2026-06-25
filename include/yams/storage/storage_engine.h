@@ -32,6 +32,15 @@ struct StorageConfig {
     bool enableCompression = false;
     size_t maxConcurrentReaders = 1000;
     size_t maxConcurrentWriters = 100;
+    /// When true (default), fsync the temp file before atomic rename() in
+    /// store(). Guarantees written data survives a crash. Disable only when
+    /// the caller accepts best-effort durability (e.g., test fixtures).
+    /// On macOS this uses F_FULLFSYNC via fcntl (see Apple TN2250).
+    bool fsyncBeforeRename = true;
+    /// When true, verify SHA-256(content) matches the requested hash key on
+    /// every retrieve() call. Catches bit-rot in long-lived archives.
+    /// Default false — most callers trust the filesystem.
+    bool verifyReads = false;
 };
 
 // Storage operation statistics
@@ -54,10 +63,18 @@ struct StorageStats {
     // Default constructor
     StorageStats() = default;
 
-    // Calculate deduplication ratio
-    double getDeduplicationRatio() const noexcept {
+    /// Compute storage density: objects per byte stored. Lower values
+    /// indicate larger objects on average. For content-addressed storage
+    /// this is a density metric, not a traditional dedup ratio.
+    [[nodiscard]] double getStorageDensity() const noexcept {
         auto total = totalBytes.load();
-        return total > 0 ? 1.0 - (static_cast<double>(totalObjects) / total) : 0.0;
+        return total > 0 ? static_cast<double>(totalObjects) / static_cast<double>(total) : 0.0;
+    }
+
+    /// Deprecated: use getStorageDensity() instead.
+    [[deprecated("Use getStorageDensity() instead")]]
+    double getDeduplicationRatio() const noexcept {
+        return getStorageDensity();
     }
 };
 
@@ -125,18 +142,9 @@ public:
     std::future<Result<std::vector<std::byte>>> retrieveAsync(std::string_view hash) const override;
     std::future<Result<RawObject>> retrieveRawAsync(std::string_view hash) const override;
 
-    // Batch operations implementation
+    // Batch operations implementation — parallelized via storeAsync
     std::vector<Result<void>>
-    storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
-        std::vector<Result<void>> results;
-        results.reserve(items.size());
-
-        for (const auto& [hash, data] : items) {
-            results.push_back(store(hash, data));
-        }
-
-        return results;
-    }
+    storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override;
     // Expose base storage path (useful for wrappers to log the true root)
     std::filesystem::path getBasePath() const;
 
