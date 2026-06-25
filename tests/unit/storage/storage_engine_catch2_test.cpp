@@ -1,6 +1,7 @@
 // Catch2 tests for storage engine
 // Migrated from GTest: storage_engine_test.cpp
 
+#include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -1019,4 +1020,514 @@ TEST_CASE("validateStorageIntegrity returns false for non-existent base path",
     auto result = yams::storage::validateStorageIntegrity(basePath);
     REQUIRE(result.has_value());
     CHECK_FALSE(result.value());
+}
+
+// ---------------------------------------------------------------------------
+// New storage features: verifyReads, fsyncBeforeRename, getStorageDensity
+// ---------------------------------------------------------------------------
+
+TEST_CASE("StorageEngine verifyReads detects corrupted data",
+          "[storage][engine][integrity][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_verify_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .verifyReads = true};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(1024);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    REQUIRE(storage->store(hash, data));
+
+    // Corrupt the stored file on disk.
+    auto objPath = testDir / "objects" / hash.substr(0, 2) / hash.substr(2);
+    REQUIRE(std::filesystem::exists(objPath));
+    {
+        std::ofstream f(objPath, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(f.is_open());
+        f.seekp(10);
+        f.put('\x00');
+        f.close();
+    }
+
+    auto result = storage->retrieve(hash);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::HashMismatch);
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine verifyReads disabled does not check",
+          "[storage][engine][integrity][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_noverify_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .verifyReads = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(1024);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    REQUIRE(storage->store(hash, data));
+
+    auto objPath = testDir / "objects" / hash.substr(0, 2) / hash.substr(2);
+    {
+        std::ofstream f(objPath, std::ios::binary | std::ios::in | std::ios::out);
+        f.seekp(10);
+        f.put('\x00');
+        f.close();
+    }
+
+    auto result = storage->retrieve(hash);
+    CHECK(result.has_value()); // No check → returns corrupted data silently
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine fsyncBeforeRename=false writes correctly",
+          "[storage][engine][durability][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_nofsync_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .fsyncBeforeRename = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(2048);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    REQUIRE(storage->store(hash, data));
+    auto retrieved = storage->retrieve(hash);
+    REQUIRE(retrieved.has_value());
+    CHECK(retrieved.value().size() == data.size());
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine getStorageDensity reflects stored objects",
+          "[storage][engine][stats][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_density_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{.basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    for (int i = 0; i < 5; ++i) {
+        auto data = generateRandomBytes(512);
+        auto hasher = crypto::createSHA256Hasher();
+        auto hash = hasher->hash(data);
+        REQUIRE(storage->store(hash, data));
+    }
+
+    auto stats = storage->getStats();
+    auto density = stats.getStorageDensity();
+    // 5 objects, 5*512 = 2560 bytes → density ≈ 5/2560 ≈ 0.00195
+    CHECK(density > 0.0);
+    CHECK(density < 1.0);
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine getDeduplicationRatio is deprecated alias",
+          "[storage][engine][stats][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_deprecated_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{.basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(100);
+    auto hasher = crypto::createSHA256Hasher();
+    auto hash = hasher->hash(data);
+    REQUIRE(storage->store(hash, data));
+
+    auto stats = storage->getStats();
+    // Deprecated alias should return same value as getStorageDensity.
+    CHECK(stats.getDeduplicationRatio() == stats.getStorageDensity());
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: storeBatch serial vs parallel
+// ---------------------------------------------------------------------------
+
+TEST_CASE("StorageEngine storeBatch parallel speedup",
+          "[storage][engine][batch][benchmark][catch2]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_batch_bench_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    constexpr std::size_t kItemCount = 128;
+    constexpr std::size_t kItemSize = 1024;
+    std::vector<std::pair<std::string, std::vector<std::byte>>> items;
+    items.reserve(kItemCount);
+    auto hasher = crypto::createSHA256Hasher();
+    for (std::size_t i = 0; i < kItemCount; ++i) {
+        auto data = generateRandomBytes(kItemSize);
+        auto hash = hasher->hash(data);
+        items.emplace_back(std::move(hash), std::move(data));
+    }
+
+    BENCHMARK("storeBatch serial (maxConcurrentWriters=1)") {
+        StorageConfig config{.basePath = testDir / "serial",
+                             .shardDepth = 2,
+                             .mutexPoolSize = 64,
+                             .maxConcurrentWriters = 1};
+        auto storage = std::make_unique<StorageEngine>(std::move(config));
+        return storage->storeBatch(items);
+    };
+
+    BENCHMARK("storeBatch parallel (maxConcurrentWriters=16)") {
+        StorageConfig config{.basePath = testDir / "parallel",
+                             .shardDepth = 2,
+                             .mutexPoolSize = 64,
+                             .maxConcurrentWriters = 16};
+        auto storage = std::make_unique<StorageEngine>(std::move(config));
+        return storage->storeBatch(items);
+    };
+
+    // Verify all data is retrievable from both runs.
+    for (const auto& [hash, data] : items) {
+        for (const auto& sub : {"serial", "parallel"}) {
+            StorageConfig config{.basePath = testDir / sub, .shardDepth = 2, .mutexPoolSize = 64};
+            auto storage = std::make_unique<StorageEngine>(std::move(config));
+            auto retrieved = storage->retrieve(hash);
+            CHECK(retrieved.has_value());
+            CHECK(retrieved.value() == data);
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// Crash-simulation and error-injection tests (YAMS_TESTING hooks)
+// ---------------------------------------------------------------------------
+
+#ifdef YAMS_TESTING
+
+TEST_CASE("StorageEngine partial write failure cleans up temp file",
+          "[storage][engine][durability][testing][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_partial_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .fsyncBeforeRename = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(4096);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    // Inject: fail after writing 1000 bytes
+    StorageEngine::testing_setAtomicWriteFailureAfterBytes(1000);
+    auto result = storage->store(hash, data);
+    StorageEngine::testing_clearAtomicWriteFailure();
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::WriteError);
+
+    // Verify no orphaned temp file or partial object on disk
+    auto objPath = testDir / "objects" / hash.substr(0, 2) / hash.substr(2);
+    CHECK_FALSE(std::filesystem::exists(objPath));
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine rename failure on existing file is idempotent",
+          "[storage][engine][durability][testing][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_rename_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .fsyncBeforeRename = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(2048);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    // First write succeeds normally
+    REQUIRE(storage->store(hash, data));
+    REQUIRE(storage->exists(hash).value());
+
+    // Inject rename failure — store() should detect existing file and
+    // return success (CAS idempotent).
+    StorageEngine::testing_setRenameFailure(true);
+    auto result = storage->store(hash, data);
+    StorageEngine::testing_setRenameFailure(false);
+
+    CHECK(result.has_value());
+    CHECK(storage->exists(hash).value());
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine file open failure returns PermissionDenied",
+          "[storage][engine][error][testing][catch2]") {
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_perm_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .fsyncBeforeRename = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    auto data = generateRandomBytes(512);
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(data);
+
+    StorageEngine::testing_setFileOpenFailure(true);
+    auto result = storage->store(hash, data);
+    StorageEngine::testing_setFileOpenFailure(false);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::PermissionDenied);
+
+    // Verify no orphaned temp file
+    auto objPath = testDir / "objects" / hash.substr(0, 2) / hash.substr(2);
+    CHECK_FALSE(std::filesystem::exists(objPath));
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+TEST_CASE("StorageEngine sustained concurrent load 50 writers 30s",
+          "[storage][engine][stress][concurrent][catch2]") {
+    constexpr int kNumWriters = 50;
+    constexpr int kNumReaders = 10;
+    constexpr int kRunSeconds = 30;
+
+    auto testDir =
+        std::filesystem::temp_directory_path() /
+        std::format("yams_stress_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{.basePath = testDir,
+                         .shardDepth = 2,
+                         .mutexPoolSize = 1024,
+                         .fsyncBeforeRename = false,
+                         .maxConcurrentWriters = 200};
+    auto storage = std::make_shared<StorageEngine>(std::move(config));
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> writeOps{0};
+    std::atomic<uint64_t> readOps{0};
+    std::atomic<uint64_t> writeErrors{0};
+    std::atomic<uint64_t> readErrors{0};
+
+    // Shared key pool: writers push, readers pop.
+    std::mutex keyMutex;
+    std::vector<std::pair<std::string, std::vector<std::byte>>> keyPool;
+    keyPool.reserve(100000);
+
+    auto writerFn = [&](int id) {
+        auto hasher = crypto::createSHA256Hasher();
+        std::mt19937 rng(static_cast<unsigned>(id + 42));
+        std::uniform_int_distribution<size_t> sizeDist(512, 65536);
+
+        while (!stop.load(std::memory_order_relaxed)) {
+            auto data = generateRandomBytes(sizeDist(rng));
+            auto hash = hasher->hash(data);
+            auto result = storage->store(hash, data);
+            if (result.has_value()) {
+                writeOps.fetch_add(1, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lock(keyMutex);
+                keyPool.emplace_back(std::move(hash), std::move(data));
+            } else {
+                writeErrors.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    auto readerFn = [&](int id) {
+        std::mt19937 rng(static_cast<unsigned>(id + 999));
+
+        while (!stop.load(std::memory_order_relaxed)) {
+            std::string hash;
+            std::vector<std::byte> expected;
+            {
+                std::lock_guard<std::mutex> lock(keyMutex);
+                if (keyPool.empty()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                std::uniform_int_distribution<size_t> dist(0, keyPool.size() - 1);
+                size_t idx = dist(rng);
+                hash = keyPool[idx].first;
+                expected = keyPool[idx].second;
+            }
+            auto result = storage->retrieve(hash);
+            if (result.has_value()) {
+                readOps.fetch_add(1, std::memory_order_relaxed);
+                if (result.value() != expected) {
+                    readErrors.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else {
+                readErrors.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    // Launch workers.
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kNumWriters; ++i) {
+        threads.emplace_back(writerFn, i);
+    }
+    for (int i = 0; i < kNumReaders; ++i) {
+        threads.emplace_back(readerFn, i);
+    }
+
+    // Run for kRunSeconds.
+    std::this_thread::sleep_for(std::chrono::seconds(kRunSeconds));
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    auto writes = writeOps.load();
+    auto reads = readOps.load();
+    auto wErrs = writeErrors.load();
+    auto rErrs = readErrors.load();
+
+    INFO("Writers: " << writes << " ops (" << (writes / kRunSeconds) << " ops/s), " << wErrs
+                     << " errors");
+    INFO("Readers: " << reads << " ops (" << (reads / kRunSeconds) << " ops/s), " << rErrs
+                     << " errors");
+
+    // Sanity: at least some writes succeeded.
+    CHECK(writes > 0);
+    // No data corruption on reads.
+    CHECK(rErrs == 0);
+
+    // Final verification: sample 500 random keys for retrievability.
+    std::lock_guard<std::mutex> lock(keyMutex);
+    if (keyPool.size() > 500) {
+        std::mt19937 rng(42);
+        std::uniform_int_distribution<size_t> dist(0, keyPool.size() - 1);
+        for (int i = 0; i < 500; ++i) {
+            size_t idx = dist(rng);
+            auto result = storage->retrieve(keyPool[idx].first);
+            CHECK(result.has_value());
+            if (result.has_value()) {
+                CHECK(result.value() == keyPool[idx].second);
+            }
+        }
+    } else {
+        for (const auto& [hash, data] : keyPool) {
+            auto result = storage->retrieve(hash);
+            CHECK(result.has_value());
+            if (result.has_value()) {
+                CHECK(result.value() == data);
+            }
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+}
+
+#endif // YAMS_TESTING
+
+// ---------------------------------------------------------------------------
+// Cold-cache benchmark (best-effort, may skip without root)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("StorageEngine cold vs warm cache retrieval",
+          "[storage][engine][cache][benchmark][!benchmark]") {
+    auto testDir = std::filesystem::temp_directory_path() /
+                   std::format("yams_cold_cache_{}",
+                               std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(testDir);
+
+    StorageConfig config{
+        .basePath = testDir, .shardDepth = 2, .mutexPoolSize = 64, .fsyncBeforeRename = false};
+    auto storage = std::make_unique<StorageEngine>(std::move(config));
+
+    // Write 100 files (64KB each = 6.4MB).
+    constexpr int kFiles = 100;
+    constexpr size_t kSize = 65536;
+    std::vector<std::pair<std::string, std::vector<std::byte>>> items;
+    items.reserve(kFiles);
+    auto hasher = crypto::createSHA256Hasher();
+    for (int i = 0; i < kFiles; ++i) {
+        auto data = generateRandomBytes(kSize);
+        auto hash = hasher->hash(data);
+        REQUIRE(storage->store(hash, data));
+        items.emplace_back(std::move(hash), std::move(data));
+    }
+
+    // Warm up: read all files once.
+    for (const auto& [hash, _] : items) {
+        REQUIRE(storage->retrieve(hash).has_value());
+    }
+
+    // Attempt to evict page cache.
+    bool cacheEvicted = false;
+#if __APPLE__
+    // Try sudo purge first, fall back to memory pressure.
+    if (std::system("sudo purge 2>/dev/null") == 0) {
+        cacheEvicted = true;
+    } else {
+        // Memory pressure: allocate ~70% of available RAM.
+        try {
+            auto big = std::make_unique_for_overwrite<char[]>(
+                static_cast<size_t>(1.5 * 1024 * 1024 * 1024)); // 1.5GB
+            std::memset(big.get(), 0xFF, static_cast<size_t>(1.5 * 1024 * 1024 * 1024));
+            cacheEvicted = true;
+        } catch (const std::exception& e) {
+            WARN("Memory pressure allocation failed: " << e.what());
+        } catch (...) {
+            WARN("Memory pressure allocation failed (unknown error)");
+        }
+    }
+#else
+    if (std::system("echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1") == 0) {
+        cacheEvicted = true;
+    }
+#endif
+
+    INFO("Cache eviction: " << (cacheEvicted ? "succeeded" : "skipped"));
+
+    // Benchmark: retrieve all files (warm or cold depending on eviction).
+    BENCHMARK("retrieve 64KB files") {
+        for (const auto& [hash, _] : items) {
+            auto r = storage->retrieve(hash);
+            CHECK(r.has_value());
+        }
+    };
+
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
 }

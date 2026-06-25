@@ -12,10 +12,14 @@ bool isCodeProfileState(TuningState state) {
     return state == TuningState::SMALL_CODE || state == TuningState::LARGE_CODE;
 }
 
-// Forward declaration: defined after the intent layer.
-void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
-                              TunedParams& params, QueryPolicyResolution& /*resolution*/);
-void applyQueryComplexityLayer(std::string_view query, TunedParams& params);
+} // namespace
+
+// File-static forward declarations (defined after the intent layer).
+static void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
+                                     TunedParams& params, QueryPolicyResolution& /*resolution*/);
+static void applyQueryComplexityLayer(std::string_view query, TunedParams& params);
+
+namespace {
 
 QueryRouteContext makeQueryRouteContext(std::optional<TuningState> state) {
     QueryRouteContext context;
@@ -311,8 +315,8 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
 // Layer 6: Adaptive Budget (per-query component cap scaling)
 // ---------------------------------------------------------------------------
 
-void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
-                              TunedParams& params, QueryPolicyResolution& /*resolution*/) {
+static void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
+                                     TunedParams& params, QueryPolicyResolution& /*resolution*/) {
     // Count whitespace-separated tokens as a proxy for query signal strength.
     std::size_t tokenCount = 0;
     bool inToken = false;
@@ -348,7 +352,7 @@ void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& 
 // Layer 6: Query Complexity
 // ---------------------------------------------------------------------------
 
-void applyQueryComplexityLayer(std::string_view query, TunedParams& params) {
+static void applyQueryComplexityLayer(std::string_view query, TunedParams& params) {
     // Count tokens as complexity proxy (same tokenizer as adaptive budget layer).
     std::size_t tokenCount = 0;
     bool inToken = false;
