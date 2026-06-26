@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
@@ -234,6 +235,14 @@ public:
                      .isRunning = isRunning()};
     }
 
+    /// Cancellation slot for detached coroutines. Callers that co_spawn
+    /// with detached should bind this slot so io_context::stop() can
+    /// cancel their pending async operations.
+    /// NOTE: boost::asio::cancellation_signal::slot() is not const.
+    [[nodiscard]] boost::asio::cancellation_slot cancellationSlot() noexcept {
+        return cancelSignal_.slot();
+    }
+
 private:
     /// Shared io_context for all async operations
     std::shared_ptr<boost::asio::io_context> ioContext_;
@@ -282,6 +291,11 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> highPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> backgroundPriorityStrand_;
+
+    /// Cancellation signal emitted in stop() to cancel detached coroutines.
+    /// Pollers should bind this via bind_cancellation_slot to receive
+    /// the cancellation when the coordinator shuts down.
+    boost::asio::cancellation_signal cancelSignal_;
 };
 
 } // namespace yams::daemon

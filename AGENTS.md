@@ -72,6 +72,11 @@ contract in the prompt; the graph here is rich: function-level nodes with
 - Compile: `meson compile -C build/debug -j4 <target>` — never run parallel
   meson compiles (build-dir lock contention).
 - Run: `build/debug/tests/<target>` or `meson test -C build/debug <name>`.
+- CI no longer runs coverage; use the tracked local pre-push hook instead.
+  Enable it with `git config core.hooksPath .githooks`. The hook dispatches
+  `scripts/run-local-coverage.sh`, builds `build/coverage`, runs unit +
+  integration suites, and prints a `gcovr` text summary for pushed C/C++ /
+  Meson changes. Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
 - `-DYAMS_TESTING=1` gates `testing_*` helpers in production headers.
 - RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard`); reset
   atomics/overrides between cases.

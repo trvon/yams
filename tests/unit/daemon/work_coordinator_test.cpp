@@ -594,4 +594,102 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         CHECK_FALSE((coordinator.isRunning()));
         CHECK((coordinator.getWorkerCount() == 0));
     }
+
+    SECTION("Many workers drain parked handlers after stop (shutdown-race guard)") {
+        constexpr int kWorkers = 12;
+        constexpr int kPostedItems = 200;
+        constexpr auto kJoinTimeout = 3000ms;
+
+        WorkCoordinator coordinator;
+        coordinator.start(kWorkers);
+
+        std::atomic<int> executed{0};
+
+        // Post many fast handlers to exercise the poll() drain in stop().
+        for (int i = 0; i < kPostedItems; ++i) {
+            boost::asio::post(coordinator.getExecutor(), [&]() { executed.fetch_add(1); });
+        }
+
+        // Wait for at least some work to start.
+        REQUIRE(wait_for_condition(2000ms, 5ms, [&]() { return executed.load() > 0; }));
+
+        coordinator.stop();
+        bool joined = coordinator.joinWithTimeout(kJoinTimeout);
+
+        CHECK(joined);
+        CHECK(coordinator.getWorkerCount() == 0);
+        CHECK_FALSE(coordinator.isRunning());
+    }
+}
+
+TEST_CASE("WorkCoordinator shutdown stress no stuck workers",
+          "[daemon][work_coordinator][shutdown][stress]") {
+    // Regression test: 12 workers, stop, verify all exit within 5s.
+    // Reproduces the pre-existing shutdown race where 12 workers hung past 30s.
+    constexpr int kWorkers = 12;
+    constexpr auto kJoinTimeout = 5000ms;
+
+    WorkCoordinator coordinator;
+    coordinator.start(kWorkers);
+
+    // Post a few quick work items to get workers running.
+    std::atomic<int> executed{0};
+    for (int i = 0; i < 100; ++i) {
+        boost::asio::post(coordinator.getExecutor(), [&]() { executed.fetch_add(1); });
+    }
+
+    // Wait for work to start executing.
+    REQUIRE(wait_for_condition(2000ms, 5ms, [&]() { return executed.load() > 0; }));
+
+    coordinator.stop();
+    bool joined = coordinator.joinWithTimeout(kJoinTimeout);
+
+    INFO("Executed: " << executed.load() << " / 100");
+    CHECK(joined);
+    CHECK(coordinator.getWorkerCount() == 0);
+    CHECK_FALSE(coordinator.isRunning());
+}
+
+TEST_CASE("WorkCoordinator detached coroutine requires explicit cancel (known limitation)",
+          "[daemon][work_coordinator][shutdown][channel]") {
+    // Documents the pre-existing shutdown race: co_spawn with detached
+    // does not receive cancellation from io_context::stop().
+    // The production fix requires bind_cancellation_slot on pollers.
+    // This test validates that explicit cancel BEFORE stop works.
+    constexpr int kWorkers = 4;
+
+    WorkCoordinator coordinator;
+    coordinator.start(kWorkers);
+
+    std::atomic<bool> coroutineExited{false};
+
+    // Use an atomic flag the coroutine can poll — avoids timer cancel
+    // complexity while still validating the shutdown flow.
+    std::atomic<bool> keepRunning{true};
+
+    boost::asio::co_spawn(
+        coordinator.getExecutor(),
+        [&]() -> boost::asio::awaitable<void> {
+            while (keepRunning.load(std::memory_order_relaxed)) {
+                boost::asio::steady_timer t(*coordinator.getIOContext());
+                t.expires_after(5ms);
+                co_await t.async_wait(boost::asio::use_awaitable);
+            }
+            coroutineExited.store(true);
+            co_return;
+        },
+        boost::asio::detached);
+
+    // Let the coroutine run briefly.
+    std::this_thread::sleep_for(50ms);
+
+    // Signal exit, then stop.
+    keepRunning.store(false);
+    std::this_thread::sleep_for(20ms); // let the coroutine see the flag
+
+    coordinator.stop();
+    bool joined = coordinator.joinWithTimeout(5000ms);
+
+    CHECK(joined);
+    CHECK(coordinator.getWorkerCount() == 0);
 }

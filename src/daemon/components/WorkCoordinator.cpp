@@ -201,6 +201,7 @@ void WorkCoordinator::stop() {
         stopRequestedSet_ = true;
     }
     workGuard_.reset();
+    cancelSignal_.emit(boost::asio::cancellation_type::all);
     ioContext_->stop();
     try {
         spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
