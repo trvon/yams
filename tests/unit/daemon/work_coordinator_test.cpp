@@ -617,7 +617,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         bool joined = coordinator.joinWithTimeout(kJoinTimeout);
 
         CHECK(joined);
-        CHECK(coordinator.getWorkerCount() == 0);
+        CHECK((coordinator.getWorkerCount() == 0));
         CHECK_FALSE(coordinator.isRunning());
     }
 }
@@ -646,7 +646,7 @@ TEST_CASE("WorkCoordinator shutdown stress no stuck workers",
 
     INFO("Executed: " << executed.load() << " / 100");
     CHECK(joined);
-    CHECK(coordinator.getWorkerCount() == 0);
+    CHECK((coordinator.getWorkerCount() == 0));
     CHECK_FALSE(coordinator.isRunning());
 }
 
@@ -691,5 +691,32 @@ TEST_CASE("WorkCoordinator detached coroutine requires explicit cancel (known li
     bool joined = coordinator.joinWithTimeout(5000ms);
 
     CHECK(joined);
-    CHECK(coordinator.getWorkerCount() == 0);
+    CHECK((coordinator.getWorkerCount() == 0));
+}
+
+TEST_CASE("WorkCoordinator spawnDetached cancels timer poller on stop",
+          "[daemon][work_coordinator][shutdown][cancel]") {
+    WorkCoordinator coordinator;
+    coordinator.start(4);
+
+    std::atomic<bool> started{false};
+
+    coordinator.spawnDetached(coordinator.getExecutor(), [&]() -> boost::asio::awaitable<void> {
+        started.store(true, std::memory_order_release);
+        for (;;) {
+            boost::asio::steady_timer timer(*coordinator.getIOContext());
+            timer.expires_after(5s);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+    }());
+
+    REQUIRE(
+        wait_for_condition(1000ms, 5ms, [&]() { return started.load(std::memory_order_acquire); }));
+
+    coordinator.stop();
+    const bool joined = coordinator.joinWithTimeout(1000ms);
+
+    CHECK(joined);
+    CHECK((coordinator.getWorkerCount() == 0));
+    CHECK_FALSE(coordinator.isRunning());
 }

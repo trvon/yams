@@ -714,7 +714,7 @@ void DaemonMetrics::startPolling() {
         std::lock_guard<std::mutex> lk(pollingMutex_);
         pollingStopped_ = false;
     }
-    boost::asio::co_spawn(strand_, pollingLoop(), boost::asio::detached);
+    coordinator_->spawnDetached(strand_, pollingLoop());
 }
 
 void DaemonMetrics::stopPolling() {

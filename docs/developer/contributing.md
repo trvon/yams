@@ -127,8 +127,22 @@ When in doubt, favor smaller PRs, more disclosure, and more human review.
 - For async/background work, include timing-safe assertions or fakes.
 - Coverage is local-only now. Enable the tracked hooks with
   `git config core.hooksPath .githooks`; the pre-push hook runs
-  `scripts/run-local-coverage.sh` for pushed C/C++ / Meson changes and prints a
-  `gcovr` summary. Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
+  `scripts/run-local-coverage.sh` for pushed C/C++ / Meson changes, prefers
+  ccache plus a fast linker when available, and prints a `gcovr` summary.
+  Default mode is unit-only for speed; add
+  `YAMS_COVERAGE_INCLUDE_INTEGRATION=1` when you need integration coverage.
+  Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
+- Optimize test runtime by reducing repeated setup and monolithic suite shape,
+  not by deleting correctness checks. Slow stress/soak, migration,
+  diagnostics-heavy, and long-wait coverage should keep an explicit suite or
+  binary instead of living in the default fast path.
+- When refactoring tests, prefer seeded fixtures, pre-migrated DB helpers,
+  narrower binaries, and deterministic synchronization primitives over repeated
+  bootstrap, broad `SECTION()` fan-out, or fixed sleeps.
+- If a binary becomes a TSAN bottleneck, split it by behavior cluster so Meson
+  can parallelize it while preserving failure locality.
+- See [`docs/developer/testing.md`](testing.md) for the detailed suite-shaping
+  policy and validation expectations.
 
 ## Documentation
 

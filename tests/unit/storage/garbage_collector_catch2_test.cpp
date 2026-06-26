@@ -105,9 +105,9 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: basic collect on empty sto
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
-    CHECK(stats.blocksScanned == 0);
-    CHECK(stats.blocksDeleted == 0);
-    CHECK(stats.bytesReclaimed == 0);
+    CHECK((stats.blocksScanned == 0));
+    CHECK((stats.blocksDeleted == 0));
+    CHECK((stats.bytesReclaimed == 0));
 }
 
 TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: dry run does not delete",
@@ -126,14 +126,14 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: dry run does not delete",
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
-    CHECK(stats.blocksScanned >= 1);
-    CHECK(stats.blocksDeleted == 0);
-    CHECK(stats.bytesReclaimed == 0);
+    CHECK((stats.blocksScanned >= 1));
+    CHECK((stats.blocksDeleted == 0));
+    CHECK((stats.bytesReclaimed == 0));
 
     // Block should still exist in storage (the key dry-run property)
     auto existsResult = storage_->exists(hash);
     REQUIRE(existsResult.has_value());
-    CHECK(existsResult.value());
+    CHECK((existsResult.value()));
 }
 
 TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: collect deletes unreferenced block",
@@ -151,9 +151,9 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: collect deletes unreferenc
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
-    CHECK(stats.blocksScanned >= 1);
-    CHECK(stats.blocksDeleted >= 1);
-    CHECK(stats.bytesReclaimed >= 256);
+    CHECK((stats.blocksScanned >= 1));
+    CHECK((stats.blocksDeleted >= 1));
+    CHECK((stats.bytesReclaimed >= 256));
 
     // Block should be gone from storage
     auto existsResult = storage_->exists(hash);
@@ -207,8 +207,8 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: respects maxBlocksPerRun",
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
-    CHECK(stats.blocksScanned >= 10);
-    CHECK(stats.blocksDeleted <= 10);
+    CHECK((stats.blocksScanned >= 10));
+    CHECK((stats.blocksDeleted <= 10));
 
     // At least some blocks should remain (the ones beyond the batch limit)
     int remaining = 0;
@@ -218,7 +218,7 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: respects maxBlocksPerRun",
             ++remaining;
         }
     }
-    CHECK(remaining >= 5); // at least 5 should remain (15 - 10 max)
+    CHECK((remaining >= 5)); // at least 5 should remain (15 - 10 max)
 }
 
 TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: concurrently-collecting flag",
@@ -248,7 +248,7 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: concurrently-collecting fl
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Check that isCollecting() returns true during active collection
-    CHECK(gc_->isCollecting());
+    CHECK((gc_->isCollecting()));
 
     // Trying to collect again should return OperationInProgress
     GCOptions secondOpts;
@@ -256,7 +256,7 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: concurrently-collecting fl
     secondOpts.minAgeSeconds = 0;
     auto secondResult = gc_->collect(secondOpts);
     REQUIRE_FALSE(secondResult.has_value());
-    CHECK(secondResult.error().code == ErrorCode::OperationInProgress);
+    CHECK((secondResult.error().code == ErrorCode::OperationInProgress));
 
     // Wait for first collection to finish
     fut.wait();
@@ -270,8 +270,8 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: getLastStats after collect
                  "[storage][gc][catch2]") {
     // Initial stats should be zero
     auto initialStats = gc_->getLastStats();
-    CHECK(initialStats.blocksScanned == 0);
-    CHECK(initialStats.blocksDeleted == 0);
+    CHECK((initialStats.blocksScanned == 0));
+    CHECK((initialStats.blocksDeleted == 0));
 
     // Store, decrement, collect
     std::string hash = storeAndTrack(200);
@@ -286,12 +286,12 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: getLastStats after collect
     gc_->collect(opts);
 
     auto lastStats = gc_->getLastStats();
-    CHECK(lastStats.blocksScanned >= 1);
-    CHECK(lastStats.blocksDeleted >= 1);
-    CHECK(lastStats.bytesReclaimed >= 200);
+    CHECK((lastStats.blocksScanned >= 1));
+    CHECK((lastStats.blocksDeleted >= 1));
+    CHECK((lastStats.bytesReclaimed >= 200));
     // Duration may be zero on very fast collections; only verify
     // that the stats object was updated.
-    CHECK(lastStats.blocksScanned > 0);
+    CHECK((lastStats.blocksScanned > 0));
 }
 
 TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: stopScheduledCollection halts periodic run",
@@ -330,10 +330,10 @@ TEST_CASE_METHOD(CollectorFixture, "GarbageCollector: blocks with active referen
     REQUIRE(result.has_value());
 
     const auto& stats = result.value();
-    CHECK(stats.blocksDeleted == 0); // nothing should be collected
+    CHECK((stats.blocksDeleted == 0)); // nothing should be collected
 
     // Block with refcount > 0 should still exist
     auto existsResult = storage_->exists(hash);
     REQUIRE(existsResult.has_value());
-    CHECK(existsResult.value());
+    CHECK((existsResult.value()));
 }

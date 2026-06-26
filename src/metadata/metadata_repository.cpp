@@ -570,57 +570,62 @@ void MetadataRepository::updateQueryCache(const std::string& key,
     std::atomic_store_explicit(&queryCacheSnapshot_, std::move(updated), std::memory_order_release);
 }
 
-MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool)
+MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool,
+                                       SchemaBootstrapMode schemaMode)
     : pool_(pool), readPool_(readPool) {
-    // Ensure database schema is initialized
-    auto initResult = pool_.withConnection([](Database& db) -> Result<void> {
-        // Create migration manager and apply all migrations
-        MigrationManager manager(db);
-        auto initResult = manager.initialize();
-        if (!initResult) {
-            spdlog::error("Failed to initialize migration system: {}", initResult.error().message);
-            return initResult;
+    if (schemaMode == SchemaBootstrapMode::EnsureSchema) {
+        // Ensure database schema is initialized
+        auto initResult = pool_.withConnection([](Database& db) -> Result<void> {
+            // Create migration manager and apply all migrations
+            MigrationManager manager(db);
+            auto initResult = manager.initialize();
+            if (!initResult) {
+                spdlog::error("Failed to initialize migration system: {}",
+                              initResult.error().message);
+                return initResult;
+            }
+
+            // Register all YAMS metadata migrations
+            manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+
+            auto currentVersionRes = manager.getCurrentVersion();
+            if (!currentVersionRes) {
+                spdlog::error("Failed to get current DB version: {}",
+                              currentVersionRes.error().message);
+                return currentVersionRes.error();
+            }
+            int currentVersion = currentVersionRes.value();
+            int latestVersion = manager.getLatestVersion();
+            spdlog::info("Database schema version: {}, latest available: {}", currentVersion,
+                         latestVersion);
+
+            if (currentVersion < latestVersion) {
+                spdlog::info("Pending migrations found. Attempting to upgrade...");
+            }
+
+            // Apply migrations
+            auto migrateResult = manager.migrate();
+            if (!migrateResult) {
+                spdlog::error("Failed to run database migrations: {}",
+                              migrateResult.error().message);
+                return Error{migrateResult.error()};
+            }
+
+            auto newVersionRes = manager.getCurrentVersion();
+            if (newVersionRes && newVersionRes.value() > currentVersion) {
+                spdlog::info("Database successfully migrated to version {}", newVersionRes.value());
+            } else if (newVersionRes) {
+                spdlog::info("Database schema is up to date at version {}", newVersionRes.value());
+            }
+
+            spdlog::info("Database schema initialized successfully");
+            return Result<void>();
+        });
+
+        if (!initResult.has_value()) {
+            spdlog::warn("Failed to initialize database schema: {}", initResult.error().message);
+            // Continue anyway - the error will be caught when operations are attempted
         }
-
-        // Register all YAMS metadata migrations
-        manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
-
-        auto currentVersionRes = manager.getCurrentVersion();
-        if (!currentVersionRes) {
-            spdlog::error("Failed to get current DB version: {}",
-                          currentVersionRes.error().message);
-            return currentVersionRes.error();
-        }
-        int currentVersion = currentVersionRes.value();
-        int latestVersion = manager.getLatestVersion();
-        spdlog::info("Database schema version: {}, latest available: {}", currentVersion,
-                     latestVersion);
-
-        if (currentVersion < latestVersion) {
-            spdlog::info("Pending migrations found. Attempting to upgrade...");
-        }
-
-        // Apply migrations
-        auto migrateResult = manager.migrate();
-        if (!migrateResult) {
-            spdlog::error("Failed to run database migrations: {}", migrateResult.error().message);
-            return Error{migrateResult.error()};
-        }
-
-        auto newVersionRes = manager.getCurrentVersion();
-        if (newVersionRes && newVersionRes.value() > currentVersion) {
-            spdlog::info("Database successfully migrated to version {}", newVersionRes.value());
-        } else if (newVersionRes) {
-            spdlog::info("Database schema is up to date at version {}", newVersionRes.value());
-        }
-
-        spdlog::info("Database schema initialized successfully");
-        return Result<void>();
-    });
-
-    if (!initResult.has_value()) {
-        spdlog::warn("Failed to initialize database schema: {}", initResult.error().message);
-        // Continue anyway - the error will be caught when operations are attempted
     }
 
     auto featureResult = pool_.withConnection([this](Database& db) -> Result<void> {

@@ -1323,7 +1323,7 @@ TEST_CASE("StorageEngine file open failure returns PermissionDenied",
 }
 
 TEST_CASE("StorageEngine sustained concurrent load 50 writers 30s",
-          "[storage][engine][stress][concurrent][catch2]") {
+          "[storage][engine][stress][concurrent][slow][catch2]") {
     constexpr int kNumWriters = 50;
     constexpr int kNumReaders = 10;
     constexpr int kRunSeconds = 30;
@@ -1336,8 +1336,8 @@ TEST_CASE("StorageEngine sustained concurrent load 50 writers 30s",
     StorageConfig config{.basePath = testDir,
                          .shardDepth = 2,
                          .mutexPoolSize = 1024,
-                         .fsyncBeforeRename = false,
-                         .maxConcurrentWriters = 200};
+                         .maxConcurrentWriters = 200,
+                         .fsyncBeforeRename = false};
     auto storage = std::make_shared<StorageEngine>(std::move(config));
 
     std::atomic<bool> stop{false};

@@ -540,24 +540,24 @@ void PostIngestQueue::start() {
     const bool startTitle = hasTitleExtractor();
 
     spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
-    boost::asio::co_spawn(coordinator_->makeStrand(), channelPoller(), boost::asio::detached);
+    coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
     if (startKg) {
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->makeStrand(), kgPoller(), boost::asio::detached);
+        coordinator_->spawnDetached(coordinator_->makeStrand(), kgPoller());
     }
     if (startSymbol) {
         spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->makeStrand(), symbolPoller(), boost::asio::detached);
+        coordinator_->spawnDetached(coordinator_->makeStrand(), symbolPoller());
     }
     if (startEntity) {
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        auto entityExec =
-            entityCoordinator_ ? entityCoordinator_->makeStrand() : coordinator_->makeStrand();
-        boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
+        auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
+        auto entityExec = entityCoordinator->makeStrand();
+        entityCoordinator->spawnDetached(entityExec, entityPoller());
     }
     if (startTitle) {
         spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-        boost::asio::co_spawn(coordinator_->makeStrand(), titlePoller(), boost::asio::detached);
+        coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
     }
 
     const auto startupDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);

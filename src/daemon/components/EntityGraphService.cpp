@@ -2,7 +2,6 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <yams/profiling.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -31,6 +30,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/plugins/symbol_extractor_v1.h>
+#include <yams/profiling.h>
 #include <yams/search/query_text_utils.h>
 
 namespace yams::daemon {
@@ -156,7 +156,7 @@ void EntityGraphService::start() {
         return;
 
     stop_.store(false);
-    boost::asio::co_spawn(coordinator->getExecutor(), channelPoller(), boost::asio::detached);
+    coordinator->spawnDetached(coordinator->getExecutor(), channelPoller());
     spdlog::debug("EntityGraphService: channel poller started");
 }
 

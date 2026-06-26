@@ -49,7 +49,7 @@
 #ifdef YAMS_BUILD_TIMESTAMP
 #define YAMS_BUILD_DATE YAMS_BUILD_TIMESTAMP
 #else
-#define YAMS_BUILD_DATE __DATE__ " " __TIME__
+#define YAMS_BUILD_DATE "unknown"
 #endif
 #endif
 

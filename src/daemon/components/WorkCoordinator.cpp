@@ -28,11 +28,17 @@
 
 namespace yams::daemon {
 
+struct WorkCoordinator::DetachedCancellationState {
+    mutable std::mutex mutex;
+    std::vector<std::shared_ptr<boost::asio::cancellation_signal>> signals;
+};
+
 WorkCoordinator::WorkCoordinator()
     : ioContext_(std::make_shared<boost::asio::io_context>(BOOST_ASIO_CONCURRENCY_HINT_SAFE)),
       started_(false), highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
-      backgroundPriorityStrand_(ioContext_->get_executor()) {
+      backgroundPriorityStrand_(ioContext_->get_executor()),
+      detachedCancellationState_(std::make_shared<DetachedCancellationState>()) {
     spdlog::debug("[WorkCoordinator] Constructed (io_context created, not started)");
 }
 
@@ -201,6 +207,10 @@ void WorkCoordinator::stop() {
         stopRequestedSet_ = true;
     }
     workGuard_.reset();
+    auto detachedSignals = snapshotDetachedCancellationSignals();
+    for (const auto& signal : detachedSignals) {
+        signal->emit(boost::asio::cancellation_type::all);
+    }
     cancelSignal_.emit(boost::asio::cancellation_type::all);
     ioContext_->stop();
     try {
@@ -409,11 +419,59 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
     return completed;
 }
 
+void WorkCoordinator::registerDetachedCancellationSignal(
+    const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
+    if (!signal || !detachedCancellationState_) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(detachedCancellationState_->mutex);
+    auto& signals = detachedCancellationState_->signals;
+    signals.erase(std::remove_if(signals.begin(), signals.end(),
+                                 [](const auto& entry) { return entry == nullptr; }),
+                  signals.end());
+    signals.push_back(signal);
+}
+
+std::vector<std::shared_ptr<boost::asio::cancellation_signal>>
+WorkCoordinator::snapshotDetachedCancellationSignals() const {
+    std::vector<std::shared_ptr<boost::asio::cancellation_signal>> activeSignals;
+    if (!detachedCancellationState_) {
+        return activeSignals;
+    }
+
+    std::lock_guard<std::mutex> lock(detachedCancellationState_->mutex);
+    auto& signals = detachedCancellationState_->signals;
+    signals.erase(std::remove_if(signals.begin(), signals.end(),
+                                 [](const auto& entry) { return entry == nullptr; }),
+                  signals.end());
+    activeSignals.reserve(signals.size());
+    for (const auto& entry : signals) {
+        activeSignals.push_back(entry);
+    }
+    return activeSignals;
+}
+
+void WorkCoordinator::cleanupDetachedCancellationState(
+    const std::weak_ptr<WorkCoordinator::DetachedCancellationState>& state,
+    const boost::asio::cancellation_signal* completedSignal) {
+    if (auto locked = state.lock()) {
+        std::lock_guard<std::mutex> lock(locked->mutex);
+        auto& signals = locked->signals;
+        signals.erase(std::remove_if(signals.begin(), signals.end(),
+                                     [completedSignal](const auto& entry) {
+                                         return !entry || entry.get() == completedSignal;
+                                     }),
+                      signals.end());
+    }
+}
+
 void WorkCoordinator::abandonWorkersForShutdown() {
     try {
         spdlog::warn("[WorkCoordinator] Abandoning remaining workers for shutdown");
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        const auto ignored = std::current_exception();
+        (void)ignored;
     }
 
     for (auto& worker : workers_) {
@@ -421,7 +479,8 @@ void WorkCoordinator::abandonWorkersForShutdown() {
             try {
                 worker.detach();
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                const auto ignored = std::current_exception();
+                (void)ignored;
             }
         }
     }

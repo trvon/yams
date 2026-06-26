@@ -152,7 +152,7 @@ void IngestService::start() {
     }
 
     stop_.store(false, std::memory_order_release);
-    boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+    coordinator_->spawnDetached(strand_, channelPoller());
 }
 
 void IngestService::notifyLifecycle() {

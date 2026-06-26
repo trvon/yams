@@ -16,6 +16,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 
+#include "../../common/metadata_test_db.h"
+
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -27,20 +29,19 @@ namespace {
 
 struct DeleteCascadeFixture {
     DeleteCascadeFixture() {
-        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-        testDir = std::filesystem::temp_directory_path() /
-                  ("yams_delete_cascade_test_" + std::to_string(nonce));
+        dbPath = yams::test::migrated_metadata_db_template().clone("yams_delete_cascade_db_");
+        testDir = dbPath.parent_path() / dbPath.stem();
         std::filesystem::create_directories(testDir);
-        dbPath = testDir / "test.db";
 
         ConnectionPoolConfig poolConfig;
         poolConfig.minConnections = 1;
         poolConfig.maxConnections = 2;
-        REQUIRE(poolConfig.enableForeignKeys);
+        REQUIRE((poolConfig.enableForeignKeys));
         pool = std::make_shared<ConnectionPool>(dbPath.string(), poolConfig);
         REQUIRE((pool->initialize().has_value()));
 
-        metadataRepo = std::make_shared<MetadataRepository>(*pool);
+        metadataRepo = std::make_shared<MetadataRepository>(
+            *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
         KnowledgeGraphStoreConfig kgConfig;
         kgConfig.enable_alias_fts = true;
@@ -57,6 +58,7 @@ struct DeleteCascadeFixture {
         pool.reset();
         std::error_code ec;
         std::filesystem::remove_all(testDir, ec);
+        yams::test::remove_sqlite_artifacts(dbPath);
     }
 
     int64_t insertDoc(const std::string& filePath, const std::string& hash,
@@ -128,7 +130,7 @@ TEST_CASE("delete-cascade: foreign_keys pragma is enabled on pooled connections"
         return step.value() ? stmt.getInt64(0) : -1;
     });
     REQUIRE((r.has_value()));
-    CHECK(r.value() == 1);
+    CHECK((r.value() == 1));
 }
 
 // Finding A (fixed): deleteDocument now removes the content FTS row in-transaction.
@@ -138,13 +140,14 @@ TEST_CASE("delete-cascade: content FTS row is removed on document delete",
     const std::string hash(64, 'a');
     const int64_t id = f.insertDoc("/corpus/leak_fts.txt", hash, "unique_fts_token_zzz");
 
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM documents_fts WHERE rowid = " + std::to_string(id)) ==
-            1);
+    REQUIRE(
+        (f.scalar("SELECT COUNT(*) FROM documents_fts WHERE rowid = " + std::to_string(id)) == 1));
 
     REQUIRE((f.metadataRepo->deleteDocument(id).has_value()));
 
-    CHECK(f.scalar("SELECT COUNT(*) FROM documents WHERE id = " + std::to_string(id)) == 0);
-    CHECK(f.scalar("SELECT COUNT(*) FROM documents_fts WHERE rowid = " + std::to_string(id)) == 0);
+    CHECK((f.scalar("SELECT COUNT(*) FROM documents WHERE id = " + std::to_string(id)) == 0));
+    CHECK(
+        (f.scalar("SELECT COUNT(*) FROM documents_fts WHERE rowid = " + std::to_string(id)) == 0));
 }
 
 TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
@@ -161,16 +164,17 @@ TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
     REQUIRE((f.metadataRepo->insertContent(dc).has_value()));
     REQUIRE((f.metadataRepo->setMetadata(id, "k", MetadataValue(std::string("v"))).has_value()));
 
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM document_content WHERE document_id = " +
-                     std::to_string(id)) == 1);
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) ==
-            1);
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM document_content WHERE document_id = " +
+                      std::to_string(id)) == 1));
+    REQUIRE(
+        (f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 1));
 
     REQUIRE((f.metadataRepo->deleteDocument(id).has_value()));
 
-    CHECK(f.scalar("SELECT COUNT(*) FROM document_content WHERE document_id = " +
-                   std::to_string(id)) == 0);
-    CHECK(f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 0);
+    CHECK((f.scalar("SELECT COUNT(*) FROM document_content WHERE document_id = " +
+                    std::to_string(id)) == 0));
+    CHECK(
+        (f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 0));
 }
 
 TEST_CASE("delete-cascade: symbol_metadata cascades on document delete",
@@ -189,13 +193,13 @@ TEST_CASE("delete-cascade: symbol_metadata cascades on document delete",
     sym.endLine = 1;
     REQUIRE((f.kgStore->upsertSymbolMetadata({sym}).has_value()));
 
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash + "'") ==
-            1);
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash +
+                      "'") == 1));
 
     REQUIRE((f.metadataRepo->deleteDocument(id).has_value()));
 
-    CHECK(f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash + "'") ==
-          0);
+    CHECK((f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash + "'") ==
+           0));
 }
 
 // Finding D (fixed): canonical + reference nodes (and edges between them) are cleaned by the
@@ -240,19 +244,20 @@ TEST_CASE("delete-cascade: KG canonical/reference nodes and edges are cleaned by
     edge.properties = R"({"source_file":"/corpus/graph.cpp"})";
     REQUIRE((f.kgStore->addEdge(edge).has_value()));
 
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM kg_nodes") == 4);
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM kg_edges") == 1);
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_nodes") == 4));
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_edges") == 1));
 
     // The full cleanup the delete path performs: hash-based + path-based nodes + edges.
     REQUIRE((f.kgStore->deleteNodesForDocumentHash(hash).has_value()));
     REQUIRE((f.kgStore->deleteEdgesForSourceFile(path).has_value()));
     auto pathDeleted = f.kgStore->deleteNodesForSourceFile(path);
     REQUIRE((pathDeleted.has_value()));
-    CHECK(pathDeleted.value() == 2); // canonical + reference
+    CHECK((pathDeleted.value() == 2)); // canonical + reference
 
-    CHECK(f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'function:g@" + path + "'") == 0);
-    CHECK(f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'symbol_ref:helper'") == 0);
-    CHECK(f.scalar("SELECT COUNT(*) FROM kg_edges") == 0);
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'function:g@" + path + "'") ==
+           0));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'symbol_ref:helper'") == 0));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_edges") == 0));
 }
 
 TEST_CASE("delete-cascade: kg_edges cascade when an endpoint node is deleted",
@@ -278,10 +283,10 @@ TEST_CASE("delete-cascade: kg_edges cascade when an endpoint node is deleted",
     edge.dstNodeId = versionId.value();
     edge.relation = "contains";
     REQUIRE((f.kgStore->addEdge(edge).has_value()));
-    REQUIRE(f.scalar("SELECT COUNT(*) FROM kg_edges") == 1);
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_edges") == 1));
 
     auto deleted = f.kgStore->deleteNodesForDocumentHash(hash);
     REQUIRE((deleted.has_value()));
-    CHECK(deleted.value() == 2);
-    CHECK(f.scalar("SELECT COUNT(*) FROM kg_edges") == 0);
+    CHECK((deleted.value() == 2));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_edges") == 0));
 }
