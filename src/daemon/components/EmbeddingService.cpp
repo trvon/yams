@@ -85,7 +85,7 @@ void EmbeddingService::start() {
         activeInferSubBatches_.clear();
     }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
-    boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+    coordinator_->spawnDetached(strand_, channelPoller());
     spdlog::info("EmbeddingService: started channel poller");
 }
 

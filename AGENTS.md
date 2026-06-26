@@ -72,10 +72,33 @@ contract in the prompt; the graph here is rich: function-level nodes with
 - Compile: `meson compile -C build/debug -j4 <target>` — never run parallel
   meson compiles (build-dir lock contention).
 - Run: `build/debug/tests/<target>` or `meson test -C build/debug <name>`.
+- CI no longer runs coverage; use the tracked local pre-push hook instead.
+  Enable it with `git config core.hooksPath .githooks`. The hook dispatches
+  `scripts/run-local-coverage.sh`, builds `build/coverage`, prefers ccache and
+  a fast linker override when available, runs the unit-suite fast path by
+  default, and prints a `gcovr` text summary for pushed C/C++ / Meson changes.
+  Opt into integration coverage with `YAMS_COVERAGE_INCLUDE_INTEGRATION=1`.
+  Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
+- Optimize test **overlap and suite shape**, not away correctness. Keep a fast
+  default correctness lane, but move stress/soak, migration, heavy log-capture,
+  and multi-second wait tests into explicit slow suites or binaries instead of
+  deleting them.
+- Avoid repeated expensive bootstrap in broad suites when bootstrap is not the
+  behavior under test: temp DB + pool + migration + daemon/KG setup should be
+  reused, pre-seeded, or split into narrower binaries where safe.
+- Prefer deterministic synchronization (`promise`/`future`, latches, condition
+  variables, observable state transitions) over fixed sleeps and long polling
+  loops. If polling is unavoidable, keep deadlines tight and justify them.
+- Non-log-assertion tests should clamp log volume; verbose daemon/service logs
+  belong in focused diagnostics/logging tests, not the default fast TSAN path.
+- Split monolithic Catch2 binaries when one executable bundles many unrelated
+  files and blocks `meson test` parallelism; preserve behavior coverage while
+  improving failure locality and runtime.
 - `-DYAMS_TESTING=1` gates `testing_*` helpers in production headers.
 - RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard`); reset
   atomics/overrides between cases.
 - DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
+- See `docs/developer/testing.md` for the full suite-shaping policy.
 
 ## Patterns To Reuse (High Signal)
 

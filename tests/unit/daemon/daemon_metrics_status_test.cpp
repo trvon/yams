@@ -19,7 +19,10 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "../../common/metadata_test_db.h"
 #include "../../common/test_helpers_catch2.h"
+
+#include <spdlog/spdlog.h>
 
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -324,6 +327,16 @@ std::shared_ptr<metadata::ConnectionPool> getPruneTestPool() {
         return p;
     }();
     return pool;
+}
+
+std::filesystem::path makeTempMetadataDbPath(const std::string& prefix) {
+    return yams::test::migrated_metadata_db_template().clone(prefix);
+}
+
+std::shared_ptr<metadata::MetadataRepository>
+makeReadyMetadataRepo(const std::shared_ptr<metadata::ConnectionPool>& pool) {
+    return std::make_shared<metadata::MetadataRepository>(
+        *pool, nullptr, metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
 }
 
 class StubPruneMetadataRepository : public metadata::MetadataRepository {
@@ -702,7 +715,13 @@ metadata::DocumentInfo makeGraphDispatcherDocument(const std::filesystem::path& 
 
 struct GraphDispatcherFixture {
     GraphDispatcherFixture() {
+        static const bool kSuppressInfoLogs = [] {
+            spdlog::set_level(spdlog::level::warn);
+            return true;
+        }();
+        (void)kSuppressInfoLogs;
         testDir = makeTempDir("yams_graph_dispatcher_");
+        dbPath = makeTempMetadataDbPath("yams_graph_dispatcher_db_");
         cfg.dataDir = testDir;
         state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
         state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
@@ -725,17 +744,17 @@ struct GraphDispatcherFixture {
         pool.reset();
         std::error_code ec;
         std::filesystem::remove_all(testDir, ec);
+        yams::test::remove_sqlite_artifacts(dbPath);
     }
 
     void initMetadata(bool withKg = true) {
         metadata::ConnectionPoolConfig poolConfig{};
         poolConfig.minConnections = 1;
         poolConfig.maxConnections = 2;
-        pool = std::make_shared<metadata::ConnectionPool>(
-            (testDir / "graph_dispatcher.db").string(), poolConfig);
+        pool = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolConfig);
         REQUIRE(pool->initialize().has_value());
 
-        repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        repo = makeReadyMetadataRepo(pool);
         svc->__test_setMetadataRepo(repo);
 
         if (withKg) {
@@ -795,6 +814,7 @@ struct GraphDispatcherFixture {
     }
 
     std::filesystem::path testDir;
+    std::filesystem::path dbPath;
     DaemonConfig cfg;
     StubLifecycle lifecycle;
     StateComponent state;
@@ -2286,11 +2306,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("get request maps related documents when graph view is enabled") {
-        auto repoPath = makeTempDir("yams_get_graph_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_get_graph_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto graphQuery = std::make_shared<StubGraphQueryService>();
@@ -2329,11 +2349,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("get request still succeeds without query trace env") {
-        auto repoPath = makeTempDir("yams_get_query_trace_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_get_query_trace_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(71, "/tmp/get/query-trace.txt",
@@ -2355,11 +2375,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("get request maps fallback documents vector response") {
-        auto repoPath = makeTempDir("yams_get_documents_vector_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_get_documents_vector_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(72, "/tmp/get/documents-vector.txt",
@@ -2384,11 +2404,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("get request returns not found when service result is forced empty") {
-        auto repoPath = makeTempDir("yams_get_empty_result_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_get_empty_result_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(73, "/tmp/get/empty-result.txt",
@@ -2532,11 +2552,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("list request paths-only mode trims snippets metadata and tags") {
-        auto repoPath = makeTempDir("yams_list_dispatcher_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_list_dispatcher_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto doc = makeDoc(55, "/tmp/list/paths-only.md", "list-paths-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
@@ -2565,11 +2585,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("list request emits dispatch timing stats by default") {
-        auto repoPath = makeTempDir("yams_list_query_trace_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_list_query_trace_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto doc = makeDoc(56, "/tmp/list/query-trace.md", "list-query-trace-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
@@ -2591,11 +2611,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("list request parses filter tags and recent count") {
-        auto repoPath = makeTempDir("yams_list_filter_tags_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_list_filter_tags_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto doc = makeDoc(67, "/tmp/list/filter-tags.md", "list-filter-tags-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
@@ -2619,11 +2639,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     SECTION("list request works when inflight limit is disabled") {
         TuneAdvisorListGuard tuneGuard(0, 1);
 
-        auto repoPath = makeTempDir("yams_list_no_inflight_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_list_no_inflight_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto doc = makeDoc(68, "/tmp/list/no-inflight.md", "list-no-inflight-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
@@ -2662,11 +2682,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     SECTION("list request reports resource exhaustion when inflight limit is saturated") {
         TuneAdvisorListGuard tuneGuard(1, 1);
 
-        auto repoPath = makeTempDir("yams_list_exhaustion_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_list_exhaustion_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
         auto doc = makeDoc(60, "/tmp/list/exhausted.md", "list-exhausted-hash");
         REQUIRE(repo->insertDocument(doc).has_value());
         svc.__test_setMetadataRepo(repo);
@@ -3397,11 +3417,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("cat request reports missing content payload for indexed document") {
-        auto repoPath = makeTempDir("yams_cat_missing_content_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_cat_missing_content_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(59, "/tmp/cat/metadata-only.txt",
@@ -3422,11 +3442,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("cat request hits missing document branch after successful retrieval") {
-        auto repoPath = makeTempDir("yams_cat_force_missing_doc_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_cat_force_missing_doc_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(61, "/tmp/cat/force-missing-doc.txt",
@@ -3450,11 +3470,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("cat request hits content unavailable branch after successful retrieval") {
-        auto repoPath = makeTempDir("yams_cat_force_missing_content_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_cat_force_missing_content_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(62, "/tmp/cat/force-missing-content.txt",
@@ -3478,11 +3498,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("cat request hits native missing document branch") {
-        auto repoPath = makeTempDir("yams_cat_native_missing_doc_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_cat_native_missing_doc_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(65, "/tmp/cat/native-missing-doc.txt",
@@ -3506,11 +3526,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
     }
 
     SECTION("cat request hits native missing content branch") {
-        auto repoPath = makeTempDir("yams_cat_native_missing_content_repo_") / "metadata.db";
+        auto repoPath = makeTempMetadataDbPath("yams_cat_native_missing_content_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
         auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
         REQUIRE(pool->initialize().has_value());
-        auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+        auto repo = makeReadyMetadataRepo(pool);
 
         auto store = std::make_shared<StubContentStore>();
         auto doc = makeDoc(66, "/tmp/cat/native-missing-content.txt",

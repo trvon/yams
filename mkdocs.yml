@@ -42,7 +42,6 @@ nav:
           - Setup: developer/setup.md
           - Build System: developer/build_system.md
           - Contributing: developer/contributing.md
-          - Mobile Bindings: developer/mobile-bindings.md
       - Roadmap: roadmap.md
 
 theme:

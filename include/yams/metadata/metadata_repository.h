@@ -549,7 +549,13 @@ public:
  */
 class MetadataRepository : public IMetadataRepository {
 public:
-    explicit MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool = nullptr);
+    enum class SchemaBootstrapMode {
+        EnsureSchema,
+        AssumeReady,
+    };
+
+    explicit MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool = nullptr,
+                                SchemaBootstrapMode schemaMode = SchemaBootstrapMode::EnsureSchema);
     ~MetadataRepository()
         override; // Defined in cpp to allow unique_ptr<CorpusStats> with forward decl
     void shutdown();
@@ -586,7 +592,8 @@ public:
      *              set internally to the corresponding new docId.
      * @return Document IDs in the same order as @p items (new or existing).
      */
-    Result<std::vector<int64_t>> batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items);
+    Result<std::vector<int64_t>>
+    batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items);
 
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;

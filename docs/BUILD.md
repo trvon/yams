@@ -136,6 +136,9 @@ meson compile -C build/debug
 meson test -C build/debug --print-errorlogs
 ```
 
+For test-suite shaping guidance (fast correctness lane vs explicit slow stress /
+migration / diagnostics suites), see [`docs/developer/testing.md`](developer/testing.md).
+
 ## Troubleshooting
 
 | Symptom                                  | Fix                                                            |
@@ -148,8 +151,12 @@ meson test -C build/debug --print-errorlogs
 ## Advanced
 
 ```bash
-# Coverage
-./setup.sh Debug --coverage && meson test -C build/debug && gcovr --html -o build/debug/coverage.html
+# Coverage (manual)
+./setup.sh Debug --coverage && meson test -C build/debug --suite unit && gcovr --html -o build/debug/coverage.html
+
+# Or use the tracked local pre-push gate
+git config core.hooksPath .githooks
+YAMS_COVERAGE_INCLUDE_INTEGRATION=1 .githooks/pre-push
 
 # LTO
 CXXFLAGS="-flto" LDFLAGS="-flto" ./setup.sh Release

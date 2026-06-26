@@ -1647,9 +1647,9 @@ public:
             // Canonical symbol nodes (kind:qualName@file) carry file_path; unresolved
             // reference nodes carry source_file. Neither has a document_hash, so they are not
             // covered by deleteNodesForDocumentHash. Their edges cascade via FK once removed.
-            auto stmtR = db.prepare(
-                "DELETE FROM kg_nodes WHERE json_extract(properties, '$.file_path') = ? "
-                "OR json_extract(properties, '$.source_file') = ?");
+            auto stmtR =
+                db.prepare("DELETE FROM kg_nodes WHERE json_extract(properties, '$.file_path') = ? "
+                           "OR json_extract(properties, '$.source_file') = ?");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -2906,7 +2906,6 @@ public:
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
-        std::int64_t before = db.changes();
         for (const auto& e : edges) {
             auto br = stmt.clearBindings();
             if (!br)
@@ -2934,11 +2933,11 @@ public:
             auto ex = stmt.execute();
             if (!ex)
                 return ex.error();
+            edgeCountDelta_ += std::max<std::int64_t>(0, db.changes());
             auto rr = stmt.reset();
             if (!rr)
                 return rr;
         }
-        edgeCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
         return Result<void>();
     }
 
@@ -2955,7 +2954,6 @@ public:
             return stmtR.error();
         auto& stmt = *stmtR.value();
 
-        std::int64_t before = db.changes();
         for (const auto& alias : aliases) {
             auto clearResult = stmt.clearBindings();
             if (!clearResult)
@@ -2966,11 +2964,11 @@ public:
             auto execResult = stmt.execute();
             if (!execResult)
                 return execResult.error();
+            aliasCountDelta_ += std::max<std::int64_t>(0, db.changes());
             auto resetResult = stmt.reset();
             if (!resetResult)
                 return resetResult;
         }
-        aliasCountDelta_ += std::max<std::int64_t>(0, db.changes() - before);
         return Result<void>();
     }
 

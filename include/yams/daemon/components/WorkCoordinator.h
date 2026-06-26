@@ -24,8 +24,13 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
@@ -77,6 +82,9 @@ namespace yams::daemon {
  * @see docs/delivery/003/prd.md for full design documentation
  */
 class WorkCoordinator {
+private:
+    struct DetachedCancellationState;
+
 public:
     enum class Priority {
         High,
@@ -234,7 +242,37 @@ public:
                      .isRunning = isRunning()};
     }
 
+    /// Cancellation slot for single-consumer cases. Long-lived daemon pollers
+    /// should prefer spawnDetached(), which allocates a dedicated cancellation
+    /// signal per coroutine and fans cancellation out during stop().
+    /// NOTE: boost::asio::cancellation_signal::slot() is not const.
+    [[nodiscard]] boost::asio::cancellation_slot cancellationSlot() noexcept {
+        return cancelSignal_.slot();
+    }
+
+    template <typename Executor, typename Awaitable>
+    void spawnDetached(Executor&& executor, Awaitable&& awaitable) {
+        auto signal = std::make_shared<boost::asio::cancellation_signal>();
+        registerDetachedCancellationSignal(signal);
+        std::weak_ptr<DetachedCancellationState> state = detachedCancellationState_;
+        const auto* completedSignal = signal.get();
+        boost::asio::co_spawn(
+            std::forward<Executor>(executor), std::forward<Awaitable>(awaitable),
+            boost::asio::bind_cancellation_slot(
+                signal->slot(),
+                [state, completedSignal, signal = std::move(signal)](std::exception_ptr) mutable {
+                    cleanupDetachedCancellationState(state, completedSignal);
+                }));
+    }
+
 private:
+    void registerDetachedCancellationSignal(
+        const std::shared_ptr<boost::asio::cancellation_signal>& signal);
+    [[nodiscard]] std::vector<std::shared_ptr<boost::asio::cancellation_signal>>
+    snapshotDetachedCancellationSignals() const;
+    static void
+    cleanupDetachedCancellationState(const std::weak_ptr<DetachedCancellationState>& state,
+                                     const boost::asio::cancellation_signal* completedSignal);
     /// Shared io_context for all async operations
     std::shared_ptr<boost::asio::io_context> ioContext_;
 
@@ -282,6 +320,12 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> highPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> backgroundPriorityStrand_;
+
+    /// Cancellation signal emitted in stop() for legacy single-consumer flows.
+    boost::asio::cancellation_signal cancelSignal_;
+
+    /// Registry of per-coroutine cancellation signals used by spawnDetached().
+    std::shared_ptr<DetachedCancellationState> detachedCancellationState_;
 };
 
 } // namespace yams::daemon

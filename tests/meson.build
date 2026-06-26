@@ -330,11 +330,17 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_daemon_metrics_exe = executable('catch2_daemon_metrics',
-    files(
-      'unit/daemon/daemon_metrics_status_test.cpp',
-      'unit/daemon/daemon_metrics_catch2_test.cpp',
-    ),
+  catch2_daemon_metrics_status_exe = executable('catch2_daemon_metrics_status',
+    files('unit/daemon/daemon_metrics_status_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_daemon_metrics_core_exe = executable('catch2_daemon_metrics_core',
+    files('unit/daemon/daemon_metrics_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -423,8 +429,16 @@ if catch2_dep.found()
   )
 
   catch2_daemon_graph_component_exe = executable('catch2_daemon_graph_component',
+    files('unit/daemon/graph_component_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_graph_services_exe = executable('catch2_graph_services',
     files(
-      'unit/daemon/graph_component_catch2_test.cpp',
       'unit/app/services/graph_query_service_catch2_test.cpp',
       'unit/app/services/graph_context_service_catch2_test.cpp',
       'unit/metadata/delete_cascade_catch2_test.cpp',
@@ -1348,9 +1362,13 @@ if catch2_dep.found()
     install: false,
   )
 
-#CLI submodule tests(Commands, Data Resolution, Error Hints, Prompt Utils, etc.)
+#CLI submodule tests split by behavior cluster to improve Meson parallelism
+#and keep failures localized without dropping coverage.
 #Migrated from GTest as part of yams - 3s4 / yams - cli
-  catch2_cli_submodule_exe = executable('catch2_cli_submodule',
+  cli_test_deps = [version_generated_dep, catch2_dep, catch2_main_dep] + test_deps
+  cli_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
+
+  catch2_cli_common_exe = executable('catch2_cli_common',
     version_header,
     files(
       'unit/common/format_catch2_test.cpp',
@@ -1358,50 +1376,122 @@ if catch2_dep.found()
       'unit/common/test_utils_catch2_test.cpp',
       'unit/common/time_utils_catch2_test.cpp',
       'unit/common/utf8_utils_catch2_test.cpp',
-      'unit/cli/add_command_stdin_catch2_test.cpp',
+      'unit/cli/cli_test_cleanup_listener.cpp',
+      'unit/cli/error_hints_catch2_test.cpp',
+      'unit/cli/homebrew_service_formula_catch2_test.cpp',
+      'unit/cli/pipeline_stage_render_catch2_test.cpp',
+      'unit/cli/prompt_util_catch2_test.cpp',
+      'unit/cli/recommendation_util_catch2_test.cpp',
+      'unit/cli/status_metrics_catch2_test.cpp',
+      'unit/cli/stream_heuristics_catch2_test.cpp',
+      'unit/cli/time_parser_catch2_test.cpp',
+      'unit/cli/version_generated_header_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_config_exe = executable('catch2_cli_config',
+    version_header,
+    files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
       'unit/cli/cli_utility_coverage_catch2_test.cpp',
+      'unit/cli/config_command_catch2_test.cpp',
+      'unit/cli/data_dir_resolution_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_commands_exe = executable('catch2_cli_commands',
+    version_header,
+    files(
+      'unit/cli/cli_test_cleanup_listener.cpp',
+      'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
-      'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
-      'unit/cli/daemon_helpers_pool_catch2_test.cpp',
-      'unit/cli/daemon_command_catch2_test.cpp',
-      'unit/cli/data_dir_resolution_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
+      'unit/cli/init_command_catch2_test.cpp',
+      'unit/cli/list_command_catch2_test.cpp',
+      'unit/cli/update_command_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_model_plugin_exe = executable('catch2_cli_model_plugin',
+    version_header,
+    files(
+      'unit/cli/cli_test_cleanup_listener.cpp',
+      'unit/cli/model_command_catch2_test.cpp',
+      'unit/cli/plugin_command_catch2_test.cpp',
+      'unit/cli/repair_command_catch2_test.cpp',
+      'unit/cli/session_command_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_doctor_exe = executable('catch2_cli_doctor',
+    version_header,
+    files(
+      'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
       'unit/cli/doctor_repair_renderers_catch2_test.cpp',
       'unit/cli/doctor/db_integrity_catch2_test.cpp',
       'unit/cli/doctor/dim_consistency_catch2_test.cpp',
       'unit/cli/doctor/storage_blob_check_catch2_test.cpp',
       'unit/cli/doctor/ref_count_check_catch2_test.cpp',
-      'unit/cli/error_hints_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_graph_exe = executable('catch2_cli_graph',
+    version_header,
+    files(
+      'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/graph_explore_presenter_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
       'unit/cli/graph_query_presenter_catch2_test.cpp',
       'unit/cli/graph_topology_support_catch2_test.cpp',
       'unit/cli/grep_command_path_tree_catch2_test.cpp',
-      'unit/cli/homebrew_service_formula_catch2_test.cpp',
-      'unit/cli/list_command_catch2_test.cpp',
-      'unit/cli/init_command_catch2_test.cpp',
-      'unit/cli/model_command_catch2_test.cpp',
-      'unit/cli/plugin_command_catch2_test.cpp',
-      'unit/cli/pipeline_stage_render_catch2_test.cpp',
-      'unit/cli/prompt_util_catch2_test.cpp',
-      'unit/cli/recommendation_util_catch2_test.cpp',
-      'unit/cli/repair_command_catch2_test.cpp',
-      'unit/cli/session_command_catch2_test.cpp',
-      'unit/cli/status_metrics_catch2_test.cpp',
-      'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
-      'unit/cli/update_command_catch2_test.cpp',
-      'unit/cli/time_parser_catch2_test.cpp',
-      'unit/cli/version_generated_header_catch2_test.cpp',
     ),
     include_directories: incs,
-    dependencies: [version_generated_dep, catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_cli_daemon_exe = executable('catch2_cli_daemon',
+    version_header,
+    files(
+      'unit/cli/cli_test_cleanup_listener.cpp',
+      'unit/cli/daemon_helpers_pool_catch2_test.cpp',
+      'unit/cli/daemon_command_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: cli_test_deps,
+    cpp_args: cli_test_cpp_args,
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
@@ -1601,6 +1691,16 @@ if catch2_dep.found()
       'unit/metadata/kg_store_catch2_test.cpp',
       'unit/metadata/kg_relation_summary_catch2_test.cpp',
     ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # KG Write Buffer Tests (Catch2) - in-memory edge/entity coalescing
+  catch2_kg_write_buffer_exe = executable('catch2_kg_write_buffer',
+    files('unit/metadata/kg_write_buffer_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2263,6 +2363,12 @@ if catch2_dep.found()
     timeout: 120
   )
 
+  test('kg_write_buffer', catch2_kg_write_buffer_exe,
+    suite: ['catch2', 'unit', 'metadata', 'kg'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('database', catch2_database_exe,
     suite: ['catch2', 'unit', 'metadata', 'database'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2589,11 +2695,17 @@ if catch2_dep.found()
 
   daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 240 : 180
 
-  test('daemon_metrics_status', catch2_daemon_metrics_exe,
+  test('daemon_metrics_status', catch2_daemon_metrics_status_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: daemon_metrics_timeout,
     is_parallel: false
+  )
+
+  test('daemon_metrics_core', catch2_daemon_metrics_core_exe,
+    suite: ['catch2', 'unit', 'daemon', 'metrics', 'core'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('daemon_components', catch2_daemon_components_exe,
@@ -2678,8 +2790,13 @@ if catch2_dep.found()
   test('daemon_graph_component', catch2_daemon_graph_component_exe,
     suite: ['catch2', 'unit', 'daemon', 'graph', 'pbi-009'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
+    timeout: 60
+  )
+
+  test('graph_services', catch2_graph_services_exe,
+    suite: ['catch2', 'unit', 'services', 'graph'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('daemon_component_submodule', catch2_daemon_component_submodule_exe,
@@ -3110,6 +3227,14 @@ if catch2_dep.found()
 
   test('storage_submodule', catch2_storage_submodule_exe,
     suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300
+  )
+
+  test('storage_submodule_slow', catch2_storage_submodule_exe,
+    suite: ['catch2', 'slow', 'storage', 'yams-8b9'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
@@ -3180,16 +3305,60 @@ if catch2_dep.found()
     timeout: 180
   )
 
-  test('cli_submodule', catch2_cli_submodule_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-      'YAMS_SOURCE_DIR': meson.project_source_root(),
-      'MESON_BUILD_ROOT': meson.project_build_root(),
-    },
+  cli_test_env = {
+    'LD_LIBRARY_PATH': _test_env_ld_library_path,
+    'TSAN_OPTIONS': _test_tsan_options,
+    'YAMS_SOURCE_DIR': meson.project_source_root(),
+    'MESON_BUILD_ROOT': meson.project_build_root(),
+  }
+
+  test('cli_common', catch2_cli_common_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'common'],
+    env: cli_test_env,
     depends: [yams_cli_exe, version_header],
-    timeout: 300  # Tests take ~200s
+    timeout: 120
+  )
+
+  test('cli_config', catch2_cli_config_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'config'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 180
+  )
+
+  test('cli_commands', catch2_cli_commands_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'commands'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 180
+  )
+
+  test('cli_model_plugin', catch2_cli_model_plugin_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'model-plugin'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 120
+  )
+
+  test('cli_doctor', catch2_cli_doctor_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'doctor'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 180
+  )
+
+  test('cli_graph', catch2_cli_graph_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'graph'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 120
+  )
+
+  test('cli_daemon', catch2_cli_daemon_exe,
+    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'daemon'],
+    env: cli_test_env,
+    depends: [yams_cli_exe, version_header],
+    timeout: 120
   )
 
 #Vector test suite(requires enable - vector - tests)

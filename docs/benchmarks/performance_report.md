@@ -12,6 +12,8 @@
 - [Latest Local Refresh](#latest-local-refresh)
 - [Historical Comparisons](#historical-comparisons)
 - [Core Microbenchmarks](#core-microbenchmarks)
+- [KG Edge/Entity Insert Microbenchmarks](#kg-edgeentity-insert-microbenchmarks)
+- [Simeon Lexical Rescoring Observations](#simeon-lexical-rescoring-observations)
 - [Multi-Client Benchmarks](#multi-client-benchmarks)
 - [Storage Backends](#storage-backends)
 
@@ -219,7 +221,74 @@ Vectors/model loading disabled. In-process daemon harness. ASAN+coverage lane.
 | 16 | 4,421.4 docs/s | 295.2 docs/s | 64.5% | 625.2 MB | 0 |
 | 32 | 1,225.4 docs/s | 62.2 docs/s | 8.9% | 719.8 MB | 416 |
 
+## KG Edge/Entity Insert Microbenchmarks
+
+**New (2026-06-24)** — `kg_edge_insert_bench` executable. Covers the `addEdgesUnique`,
+`addEdges` (no dedup), `upsertNodes`, and `WriteBatch` insert paths at varying batch
+sizes. These metrics form the baseline for the KGWriteBuffer optimization (#2).
+
+### Edge Insert Throughput
+
+| Benchmark | Batch Size | p50 Throughput | Notes |
+|-----------|-----------:|---------------:|-------|
+| `AddEdgesUnique_SingleTx` | 100 | 194,367 edges/s | dedup in single transaction |
+| `AddEdgesUnique_SingleTx` | 500 | 196,781 edges/s | |
+| `AddEdgesUnique_SingleTx` | 1000 | 194,126 edges/s | |
+| `AddEdgesUnique_OneByOne` | 100 | 14,627 edges/s | per-edge insert + dedup (13.3× slower than bulk) |
+| `AddEdgesUnique_OneByOne` | 500 | 13,717 edges/s | |
+| `AddEdges_NoDedup_Bulk` | 100 | 123,609 edges/s | no dedup check (upper bound) |
+| `AddEdges_NoDedup_Bulk` | 500 | 121,065 edges/s | |
+| `AddEdges_NoDedup_Bulk` | 1000 | 115,969 edges/s | |
+| `WriteBatch_Edges` | 100 | 192,270 edges/s | explicit WriteBatch path |
+| `WriteBatch_Edges` | 500 | 188,565 edges/s | |
+| `WriteBatch_Edges` | 1000 | 197,334 edges/s | |
+
+### Node Upsert Throughput
+
+| Benchmark | Batch Size | p50 Throughput | Notes |
+|-----------|-----------:|---------------:|-------|
+| `UpsertNodes_Bulk` | 100 | 14,689 nodes/s | bulk transaction |
+| `UpsertNodes_Bulk` | 500 | 9,643 nodes/s | |
+| `UpsertNodes_Bulk` | 1000 | 11,056 nodes/s | |
+| `UpsertNodes_OneByOne` | 100 | 15,357 nodes/s | individual upserts (small-batch parity with bulk) |
+| `UpsertNodes_OneByOne` | 500 | 10,537 nodes/s | |
+
+### Target for KGWriteBuffer (#2)
+
+The one-by-one insert paths simulate the current ingest behavior where post-ingest
+KG extraction yields per-document edges/entities without batching. The KGWriteBuffer
+should bring one-by-one throughput close to the bulk path by accumulating writes in
+memory and flushing in batch.
+
+**Expected improvement**: 2-5x edges/sec in the one-by-one path, approaching the
+`AddEdges_NoDedup_Bulk` upper bound.
+
+---
+
+## Simeon Lexical Rescoring Observations
+
+Captured from the live-mirror suite retrieval stage trace. The Simeon lexical backend
+(`SimeonLexicalBackend::score()`) runs per-component after FTS5 candidate retrieval.
+
+**Observed (June 19 suite, M4 Max)**: The Simeon NEON dot product appears in xctrace
+hot-zone samples, confirming SIMD acceleration is active. The `hybrid_summary` event
+in the stage trace captures fusion pipeline timing but does not break out the simeon
+lexical component separately from text scoring.
+
+**Gap for hot-term cache (#3)**: No per-term `score()` latency differentiation exists
+in the current baseline. The hot-term posting list cache optimization needs:
+
+- P50/P95 `score()` latency for top-100 IDF terms ("function", "class", "return")
+- P50/P95 `score()` latency for bottom-100 IDF terms (rare symbols)
+- Cache hit rate under the live-mirror query workload
+
+These will be instrumented via `SearchEngineConfig::includeComponentTiming` and
+`SearchEngine::Statistics` new counters (`simeonLexicalCacheHits`,
+`simeonLexicalScoreMicros`) in task #3.
+
+---
+
 ## Storage Backends
 
 See [Storage Backends](storage_backends.md) for local vs S3-compatible backend comparisons.
-docs/benchmarks/README.md 
+docs/benchmarks/README.md

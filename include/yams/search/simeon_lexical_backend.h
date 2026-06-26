@@ -3,15 +3,17 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 
-#include <simeon/fragment_geometry.hpp>
 #include <simeon/concept_mining.hpp>
+#include <simeon/fragment_geometry.hpp>
 #include <simeon/prf.hpp>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -155,6 +157,12 @@ public:
         // Direct scoreBanditRouted() calls are available whenever the backend is
         // ready and receive an explicit arm name from the caller.
         bool bandit_arm_enabled = false;
+
+        // Hot-term score cache: memoizes full-corpus BM25 score vectors for
+        // frequently repeated queries. When set >0, up to this many queries
+        // are cached. Default 0 (disabled). Typical: 64 for interactive use,
+        // 0 for bulk evaluation.
+        std::size_t score_cache_entries = 0;
     };
 
     explicit SimeonLexicalBackend(Config cfg);
@@ -250,6 +258,17 @@ public:
     Result<TopCandidateDecision> searchTop(std::string_view query, std::size_t limit,
                                            std::string_view arm_name = {}) const;
 
+    /// Number of score cache hits since last reset.
+    [[nodiscard]] std::uint64_t scoreCacheHits() const noexcept {
+        return score_cache_hits_.load(std::memory_order_relaxed);
+    }
+
+    /// Reset the score cache hit counter.
+    void resetScoreCacheHits() { score_cache_hits_.store(0, std::memory_order_relaxed); }
+
+    /// Clear the score cache (e.g., after corpus rebuild).
+    void clearScoreCache();
+
 private:
     Config cfg_;
     std::atomic<bool> ready_{false};
@@ -279,6 +298,20 @@ private:
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
     std::vector<std::int64_t> index_to_doc_id_;
     std::size_t doc_count_ = 0;
+
+    // Hot-query score cache: memoizes full-corpus BM25 score vectors.
+    // Keyed by query string and evicted LRU when full. Access is serialized
+    // with score_cache_mutex_ because score() is const but mutates cache state.
+    struct ScoreCacheEntry {
+        std::vector<float> scores;
+        std::uint32_t concept_count = 0; // invalidated when concept index changes
+    };
+    mutable std::mutex score_cache_mutex_;
+    mutable std::list<std::pair<std::string, ScoreCacheEntry>> score_cache_list_;
+    mutable std::unordered_map<std::string,
+                               std::list<std::pair<std::string, ScoreCacheEntry>>::iterator>
+        score_cache_map_;
+    mutable std::atomic<std::uint64_t> score_cache_hits_{0};
 };
 
 } // namespace yams::search

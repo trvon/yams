@@ -77,8 +77,8 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
                 if (stats.has_value()) {
                     successCount++;
                     // Verify stats make sense
-                    CHECK(stats.value().totalBlocks >= 0u);
-                    CHECK(stats.value().totalReferences >= 0u);
+                    CHECK((stats.value().totalBlocks >= 0u));
+                    CHECK((stats.value().totalReferences >= 0u));
                 } else {
                     errorCount++;
                 }
@@ -90,14 +90,14 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
         t.join();
     }
 
-    CHECK(successCount.load() > 0);
-    CHECK(errorCount.load() == 0);
+    CHECK((successCount.load() > 0));
+    CHECK((errorCount.load() == 0));
 
     // Final stats check
     auto finalStats = refCounter->getStats();
     REQUIRE(finalStats.has_value());
-    CHECK(finalStats.value().totalBlocks == static_cast<uint64_t>(numBlocks));
-    CHECK(finalStats.value().totalReferences == static_cast<uint64_t>(numBlocks));
+    CHECK((finalStats.value().totalBlocks == static_cast<uint64_t>(numBlocks)));
+    CHECK((finalStats.value().totalReferences == static_cast<uint64_t>(numBlocks)));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mixed operations",
@@ -137,6 +137,9 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mix
                     case 3: // getStats
                         success = refCounter->getStats().has_value();
                         break;
+                    default:
+                        FAIL("unexpected mixed-operation selector");
+                        break;
                 }
 
                 if (success) {
@@ -152,7 +155,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mix
         t.join();
     }
 
-    CHECK(successCount.load() > numThreads * opsPerThread * 0.99);
+    CHECK((successCount.load() > numThreads * opsPerThread * 0.99));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent transactions",
@@ -211,10 +214,10 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent tra
         t.join();
     }
 
-    CHECK(commitCount.load() > 0);
-    CHECK(rollbackCount.load() > 0);
-    CHECK(errorCount.load() == 0);
-    CHECK(commitCount + rollbackCount == numThreads * txnsPerThread);
+    CHECK((commitCount.load() > 0));
+    CHECK((rollbackCount.load() > 0));
+    CHECK((errorCount.load() == 0));
+    CHECK((commitCount + rollbackCount == numThreads * txnsPerThread));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent getUnreferencedBlocks",
@@ -228,13 +231,15 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
     std::atomic<int> readerSuccessCount{0};
     std::atomic<int> writerSuccessCount{0};
     std::vector<std::thread> threads;
+    std::latch startLatch(numReaderThreads + numWriterThreads);
 
-    // Writer threads: constantly increment/decrement
+    // Writer threads: constantly increment/decrement while readers are active.
     for (int t = 0; t < numWriterThreads; ++t) {
         threads.emplace_back([&, threadId = t]() {
             std::mt19937 rng(threadId);
             std::uniform_int_distribution<int> blockDist(0, numBlocks - 1);
 
+            startLatch.arrive_and_wait();
             while (!stopFlag.load(std::memory_order_relaxed)) {
                 auto hash = generateHash(blockDist(rng));
                 if (threadId % 2 == 0) {
@@ -246,34 +251,35 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
                         writerSuccessCount++;
                     }
                 }
-                std::this_thread::sleep_for(1ms);
+                std::this_thread::yield();
             }
         });
     }
 
-    // Reader threads: constantly call getUnreferencedBlocks
+    // Reader threads: repeatedly query while writers are mutating state.
     for (int t = 0; t < numReaderThreads; ++t) {
         threads.emplace_back([&]() {
+            startLatch.arrive_and_wait();
             for (int i = 0; i < iterations; ++i) {
                 auto blocks = refCounter->getUnreferencedBlocks(50, std::chrono::seconds(0));
                 if (blocks.has_value()) {
                     readerSuccessCount++;
                 }
-                std::this_thread::sleep_for(5ms);
+                std::this_thread::yield();
             }
         });
     }
 
-    // Let readers finish
-    std::this_thread::sleep_for(1s);
+    for (int i = 0; i < numReaderThreads; ++i) {
+        threads[numWriterThreads + i].join();
+    }
     stopFlag.store(true, std::memory_order_relaxed);
-
-    for (auto& t : threads) {
-        t.join();
+    for (int i = 0; i < numWriterThreads; ++i) {
+        threads[i].join();
     }
 
-    CHECK(readerSuccessCount.load() > 0);
-    CHECK(writerSuccessCount.load() > 0);
+    CHECK((readerSuccessCount.load() > 0));
+    CHECK((writerSuccessCount.load() > 0));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter high load batch operations",
@@ -311,7 +317,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter high load batc
         t.join();
     }
 
-    CHECK(successCount.load() == numThreads * batchesPerThread * 2);
+    CHECK((successCount.load() == numThreads * batchesPerThread * 2));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture,
@@ -324,7 +330,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
 
     for (int i = 0; i < iterations; ++i) {
         auto txn = refCounter->beginTransaction();
-        REQUIRE(txn != nullptr);
+        REQUIRE((txn != nullptr));
         txn->increment(generateHash(10'000 + i), 4096);
 
         std::atomic<bool> stopObserver{false};
@@ -364,21 +370,21 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
         CHECK_FALSE(txn->isActive());
     }
 
-    CHECK(activeTrue.load() > 0);
-    CHECK(activeFalse.load() > 0);
+    CHECK((activeTrue.load() > 0));
+    CHECK((activeFalse.load() > 0));
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter reproduce getStats crash",
                  "[storage][refcount][stress][regression][catch2]") {
-    // This test reproduces the exact crash scenario from the bug report
-    // Simulates the daemon metrics refresh thread calling getStats()
-    // while other threads are doing work
-
+    // This keeps the original daemon-metrics regression in the fast lane,
+    // but uses bounded concurrent work instead of a multi-second soak.
     constexpr int numThreads = 10;
-    constexpr int iterations = 200;
+    constexpr int workerIterations = 250;
+    constexpr int statsIterations = 200;
 
-    std::atomic<bool> stopFlag{false};
+    std::atomic<int> workerErrors{0};
     std::vector<std::thread> threads;
+    std::latch startLatch(numThreads);
 
     // Background worker threads
     for (int t = 0; t < numThreads - 1; ++t) {
@@ -386,34 +392,39 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter reproduce getS
             std::mt19937 rng(threadId);
             std::uniform_int_distribution<int> hashDist(0, 49);
 
-            while (!stopFlag.load(std::memory_order_relaxed)) {
+            startLatch.arrive_and_wait();
+            for (int i = 0; i < workerIterations; ++i) {
                 auto hash = generateHash(hashDist(rng));
-                refCounter->increment(hash, 4096);
-                std::this_thread::sleep_for(10ms);
-                refCounter->decrement(hash);
+                if (!refCounter->increment(hash, 4096).has_value()) {
+                    workerErrors.fetch_add(1, std::memory_order_relaxed);
+                }
+                if ((i % 4) == 0) {
+                    std::this_thread::yield();
+                }
+                if (!refCounter->decrement(hash).has_value()) {
+                    workerErrors.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         });
     }
 
     // Metrics thread (reproduces DaemonMetrics::refresh calling getStats)
     threads.emplace_back([&]() {
-        for (int i = 0; i < iterations; ++i) {
+        startLatch.arrive_and_wait();
+        for (int i = 0; i < statsIterations; ++i) {
             auto stats = refCounter->getStats();
             REQUIRE(stats.has_value());
 
             // Verify stats are valid (not garbage from use-after-free)
-            CHECK(stats.value().totalBlocks < 1000000u);
-            CHECK(stats.value().totalReferences < 1000000u);
-
-            std::this_thread::sleep_for(20ms); // Similar to daemon refresh interval
+            CHECK((stats.value().totalBlocks < 1000000u));
+            CHECK((stats.value().totalReferences < 1000000u));
+            std::this_thread::yield();
         }
     });
-
-    // Let it run
-    std::this_thread::sleep_for(5s);
-    stopFlag.store(true, std::memory_order_relaxed);
 
     for (auto& t : threads) {
         t.join();
     }
+
+    CHECK((workerErrors.load() == 0));
 }

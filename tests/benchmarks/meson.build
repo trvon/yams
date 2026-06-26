@@ -264,6 +264,24 @@ if benchmark_dep.found()
 
   alias_target('bench_fts5_indexing', fts5_indexing_bench)
 
+  # KG edge/entity insert microbenchmark. Covers addEdgesUnique, addEdges,
+  # upsertNodes, and WriteBatch throughput with varying batch sizes.
+  # Used as a baseline for the KGWriteBuffer optimization (#2).
+  kg_edge_insert_bench = executable('kg_edge_insert_bench',
+    files('kg_edge_insert_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      dependency('yams_metadata'),
+      dependency('spdlog'),
+      benchmark_main_dep,
+      benchmark_dep,
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_kg_edge_insert', kg_edge_insert_bench)
+
   # PBI-004: End-to-end ingestion pipeline benchmark
   ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
 

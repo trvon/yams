@@ -11,6 +11,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../common/metadata_test_db.h"
+
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
@@ -21,14 +23,12 @@ using namespace yams::metadata;
 
 namespace {
 std::filesystem::path tempDbPath(const char* prefix) {
-    const char* t = std::getenv("YAMS_TEST_TMPDIR");
-    auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto p = base / (std::string(prefix) + std::to_string(ts) + ".db");
-    std::filesystem::remove(p, ec);
-    return p;
+    static const bool kSuppressInfoLogs = [] {
+        spdlog::set_level(spdlog::level::warn);
+        return true;
+    }();
+    (void)kSuppressInfoLogs;
+    return yams::test::migrated_metadata_db_template().clone(prefix);
 }
 
 DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& hash) {
@@ -58,15 +58,15 @@ struct MetadataRepositoryFixture {
 
         pool = std::make_unique<ConnectionPool>(dbPath.string(), config);
         REQUIRE(pool->initialize().has_value());
-        repository = std::make_unique<MetadataRepository>(*pool);
+        repository = std::make_unique<MetadataRepository>(
+            *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
     }
 
     ~MetadataRepositoryFixture() {
         repository.reset();
         pool->shutdown();
         pool.reset();
-        std::error_code ec;
-        std::filesystem::remove(dbPath, ec);
+        yams::test::remove_sqlite_artifacts(dbPath);
     }
 
     Result<void> installMetadataInsertAbortTrigger(const std::string& triggerName) {
@@ -332,7 +332,8 @@ TEST_CASE("MetadataRepository insertDocumentWithMetadata does not amplify lock r
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;

@@ -12,7 +12,6 @@
 #include <variant>
 #include <vector>
 
-#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -21,6 +20,8 @@
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
+
+#include "../../common/metadata_test_db.h"
 #include <yams/metadata/content_index_writer.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_insert_writer.h>
@@ -40,14 +41,12 @@ using namespace yams::search;
 namespace {
 
 std::filesystem::path tempDbPath(const char* prefix) {
-    const char* t = std::getenv("YAMS_TEST_TMPDIR");
-    auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto p = base / (std::string(prefix) + std::to_string(ts) + ".db");
-    std::filesystem::remove(p, ec);
-    return p;
+    static const bool kSuppressInfoLogs = [] {
+        spdlog::set_level(spdlog::level::warn);
+        return true;
+    }();
+    (void)kSuppressInfoLogs;
+    return yams::test::migrated_metadata_db_template().clone(prefix);
 }
 
 DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& hash,
@@ -68,19 +67,35 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     return info;
 }
 
-BatchContentEntry makeBatchContentEntry(int64_t documentId, std::string title,
-                                        std::string contentText,
-                                        std::string mimeType = "text/plain",
-                                        std::string extractionMethod = "test",
-                                        std::string language = "en") {
+BatchContentEntry makeBatchContentEntry(int64_t documentId, const std::string& title,
+                                        const std::string& contentText,
+                                        const std::string& mimeType = "text/plain",
+                                        const std::string& extractionMethod = "test",
+                                        const std::string& language = "en") {
     BatchContentEntry entry;
     entry.documentId = documentId;
-    entry.title = std::move(title);
-    entry.contentText = std::move(contentText);
-    entry.mimeType = std::move(mimeType);
-    entry.extractionMethod = std::move(extractionMethod);
-    entry.language = std::move(language);
+    entry.title = title;
+    entry.contentText = contentText;
+    entry.mimeType = mimeType;
+    entry.extractionMethod = extractionMethod;
+    entry.language = language;
     return entry;
+}
+
+std::unique_ptr<yams::daemon::WriteBatch> makeSymSpellBatch(const std::string& source,
+                                                            const std::string& indexedTerm) {
+    auto batch = std::make_unique<yams::daemon::WriteBatch>();
+    batch->source = source;
+    batch->ops.emplace_back(yams::daemon::AddSymSpellTermsOp{{indexedTerm}});
+    return batch;
+}
+
+BatchDocumentInsert makeIndexedBatchInsert(int index) {
+    BatchDocumentInsert item;
+    item.info = makeDocumentWithPath("repo/writer/doc-" + std::to_string(index) + ".txt",
+                                     "writer-hash-" + std::to_string(index));
+    item.tags.emplace_back("idx", MetadataValue(std::to_string(index)));
+    return item;
 }
 
 TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[metadata][path]") {
@@ -110,15 +125,15 @@ struct MetadataRepositoryFixture {
         auto initResult = pool_->initialize();
         REQUIRE((initResult.has_value()));
 
-        repository_ = std::make_unique<MetadataRepository>(*pool_);
+        repository_ = std::make_unique<MetadataRepository>(
+            *pool_, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
     }
 
     ~MetadataRepositoryFixture() {
         repository_.reset();
         pool_->shutdown();
         pool_.reset();
-        std::error_code ec;
-        std::filesystem::remove(dbPath_, ec);
+        yams::test::remove_sqlite_artifacts(dbPath_);
     }
 
     std::filesystem::path dbPath_;
@@ -300,7 +315,8 @@ TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
     REQUIRE((writePool->initialize().has_value()));
     REQUIRE((readPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
+    auto repository = std::make_unique<MetadataRepository>(
+        *writePool, readPool.get(), MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool.txt", "dual-pool-hash");
     auto insertResult = repository->insertDocument(doc);
@@ -349,7 +365,8 @@ TEST_CASE("MetadataRepository: dual-pool session count read route isolation",
     REQUIRE((writePool->initialize().has_value()));
     REQUIRE((readPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
+    auto repository = std::make_unique<MetadataRepository>(
+        *writePool, readPool.get(), MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool-session.txt", "dual-pool-session-hash");
     auto insertResult = repository->insertDocument(doc);
@@ -598,7 +615,8 @@ TEST_CASE("MetadataRepository: dual-pool embedding-hash read route isolation",
     REQUIRE((writePool->initialize().has_value()));
     REQUIRE((readPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
+    auto repository = std::make_unique<MetadataRepository>(
+        *writePool, readPool.get(), MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     auto doc = makeDocumentWithPath("/tmp/dual-pool-embed-hash.txt", "dual-pool-embed-hash");
     auto insertResult = repository->insertDocument(doc);
@@ -1047,7 +1065,8 @@ TEST_CASE("MetadataRepository: batch repair status update does not stack retry l
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -1431,8 +1450,8 @@ TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after update"
 
     auto warmStats = fix.repository_->getCorpusStats();
     REQUIRE((warmStats.has_value()));
-    CHECK((warmStats.value().pathDepthMax ==
-           Catch::Approx(static_cast<double>(deep.pathDepth)).epsilon(0.01)));
+    CHECK_THAT(warmStats.value().pathDepthMax,
+               Catch::Matchers::WithinRel(static_cast<double>(deep.pathDepth), 0.01));
 
     deep.id = deepInsert.value();
     deep.filePath = "/flattened.txt";
@@ -1446,7 +1465,7 @@ TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after update"
     auto afterStats = fix.repository_->getCorpusStats();
     REQUIRE((afterStats.has_value()));
     const auto expectedMaxDepth = static_cast<double>(std::max(shallow.pathDepth, deep.pathDepth));
-    CHECK((afterStats.value().pathDepthMax == Catch::Approx(expectedMaxDepth).epsilon(0.01)));
+    CHECK_THAT(afterStats.value().pathDepthMax, Catch::Matchers::WithinRel(expectedMaxDepth, 0.01));
 }
 
 TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
@@ -1710,15 +1729,15 @@ TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after delete"
 
     auto warmStats = fix.repository_->getCorpusStats();
     REQUIRE((warmStats.has_value()));
-    CHECK((warmStats.value().pathDepthMax ==
-           Catch::Approx(static_cast<double>(deep.pathDepth)).epsilon(0.01)));
+    CHECK_THAT(warmStats.value().pathDepthMax,
+               Catch::Matchers::WithinRel(static_cast<double>(deep.pathDepth), 0.01));
 
     REQUIRE((fix.repository_->deleteDocument(deepInsert.value()).has_value()));
 
     auto afterStats = fix.repository_->getCorpusStats();
     REQUIRE((afterStats.has_value()));
-    CHECK((afterStats.value().pathDepthMax ==
-           Catch::Approx(static_cast<double>(shallow.pathDepth)).epsilon(0.01)));
+    CHECK_THAT(afterStats.value().pathDepthMax,
+               Catch::Matchers::WithinRel(static_cast<double>(shallow.pathDepth), 0.01));
 }
 
 TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after batch delete",
@@ -1740,8 +1759,8 @@ TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after batch d
 
     auto warmStats = fix.repository_->getCorpusStats();
     REQUIRE((warmStats.has_value()));
-    CHECK((warmStats.value().pathDepthMax ==
-           Catch::Approx(static_cast<double>(deep.pathDepth)).epsilon(0.01)));
+    CHECK_THAT(warmStats.value().pathDepthMax,
+               Catch::Matchers::WithinRel(static_cast<double>(deep.pathDepth), 0.01));
 
     auto deleted = fix.repository_->deleteDocumentsBatch({deepInsert.value(), 999999});
     REQUIRE((deleted.has_value()));
@@ -1749,8 +1768,8 @@ TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after batch d
 
     auto afterStats = fix.repository_->getCorpusStats();
     REQUIRE((afterStats.has_value()));
-    CHECK((afterStats.value().pathDepthMax ==
-           Catch::Approx(static_cast<double>(medium.pathDepth)).epsilon(0.01)));
+    CHECK_THAT(afterStats.value().pathDepthMax,
+               Catch::Matchers::WithinRel(static_cast<double>(medium.pathDepth), 0.01));
 }
 
 TEST_CASE("MetadataRepository: set and get metadata", "[unit][metadata][repository]") {
@@ -1815,7 +1834,7 @@ TEST_CASE("MetadataRepository: get all metadata", "[unit][metadata][repository]"
 
     CHECK((metadata["author"].asString() == "John Doe"));
     CHECK((metadata["year"].asInteger() == 2024));
-    CHECK((metadata["rating"].asReal() == Catch::Approx(4.5)));
+    CHECK_THAT(metadata["rating"].asReal(), Catch::Matchers::WithinRel(4.5, 0.0001));
 }
 
 TEST_CASE("MetadataRepository: remove metadata", "[unit][metadata][repository]") {
@@ -2140,7 +2159,8 @@ TEST_CASE("MetadataRepository: single extraction status update does not amplify 
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -2192,7 +2212,8 @@ TEST_CASE("MetadataRepository: batch extraction status update does not amplify l
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -2498,12 +2519,9 @@ TEST_CASE(
     for (int worker = 0; worker < 4; ++worker) {
         workers.emplace_back([&coordinator, worker, indexedTerm] {
             for (int i = 0; i < 50; ++i) {
-                auto batch = std::make_unique<yams::daemon::WriteBatch>();
-                batch->source = "test/symspell_lock_storm";
                 (void)worker;
                 (void)i;
-                batch->ops.emplace_back(yams::daemon::AddSymSpellTermsOp{{indexedTerm}});
-                coordinator.enqueue(std::move(batch));
+                coordinator.enqueue(makeSymSpellBatch("test/symspell_lock_storm", indexedTerm));
             }
         });
     }
@@ -2570,10 +2588,7 @@ TEST_CASE("MetadataRepository: coordinator coalesces duplicate SymSpell terms pr
 
     constexpr std::uint64_t kDuplicateBatches = 300;
     for (std::uint64_t i = 0; i < kDuplicateBatches; ++i) {
-        auto batch = std::make_unique<yams::daemon::WriteBatch>();
-        batch->source = "test/symspell_coalesce";
-        batch->ops.emplace_back(yams::daemon::AddSymSpellTermsOp{{indexedTerm}});
-        coordinator.enqueue(std::move(batch));
+        coordinator.enqueue(makeSymSpellBatch("test/symspell_coalesce", indexedTerm));
     }
 
     auto flushResult = coordinator.flush(std::chrono::seconds{10});
@@ -2848,7 +2863,7 @@ TEST_CASE("MetadataRepository: path tree upsert rolls back partial changes on fa
             return stmtResult.error();
         }
 
-        auto stmt = std::move(stmtResult.value());
+        auto stmt = std::move(stmtResult).value();
         if (auto bindDoc = stmt.bind(1, docId); !bindDoc) {
             return bindDoc.error();
         }
@@ -3012,7 +3027,8 @@ TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
     auto singleConnPool =
         std::make_unique<ConnectionPool>(singleConnDbPath.string(), singleConnConfig);
     REQUIRE((singleConnPool->initialize().has_value()));
-    auto singleConnRepo = std::make_unique<MetadataRepository>(*singleConnPool);
+    auto singleConnRepo = std::make_unique<MetadataRepository>(
+        *singleConnPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     auto singleConnDoc =
         makeDocumentWithPath("/single/connection/child.txt", "single-connection-path-tree-hash");
@@ -3144,9 +3160,9 @@ TEST_CASE("MetadataRepository: direct path tree centroid helper handles reset an
     REQUIRE((afterSecond.value().has_value()));
     CHECK((afterSecond.value()->centroidWeight == 2));
     REQUIRE((afterSecond.value()->centroid.size() == 3));
-    CHECK((afterSecond.value()->centroid[0] == Catch::Approx(2.5F).epsilon(0.01)));
-    CHECK((afterSecond.value()->centroid[1] == Catch::Approx(3.5F).epsilon(0.01)));
-    CHECK((afterSecond.value()->centroid[2] == Catch::Approx(4.5F).epsilon(0.01)));
+    CHECK_THAT(afterSecond.value()->centroid[0], Catch::Matchers::WithinRel(2.5F, 0.01F));
+    CHECK_THAT(afterSecond.value()->centroid[1], Catch::Matchers::WithinRel(3.5F, 0.01F));
+    CHECK_THAT(afterSecond.value()->centroid[2], Catch::Matchers::WithinRel(4.5F, 0.01F));
 
     const std::vector<std::byte> corruptBlob{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
     REQUIRE((overwritePathTreeCentroid(*fix.pool_, "/embed", corruptBlob, 5).has_value()));
@@ -3764,7 +3780,8 @@ TEST_CASE("batchInsertContentAndIndex: does not amplify lock retries",
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -4012,7 +4029,7 @@ TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and lates
     CHECK((all.value().at("revision").type == MetadataValueType::Integer));
     CHECK((all.value().at("revision").asInteger() == 42));
     CHECK((all.value().at("score").type == MetadataValueType::Real));
-    CHECK((all.value().at("score").asReal() == Catch::Approx(0.875)));
+    CHECK_THAT(all.value().at("score").asReal(), Catch::Matchers::WithinRel(0.875, 0.0001));
     CHECK((all.value().at("published").type == MetadataValueType::Boolean));
     CHECK((all.value().at("published").asBoolean()));
     CHECK((all.value().at("payload").type == MetadataValueType::Blob));
@@ -4040,7 +4057,8 @@ TEST_CASE("MetadataRepository: setMetadataBatch does not amplify lock retries",
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -4089,11 +4107,12 @@ TEST_CASE("MetadataRepository: feedback event write does not wait for a busy poo
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     auto heldConnResult = repoPool->acquire();
     REQUIRE((heldConnResult.has_value()));
-    auto heldConn = std::move(heldConnResult.value());
+    auto heldConn = std::move(heldConnResult).value();
 
     FeedbackEvent event;
     event.eventId = "feedback-busy-pool-event";
@@ -4133,7 +4152,8 @@ TEST_CASE("MetadataWriteFacade: fallback path batches writes until flush",
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
     auto doc = makeDocumentWithPath("/tmp/facade-fallback.txt", "facade-fallback-hash");
     auto insert = repository->insertDocument(doc);
     REQUIRE((insert.has_value()));
@@ -4194,7 +4214,8 @@ TEST_CASE("MetadataWriteFacade: fallback flush retains pending writes after a tr
     auto repoPool = std::make_unique<ConnectionPool>(dbPath.string(), repoCfg);
     REQUIRE((repoPool->initialize().has_value()));
 
-    auto repository = std::make_unique<MetadataRepository>(*repoPool);
+    auto repository = std::make_unique<MetadataRepository>(
+        *repoPool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     ConnectionPoolConfig lockerCfg;
     lockerCfg.minConnections = 1;
@@ -4538,7 +4559,8 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
     config.maxConnections = 2;
     auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
     REQUIRE((pool->initialize().has_value()));
-    auto repo = std::make_shared<MetadataRepository>(*pool);
+    auto repo = std::make_shared<MetadataRepository>(
+        *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
     constexpr int kDocs = 64;
     {
@@ -4557,11 +4579,7 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
                     int i = next.fetch_add(1);
                     if (i >= kDocs)
                         break;
-                    BatchDocumentInsert item;
-                    item.info = makeDocumentWithPath("repo/writer/doc-" + std::to_string(i) + ".txt",
-                                                     "writer-hash-" + std::to_string(i));
-                    item.tags.emplace_back("idx", MetadataValue(std::to_string(i)));
-                    auto fut = writer.submit(std::move(item));
+                    auto fut = writer.submit(makeIndexedBatchInsert(i));
                     std::lock_guard<std::mutex> lk(futMutex);
                     collected.push_back(std::move(fut));
                 }
@@ -4603,7 +4621,8 @@ TEST_CASE("ContentIndexWriter commits content-index chunks from concurrent submi
     config.maxConnections = 2;
     auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
     REQUIRE((pool->initialize().has_value()));
-    auto repo = std::make_shared<MetadataRepository>(*pool);
+    auto repo = std::make_shared<MetadataRepository>(
+        *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
     repo->initializeCounters();
 
     constexpr int kDocs = 32;
@@ -4614,7 +4633,8 @@ TEST_CASE("ContentIndexWriter commits content-index chunks from concurrent submi
         doc.fileName = "ciw-" + std::to_string(i) + ".txt";
         doc.fileSize = 100;
         doc.mimeType = "text/plain";
-        doc.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         doc.modifiedTime = doc.createdTime;
         doc.contentExtracted = false;
         doc.extractionStatus = ExtractionStatus::Pending;

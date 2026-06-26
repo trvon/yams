@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <utility>
+
+#include "../../common/metadata_test_db.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -25,14 +28,13 @@ struct MetadataSchemaFixture {
     std::unique_ptr<MetadataRepository> repo_;
 
     MetadataSchemaFixture() {
-        // Use temporary database for tests; allow override for restricted environments
-        const char* t = std::getenv("YAMS_TEST_TMPDIR");
-        auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
-        std::error_code ec;
-        std::filesystem::create_directories(base, ec);
-        auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-        dbPath_ = base / (std::string("kronos_metadata_test_") + std::to_string(ts) + ".db");
-        std::filesystem::remove(dbPath_);
+        static const bool kSuppressInfoLogs = [] {
+            spdlog::set_level(spdlog::level::warn);
+            return true;
+        }();
+        (void)kSuppressInfoLogs;
+
+        dbPath_ = yams::test::migrated_metadata_db_template().clone("kronos_metadata_test_");
 
         // Initialize connection pool
         // Use higher connection count to prevent pool exhaustion with nested queries
@@ -43,26 +45,16 @@ struct MetadataSchemaFixture {
         auto initResult = pool_->initialize();
         REQUIRE(initResult.has_value());
 
-        // Run migrations
-        pool_->withConnection([](Database& db) -> Result<void> {
-            MigrationManager mm(db);
-            auto initResult = mm.initialize();
-            if (!initResult)
-                return initResult.error();
-
-            mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
-            return mm.migrate();
-        });
-
-        // Create repository
-        repo_ = std::make_unique<MetadataRepository>(*pool_);
+        // Create repository against the pre-migrated snapshot.
+        repo_ = std::make_unique<MetadataRepository>(
+            *pool_, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
     }
 
     ~MetadataSchemaFixture() {
         repo_.reset();
         pool_->shutdown();
         pool_.reset();
-        std::filesystem::remove(dbPath_);
+        yams::test::remove_sqlite_artifacts(dbPath_);
     }
 
     DocumentInfo createTestDocument(const std::string& name) {
@@ -118,28 +110,28 @@ struct StandaloneMigrationDb {
 };
 
 template <typename... Args>
-Result<void> executeBound(Database& db, const std::string& sql, Args&&... args) {
+Result<void> executeBound(Database& db, const std::string& sql, const Args&... args) {
     auto stmtResult = db.prepare(sql);
     if (!stmtResult) {
         return stmtResult.error();
     }
 
     auto stmt = std::move(stmtResult).value();
-    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+    if (auto bindResult = stmt.bindAll(args...); !bindResult) {
         return bindResult.error();
     }
     return stmt.execute();
 }
 
 template <typename... Args>
-Result<int64_t> querySingleInt64(Database& db, const std::string& sql, Args&&... args) {
+Result<int64_t> querySingleInt64(Database& db, const std::string& sql, const Args&... args) {
     auto stmtResult = db.prepare(sql);
     if (!stmtResult) {
         return stmtResult.error();
     }
 
     auto stmt = std::move(stmtResult).value();
-    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+    if (auto bindResult = stmt.bindAll(args...); !bindResult) {
         return bindResult.error();
     }
 
@@ -155,14 +147,14 @@ Result<int64_t> querySingleInt64(Database& db, const std::string& sql, Args&&...
 
 template <typename... Args>
 Result<std::optional<std::string>> queryOptionalString(Database& db, const std::string& sql,
-                                                       Args&&... args) {
+                                                       const Args&... args) {
     auto stmtResult = db.prepare(sql);
     if (!stmtResult) {
         return stmtResult.error();
     }
 
     auto stmt = std::move(stmtResult).value();
-    if (auto bindResult = stmt.bindAll(std::forward<Args>(args)...); !bindResult) {
+    if (auto bindResult = stmt.bindAll(args...); !bindResult) {
         return bindResult.error();
     }
 
@@ -1428,8 +1420,8 @@ TEST_CASE("MigrationManager records failed migrations and keeps readiness pendin
     std::vector<std::string> progressNames;
     db.mm.setProgressCallback(
         [&progressNames](int, int, const std::string& name) { progressNames.push_back(name); });
-    db.mm.registerMigration(std::move(okMigration));
-    db.mm.registerMigration(std::move(failingMigration));
+    db.mm.registerMigration(okMigration);
+    db.mm.registerMigration(failingMigration);
 
     CHECK((db.mm.getLatestVersion() == 2));
     auto initialNeedsMigration = db.mm.needsMigration();

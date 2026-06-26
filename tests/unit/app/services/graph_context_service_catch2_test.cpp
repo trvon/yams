@@ -9,6 +9,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 
+#include "../../../common/metadata_test_db.h"
+
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -25,11 +27,10 @@ namespace {
 
 struct GraphContextServiceFixture {
     GraphContextServiceFixture() {
-        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-        testDir = std::filesystem::temp_directory_path() /
-                  ("yams_graph_context_service_test_" + std::to_string(nonce));
+        dbPath =
+            yams::test::migrated_metadata_db_template().clone("yams_graph_context_service_db_");
+        testDir = dbPath.parent_path() / dbPath.stem();
         std::filesystem::create_directories(testDir);
-        dbPath = testDir / "test.db";
 
         ConnectionPoolConfig poolConfig;
         poolConfig.minConnections = 1;
@@ -38,7 +39,8 @@ struct GraphContextServiceFixture {
         auto poolInitRes = pool->initialize();
         REQUIRE((poolInitRes.has_value()));
 
-        metadataRepo = std::make_shared<MetadataRepository>(*pool);
+        metadataRepo = std::make_shared<MetadataRepository>(
+            *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
 
         KnowledgeGraphStoreConfig kgConfig;
         kgConfig.enable_alias_fts = true;
@@ -53,7 +55,9 @@ struct GraphContextServiceFixture {
         kgStore.reset();
         metadataRepo.reset();
         pool.reset();
-        std::filesystem::remove_all(testDir);
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+        yams::test::remove_sqlite_artifacts(dbPath);
     }
 
     std::filesystem::path writeSource(const std::string& relativePath,

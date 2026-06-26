@@ -65,123 +65,123 @@
 set -euo pipefail
 
 is_true() {
-  case "${1:-}" in
-    1|true|TRUE|yes|YES|on|ON)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+	case "${1:-}" in
+	1 | true | TRUE | yes | YES | on | ON)
+		return 0
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
 command_path_or_empty() {
-  command -v "$1" 2>/dev/null || true
+	command -v "$1" 2>/dev/null || true
 }
 
 ENABLE_OFFLINE=false
 USE_SYSTEM_DEPS=false
 ENABLE_COVERAGE=false
-ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
-ENABLE_ASAN="${ENABLE_ASAN:-}"  # Preserve environment variable if set
+ENABLE_TSAN="${ENABLE_TSAN:-}" # Preserve environment variable if set
+ENABLE_ASAN="${ENABLE_ASAN:-}" # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
 ENABLE_RELEASE_TESTS=false
 TSAN_EXPLICIT=false
 ASAN_EXPLICIT=false
 
 if is_true "${YAMS_OFFLINE:-false}"; then
-  ENABLE_OFFLINE=true
+	ENABLE_OFFLINE=true
 fi
 
 if is_true "${YAMS_USE_SYSTEM_DEPS:-false}"; then
-  USE_SYSTEM_DEPS=true
+	USE_SYSTEM_DEPS=true
 fi
 
 INITIAL_MESON_BIN="$(command_path_or_empty meson)"
 INITIAL_NINJA_BIN="$(command_path_or_empty ninja)"
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --coverage)
-      ENABLE_COVERAGE=true
-      shift
-      ;;
-    --tsan)
-      ENABLE_TSAN=true
-      TSAN_EXPLICIT=true
-      shift
-      ;;
-    --no-tsan)
-      ENABLE_TSAN=false
-      TSAN_EXPLICIT=true
-      shift
-      ;;
-    --asan)
-      ENABLE_ASAN=true
-      ASAN_EXPLICIT=true
-      shift
-      ;;
-    --no-asan)
-      ENABLE_ASAN=false
-      ASAN_EXPLICIT=true
-      shift
-      ;;
-    --with-tests)
-      # Force building tests/benchmarks even in Release builds.
-      ENABLE_RELEASE_TESTS=true
-      shift
-      ;;
-    --offline)
-      ENABLE_OFFLINE=true
-      shift
-      ;;
-    --system-deps)
-      USE_SYSTEM_DEPS=true
-      shift
-      ;;
-    Debug|Release|Profiling|Fuzzing|debug|release|profiling|fuzzing)
-      if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
-        echo "Error: Build type specified multiple times" >&2
-        exit 1
-      fi
-      BUILD_TYPE_INPUT="$1"
-      shift
-      ;;
-    *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests] [--offline] [--system-deps]" >&2
-      exit 1
-      ;;
-  esac
+	case "$1" in
+	--coverage)
+		ENABLE_COVERAGE=true
+		shift
+		;;
+	--tsan)
+		ENABLE_TSAN=true
+		TSAN_EXPLICIT=true
+		shift
+		;;
+	--no-tsan)
+		ENABLE_TSAN=false
+		TSAN_EXPLICIT=true
+		shift
+		;;
+	--asan)
+		ENABLE_ASAN=true
+		ASAN_EXPLICIT=true
+		shift
+		;;
+	--no-asan)
+		ENABLE_ASAN=false
+		ASAN_EXPLICIT=true
+		shift
+		;;
+	--with-tests)
+		# Force building tests/benchmarks even in Release builds.
+		ENABLE_RELEASE_TESTS=true
+		shift
+		;;
+	--offline)
+		ENABLE_OFFLINE=true
+		shift
+		;;
+	--system-deps)
+		USE_SYSTEM_DEPS=true
+		shift
+		;;
+	Debug | Release | Profiling | Fuzzing | debug | release | profiling | fuzzing)
+		if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
+			echo "Error: Build type specified multiple times" >&2
+			exit 1
+		fi
+		BUILD_TYPE_INPUT="$1"
+		shift
+		;;
+	*)
+		echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests] [--offline] [--system-deps]" >&2
+		exit 1
+		;;
+	esac
 done
 
 BUILD_TYPE_INPUT=${BUILD_TYPE_INPUT:-Release}
 BUILD_TYPE_INPUT_LOWER=$(echo "${BUILD_TYPE_INPUT}" | tr '[:upper:]' '[:lower:]')
 
 case "${BUILD_TYPE_INPUT_LOWER}" in
-  debug)
-    BUILD_TYPE="Debug"
-    ;;
-  release)
-    BUILD_TYPE="Release"
-    ;;
-  profiling)
-    BUILD_TYPE="Debug"  # Use Debug as base for Conan/Meson
-    ENABLE_PROFILING=true
-    ;;
-  fuzzing)
-    BUILD_TYPE="Debug"  # Use Debug as base for Conan/Meson
-    ENABLE_FUZZING=true
-    echo "Fuzzing build: AFL++/libFuzzer instrumentation enabled"
-    ;;
-  *)
-    echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug, Release, Profiling, or Fuzzing." >&2
-    exit 1
-    ;;
+debug)
+	BUILD_TYPE="Debug"
+	;;
+release)
+	BUILD_TYPE="Release"
+	;;
+profiling)
+	BUILD_TYPE="Debug" # Use Debug as base for Conan/Meson
+	ENABLE_PROFILING=true
+	;;
+fuzzing)
+	BUILD_TYPE="Debug" # Use Debug as base for Conan/Meson
+	ENABLE_FUZZING=true
+	echo "Fuzzing build: AFL++/libFuzzer instrumentation enabled"
+	;;
+*)
+	echo "Unknown build type: ${BUILD_TYPE_INPUT}. Expected Debug, Release, Profiling, or Fuzzing." >&2
+	exit 1
+	;;
 esac
 
 if [[ "${ENABLE_COVERAGE}" == "true" ]] && [[ "${BUILD_TYPE}" != "Debug" ]]; then
-  echo "Error: --coverage flag requires Debug build type" >&2
-  exit 1
+	echo "Error: --coverage flag requires Debug build type" >&2
+	exit 1
 fi
 
 # Select desired C++ standard.
@@ -190,12 +190,12 @@ fi
 # profiles and current CI dependency graph. Other platforms prefer C++23 when
 # the compiler supports constexpr containers.
 if [[ -z "${YAMS_CPPSTD:-}" ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    CPPSTD_INPUT="20"
-    echo "macOS defaulting to C++20 for Conan/Meson compatibility"
-  else
-    # Test if compiler supports C++23 with constexpr containers
-    if echo '#include <vector>
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		CPPSTD_INPUT="20"
+		echo "macOS defaulting to C++20 for Conan/Meson compatibility"
+	else
+		# Test if compiler supports C++23 with constexpr containers
+		if echo '#include <vector>
 #if __cplusplus >= 202302L && defined(__cpp_lib_constexpr_vector) && __cpp_lib_constexpr_vector >= 201907L
 #define HAS_CPP23_CONTAINERS 1
 #else
@@ -204,53 +204,53 @@ if [[ -z "${YAMS_CPPSTD:-}" ]]; then
 #if !HAS_CPP23_CONTAINERS
 #error "No C++23 constexpr containers"
 #endif' | "${CXX:-c++}" -std=c++23 -fsyntax-only -x c++ - >/dev/null 2>&1; then
-      CPPSTD_INPUT="23"
-      echo "Auto-detected C++23 compiler support (constexpr containers available)"
-    else
-      CPPSTD_INPUT="20"
-      echo "C++23 not fully supported, using C++20"
-    fi
-  fi
+			CPPSTD_INPUT="23"
+			echo "Auto-detected C++23 compiler support (constexpr containers available)"
+		else
+			CPPSTD_INPUT="20"
+			echo "C++23 not fully supported, using C++20"
+		fi
+	fi
 else
-  CPPSTD_INPUT="${YAMS_CPPSTD}"
+	CPPSTD_INPUT="${YAMS_CPPSTD}"
 fi
 
 case "${CPPSTD_INPUT}" in
-  17|20|23)
-    CPPSTD="${CPPSTD_INPUT}"
-    ;;
-  c++17|c++20|c++23)
-    CPPSTD="${CPPSTD_INPUT#c++}"
-    ;;
-  *)
-    echo "Unknown C++ standard: ${CPPSTD_INPUT}. Expected 17|20|23 or c++17|c++20|c++23." >&2
-    exit 1
-    ;;
+17 | 20 | 23)
+	CPPSTD="${CPPSTD_INPUT}"
+	;;
+c++17 | c++20 | c++23)
+	CPPSTD="${CPPSTD_INPUT#c++}"
+	;;
+*)
+	echo "Unknown C++ standard: ${CPPSTD_INPUT}. Expected 17|20|23 or c++17|c++20|c++23." >&2
+	exit 1
+	;;
 esac
 # Value for Meson project option
 MESON_CPPSTD="c++${CPPSTD}"
 
 if [[ -z "${YAMS_ENABLE_MODULES:-}" ]]; then
-  ENABLE_MODULES=false
-  if echo 'export module test; export int foo() { return 42; }' | \
-     "${CXX:-c++}" -std=c++20 -fmodules -fsyntax-only -x c++ - >/dev/null 2>&1; then
-    ENABLE_MODULES=true
-    echo "Auto-detected C++20 module support (Clang -fmodules)"
-  elif echo 'export module test; export int foo() { return 42; }' | \
-       "${CXX:-c++}" -std=c++20 -fmodules-ts -fsyntax-only -x c++ - >/dev/null 2>&1; then
-    ENABLE_MODULES=true
-    echo "Auto-detected C++20 module support (GCC -fmodules-ts)"
-  else
-    echo "C++20 modules not fully supported by compiler, disabled"
-  fi
+	ENABLE_MODULES=false
+	if echo 'export module test; export int foo() { return 42; }' |
+		"${CXX:-c++}" -std=c++20 -fmodules -fsyntax-only -x c++ - >/dev/null 2>&1; then
+		ENABLE_MODULES=true
+		echo "Auto-detected C++20 module support (Clang -fmodules)"
+	elif echo 'export module test; export int foo() { return 42; }' |
+		"${CXX:-c++}" -std=c++20 -fmodules-ts -fsyntax-only -x c++ - >/dev/null 2>&1; then
+		ENABLE_MODULES=true
+		echo "Auto-detected C++20 module support (GCC -fmodules-ts)"
+	else
+		echo "C++20 modules not fully supported by compiler, disabled"
+	fi
 else
-  if [[ "${YAMS_ENABLE_MODULES}" == "true" ]]; then
-    ENABLE_MODULES=true
-    echo "C++20 modules enabled via YAMS_ENABLE_MODULES=true"
-  else
-    ENABLE_MODULES=false
-    echo "C++20 modules disabled via YAMS_ENABLE_MODULES=false"
-  fi
+	if [[ "${YAMS_ENABLE_MODULES}" == "true" ]]; then
+		ENABLE_MODULES=true
+		echo "C++20 modules enabled via YAMS_ENABLE_MODULES=true"
+	else
+		ENABLE_MODULES=false
+		echo "C++20 modules disabled via YAMS_ENABLE_MODULES=false"
+	fi
 fi
 
 # libc++ hardening mode (only applies when using libc++)
@@ -265,29 +265,29 @@ CONAN_EXTRA_OPTIONS=${YAMS_CONAN_EXTRA_OPTIONS:-}
 USE_PROFILE=false
 
 if [[ -z "${CONAN_HOST_PROFILE}" ]] && [[ "$(uname -s)" == "Darwin" ]]; then
-  uname_machine=$(uname -m)
-  if [[ "${uname_machine}" == "x86_64" ]]; then
-    CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang-x86"
-  else
-    CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
-  fi
+	uname_machine=$(uname -m)
+	if [[ "${uname_machine}" == "x86_64" ]]; then
+		CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang-x86"
+	else
+		CONAN_HOST_PROFILE="./conan/profiles/host-macos-apple-clang"
+	fi
 fi
 
 if [[ -n "${CONAN_HOST_PROFILE}" ]]; then
-  if [[ ! -f "${CONAN_HOST_PROFILE}" ]]; then
-    echo "ERROR: Conan host profile not found: ${CONAN_HOST_PROFILE}" >&2
-    exit 1
-  fi
-  USE_PROFILE=true
-  echo "Using explicit Conan host profile: ${CONAN_HOST_PROFILE}"
+	if [[ ! -f "${CONAN_HOST_PROFILE}" ]]; then
+		echo "ERROR: Conan host profile not found: ${CONAN_HOST_PROFILE}" >&2
+		exit 1
+	fi
+	USE_PROFILE=true
+	echo "Using explicit Conan host profile: ${CONAN_HOST_PROFILE}"
 fi
 
 CONAN_ARGS=(-s "build_type=${BUILD_TYPE}")
 
 if [[ "${ENABLE_OFFLINE}" == "true" ]]; then
-  CONAN_ARGS+=(-nr --build=never)
+	CONAN_ARGS+=(-nr --build=never)
 else
-  CONAN_ARGS+=(--update --build=missing)
+	CONAN_ARGS+=(--update --build=missing)
 fi
 
 # Add common Conan options (sqlite3 with FTS5, etc.)
@@ -295,111 +295,111 @@ CONAN_ARGS+=(-o "sqlite3/*:fts5=True")
 
 # Fuzzing builds: disable programs in zstd to avoid symlink issues in Docker
 if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  CONAN_ARGS+=(-o "zstd/*:build_programs=False")
+	CONAN_ARGS+=(-o "zstd/*:build_programs=False")
 fi
 
 # Add extra Conan options from environment (for CI)
 if [[ -n "${CONAN_EXTRA_OPTIONS}" ]]; then
-  # shellcheck disable=SC2086
-  read -ra EXTRA_OPTS <<< "${CONAN_EXTRA_OPTIONS}"
-  CONAN_ARGS+=("${EXTRA_OPTS[@]}")
-  echo "Extra Conan options: ${CONAN_EXTRA_OPTIONS}"
+	# shellcheck disable=SC2086
+	read -ra EXTRA_OPTS <<<"${CONAN_EXTRA_OPTIONS}"
+	CONAN_ARGS+=("${EXTRA_OPTS[@]}")
+	echo "Extra Conan options: ${CONAN_EXTRA_OPTIONS}"
 fi
 
 detect_version() {
-  local bin="$1"
-  if command -v "${bin}" >/dev/null 2>&1; then
-    if "${bin}" -dumpfullversion >/dev/null 2>&1; then
-      "${bin}" -dumpfullversion
-    elif "${bin}" -dumpversion >/dev/null 2>&1; then
-      "${bin}" -dumpversion
-    else
-      "${bin}" --version | head -n1 | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1
-    fi
-  fi
+	local bin="$1"
+	if command -v "${bin}" >/dev/null 2>&1; then
+		if "${bin}" -dumpfullversion >/dev/null 2>&1; then
+			"${bin}" -dumpfullversion
+		elif "${bin}" -dumpversion >/dev/null 2>&1; then
+			"${bin}" -dumpversion
+		else
+			"${bin}" --version | head -n1 | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1
+		fi
+	fi
 }
 
 COERCE_MAJOR() {
-  echo "$1" | cut -d. -f1
+	echo "$1" | cut -d. -f1
 }
 
 COMPILER_OVERRIDE=${YAMS_COMPILER:-}
 
 # When using explicit profile, skip auto-detection of compiler settings
 if [[ "${USE_PROFILE}" == "true" ]]; then
-  echo "Skipping compiler auto-detection (using profile: ${CONAN_HOST_PROFILE})"
-  # Still set CC/CXX for Meson if not already set
-  if [[ -z "${CC:-}" ]] && command -v clang >/dev/null 2>&1; then
-    export CC="clang"
-    export CXX="clang++"
-  elif [[ -z "${CC:-}" ]] && command -v gcc >/dev/null 2>&1; then
-    export CC="gcc"
-    export CXX="g++"
-  fi
-  # Add profile to Conan args
-  CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b default)
-  CONAN_ARGS+=(-s:h "build_type=${BUILD_TYPE}")
-  CONAN_ARGS+=(-s:h "compiler.cppstd=${CPPSTD}")
-  # Add architecture if specified
-  if [[ -n "${CONAN_ARCH}" ]]; then
-    CONAN_ARGS+=(-s:h "arch=${CONAN_ARCH}")
-    echo "Target architecture: ${CONAN_ARCH}"
-  fi
+	echo "Skipping compiler auto-detection (using profile: ${CONAN_HOST_PROFILE})"
+	# Still set CC/CXX for Meson if not already set
+	if [[ -z "${CC:-}" ]] && command -v clang >/dev/null 2>&1; then
+		export CC="clang"
+		export CXX="clang++"
+	elif [[ -z "${CC:-}" ]] && command -v gcc >/dev/null 2>&1; then
+		export CC="gcc"
+		export CXX="g++"
+	fi
+	# Add profile to Conan args
+	CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b default)
+	CONAN_ARGS+=(-s:h "build_type=${BUILD_TYPE}")
+	CONAN_ARGS+=(-s:h "compiler.cppstd=${CPPSTD}")
+	# Add architecture if specified
+	if [[ -n "${CONAN_ARCH}" ]]; then
+		CONAN_ARGS+=(-s:h "arch=${CONAN_ARCH}")
+		echo "Target architecture: ${CONAN_ARCH}"
+	fi
 else
-  # Auto-detection mode (original behavior)
-  if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] && command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; }; then
-    echo "--- Using Clang toolchain ---"
-    export CC="clang"
-    export CXX="clang++"
-    # macOS requires libc++, Linux can use libstdc++11
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      LIBCXX="libc++"
-    else
-      LIBCXX="libstdc++11"
-    fi
-    CLANG_VERSION=$(detect_version clang++)
-    CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
-    if [[ -z "${CLANG_MAJOR}" || "${CLANG_MAJOR}" == 0 ]]; then
-      echo "Unable to detect clang version." >&2
-      exit 1
-    fi
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      # On macOS use Conan's apple-clang compiler model
-      CONAN_ARGS+=(
-        -s "compiler=apple-clang"
-        -s "compiler.version=${CLANG_MAJOR}"
-        -s "compiler.libcxx=${LIBCXX}"
-        -s "compiler.cppstd=${CPPSTD}"
-      )
-    else
-      CONAN_ARGS+=(
-        -s "compiler=clang"
-        -s "compiler.version=${CLANG_MAJOR}"
-        -s "compiler.libcxx=${LIBCXX}"
-        -s "compiler.cppstd=${CPPSTD}"
-      )
-    fi
-  else
-    echo "--- Using GCC toolchain ---"
-    export CC="gcc"
-    export CXX="g++"
-    if ! command -v g++ >/dev/null 2>&1; then
-      echo "g++ not found in PATH." >&2
-      exit 1
-    fi
-    GCC_VERSION=$(detect_version g++)
-    GCC_MAJOR=$(COERCE_MAJOR "${GCC_VERSION:-0}")
-    if [[ -z "${GCC_MAJOR}" || "${GCC_MAJOR}" == 0 ]]; then
-      echo "Unable to detect gcc version." >&2
-      exit 1
-    fi
-    CONAN_ARGS+=(
-      -s "compiler=gcc"
-      -s "compiler.version=${GCC_MAJOR}"
-      -s "compiler.libcxx=libstdc++11"
-      -s "compiler.cppstd=${CPPSTD}"
-    )
-  fi
+	# Auto-detection mode (original behavior)
+	if [[ "${COMPILER_OVERRIDE}" == clang ]] || { [[ -z "${COMPILER_OVERRIDE}" ]] && command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; }; then
+		echo "--- Using Clang toolchain ---"
+		export CC="clang"
+		export CXX="clang++"
+		# macOS requires libc++, Linux can use libstdc++11
+		if [[ "$(uname -s)" == "Darwin" ]]; then
+			LIBCXX="libc++"
+		else
+			LIBCXX="libstdc++11"
+		fi
+		CLANG_VERSION=$(detect_version clang++)
+		CLANG_MAJOR=$(COERCE_MAJOR "${CLANG_VERSION:-0}")
+		if [[ -z "${CLANG_MAJOR}" || "${CLANG_MAJOR}" == 0 ]]; then
+			echo "Unable to detect clang version." >&2
+			exit 1
+		fi
+		if [[ "$(uname -s)" == "Darwin" ]]; then
+			# On macOS use Conan's apple-clang compiler model
+			CONAN_ARGS+=(
+				-s "compiler=apple-clang"
+				-s "compiler.version=${CLANG_MAJOR}"
+				-s "compiler.libcxx=${LIBCXX}"
+				-s "compiler.cppstd=${CPPSTD}"
+			)
+		else
+			CONAN_ARGS+=(
+				-s "compiler=clang"
+				-s "compiler.version=${CLANG_MAJOR}"
+				-s "compiler.libcxx=${LIBCXX}"
+				-s "compiler.cppstd=${CPPSTD}"
+			)
+		fi
+	else
+		echo "--- Using GCC toolchain ---"
+		export CC="gcc"
+		export CXX="g++"
+		if ! command -v g++ >/dev/null 2>&1; then
+			echo "g++ not found in PATH." >&2
+			exit 1
+		fi
+		GCC_VERSION=$(detect_version g++)
+		GCC_MAJOR=$(COERCE_MAJOR "${GCC_VERSION:-0}")
+		if [[ -z "${GCC_MAJOR}" || "${GCC_MAJOR}" == 0 ]]; then
+			echo "Unable to detect gcc version." >&2
+			exit 1
+		fi
+		CONAN_ARGS+=(
+			-s "compiler=gcc"
+			-s "compiler.version=${GCC_MAJOR}"
+			-s "compiler.libcxx=libstdc++11"
+			-s "compiler.cppstd=${CPPSTD}"
+		)
+	fi
 fi
 
 # Wrap CC/CXX with ccache if available for faster incremental builds.
@@ -407,40 +407,40 @@ fi
 # useful for CI environments where ccache interferes with Conan
 # dependency builds (e.g. OpenBLAS ASM compilation via CMake).
 if [[ "${YAMS_SKIP_CCACHE:-}" == "1" ]]; then
-  echo "--- Skipping ccache wrapper (YAMS_SKIP_CCACHE=1) ---"
+	echo "--- Skipping ccache wrapper (YAMS_SKIP_CCACHE=1) ---"
 elif command -v ccache >/dev/null 2>&1; then
-  echo "--- Enabling ccache for faster incremental builds ---"
-  # Only wrap if not already wrapped
-  if [[ "${CC:-}" != ccache* ]]; then
-    export CC="ccache ${CC:-cc}"
-    export CXX="ccache ${CXX:-c++}"
-  fi
-  # Show ccache stats if verbose
-  ccache -s 2>/dev/null | head -5 || true
+	echo "--- Enabling ccache for faster incremental builds ---"
+	# Only wrap if not already wrapped
+	if [[ "${CC:-}" != ccache* ]]; then
+		export CC="ccache ${CC:-cc}"
+		export CXX="ccache ${CXX:-c++}"
+	fi
+	# Show ccache stats if verbose
+	ccache -s 2>/dev/null | head -5 || true
 fi
 
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
-  BUILD_DIR="build/profiling"
-  CONAN_SUBDIR="build-profiling"
-  # Conan often writes profiling/debug toolchains under a nested build-debug directory
-  CONAN_ALT_SUBDIR="build-debug"
-  BUILD_TYPE_MESON_LOWER="debug"
+	BUILD_DIR="build/profiling"
+	CONAN_SUBDIR="build-profiling"
+	# Conan often writes profiling/debug toolchains under a nested build-debug directory
+	CONAN_ALT_SUBDIR="build-debug"
+	BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  BUILD_DIR="build/fuzzing"
-  CONAN_SUBDIR="build-fuzzing"
-  BUILD_TYPE_MESON_LOWER="debug"
+	BUILD_DIR="build/fuzzing"
+	CONAN_SUBDIR="build-fuzzing"
+	BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
-  BUILD_DIR="builddir"
-  CONAN_SUBDIR="build-debug"
-  BUILD_TYPE_MESON_LOWER="debug"
+	BUILD_DIR="builddir"
+	CONAN_SUBDIR="build-debug"
+	BUILD_TYPE_MESON_LOWER="debug"
 else
-  BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
-  CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
-  BUILD_TYPE_MESON_LOWER="debugoptimized"
+	BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
+	CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
+	BUILD_TYPE_MESON_LOWER="debugoptimized"
 fi
 
 if [[ -n "${YAMS_BUILD_DIR:-}" ]]; then
-  BUILD_DIR="${YAMS_BUILD_DIR}"
+	BUILD_DIR="${YAMS_BUILD_DIR}"
 fi
 
 # Some Conan generators ignore --output-folder and always emit to build-<build_type>.
@@ -450,16 +450,16 @@ CONAN_ALT_DIR="${BUILD_DIR}/${CONAN_ALT_SUBDIR:-}"
 
 # Detect install prefix based on platform
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  # macOS: check for Homebrew installation
-  if command -v brew >/dev/null 2>&1; then
-    BREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/usr/local")
-    INSTALL_PREFIX="${BREW_PREFIX}"
-  else
-    INSTALL_PREFIX="/usr/local"
-  fi
+	# macOS: check for Homebrew installation
+	if command -v brew >/dev/null 2>&1; then
+		BREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/usr/local")
+		INSTALL_PREFIX="${BREW_PREFIX}"
+	else
+		INSTALL_PREFIX="/usr/local"
+	fi
 else
-  # Linux: use standard prefix
-  INSTALL_PREFIX="/usr/local"
+	# Linux: use standard prefix
+	INSTALL_PREFIX="/usr/local"
 fi
 
 # Allow override via environment
@@ -467,10 +467,10 @@ INSTALL_PREFIX="${YAMS_INSTALL_PREFIX:-${INSTALL_PREFIX}}"
 
 echo "Build Type:        ${BUILD_TYPE_INPUT}"
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
-  echo "Profiling:         Tracy enabled"
+	echo "Profiling:         Tracy enabled"
 fi
 if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  echo "Fuzzing:           AFL++/libFuzzer enabled"
+	echo "Fuzzing:           AFL++/libFuzzer enabled"
 fi
 echo "Build Dir:         ${BUILD_DIR}"
 echo "Install Prefix:    ${INSTALL_PREFIX}"
@@ -478,358 +478,371 @@ echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
 echo "Offline Mode:      ${ENABLE_OFFLINE}"
 echo "System Deps:       ${USE_SYSTEM_DEPS}"
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
-  echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
+	echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
 fi
 if [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
-  echo "Release Tests:     enabled (--with-tests)"
+	echo "Release Tests:     enabled (--with-tests)"
 fi
 
 if [[ "${USE_SYSTEM_DEPS}" != "true" ]]; then
-  echo "--- Exporting custom Conan recipes... ---"
+	echo "--- Exporting custom Conan recipes... ---"
 
-  # Export custom onnxruntime recipe if it exists
-  if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-    echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
-  elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
-    # Avoid sporadic Conan cache race/collision errors by retrying export once.
-    echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
-    if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
-      echo "Retrying conan export onnxruntime/1.23.0..."
-      conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
-    fi
-  fi
+	# Export custom onnxruntime recipe if it exists
+	if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+		echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
+	elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
+		# Avoid sporadic Conan cache race/collision errors by retrying export once.
+		echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
+		if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
+			echo "Retrying conan export onnxruntime/1.23.0..."
+			conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
+		fi
+	fi
 
-  echo "--- Running conan install... ---"
-  # Add policy toolchain for legacy recipes if in Docker or CI
-  POLICY_TC=""
-  if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
-    POLICY_TC="/tmp/yams_policy_toolchain.cmake"
-    echo 'cmake_policy(VERSION 3.5)' > "$POLICY_TC"
-    CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
-  fi
+	echo "--- Running conan install... ---"
+	# Add policy toolchain for legacy recipes if in Docker or CI
+	POLICY_TC=""
+	if [[ -n "${DOCKERFILE_CONF_REV:-}" ]] || [[ -n "${CI:-}" ]]; then
+		POLICY_TC="/tmp/yams_policy_toolchain.cmake"
+		echo 'cmake_policy(VERSION 3.5)' >"$POLICY_TC"
+		CONAN_ARGS+=(-c "tools.cmake.cmaketoolchain:user_toolchain+=${POLICY_TC}")
+	fi
 fi
 
 # Enable tests for Debug builds in Conan (needed for Catch2/gtest dependencies)
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  CONAN_ARGS+=(-o "&:build_tests=True")
+	CONAN_ARGS+=(-o "&:build_tests=True")
 fi
 
 # Optionally enable tests in Conan for Release builds.
 if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
-  CONAN_ARGS+=(-o "&:build_tests=True")
+	CONAN_ARGS+=(-o "&:build_tests=True")
 fi
 
 # Enable Tracy profiling for profiling builds
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
-  echo "Tracy profiling enabled"
-  CONAN_ARGS+=(-o "yams/*:enable_profiling=True")
-  CONAN_ARGS+=(-o "tracy/*:enable=True")
+	echo "Tracy profiling enabled"
+	CONAN_ARGS+=(-o "yams/*:enable_profiling=True")
+	CONAN_ARGS+=(-o "tracy/*:enable=True")
 fi
 
 # Handle optional feature flags from environment
 if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-  echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
-  CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
+	echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
+	CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
 else
-  # --- Detect system-installed onnxruntime ---
-  # Override with YAMS_USE_SYSTEM_ONNX=true|false|auto (default: auto)
-  # When auto, we detect system onnxruntime and use it if found.
-  # Set YAMS_ONNX_PREFIX to override the detected prefix path.
-  USE_SYSTEM_ONNX="${YAMS_USE_SYSTEM_ONNX:-auto}"
-  SYSTEM_ONNX_PREFIX="${YAMS_ONNX_PREFIX:-}"
+	# --- Detect system-installed onnxruntime ---
+	# Override with YAMS_USE_SYSTEM_ONNX=true|false|auto (default: auto)
+	# When auto, we detect system onnxruntime and use it if found.
+	# Set YAMS_ONNX_PREFIX to override the detected prefix path.
+	USE_SYSTEM_ONNX="${YAMS_USE_SYSTEM_ONNX:-auto}"
+	SYSTEM_ONNX_PREFIX="${YAMS_ONNX_PREFIX:-}"
 
-  if [[ "${USE_SYSTEM_ONNX}" == "auto" ]]; then
-    # Auto-detect: check pkg-config, Homebrew, common paths
-    DETECTED_ONNX_PREFIX=""
+	if [[ "${USE_SYSTEM_ONNX}" == "auto" ]]; then
+		# Auto-detect: check pkg-config, Homebrew, common paths
+		DETECTED_ONNX_PREFIX=""
 
-    # 1) pkg-config
-    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
-      DETECTED_ONNX_PREFIX=$(pkg-config --variable=prefix onnxruntime 2>/dev/null || true)
-      if [[ -n "${DETECTED_ONNX_PREFIX}" && -d "${DETECTED_ONNX_PREFIX}" ]]; then
-        echo "System onnxruntime detected via pkg-config: ${DETECTED_ONNX_PREFIX}"
-      else
-        DETECTED_ONNX_PREFIX=""
-      fi
-    fi
+		# 1) pkg-config
+		if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
+			DETECTED_ONNX_PREFIX=$(pkg-config --variable=prefix onnxruntime 2>/dev/null || true)
+			if [[ -n "${DETECTED_ONNX_PREFIX}" && -d "${DETECTED_ONNX_PREFIX}" ]]; then
+				echo "System onnxruntime detected via pkg-config: ${DETECTED_ONNX_PREFIX}"
+			else
+				DETECTED_ONNX_PREFIX=""
+			fi
+		fi
 
-    # 2) Homebrew (macOS)
-    if [[ -z "${DETECTED_ONNX_PREFIX}" && "$(uname -s)" == "Darwin" ]]; then
-      if command -v brew >/dev/null 2>&1; then
-        BREW_ONNX_PREFIX=$(brew --prefix onnxruntime 2>/dev/null || true)
-        if [[ -n "${BREW_ONNX_PREFIX}" && -d "${BREW_ONNX_PREFIX}/lib" && -d "${BREW_ONNX_PREFIX}/include" ]]; then
-          # Verify it's actually installed (brew --prefix returns cellar path even if not installed)
-          if ls "${BREW_ONNX_PREFIX}"/lib/libonnxruntime* >/dev/null 2>&1; then
-            DETECTED_ONNX_PREFIX="${BREW_ONNX_PREFIX}"
-            echo "System onnxruntime detected via Homebrew: ${DETECTED_ONNX_PREFIX}"
-          fi
-        fi
-      fi
-    fi
+		# 2) Homebrew (macOS)
+		if [[ -z "${DETECTED_ONNX_PREFIX}" && "$(uname -s)" == "Darwin" ]]; then
+			if command -v brew >/dev/null 2>&1; then
+				BREW_ONNX_PREFIX=$(brew --prefix onnxruntime 2>/dev/null || true)
+				if [[ -n "${BREW_ONNX_PREFIX}" && -d "${BREW_ONNX_PREFIX}/lib" && -d "${BREW_ONNX_PREFIX}/include" ]]; then
+					# Verify it's actually installed (brew --prefix returns cellar path even if not installed)
+					if ls "${BREW_ONNX_PREFIX}"/lib/libonnxruntime* >/dev/null 2>&1; then
+						DETECTED_ONNX_PREFIX="${BREW_ONNX_PREFIX}"
+						echo "System onnxruntime detected via Homebrew: ${DETECTED_ONNX_PREFIX}"
+					fi
+				fi
+			fi
+		fi
 
-    # 3) Common system paths
-    if [[ -z "${DETECTED_ONNX_PREFIX}" ]]; then
-      for candidate_prefix in /opt/homebrew /usr/local /usr; do
-        if ls "${candidate_prefix}"/lib/libonnxruntime* >/dev/null 2>&1; then
-          # Check all known header layouts:
-          #   Flat:     include/onnxruntime_c_api.h  (prebuilt archives)
-          #   Homebrew: include/onnxruntime/onnxruntime_c_api.h  (brew)
-          #   Source:   include/onnxruntime/core/session/onnxruntime_c_api.h (apt/manual)
-          if [[ -f "${candidate_prefix}/include/onnxruntime_c_api.h" ]] || \
-             [[ -f "${candidate_prefix}/include/onnxruntime/onnxruntime_c_api.h" ]] || \
-             [[ -f "${candidate_prefix}/include/onnxruntime/core/session/onnxruntime_c_api.h" ]]; then
-            DETECTED_ONNX_PREFIX="${candidate_prefix}"
-            echo "System onnxruntime detected at: ${DETECTED_ONNX_PREFIX}"
-            break
-          fi
-        fi
-      done
-    fi
+		# 3) Common system paths
+		if [[ -z "${DETECTED_ONNX_PREFIX}" ]]; then
+			for candidate_prefix in /opt/homebrew /usr/local /usr; do
+				if ls "${candidate_prefix}"/lib/libonnxruntime* >/dev/null 2>&1; then
+					# Check all known header layouts:
+					#   Flat:     include/onnxruntime_c_api.h  (prebuilt archives)
+					#   Homebrew: include/onnxruntime/onnxruntime_c_api.h  (brew)
+					#   Source:   include/onnxruntime/core/session/onnxruntime_c_api.h (apt/manual)
+					if [[ -f "${candidate_prefix}/include/onnxruntime_c_api.h" ]] ||
+						[[ -f "${candidate_prefix}/include/onnxruntime/onnxruntime_c_api.h" ]] ||
+						[[ -f "${candidate_prefix}/include/onnxruntime/core/session/onnxruntime_c_api.h" ]]; then
+						DETECTED_ONNX_PREFIX="${candidate_prefix}"
+						echo "System onnxruntime detected at: ${DETECTED_ONNX_PREFIX}"
+						break
+					fi
+				fi
+			done
+		fi
 
-    if [[ -n "${DETECTED_ONNX_PREFIX}" ]]; then
-      USE_SYSTEM_ONNX="true"
-      SYSTEM_ONNX_PREFIX="${SYSTEM_ONNX_PREFIX:-${DETECTED_ONNX_PREFIX}}"
-    else
-      USE_SYSTEM_ONNX="false"
-    fi
-  fi
+		if [[ -n "${DETECTED_ONNX_PREFIX}" ]]; then
+			USE_SYSTEM_ONNX="true"
+			SYSTEM_ONNX_PREFIX="${SYSTEM_ONNX_PREFIX:-${DETECTED_ONNX_PREFIX}}"
+		else
+			USE_SYSTEM_ONNX="false"
+		fi
+	fi
 
-  if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
-    echo "Using system onnxruntime from: ${SYSTEM_ONNX_PREFIX}"
-    CONAN_ARGS+=(-o "onnxruntime/*:use_system=True")
-    if [[ -n "${SYSTEM_ONNX_PREFIX}" ]]; then
-      CONAN_ARGS+=(-o "onnxruntime/*:system_prefix=${SYSTEM_ONNX_PREFIX}")
-    fi
-    # Detect system onnxruntime version for informational purposes
-    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
-      SYS_ONNX_VERSION=$(pkg-config --modversion onnxruntime 2>/dev/null || true)
-      if [[ -n "${SYS_ONNX_VERSION}" ]]; then
-        echo "System onnxruntime version: ${SYS_ONNX_VERSION}"
-      fi
-    fi
-  fi
+	if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
+		echo "Using system onnxruntime from: ${SYSTEM_ONNX_PREFIX}"
+		CONAN_ARGS+=(-o "onnxruntime/*:use_system=True")
+		if [[ -n "${SYSTEM_ONNX_PREFIX}" ]]; then
+			CONAN_ARGS+=(-o "onnxruntime/*:system_prefix=${SYSTEM_ONNX_PREFIX}")
+		fi
+		# Detect system onnxruntime version for informational purposes
+		if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
+			SYS_ONNX_VERSION=$(pkg-config --modversion onnxruntime 2>/dev/null || true)
+			if [[ -n "${SYS_ONNX_VERSION}" ]]; then
+				echo "System onnxruntime version: ${SYS_ONNX_VERSION}"
+			fi
+		fi
+	fi
 
-  # Auto-detect GPU for ONNX acceleration (skip when using system onnxruntime)
-  # Override with YAMS_ONNX_GPU=cuda|coreml|migraphx|none
-  if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
-    echo "Skipping GPU auto-detection (using system onnxruntime)"
-    ONNX_GPU="none"  # System build has its own GPU support baked in
-  else
-  ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
-  if [[ "${ONNX_GPU}" == "auto" ]]; then
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      # macOS: CoreML is included in standard ONNX Runtime builds
-      ONNX_GPU="coreml"
-      echo "macOS detected: enabling CoreML GPU acceleration (Neural Engine + GPU)"
-    elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-      # NVIDIA GPU detected - now validate CUDA toolkit is actually available
-      # nvidia-smi presence alone doesn't guarantee CUDA runtime is usable
-      if command -v nvcc >/dev/null 2>&1; then
-        # nvcc is available (CUDA toolkit installed via package manager or CUDA SDK)
-        ONNX_GPU="cuda"
-        echo "NVIDIA GPU + CUDA toolkit (nvcc) detected: enabling CUDA acceleration"
-      elif [[ -f /usr/local/cuda/lib64/libcudart.so ]] || \
-           [[ -f /usr/local/cuda/lib/libcudart.so ]] || \
-           ldconfig -p 2>/dev/null | grep -q libcudart; then
-        # CUDA runtime library found (sufficient for inference, even without nvcc)
-        ONNX_GPU="cuda"
-        echo "NVIDIA GPU + CUDA runtime (libcudart) detected: enabling CUDA acceleration"
-      else
-        # GPU present but CUDA toolkit/runtime missing - use CPU to avoid runtime failures
-        ONNX_GPU="none"
-        echo "NVIDIA GPU detected but CUDA toolkit missing: using CPU-only ONNX Runtime"
-        echo "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
-      fi
-    elif [[ -d /opt/rocm ]] || command -v rocm-smi >/dev/null 2>&1; then
-      # ROCm detected - use MIGraphX (builds ONNX Runtime from source)
-      # Detect ROCm path
-      if [[ -d /opt/rocm ]]; then
-        ROCM_PATH="/opt/rocm"
-      elif command -v rocm-smi >/dev/null 2>&1; then
-        ROCM_PATH="$(dirname "$(dirname "$(command -v rocm-smi)")")"
-      fi
-      # Check if MIGraphX is installed (ROCm 7.x uses lib/migraphx/lib/)
-      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/migraphx/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/libmigraphx_c.so" ]]; then
-        ONNX_GPU="migraphx"
-        echo "ROCm + MIGraphX detected at ${ROCM_PATH}: enabling AMD GPU acceleration"
-        echo "  Note: ONNX Runtime will be built from source (takes ~20-30 minutes)"
+	# Auto-detect GPU for ONNX acceleration (skip when using system onnxruntime)
+	# Override with YAMS_ONNX_GPU=cuda|coreml|migraphx|none
+	if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
+		echo "Skipping GPU auto-detection (using system onnxruntime)"
+		ONNX_GPU="none" # System build has its own GPU support baked in
+	else
+		ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
+		if [[ "${ONNX_GPU}" == "auto" ]]; then
+			if [[ "$(uname -s)" == "Darwin" ]]; then
+				# macOS: CoreML is included in standard ONNX Runtime builds
+				ONNX_GPU="coreml"
+				echo "macOS detected: enabling CoreML GPU acceleration (Neural Engine + GPU)"
+			elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+				# NVIDIA GPU detected - now validate CUDA toolkit is actually available
+				# nvidia-smi presence alone doesn't guarantee CUDA runtime is usable
+				if command -v nvcc >/dev/null 2>&1; then
+					# nvcc is available (CUDA toolkit installed via package manager or CUDA SDK)
+					ONNX_GPU="cuda"
+					echo "NVIDIA GPU + CUDA toolkit (nvcc) detected: enabling CUDA acceleration"
+				elif [[ -f /usr/local/cuda/lib64/libcudart.so ]] ||
+					[[ -f /usr/local/cuda/lib/libcudart.so ]] ||
+					ldconfig -p 2>/dev/null | grep -q libcudart; then
+					# CUDA runtime library found (sufficient for inference, even without nvcc)
+					ONNX_GPU="cuda"
+					echo "NVIDIA GPU + CUDA runtime (libcudart) detected: enabling CUDA acceleration"
+				else
+					# GPU present but CUDA toolkit/runtime missing - use CPU to avoid runtime failures
+					ONNX_GPU="none"
+					echo "NVIDIA GPU detected but CUDA toolkit missing: using CPU-only ONNX Runtime"
+					echo "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
+				fi
+			elif [[ -d /opt/rocm ]] || command -v rocm-smi >/dev/null 2>&1; then
+				# ROCm detected - use MIGraphX (builds ONNX Runtime from source)
+				# Detect ROCm path
+				if [[ -d /opt/rocm ]]; then
+					ROCM_PATH="/opt/rocm"
+				elif command -v rocm-smi >/dev/null 2>&1; then
+					ROCM_PATH="$(dirname "$(dirname "$(command -v rocm-smi)")")"
+				fi
+				# Check if MIGraphX is installed (ROCm 7.x uses lib/migraphx/lib/)
+				if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/migraphx/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/libmigraphx_c.so" ]]; then
+					ONNX_GPU="migraphx"
+					echo "ROCm + MIGraphX detected at ${ROCM_PATH}: enabling AMD GPU acceleration"
+					echo "  Note: ONNX Runtime will be built from source (takes ~20-30 minutes)"
 
-        # Auto-detect GPU architecture using rocminfo (with timeout in case of permission issues)
-        if [[ -z "${YAMS_ROCM_GPU_TARGETS:-}" ]] && command -v rocminfo >/dev/null 2>&1; then
-          DETECTED_TARGETS=$(timeout 5 rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//' || true)
-          if [[ -n "${DETECTED_TARGETS}" ]]; then
-            export YAMS_ROCM_GPU_TARGETS="${DETECTED_TARGETS}"
-            echo "  Auto-detected GPU target(s): ${DETECTED_TARGETS}"
-          else
-            echo "  Could not auto-detect GPU targets (rocminfo failed or no permission)"
-            echo "  Set YAMS_ROCM_GPU_TARGETS manually if needed (e.g., gfx1100 for RX 7900)"
-          fi
-        fi
-      else
-        ONNX_GPU="none"
-        echo "ROCm detected at ${ROCM_PATH} but MIGraphX not found"
-        echo "  Using CPU-only ONNX Runtime"
-        echo "  Install MIGraphX for GPU acceleration: https://github.com/ROCm/AMDMIGraphX"
-      fi
-    else
-      ONNX_GPU="none"
-      echo "No GPU detected: using CPU-only ONNX Runtime"
-    fi
-  fi
-  fi  # end: skip GPU detection for system onnxruntime
+					# Auto-detect GPU architecture using rocminfo (with timeout in case of permission issues)
+					if [[ -z "${YAMS_ROCM_GPU_TARGETS:-}" ]] && command -v rocminfo >/dev/null 2>&1; then
+						DETECTED_TARGETS=$(timeout 5 rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//' || true)
+						if [[ -n "${DETECTED_TARGETS}" ]]; then
+							export YAMS_ROCM_GPU_TARGETS="${DETECTED_TARGETS}"
+							echo "  Auto-detected GPU target(s): ${DETECTED_TARGETS}"
+						else
+							echo "  Could not auto-detect GPU targets (rocminfo failed or no permission)"
+							echo "  Set YAMS_ROCM_GPU_TARGETS manually if needed (e.g., gfx1100 for RX 7900)"
+						fi
+					fi
+				else
+					ONNX_GPU="none"
+					echo "ROCm detected at ${ROCM_PATH} but MIGraphX not found"
+					echo "  Using CPU-only ONNX Runtime"
+					echo "  Install MIGraphX for GPU acceleration: https://github.com/ROCm/AMDMIGraphX"
+				fi
+			else
+				ONNX_GPU="none"
+				echo "No GPU detected: using CPU-only ONNX Runtime"
+			fi
+		fi
+	fi # end: skip GPU detection for system onnxruntime
 
-  # Handle MIGraphX-specific options (only for non-system builds)
-  if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" == "migraphx" ]]; then
-    # Set ROCm path for conan (use detected path or environment override)
-    ROCM_PATH="${YAMS_ROCM_PATH:-${ROCM_PATH:-/opt/rocm}}"
-    if [[ ! -d "${ROCM_PATH}" ]]; then
-      echo "ERROR: ROCm not found at ${ROCM_PATH}" >&2
-      echo "  Set YAMS_ROCM_PATH to your ROCm installation path" >&2
-      exit 1
-    fi
-    CONAN_ARGS+=(-o "onnxruntime/*:rocm_path=${ROCM_PATH}")
-    echo "ROCm path: ${ROCM_PATH}"
+	# Handle MIGraphX-specific options (only for non-system builds)
+	if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" == "migraphx" ]]; then
+		# Set ROCm path for conan (use detected path or environment override)
+		ROCM_PATH="${YAMS_ROCM_PATH:-${ROCM_PATH:-/opt/rocm}}"
+		if [[ ! -d "${ROCM_PATH}" ]]; then
+			echo "ERROR: ROCm not found at ${ROCM_PATH}" >&2
+			echo "  Set YAMS_ROCM_PATH to your ROCm installation path" >&2
+			exit 1
+		fi
+		CONAN_ARGS+=(-o "onnxruntime/*:rocm_path=${ROCM_PATH}")
+		echo "ROCm path: ${ROCM_PATH}"
 
-    # Pass GPU targets if specified
-    if [[ -n "${YAMS_ROCM_GPU_TARGETS:-}" ]]; then
-      echo "ROCm GPU targets: ${YAMS_ROCM_GPU_TARGETS}"
-    fi
-  fi
+		# Pass GPU targets if specified
+		if [[ -n "${YAMS_ROCM_GPU_TARGETS:-}" ]]; then
+			echo "ROCm GPU targets: ${YAMS_ROCM_GPU_TARGETS}"
+		fi
+	fi
 
-  if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" != "none" ]]; then
-    CONAN_ARGS+=(-o "onnxruntime/*:with_gpu=${ONNX_GPU}")
-    echo "ONNX GPU provider: ${ONNX_GPU}"
-  fi
+	if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" != "none" ]]; then
+		CONAN_ARGS+=(-o "onnxruntime/*:with_gpu=${ONNX_GPU}")
+		echo "ONNX GPU provider: ${ONNX_GPU}"
+	fi
 fi
 
 if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
-  echo "Symbol extraction disabled (YAMS_DISABLE_SYMBOL_EXTRACTION=true)"
-  CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
+	echo "Symbol extraction disabled (YAMS_DISABLE_SYMBOL_EXTRACTION=true)"
+	CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
 fi
 
 if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
-  echo "RE2 disabled (YAMS_DISABLE_RE2=true)"
-  CONAN_ARGS+=(-o "yams/*:enable_re2=False")
+	echo "RE2 disabled (YAMS_DISABLE_RE2=true)"
+	CONAN_ARGS+=(-o "yams/*:enable_re2=False")
 fi
 
 MESON_TOOLCHAIN_ARG=""
 MESON_TOOLCHAIN_FILE=""
 MESON_NATIVE_FILE_OVERRIDE="${YAMS_MESON_NATIVE_FILE:-}"
 MESON_CROSS_FILE_OVERRIDE="${YAMS_MESON_CROSS_FILE:-}"
+MESON_EXTRA_NATIVE_FILES=()
+
+if [[ -n "${YAMS_EXTRA_MESON_NATIVE_FILES:-}" ]]; then
+	IFS=':' read -r -a RAW_EXTRA_NATIVE_FILES <<<"${YAMS_EXTRA_MESON_NATIVE_FILES}"
+	for extra_native_file in "${RAW_EXTRA_NATIVE_FILES[@]}"; do
+		[[ -z "${extra_native_file}" ]] && continue
+		if [[ ! -f "${extra_native_file}" ]]; then
+			echo "Error: Extra Meson native file not found: ${extra_native_file}" >&2
+			exit 1
+		fi
+		MESON_EXTRA_NATIVE_FILES+=("${extra_native_file}")
+	done
+fi
 
 if [[ -n "${MESON_NATIVE_FILE_OVERRIDE}" && -n "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
-  echo "Error: Set only one of YAMS_MESON_NATIVE_FILE or YAMS_MESON_CROSS_FILE." >&2
-  exit 1
+	echo "Error: Set only one of YAMS_MESON_NATIVE_FILE or YAMS_MESON_CROSS_FILE." >&2
+	exit 1
 fi
 
 if [[ -n "${MESON_NATIVE_FILE_OVERRIDE}" ]]; then
-  if [[ ! -f "${MESON_NATIVE_FILE_OVERRIDE}" ]]; then
-    echo "Error: Meson native file not found: ${MESON_NATIVE_FILE_OVERRIDE}" >&2
-    exit 1
-  fi
-  MESON_TOOLCHAIN_ARG="--native-file"
-  MESON_TOOLCHAIN_FILE="${MESON_NATIVE_FILE_OVERRIDE}"
+	if [[ ! -f "${MESON_NATIVE_FILE_OVERRIDE}" ]]; then
+		echo "Error: Meson native file not found: ${MESON_NATIVE_FILE_OVERRIDE}" >&2
+		exit 1
+	fi
+	MESON_TOOLCHAIN_ARG="--native-file"
+	MESON_TOOLCHAIN_FILE="${MESON_NATIVE_FILE_OVERRIDE}"
 elif [[ -n "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
-  if [[ ! -f "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
-    echo "Error: Meson cross file not found: ${MESON_CROSS_FILE_OVERRIDE}" >&2
-    exit 1
-  fi
-  MESON_TOOLCHAIN_ARG="--cross-file"
-  MESON_TOOLCHAIN_FILE="${MESON_CROSS_FILE_OVERRIDE}"
+	if [[ ! -f "${MESON_CROSS_FILE_OVERRIDE}" ]]; then
+		echo "Error: Meson cross file not found: ${MESON_CROSS_FILE_OVERRIDE}" >&2
+		exit 1
+	fi
+	MESON_TOOLCHAIN_ARG="--cross-file"
+	MESON_TOOLCHAIN_FILE="${MESON_CROSS_FILE_OVERRIDE}"
 fi
 
 if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
-  echo "--- Skipping Conan install (system dependency mode) ---"
+	echo "--- Skipping Conan install (system dependency mode) ---"
 else
-  # Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
-  conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
+	# Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
+	conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
 
-  # Check for either native or cross file (Conan generates cross file for cross-compilation)
-  # Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
-  # ${BUILD_DIR}. Probe primary, then CONAN_GENERATED_DIR, then the legacy root, then CONAN_ALT_DIR.
-  NATIVE_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
-  CROSS_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
-  NATIVE_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_native.ini"
-  CROSS_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_cross.ini"
-  NATIVE_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_native.ini"
-  CROSS_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_cross.ini"
-  NATIVE_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_native.ini"
-  CROSS_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_cross.ini"
+	# Check for either native or cross file (Conan generates cross file for cross-compilation)
+	# Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
+	# ${BUILD_DIR}. Probe primary, then CONAN_GENERATED_DIR, then the legacy root, then CONAN_ALT_DIR.
+	NATIVE_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_native.ini"
+	CROSS_FILE_PRIMARY="${BUILD_DIR}/${CONAN_SUBDIR}/conan/conan_meson_cross.ini"
+	NATIVE_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_native.ini"
+	CROSS_FILE_SECONDARY="${CONAN_GENERATED_DIR}/conan/conan_meson_cross.ini"
+	NATIVE_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_native.ini"
+	CROSS_FILE_TERTIARY="${BUILD_DIR}/conan/conan_meson_cross.ini"
+	NATIVE_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_native.ini"
+	CROSS_FILE_QUAT="${CONAN_ALT_DIR}/conan/conan_meson_cross.ini"
 
-  if [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_PRIMARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--native-file"
-    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_PRIMARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_PRIMARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--cross-file"
-    MESON_TOOLCHAIN_FILE="${CROSS_FILE_PRIMARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_SECONDARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--native-file"
-    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_SECONDARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_SECONDARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--cross-file"
-    MESON_TOOLCHAIN_FILE="${CROSS_FILE_SECONDARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_TERTIARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--native-file"
-    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_TERTIARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_TERTIARY}" ]]; then
-    MESON_TOOLCHAIN_ARG="--cross-file"
-    MESON_TOOLCHAIN_FILE="${CROSS_FILE_TERTIARY}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${NATIVE_FILE_QUAT}" ]]; then
-    MESON_TOOLCHAIN_ARG="--native-file"
-    MESON_TOOLCHAIN_FILE="${NATIVE_FILE_QUAT}"
-  elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${CROSS_FILE_QUAT}" ]]; then
-    MESON_TOOLCHAIN_ARG="--cross-file"
-    MESON_TOOLCHAIN_FILE="${CROSS_FILE_QUAT}"
-  fi
+	if [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_PRIMARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--native-file"
+		MESON_TOOLCHAIN_FILE="${NATIVE_FILE_PRIMARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_PRIMARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--cross-file"
+		MESON_TOOLCHAIN_FILE="${CROSS_FILE_PRIMARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_SECONDARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--native-file"
+		MESON_TOOLCHAIN_FILE="${NATIVE_FILE_SECONDARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_SECONDARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--cross-file"
+		MESON_TOOLCHAIN_FILE="${CROSS_FILE_SECONDARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${NATIVE_FILE_TERTIARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--native-file"
+		MESON_TOOLCHAIN_FILE="${NATIVE_FILE_TERTIARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -f "${CROSS_FILE_TERTIARY}" ]]; then
+		MESON_TOOLCHAIN_ARG="--cross-file"
+		MESON_TOOLCHAIN_FILE="${CROSS_FILE_TERTIARY}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${NATIVE_FILE_QUAT}" ]]; then
+		MESON_TOOLCHAIN_ARG="--native-file"
+		MESON_TOOLCHAIN_FILE="${NATIVE_FILE_QUAT}"
+	elif [[ -z "${MESON_TOOLCHAIN_ARG}" && -n "${CONAN_ALT_DIR}" && -f "${CROSS_FILE_QUAT}" ]]; then
+		MESON_TOOLCHAIN_ARG="--cross-file"
+		MESON_TOOLCHAIN_FILE="${CROSS_FILE_QUAT}"
+	fi
 
-  if [[ -z "${MESON_TOOLCHAIN_ARG}" ]]; then
-    echo "Error: Conan meson toolchain file not found" >&2
-    echo "Checked: ${NATIVE_FILE_PRIMARY}" >&2
-    echo "     and: ${CROSS_FILE_PRIMARY}" >&2
-    echo "     and: ${NATIVE_FILE_SECONDARY}" >&2
-    echo "     and: ${CROSS_FILE_SECONDARY}" >&2
-    echo "     and: ${NATIVE_FILE_TERTIARY}" >&2
-    echo "     and: ${CROSS_FILE_TERTIARY}" >&2
-    if [[ -n "${CONAN_ALT_DIR}" ]]; then
-      echo "     and: ${NATIVE_FILE_QUAT}" >&2
-      echo "     and: ${CROSS_FILE_QUAT}" >&2
-    fi
-    echo "Please check the output path from 'conan install'." >&2
-    exit 1
-  fi
+	if [[ -z "${MESON_TOOLCHAIN_ARG}" ]]; then
+		echo "Error: Conan meson toolchain file not found" >&2
+		echo "Checked: ${NATIVE_FILE_PRIMARY}" >&2
+		echo "     and: ${CROSS_FILE_PRIMARY}" >&2
+		echo "     and: ${NATIVE_FILE_SECONDARY}" >&2
+		echo "     and: ${CROSS_FILE_SECONDARY}" >&2
+		echo "     and: ${NATIVE_FILE_TERTIARY}" >&2
+		echo "     and: ${CROSS_FILE_TERTIARY}" >&2
+		if [[ -n "${CONAN_ALT_DIR}" ]]; then
+			echo "     and: ${NATIVE_FILE_QUAT}" >&2
+			echo "     and: ${CROSS_FILE_QUAT}" >&2
+		fi
+		echo "Please check the output path from 'conan install'." >&2
+		exit 1
+	fi
 
-  CONAN_TOOLCHAIN_DIR="$(cd "$(dirname "${MESON_TOOLCHAIN_FILE}")" && pwd)"
-  CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
-  if [[ -f "${CONAN_BUILD_ENV}" ]]; then
-    # Activate Conan's build-machine tools before Meson configure so cross-build
-    # generators resolve native utilities like protoc from the Conan graph.
-    # Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
-    # that are unset in minimal environments like Docker; disable nounset temporarily.
-    for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
-        DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
-      if [[ -z "${!maybe_unset_var+x}" ]]; then
-        export "${maybe_unset_var}="
-      fi
-    done
-    # shellcheck disable=SC1090
-    set +u
-    source "${CONAN_BUILD_ENV}"
-    set -u
-  fi
+	CONAN_TOOLCHAIN_DIR="$(cd "$(dirname "${MESON_TOOLCHAIN_FILE}")" && pwd)"
+	CONAN_BUILD_ENV="${CONAN_TOOLCHAIN_DIR}/conanbuild.sh"
+	if [[ -f "${CONAN_BUILD_ENV}" ]]; then
+		# Activate Conan's build-machine tools before Meson configure so cross-build
+		# generators resolve native utilities like protoc from the Conan graph.
+		# Conan-generated env scripts may reference variables (e.g. ACLOCAL_PATH)
+		# that are unset in minimal environments like Docker; disable nounset temporarily.
+		for maybe_unset_var in ACLOCAL_PATH PKG_CONFIG_PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH \
+			DYLD_FALLBACK_LIBRARY_PATH LIBRARY_PATH CMAKE_PREFIX_PATH MANPATH; do
+			if [[ -z "${!maybe_unset_var+x}" ]]; then
+				export "${maybe_unset_var}="
+			fi
+		done
+		# shellcheck disable=SC1090
+		set +u
+		source "${CONAN_BUILD_ENV}"
+		set -u
+	fi
 
-  # Export BOOST_ROOT so meson's auto-detect Boost dep finds the Conan-installed
-  # Boost on platforms with no system Boost (Windows). Read prefix= directly
-  # from Conan's boost.pc — that file's location is the same dir holding
-  # CONAN_BUILD_ENV.
-  if [[ -z "${BOOST_ROOT:-}" ]]; then
-    BOOST_PC="${CONAN_TOOLCHAIN_DIR:-}/boost.pc"
-    if [[ -f "${BOOST_PC}" ]]; then
-      BOOST_ROOT_CANDIDATE=$(awk -F= '/^prefix[[:space:]]*=/ { print $2; exit }' "${BOOST_PC}")
-      if [[ -n "${BOOST_ROOT_CANDIDATE}" && -d "${BOOST_ROOT_CANDIDATE}/include/boost" ]]; then
-        export BOOST_ROOT="${BOOST_ROOT_CANDIDATE}"
-        echo "BOOST_ROOT set to: ${BOOST_ROOT}"
-      fi
-    fi
-  fi
+	# Export BOOST_ROOT so meson's auto-detect Boost dep finds the Conan-installed
+	# Boost on platforms with no system Boost (Windows). Read prefix= directly
+	# from Conan's boost.pc — that file's location is the same dir holding
+	# CONAN_BUILD_ENV.
+	if [[ -z "${BOOST_ROOT:-}" ]]; then
+		BOOST_PC="${CONAN_TOOLCHAIN_DIR:-}/boost.pc"
+		if [[ -f "${BOOST_PC}" ]]; then
+			BOOST_ROOT_CANDIDATE=$(awk -F= '/^prefix[[:space:]]*=/ { print $2; exit }' "${BOOST_PC}")
+			if [[ -n "${BOOST_ROOT_CANDIDATE}" && -d "${BOOST_ROOT_CANDIDATE}/include/boost" ]]; then
+				export BOOST_ROOT="${BOOST_ROOT_CANDIDATE}"
+				echo "BOOST_ROOT set to: ${BOOST_ROOT}"
+			fi
+		fi
+	fi
 fi
 YAMS_PROTOC_PATH="${YAMS_PROTOC_PATH:-}"
 
@@ -838,9 +851,9 @@ ACTIVE_MESON_BIN="$(command_path_or_empty meson)"
 ACTIVE_NINJA_BIN="$(command_path_or_empty ninja)"
 CONAN_TOOLS_OVERRIDE=false
 if [[ -f "${CONAN_BUILD_ENV:-}" ]]; then
-  MESON_WRAPPER_PATH="${BUILD_DIR}/mesonw"
-  CONAN_BUILD_ENV_ESCAPED=$(printf '%q' "${CONAN_BUILD_ENV}")
-  cat >"${MESON_WRAPPER_PATH}" <<EOF
+	MESON_WRAPPER_PATH="${BUILD_DIR}/mesonw"
+	CONAN_BUILD_ENV_ESCAPED=$(printf '%q' "${CONAN_BUILD_ENV}")
+	cat >"${MESON_WRAPPER_PATH}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 CONAN_BUILD_ENV=${CONAN_BUILD_ENV_ESCAPED}
@@ -858,308 +871,314 @@ if [[ -f "\${CONAN_BUILD_ENV}" ]]; then
 fi
 exec meson "\$@"
 EOF
-  chmod +x "${MESON_WRAPPER_PATH}"
+	chmod +x "${MESON_WRAPPER_PATH}"
 
-  if [[ "${ACTIVE_MESON_BIN}" != "${INITIAL_MESON_BIN}" || "${ACTIVE_NINJA_BIN}" != "${INITIAL_NINJA_BIN}" ]]; then
-    CONAN_TOOLS_OVERRIDE=true
-  fi
+	if [[ "${ACTIVE_MESON_BIN}" != "${INITIAL_MESON_BIN}" || "${ACTIVE_NINJA_BIN}" != "${INITIAL_NINJA_BIN}" ]]; then
+		CONAN_TOOLS_OVERRIDE=true
+	fi
 fi
 
 MESON_ARGS=(
-  "${BUILD_DIR}"
-  "--prefix" "${INSTALL_PREFIX}"
-  "--buildtype" "${BUILD_TYPE_MESON_LOWER}"
+	"${BUILD_DIR}"
+	"--prefix" "${INSTALL_PREFIX}"
+	"--buildtype" "${BUILD_TYPE_MESON_LOWER}"
 )
 
 if [[ -n "${MESON_TOOLCHAIN_ARG}" ]]; then
-  MESON_ARGS+=("${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}")
+	MESON_ARGS+=("${MESON_TOOLCHAIN_ARG}" "${MESON_TOOLCHAIN_FILE}")
+fi
+
+if [[ ${#MESON_EXTRA_NATIVE_FILES[@]} -gt 0 ]]; then
+	for extra_native_file in "${MESON_EXTRA_NATIVE_FILES[@]}"; do
+		MESON_ARGS+=("--native-file" "${extra_native_file}")
+	done
 fi
 
 MESON_WRAP_MODE="${YAMS_MESON_WRAP_MODE:-}"
 if [[ -z "${MESON_WRAP_MODE}" ]]; then
-  if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
-    MESON_WRAP_MODE="nofallback"
-  elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
-    MESON_WRAP_MODE="nodownload"
-  else
-    MESON_WRAP_MODE="default"
-  fi
+	if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
+		MESON_WRAP_MODE="nofallback"
+	elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
+		MESON_WRAP_MODE="nodownload"
+	else
+		MESON_WRAP_MODE="default"
+	fi
 fi
 
 if [[ "${MESON_WRAP_MODE}" != "default" ]]; then
-  MESON_ARGS+=("--wrap-mode" "${MESON_WRAP_MODE}")
+	MESON_ARGS+=("--wrap-mode" "${MESON_WRAP_MODE}")
 fi
 
 if [[ -n "${YAMS_PKG_CONFIG_PATH:-}" ]]; then
-  MESON_ARGS+=("--pkg-config-path" "${YAMS_PKG_CONFIG_PATH}")
+	MESON_ARGS+=("--pkg-config-path" "${YAMS_PKG_CONFIG_PATH}")
 fi
 
 if [[ -n "${YAMS_BUILD_PKG_CONFIG_PATH:-}" ]]; then
-  MESON_ARGS+=("--build.pkg-config-path" "${YAMS_BUILD_PKG_CONFIG_PATH}")
+	MESON_ARGS+=("--build.pkg-config-path" "${YAMS_BUILD_PKG_CONFIG_PATH}")
 fi
 
 if [[ -n "${YAMS_CMAKE_PREFIX_PATH:-}" ]]; then
-  MESON_ARGS+=("--cmake-prefix-path" "${YAMS_CMAKE_PREFIX_PATH}")
+	MESON_ARGS+=("--cmake-prefix-path" "${YAMS_CMAKE_PREFIX_PATH}")
 fi
 
 if [[ -n "${YAMS_BUILD_CMAKE_PREFIX_PATH:-}" ]]; then
-  MESON_ARGS+=("--build.cmake-prefix-path" "${YAMS_BUILD_CMAKE_PREFIX_PATH}")
+	MESON_ARGS+=("--build.cmake-prefix-path" "${YAMS_BUILD_CMAKE_PREFIX_PATH}")
 fi
 
 # Detect previous configured cpp_std to decide on reconfigure vs wipe
 PREV_CPPSTD=""
 INTRO_OPTS_JSON="${BUILD_DIR}/meson-info/intro-buildoptions.json"
 if [[ -f "${INTRO_OPTS_JSON}" ]]; then
-  PREV_CPPSTD=$(awk '/"name"\s*:\s*"cpp_std"/{flag=1} flag && /"value"/{gsub(/.*"value"\s*:\s*"|".*/,"",$0); print; exit}' "${INTRO_OPTS_JSON}" || true)
+	PREV_CPPSTD=$(awk '/"name"\s*:\s*"cpp_std"/{flag=1} flag && /"value"/{gsub(/.*"value"\s*:\s*"|".*/,"",$0); print; exit}' "${INTRO_OPTS_JSON}" || true)
 fi
 
 MESON_OPTIONS=("-Dbuild-cli=true" "-Dcpp_std=${MESON_CPPSTD}" "-Denable-modules=${ENABLE_MODULES}")
 if [[ -n "${YAMS_PROTOC_PATH}" ]]; then
-  MESON_OPTIONS+=("-Dprotoc-path=${YAMS_PROTOC_PATH}")
+	MESON_OPTIONS+=("-Dprotoc-path=${YAMS_PROTOC_PATH}")
 fi
 
 # Add libc++ hardening mode if specified
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
-  MESON_OPTIONS+=("-Dlibcxx-hardening=${LIBCXX_HARDENING}")
+	MESON_OPTIONS+=("-Dlibcxx-hardening=${LIBCXX_HARDENING}")
 fi
 
 # Handle optional feature flags for Meson (must match Conan options)
 if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-onnx=disabled")
-  MESON_OPTIONS+=("-Dplugin-onnx=false")
+	MESON_OPTIONS+=("-Denable-onnx=disabled")
+	MESON_OPTIONS+=("-Dplugin-onnx=false")
 fi
 
 if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-re2=disabled")
+	MESON_OPTIONS+=("-Denable-re2=disabled")
 fi
 
 if [[ "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
-  MESON_OPTIONS+=("-Db_ndebug=true")
+	MESON_OPTIONS+=("-Db_ndebug=true")
 else
-  MESON_OPTIONS+=("-Db_ndebug=false")
+	MESON_OPTIONS+=("-Db_ndebug=false")
 fi
 
 if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Dplugin-symbols=false")
+	MESON_OPTIONS+=("-Dplugin-symbols=false")
 fi
 
 # libSQL backend: default to libsql but fall back to sqlite on Linux when unavailable
 LIBSQL_BACKEND_INPUT=${YAMS_DATABASE_BACKEND:-libsql}
 LIBSQL_BACKEND_LOWER=$(echo "${LIBSQL_BACKEND_INPUT}" | tr '[:upper:]' '[:lower:]')
 if [[ "${LIBSQL_BACKEND_LOWER}" != "libsql" && "${LIBSQL_BACKEND_LOWER}" != "sqlite" ]]; then
-  echo "Error: Unknown database backend: ${LIBSQL_BACKEND_INPUT}. Expected libsql or sqlite." >&2
-  exit 1
+	echo "Error: Unknown database backend: ${LIBSQL_BACKEND_INPUT}. Expected libsql or sqlite." >&2
+	exit 1
 fi
 
 if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "${USE_SYSTEM_DEPS}" == "true" ]]; then
-  LIBSQL_PKG_FOUND=false
-  if command -v pkg-config >/dev/null 2>&1; then
-    if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
-      LIBSQL_PKG_FOUND=true
-    fi
-  fi
+	LIBSQL_PKG_FOUND=false
+	if command -v pkg-config >/dev/null 2>&1; then
+		if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
+			LIBSQL_PKG_FOUND=true
+		fi
+	fi
 
-  if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
-    echo "System dependency mode: libSQL not found via pkg-config; falling back to sqlite" >&2
-    LIBSQL_BACKEND_LOWER="sqlite"
-  fi
+	if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
+		echo "System dependency mode: libSQL not found via pkg-config; falling back to sqlite" >&2
+		LIBSQL_BACKEND_LOWER="sqlite"
+	fi
 elif [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "$(uname -s)" != "Darwin" ]]; then
-  LIBSQL_PKG_FOUND=false
-  if command -v pkg-config >/dev/null 2>&1; then
-    if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
-      LIBSQL_PKG_FOUND=true
-    fi
-  fi
+	LIBSQL_PKG_FOUND=false
+	if command -v pkg-config >/dev/null 2>&1; then
+		if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
+			LIBSQL_PKG_FOUND=true
+		fi
+	fi
 
-  if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
-    if [[ -d "subprojects/libsql" ]]; then
-      echo "libSQL subproject detected at subprojects/libsql; keeping libsql backend"
-    elif ! command -v cargo >/dev/null 2>&1; then
-      echo "libSQL not detected on Linux (pkg-config/cargo missing); falling back to sqlite" >&2
-      LIBSQL_BACKEND_LOWER="sqlite"
-    fi
-  fi
+	if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
+		if [[ -d "subprojects/libsql" ]]; then
+			echo "libSQL subproject detected at subprojects/libsql; keeping libsql backend"
+		elif ! command -v cargo >/dev/null 2>&1; then
+			echo "libSQL not detected on Linux (pkg-config/cargo missing); falling back to sqlite" >&2
+			LIBSQL_BACKEND_LOWER="sqlite"
+		fi
+	fi
 fi
 
 if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" ]]; then
-  echo "Database backend: libsql"
-  if [[ -f "subprojects/libsql.wrap" && ! -d "subprojects/libsql" ]]; then
-    if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
-      echo "libSQL not found via system dependencies; falling back to sqlite" >&2
-      LIBSQL_BACKEND_LOWER="sqlite"
-    elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
-      echo "Offline mode: not fetching libSQL subproject; falling back to sqlite" >&2
-      LIBSQL_BACKEND_LOWER="sqlite"
-    elif command -v meson >/dev/null 2>&1; then
-      echo "Fetching libSQL subproject (meson wrap)..."
-      if ! meson subprojects download libsql; then
-        echo "Failed to fetch libSQL subproject; falling back to sqlite" >&2
-        LIBSQL_BACKEND_LOWER="sqlite"
-      fi
-    else
-      echo "Meson not found; cannot fetch libSQL subproject. Falling back to sqlite" >&2
-      LIBSQL_BACKEND_LOWER="sqlite"
-    fi
-  fi
+	echo "Database backend: libsql"
+	if [[ -f "subprojects/libsql.wrap" && ! -d "subprojects/libsql" ]]; then
+		if [[ "${USE_SYSTEM_DEPS}" == "true" ]]; then
+			echo "libSQL not found via system dependencies; falling back to sqlite" >&2
+			LIBSQL_BACKEND_LOWER="sqlite"
+		elif [[ "${ENABLE_OFFLINE}" == "true" ]]; then
+			echo "Offline mode: not fetching libSQL subproject; falling back to sqlite" >&2
+			LIBSQL_BACKEND_LOWER="sqlite"
+		elif command -v meson >/dev/null 2>&1; then
+			echo "Fetching libSQL subproject (meson wrap)..."
+			if ! meson subprojects download libsql; then
+				echo "Failed to fetch libSQL subproject; falling back to sqlite" >&2
+				LIBSQL_BACKEND_LOWER="sqlite"
+			fi
+		else
+			echo "Meson not found; cannot fetch libSQL subproject. Falling back to sqlite" >&2
+			LIBSQL_BACKEND_LOWER="sqlite"
+		fi
+	fi
 else
-  echo "Database backend: sqlite"
+	echo "Database backend: sqlite"
 fi
 
 MESON_OPTIONS+=("-Ddatabase-backend=${LIBSQL_BACKEND_LOWER}")
 
 # Mobile bindings are off by default; allow CI/users to opt-in.
 if [[ "${YAMS_ENABLE_MOBILE_BINDINGS:-}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-mobile-bindings=true")
-  echo "Mobile bindings enabled (YAMS_ENABLE_MOBILE_BINDINGS=true)"
+	MESON_OPTIONS+=("-Denable-mobile-bindings=true")
+	echo "Mobile bindings enabled (YAMS_ENABLE_MOBILE_BINDINGS=true)"
 elif [[ "${YAMS_ENABLE_MOBILE_BINDINGS:-}" == "false" ]]; then
-  MESON_OPTIONS+=("-Denable-mobile-bindings=false")
-  echo "Mobile bindings disabled (YAMS_ENABLE_MOBILE_BINDINGS=false)"
+	MESON_OPTIONS+=("-Denable-mobile-bindings=false")
+	echo "Mobile bindings disabled (YAMS_ENABLE_MOBILE_BINDINGS=false)"
 fi
 
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
-  if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-    ENABLE_TSAN=true
-  else
-    ENABLE_TSAN=false
-  fi
+	if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+		ENABLE_TSAN=true
+	else
+		ENABLE_TSAN=false
+	fi
 fi
 
 # AddressSanitizer: default disabled; enable with --asan or ENABLE_ASAN=true
 if [[ -z "${ENABLE_ASAN}" ]]; then
-  ENABLE_ASAN=false
+	ENABLE_ASAN=false
 fi
 
 # If ASAN was explicitly requested and TSAN wasn't explicitly chosen, prefer ASAN for this build.
 if [[ "${ENABLE_ASAN}" == "true" ]] && [[ "${ASAN_EXPLICIT}" == "true" ]] && [[ "${TSAN_EXPLICIT}" == "false" ]]; then
-  ENABLE_TSAN=false
+	ENABLE_TSAN=false
 fi
 
 if [[ "${ENABLE_TSAN}" == "true" ]] && [[ "${ENABLE_ASAN}" == "true" ]]; then
-  echo "Error: TSAN and ASAN cannot be enabled in the same build directory." >&2
-  echo "Use separate invocations, e.g.:" >&2
-  echo "  ./setup.sh Debug --tsan --no-asan" >&2
-  echo "  ./setup.sh Debug --asan --no-tsan" >&2
-  exit 1
+	echo "Error: TSAN and ASAN cannot be enabled in the same build directory." >&2
+	echo "Use separate invocations, e.g.:" >&2
+	echo "  ./setup.sh Debug --tsan --no-asan" >&2
+	echo "  ./setup.sh Debug --asan --no-tsan" >&2
+	exit 1
 fi
 
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  MESON_OPTIONS+=(
-    "-Dbuild-tests=true"
-    "-Denable-bench-tests=true"
-    "-Denable-vector-tests=true"
-    "-Dbuild-benchmarks=true"
-  )
-  echo "Vector/embedding tests and benchmarks enabled for ${BUILD_TYPE} build"
+	MESON_OPTIONS+=(
+		"-Dbuild-tests=true"
+		"-Denable-bench-tests=true"
+		"-Denable-vector-tests=true"
+		"-Dbuild-benchmarks=true"
+	)
+	echo "Vector/embedding tests and benchmarks enabled for ${BUILD_TYPE} build"
 fi
 
 # Optionally enable tests in Release builds for benchmark executables.
 if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
-  MESON_OPTIONS+=(
-    "-Dbuild-tests=true"
-  )
-  echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
+	MESON_OPTIONS+=(
+		"-Dbuild-tests=true"
+	)
+	echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
 fi
 
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
 MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
 
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
-  MESON_OPTIONS+=("-Db_sanitize=thread")
-  cc_tool="${CC##* }"
-  cxx_tool="${CXX##* }"
-  if [[ "${cc_tool}" == clang* ]] || [[ "${cxx_tool}" == clang++* ]]; then
-    MESON_OPTIONS+=("-Db_lundef=false")
-    echo "ThreadSanitizer on Clang: forcing b_lundef=false to avoid Meson link warnings"
-  fi
-  echo "ThreadSanitizer enabled (race detection)"
+	MESON_OPTIONS+=("-Db_sanitize=thread")
+	cc_tool="${CC##* }"
+	cxx_tool="${CXX##* }"
+	if [[ "${cc_tool}" == clang* ]] || [[ "${cxx_tool}" == clang++* ]]; then
+		MESON_OPTIONS+=("-Db_lundef=false")
+		echo "ThreadSanitizer on Clang: forcing b_lundef=false to avoid Meson link warnings"
+	fi
+	echo "ThreadSanitizer enabled (race detection)"
 elif [[ "${ENABLE_ASAN}" == "true" ]]; then
-  MESON_OPTIONS+=("-Db_sanitize=address,undefined")
-  echo "AddressSanitizer enabled (memory safety checks)"
+	MESON_OPTIONS+=("-Db_sanitize=address,undefined")
+	echo "AddressSanitizer enabled (memory safety checks)"
 else
-  # Ensure any previous sanitizer setting doesn't persist across reconfigure.
-  # Users can override via YAMS_EXTRA_MESON_FLAGS. Only reset explicit sanitizer
-  # state when reconfiguring an existing builddir; clean builds do not need it.
-  if [[ -f "${INTRO_OPTS_JSON}" ]]; then
-    MESON_OPTIONS+=("-Db_sanitize=none")
-  fi
+	# Ensure any previous sanitizer setting doesn't persist across reconfigure.
+	# Users can override via YAMS_EXTRA_MESON_FLAGS. Only reset explicit sanitizer
+	# state when reconfiguring an existing builddir; clean builds do not need it.
+	if [[ -f "${INTRO_OPTS_JSON}" ]]; then
+		MESON_OPTIONS+=("-Db_sanitize=none")
+	fi
 fi
 
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
-  MESON_OPTIONS+=(
-    "-Denable-profiling=true"
-  )
-  echo "Tracy profiling enabled for Meson build"
+	MESON_OPTIONS+=(
+		"-Denable-profiling=true"
+	)
+	echo "Tracy profiling enabled for Meson build"
 fi
 
 if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  MESON_OPTIONS+=(
-    "-Dbuild-fuzzers=true"
-  )
-  echo "Fuzzing targets enabled for Meson build"
+	MESON_OPTIONS+=(
+		"-Dbuild-fuzzers=true"
+	)
+	echo "Fuzzing targets enabled for Meson build"
 fi
 
 if [[ "${ENABLE_COVERAGE}" == "true" ]]; then
-  MESON_OPTIONS+=("-Db_coverage=true")
-  echo "Coverage instrumentation enabled"
+	MESON_OPTIONS+=("-Db_coverage=true")
+	echo "Coverage instrumentation enabled"
 fi
 
 # Add extra Meson flags from environment (for CI)
 if [[ -n "${YAMS_EXTRA_MESON_FLAGS:-}" ]]; then
-  # shellcheck disable=SC2086
-  read -ra EXTRA_FLAGS <<< "${YAMS_EXTRA_MESON_FLAGS}"
-  MESON_OPTIONS+=("${EXTRA_FLAGS[@]}")
-  echo "Extra Meson flags: ${YAMS_EXTRA_MESON_FLAGS}"
+	# shellcheck disable=SC2086
+	read -ra EXTRA_FLAGS <<<"${YAMS_EXTRA_MESON_FLAGS}"
+	MESON_OPTIONS+=("${EXTRA_FLAGS[@]}")
+	echo "Extra Meson flags: ${YAMS_EXTRA_MESON_FLAGS}"
 fi
 
 # Auto-enable zyp plugin if Zig 0.15.2+ is installed
 if command -v zig >/dev/null 2>&1; then
-  ZIG_VERSION=$(zig version 2>/dev/null || echo "0.0.0")
-  # Parse major.minor.patch
-  ZIG_MAJOR=$(echo "${ZIG_VERSION}" | cut -d. -f1)
-  ZIG_MINOR=$(echo "${ZIG_VERSION}" | cut -d. -f2)
-  ZIG_PATCH=$(echo "${ZIG_VERSION}" | cut -d. -f3 | cut -d- -f1)  # Handle -dev suffix
-  # Check if >= 0.15.2
-  if [[ "${ZIG_MAJOR:-0}" -gt 0 ]] || \
-     { [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -gt 15 ]]; } || \
-     { [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -eq 15 ]] && [[ "${ZIG_PATCH:-0}" -ge 2 ]]; }; then
-    echo "Zig ${ZIG_VERSION} detected, enabling zyp PDF plugin"
-    MESON_OPTIONS+=("-Dplugin-zyp=true")
-  else
-    echo "Zig ${ZIG_VERSION} found but requires 0.15.2+ for zyp plugin"
-  fi
+	ZIG_VERSION=$(zig version 2>/dev/null || echo "0.0.0")
+	# Parse major.minor.patch
+	ZIG_MAJOR=$(echo "${ZIG_VERSION}" | cut -d. -f1)
+	ZIG_MINOR=$(echo "${ZIG_VERSION}" | cut -d. -f2)
+	ZIG_PATCH=$(echo "${ZIG_VERSION}" | cut -d. -f3 | cut -d- -f1) # Handle -dev suffix
+	# Check if >= 0.15.2
+	if [[ "${ZIG_MAJOR:-0}" -gt 0 ]] ||
+		{ [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -gt 15 ]]; } ||
+		{ [[ "${ZIG_MAJOR:-0}" -eq 0 ]] && [[ "${ZIG_MINOR:-0}" -eq 15 ]] && [[ "${ZIG_PATCH:-0}" -ge 2 ]]; }; then
+		echo "Zig ${ZIG_VERSION} detected, enabling zyp PDF plugin"
+		MESON_OPTIONS+=("-Dplugin-zyp=true")
+	else
+		echo "Zig ${ZIG_VERSION} found but requires 0.15.2+ for zyp plugin"
+	fi
 fi
 
 # Auto-enable Glint NL entity extractor plugin (GLiNER-based)
 # Requires ONNX Runtime which is already a dependency
 if [[ "${YAMS_DISABLE_ONNX:-}" != "true" ]]; then
-  echo "Enabling Glint NL entity extractor plugin"
-  MESON_OPTIONS+=("-Dplugin-glint=true")
+	echo "Enabling Glint NL entity extractor plugin"
+	MESON_OPTIONS+=("-Dplugin-glint=true")
 fi
 
 echo "--- Running meson setup... ---"
 if [[ -n "${PREV_CPPSTD}" ]]; then
-  if [[ "${PREV_CPPSTD}" != "${MESON_CPPSTD}" ]]; then
-    echo "cpp_std changed (${PREV_CPPSTD} -> ${MESON_CPPSTD}); wiping build directory configuration..."
-    meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --wipe
-  else
-    meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --reconfigure
-  fi
+	if [[ "${PREV_CPPSTD}" != "${MESON_CPPSTD}" ]]; then
+		echo "cpp_std changed (${PREV_CPPSTD} -> ${MESON_CPPSTD}); wiping build directory configuration..."
+		meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --wipe
+	else
+		meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}" --reconfigure
+	fi
 else
-  meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}"
+	meson setup "${MESON_ARGS[@]}" "${MESON_OPTIONS[@]}"
 fi
 
 echo
 echo "--- Setup complete! ---"
 if [[ "${CONAN_TOOLS_OVERRIDE}" == "true" ]]; then
-  echo "Conan provided Meson/Ninja for this build directory."
-  echo "To compile, run: ${MESON_WRAPPER_PATH} compile -C ${BUILD_DIR}"
-  echo "To install, run: ${MESON_WRAPPER_PATH} install -C ${BUILD_DIR}"
+	echo "Conan provided Meson/Ninja for this build directory."
+	echo "To compile, run: ${MESON_WRAPPER_PATH} compile -C ${BUILD_DIR}"
+	echo "To install, run: ${MESON_WRAPPER_PATH} install -C ${BUILD_DIR}"
 elif [[ -n "${MESON_WRAPPER_PATH}" ]]; then
-  echo "To compile, run: meson compile -C ${BUILD_DIR}"
-  echo "To install, run: meson install -C ${BUILD_DIR}"
-  echo "Fallback wrapper (replays Conan build env if needed): ${MESON_WRAPPER_PATH}"
+	echo "To compile, run: meson compile -C ${BUILD_DIR}"
+	echo "To install, run: meson install -C ${BUILD_DIR}"
+	echo "Fallback wrapper (replays Conan build env if needed): ${MESON_WRAPPER_PATH}"
 else
-  echo "To compile, run: meson compile -C ${BUILD_DIR}"
-  echo "To install, run: meson install -C ${BUILD_DIR}"
+	echo "To compile, run: meson compile -C ${BUILD_DIR}"
+	echo "To install, run: meson install -C ${BUILD_DIR}"
 fi

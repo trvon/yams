@@ -1,13 +1,13 @@
 # yamllint disable rule:line-length
 name: Release
 
-'on':
+"on":
   push:
     tags:
       - "v*"
       - "yams-v*"
   schedule:
-    - cron: '0 6 * * *' # 06:00 UTC daily
+    - cron: "0 6 * * *" # 06:00 UTC daily
   workflow_dispatch:
     inputs:
       channel:
@@ -161,7 +161,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false  # Manual submodule init below (some use SSH URLs)
+          submodules: false # Manual submodule init below (some use SSH URLs)
       - name: Initialize required submodules
         shell: bash
         run: |
@@ -224,9 +224,10 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
             conan2-${{ runner.os }}-${{ matrix.suffix }}-
+            conan2-${{ runner.os }}-linux-x86_64-
             conan2-${{ runner.os }}-
       - name: Conan cache diagnostics
         if: always()
@@ -241,24 +242,15 @@ jobs:
               echo "Directory $d missing"
             fi
           done
-      - name: Cache macOS build directory
-        if: runner.os == 'macOS' && github.actor != 'nektos/act'
-        uses: actions/cache@v4
-        with:
-          path: build/release
-          key: macos-build-${{ matrix.suffix }}-${{ hashFiles('meson.build', 'meson_options.txt') }}-${{ hashFiles('src/**', 'include/**') }}
-          restore-keys: |
-            macos-build-${{ matrix.suffix }}-
-
-      - name: Cache ccache
+      - name: Restore ccache
         if: github.actor != 'nektos/act'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         continue-on-error: true
         with:
           path: |
             ~/.cache/ccache
             ~/.ccache
-          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-
@@ -413,18 +405,6 @@ jobs:
           name: benchmark-results-linux-hosted-conan
           path: ci-artifacts/benchmarks
           if_no_artifact_found: warn
-
-      - name: Download CI coverage (if available)
-        if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
-        uses: dawidd6/action-download-artifact@v6
-        continue-on-error: true
-        with:
-          run_id: ${{ github.event.workflow_run.id }}
-          workflow_conclusion: completed
-          name: coverage-report
-          path: ci-artifacts/coverage
-          if_no_artifact_found: warn
-
 
       # Hosted runners: install and configure Conan (self-hosted must already be configured)
       - name: Install Conan (hosted only)
@@ -703,7 +683,7 @@ jobs:
           echo "Optimized release build for ${{ matrix.suffix }}"
           # Align build directory with README (build/release)
           rm -rf build/release
-          
+
           # Determine host profile and architecture based on platform
           if [ "$RUNNER_OS" = "macOS" ]; then
             case "${{ matrix.suffix }}" in
@@ -723,13 +703,13 @@ jobs:
               linux-x86_64) ARCH="x86_64" ;;
             esac
           fi
-          
+
           # Use setup.sh with CI environment variables for consistent configuration
           export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
           export YAMS_CONAN_ARCH="$ARCH"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
           export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
-          
+
            # Set install prefix: /usr for Linux packages, /usr/local for macOS
            if [ "$RUNNER_OS" = "Linux" ]; then
              export YAMS_INSTALL_PREFIX="/usr"
@@ -745,16 +725,16 @@ jobs:
 
            # Persist prefix for later steps
            echo "YAMS_INSTALL_PREFIX=$YAMS_INSTALL_PREFIX" >> "$GITHUB_ENV"
-          
+
           # For cross-compilation, ensure pkg-config is available
           export PKG_CONFIG="$(command -v pkg-config)"
           echo "Using pkg-config: $PKG_CONFIG"
-          
+
           # Version is already included in YAMS_EXTRA_MESON_FLAGS above. Keep this
           # echo for diagnostics, but do not overwrite feature flags.
           VERSION="${{ steps.meta.outputs.version }}"
           echo "Setting version: ${VERSION}"
-          
+
           ./setup.sh Release
           # Source Conan build env so meson compile uses the same Meson version
           # that setup.sh used for meson setup (Conan provides Meson 1.10.x which
@@ -795,6 +775,16 @@ jobs:
         shell: bash
         run: |
           ccache -s || echo "ccache stats unavailable"
+
+      - name: Save ccache
+        if: always() && github.actor != 'nektos/act'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.ccache
+          key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Collect benchmark results
         shell: bash
@@ -1015,22 +1005,6 @@ jobs:
           fi
           echo "" >> "$SUMMARY_FILE"
 
-          # Add coverage information if available (no python dependency)
-          if [ -f "ci-artifacts/coverage/coverage.xml" ]; then
-            echo "### Test Coverage" >> "$SUMMARY_FILE"
-            echo "" >> "$SUMMARY_FILE"
-            # Extract line-rate="0.8234" attribute and convert to percent with one decimal
-            raw_rate=$(grep -Eo 'line-rate="[0-9.]+"' ci-artifacts/coverage/coverage.xml | head -1 | sed -E 's/.*="([0-9.]+)"/\1/') || raw_rate=""
-            if [ -n "$raw_rate" ]; then
-              # Use awk for safe float multiplication & formatting
-              coverage_pct=$(awk -v r="$raw_rate" 'BEGIN{ printf("%.1f%%", r*100) }')
-            else
-              coverage_pct="N/A"
-            fi
-            echo "**Line Coverage:** $coverage_pct" >> "$SUMMARY_FILE"
-            echo "" >> "$SUMMARY_FILE"
-          fi
-
           # Add benchmark results if available from CI or validation (jq preferred, fallback to grep)
           if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
             echo "### Performance Metrics" >> "$SUMMARY_FILE"
@@ -1095,7 +1069,7 @@ jobs:
           # Use BASE_VERSION to generate Debian/RPM policy-compliant versions for nightly/weekly
           chmod +x scripts/build-deb.sh
           scripts/build-deb.sh package_only "${{ steps.meta.outputs.version }}" "${{ env.BUILD_DIR }}" "stage"
-          
+
           # Move packages to root directory for artifact upload
           if ls "${{ env.BUILD_DIR }}"/yams-*.deb 1> /dev/null 2>&1; then
             mv "${{ env.BUILD_DIR }}"/yams-*.deb ./ || true
@@ -1420,7 +1394,7 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           FORMULA_DIR="homebrew"
           mkdir -p "$FORMULA_DIR"
-          
+
           # Locate macOS archives from local assets (supports legacy/new naming)
           ARM64_FILE=""
           X86_64_FILE=""
@@ -1455,7 +1429,7 @@ jobs:
 
           ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
           ASSET_X86_64="$(basename "${X86_64_FILE:-yams-${VERSION}-macos-x86_64.zip}")"
-          
+
           if [ -f "$ARM64_FILE" ]; then
             SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
             echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
@@ -1463,7 +1437,7 @@ jobs:
             echo "WARNING: ARM64 zip not found at $ARM64_FILE, formula may be incomplete" >&2
             SHA256_ARM64="PLACEHOLDER_ARM64_SHA256"
           fi
-          
+
           if [ -f "$X86_64_FILE" ]; then
             SHA256_X86_64=$(shasum -a 256 "$X86_64_FILE" | awk '{print $1}')
             echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
@@ -1490,7 +1464,7 @@ jobs:
 
           # Release assets are published later in this job; defer URL checks until post-publish.
           echo "Deferring Homebrew URL validation until after release publish" >&2
-          
+
           TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
             echo "ERROR: Homebrew template not found at $TEMPLATE_PATH" >&2
@@ -1528,26 +1502,26 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
           TAP_PATH="homebrew-yams"
-          
+
           # Check if generated formula exists first
           if [ ! -f "homebrew/yams.rb" ]; then
             echo "homebrew/yams.rb not found; skipping tap update" >&2
             exit 0
           fi
-          
+
           # Initialize the homebrew-yams submodule (must happen before directory check)
           git submodule update --init homebrew-yams || {
             echo "Failed to initialize homebrew-yams submodule; skipping tap update" >&2
             exit 0
           }
-          
+
           if [ ! -d "$TAP_PATH" ]; then
             echo "Tap submodule not found at $TAP_PATH after init; skipping tap update" >&2
             exit 0
           fi
-          
+
           pushd "$TAP_PATH" >/dev/null
-          
+
           # Fetch latest and reset to main BEFORE copying formula (avoids checkout conflicts)
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
             REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
@@ -1559,9 +1533,9 @@ jobs:
             git checkout main || git checkout -b main
             git pull --ff-only 2>/dev/null || true
           fi
-          
+
           popd >/dev/null
-          
+
           # Now copy the formula after we're on the correct branch
           mkdir -p "$TAP_PATH/Formula"
           cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
@@ -1625,18 +1599,18 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           TAG="${{ steps.meta.outputs.tag }}"
           TAP_PATH="homebrew-yams"
-          
+
           # Extract date and hash from version (e.g., nightly-20251109-ebd0701)
           DATE=$(echo "$VERSION" | sed -E 's/.*-([0-9]{8})-.*/\1/')
           HASH=$(echo "$VERSION" | sed -E 's/.*-([a-f0-9]{7})$/\1/')
-          
+
           # Initialize submodule before checking path (checkout has submodules disabled by default)
           git submodule update --init homebrew-yams
           if [ ! -d "$TAP_PATH" ]; then
             echo "Tap submodule not found at $TAP_PATH after init" >&2
             exit 1
           fi
-          
+
           # Checkout main BEFORE modifying any files (avoids checkout conflicts)
           pushd "$TAP_PATH" >/dev/null
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
@@ -1649,7 +1623,7 @@ jobs:
             git checkout main || git checkout -b main
           fi
           popd >/dev/null
-          
+
           # Locate macOS archives from local assets (supports naming changes)
           ARM64_FILE=""
           X86_64_FILE=""
@@ -1682,7 +1656,7 @@ jobs:
 
           ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
           ASSET_X86_64="$(basename "${X86_64_FILE:-yams-${VERSION}-macos-x86_64.zip}")"
-          
+
           if [ -f "$ARM64_FILE" ]; then
             SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
             echo "Computed ARM64 sha256: $SHA256_ARM64" >&2
@@ -1690,7 +1664,7 @@ jobs:
             echo "WARNING: ARM64 zip not found at $ARM64_FILE, formula may be incomplete" >&2
             SHA256_ARM64="PLACEHOLDER_ARM64_SHA256"
           fi
-          
+
           if [ -f "$X86_64_FILE" ]; then
             SHA256_X86_64=$(shasum -a 256 "$X86_64_FILE" | awk '{print $1}')
             echo "Computed x86_64 sha256: $SHA256_X86_64" >&2
@@ -1717,7 +1691,7 @@ jobs:
 
           # Release assets are published later in this job; defer URL checks until post-publish.
           echo "Deferring Homebrew URL validation until after release publish" >&2
-          
+
           # Update nightly formula (now safe to modify after checkout)
           TEMPLATE_PATH="packaging/homebrew/yams-nightly.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
@@ -1732,7 +1706,7 @@ jobs:
           # Remove deprecated nightly formula names now that yams-nightly is canonical
           rm -f "$TAP_PATH/Formula/yams@nightly.rb"
           rm -f "$TAP_PATH/Aliases/yams@nightly"
-          
+
           # Replace placeholders
           sed -i.bak \
             -e "s/__VERSION__/${VERSION}/g" \

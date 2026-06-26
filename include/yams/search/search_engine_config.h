@@ -147,9 +147,9 @@ struct SearchEngineConfig {
     float metaPathWeightSem{1.0f};    // doc — semantic_neighbor — doc
     float metaPathWeightCall{
         0.5f}; // doc — contains — function — calls — function — defined_in — doc
-    float metaPathWeightDef{0.5f};    // doc — contains — symbol — defined_in — doc
-    float metaPathWeightEntity{0.3f}; // doc — kg_doc_entities — node — kg_doc_entities — doc
-    float metaPathWeightBlob{0.2f};   // doc — blob — doc (dedup)
+    float metaPathWeightDef{0.5f};         // doc — contains — symbol — defined_in — doc
+    float metaPathWeightEntity{0.3f};      // doc — kg_doc_entities — node — kg_doc_entities — doc
+    float metaPathWeightBlob{0.2f};        // doc — blob — doc (dedup)
     bool metaPathUseEdgeWeights{false};    // weight hits by edge.weight * seed similarity
     float metaPathMinSeedSimilarity{0.0f}; // skip boost when best seed sim is below this
     bool metaPathReciprocalOnly{false};    // keep only dst docs with a reverse edge to a seed
@@ -392,6 +392,28 @@ struct SearchEngineConfig {
     // Training-free at inference: the arm name is selected by TunerMAB
     // from qrel-free proxy rewards. Empty = use existing scoring path.
     std::string simeonBanditArm;
+
+    /// When true, scale per-component result caps (textMaxResults,
+    /// vectorMaxResults, etc.) per query based on signal strength.
+    /// Narrow queries (1-2 terms) get reduced vector/graph budget;
+    /// complex queries (4+ terms) get expanded fusion budget.
+    /// Requires enableAdaptiveFusion to be true as well for budget-aware fusion.
+    bool enableAdaptiveBudgeting = false;
+
+    /// Scaling factors for adaptive per-query budgets.
+    float narrowQueryVectorReduction = 0.5f;    // multiply vector caps for ≤ threshold
+    float complexQueryFusionExpansion = 1.5f;   // multiply fusion caps for ≥ threshold
+    std::size_t narrowQueryTokenThreshold = 2;  // ≤ this = narrow
+    std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
+
+    // Per-query multi-armed bandit arm selections. When non-empty, the
+    // tuning pipeline overrides the corresponding static config value with
+    // the MAB-selected arm. These extend the existing simeonBanditArm pattern
+    // to fusion strategy, vector-only threshold, and rerank top-K.
+    // Empty = use the static config value (no MAB override active).
+    std::string mabFusionStrategyArm;
+    std::string mabVectorOnlyThresholdArm;
+    std::string mabRerankTopKArm;
 };
 
 } // namespace yams::search
