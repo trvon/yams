@@ -96,42 +96,58 @@ Result<void> KGWriteBuffer::flush() {
     }
     auto& wb = *batchResult.value();
 
-    // Flush edges: convert deduplicated map to vector and use addEdges
+    std::unordered_map<EdgeKey, KGEdge> stagedEdges;
+    std::vector<DocEntity> stagedEntities;
+    if (hasEdges) {
+        stagedEdges.swap(edgeBuffer_);
+    }
+    if (hasEntities) {
+        stagedEntities.swap(entityBuffer_);
+    }
+
+    const auto restoreBuffers = [&]() {
+        if (hasEdges) {
+            edgeBuffer_.swap(stagedEdges);
+        }
+        if (hasEntities) {
+            entityBuffer_.swap(stagedEntities);
+        }
+    };
+
+    std::size_t flushedEdgeCount = 0;
+
+    // Flush edges: convert deduplicated map to vector and use addEdgesUnique
     // (no per-row dedup, since we already deduped in memory).
     if (hasEdges) {
         std::vector<KGEdge> deduped;
-        deduped.reserve(edgeBuffer_.size());
-        for (auto& [key, edge] : edgeBuffer_) {
-            deduped.push_back(std::move(edge));
+        deduped.reserve(stagedEdges.size());
+        for (const auto& [key, edge] : stagedEdges) {
+            deduped.push_back(edge);
         }
         auto r = wb.addEdgesUnique(deduped);
         if (!r) {
+            restoreBuffers();
             return r;
         }
-        totalEdgesFlushed_ += deduped.size();
-        edgeBuffer_.clear();
+        flushedEdgeCount = deduped.size();
     }
 
     // Flush entities.
     if (hasEntities) {
-        auto r = wb.addDocEntities(entityBuffer_);
+        auto r = wb.addDocEntities(stagedEntities);
         if (!r) {
+            restoreBuffers();
             return r;
         }
-        entityBuffer_.clear();
     }
 
     auto commitResult = wb.commit();
     if (!commitResult) {
+        restoreBuffers();
         return commitResult;
     }
 
-    // Update overlay stats so online counters reflect the flushed work.
-    const auto edgeCount = totalEdgesFlushed_;
-    const auto entityCount = static_cast<std::int64_t>(hasEntities ? entityBuffer_.capacity() : 0);
-    // Reset entityBuffer_ size tracking after clear() above.
-    kgStore_.updateEnqueueCounts(entityCount, static_cast<std::int64_t>(edgeCount), 0);
-
+    totalEdgesFlushed_ += flushedEdgeCount;
     return Result<void>();
 }
 

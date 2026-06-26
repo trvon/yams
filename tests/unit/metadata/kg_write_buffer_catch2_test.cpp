@@ -36,9 +36,9 @@ struct TestHarness {
         cfg.enable_alias_fts = false;
         cfg.enable_wal = true;
         auto result = makeSqliteKnowledgeGraphStore(dbPath.string(), cfg);
-        REQUIRE(result);
+        REQUIRE((result));
         kgStore = std::move(result.value());
-        REQUIRE(kgStore);
+        REQUIRE((kgStore));
 
         buffer = std::make_unique<KGWriteBuffer>(*kgStore);
     }
@@ -82,9 +82,9 @@ struct TestHarness {
     std::pair<std::int64_t, std::int64_t> insertTwoNodes() {
         std::vector<KGNode> nodes = {makeNode(1), makeNode(2)};
         auto result = kgStore->upsertNodes(nodes);
-        REQUIRE(result);
+        REQUIRE((result));
         auto ids = result.value();
-        REQUIRE(ids.size() == 2);
+        REQUIRE((ids.size() == 2));
         return {ids[0], ids[1]};
     }
 };
@@ -100,28 +100,31 @@ TEST_CASE("KGWriteBuffer coalesces duplicate edges by key", "[kg_write_buffer]")
     auto e1 = h.makeEdge(a, b, "calls", 0.5f);
     auto e2 = h.makeEdge(a, b, "calls", 1.0f); // same key, higher weight
 
-    REQUIRE(h.buffer->edgeCount() == 0);
+    REQUIRE((h.buffer->edgeCount() == 0));
     auto r1 = h.buffer->addEdge(e1);
-    REQUIRE(r1);
-    REQUIRE(h.buffer->edgeCount() == 1);
-    REQUIRE(h.buffer->totalEdgesAdded() == 1);
+    REQUIRE((r1));
+    REQUIRE((h.buffer->edgeCount() == 1));
+    REQUIRE((h.buffer->totalEdgesAdded() == 1));
 
     auto r2 = h.buffer->addEdge(e2);
-    REQUIRE(r2);
-    REQUIRE(h.buffer->edgeCount() == 1); // still one — coalesced
-    REQUIRE(h.buffer->totalEdgesAdded() == 2);
+    REQUIRE((r2));
+    REQUIRE((h.buffer->edgeCount() == 1)); // still one — coalesced
+    REQUIRE((h.buffer->totalEdgesAdded() == 2));
 
     // Flush and verify only one edge was written with max weight.
     auto flushR = h.buffer->flush();
-    REQUIRE(flushR);
-    REQUIRE(h.buffer->totalEdgesFlushed() == 1);
-    REQUIRE(h.buffer->edgeCount() == 0);
+    REQUIRE((flushR));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 1));
+    REQUIRE((h.buffer->edgeCount() == 0));
 
     // Verify the stored edge has weight 1.0 (max of 0.5 and 1.0).
     auto edges = h.kgStore->getEdgesFrom(a);
-    REQUIRE(edges);
-    REQUIRE(edges.value().size() == 1);
-    REQUIRE(edges.value()[0].weight == 1.0f);
+    REQUIRE((edges));
+    REQUIRE((edges.value().size() == 1));
+    REQUIRE((edges.value()[0].weight == 1.0f));
+
+    const auto snapshot = h.kgStore->getEntityCountSnapshot();
+    REQUIRE((snapshot.edgeCount == 1));
 }
 
 TEST_CASE("KGWriteBuffer does not coalesce different relations", "[kg_write_buffer]") {
@@ -131,16 +134,16 @@ TEST_CASE("KGWriteBuffer does not coalesce different relations", "[kg_write_buff
     auto e1 = h.makeEdge(a, b, "calls", 1.0f);
     auto e2 = h.makeEdge(a, b, "inherits", 1.0f);
 
-    REQUIRE(h.buffer->addEdge(e1));
-    REQUIRE(h.buffer->addEdge(e2));
-    REQUIRE(h.buffer->edgeCount() == 2);
+    REQUIRE((h.buffer->addEdge(e1)));
+    REQUIRE((h.buffer->addEdge(e2)));
+    REQUIRE((h.buffer->edgeCount() == 2));
 
-    REQUIRE(h.buffer->flush());
-    REQUIRE(h.buffer->totalEdgesFlushed() == 2);
+    REQUIRE((h.buffer->flush()));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 2));
 
     auto edges = h.kgStore->getEdgesFrom(a);
-    REQUIRE(edges);
-    REQUIRE(edges.value().size() == 2);
+    REQUIRE((edges));
+    REQUIRE((edges.value().size() == 2));
 }
 
 TEST_CASE("KGWriteBuffer merges edge properties correctly", "[kg_write_buffer]") {
@@ -152,15 +155,15 @@ TEST_CASE("KGWriteBuffer merges edge properties correctly", "[kg_write_buffer]")
     auto e2 = h.makeEdge(a, b, "calls", 0.9f);
     e2.properties = R"({"count": 5})"; // higher weight, should win
 
-    REQUIRE(h.buffer->addEdge(e1));
-    REQUIRE(h.buffer->addEdge(e2));
-    REQUIRE(h.buffer->flush());
+    REQUIRE((h.buffer->addEdge(e1)));
+    REQUIRE((h.buffer->addEdge(e2)));
+    REQUIRE((h.buffer->flush()));
 
     auto edges = h.kgStore->getEdgesFrom(a);
-    REQUIRE(edges);
-    REQUIRE(edges.value().size() == 1);
-    REQUIRE(edges.value()[0].weight == 0.9f);
-    REQUIRE(edges.value()[0].properties == R"({"count": 5})");
+    REQUIRE((edges));
+    REQUIRE((edges.value().size() == 1));
+    REQUIRE((edges.value()[0].weight == 0.9f));
+    REQUIRE((edges.value()[0].properties == R"({"count": 5})"));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,14 +174,26 @@ TEST_CASE("KGWriteBuffer accumulates doc entities in memory", "[kg_write_buffer]
     TestHarness h;
     auto [a, b] = h.insertTwoNodes();
 
-    REQUIRE(h.buffer->entityCount() == 0);
-    REQUIRE(h.buffer->addDocEntity(h.makeEntity(1, a, "fn1")));
-    REQUIRE(h.buffer->addDocEntity(h.makeEntity(2, b, "fn2")));
-    REQUIRE(h.buffer->entityCount() == 2);
-    // Entity flush requires a documents table (FK constraint).
-    // In the isolated test harness, flush() may leave entities buffered
-    // if the WriteBatch commit fails. This is expected behavior — callers
-    // should handle flush errors and retry.
+    REQUIRE((h.buffer->entityCount() == 0));
+    REQUIRE((h.buffer->addDocEntity(h.makeEntity(1, a, "fn1"))));
+    REQUIRE((h.buffer->addDocEntity(h.makeEntity(2, b, "fn2"))));
+    REQUIRE((h.buffer->entityCount() == 2));
+}
+
+TEST_CASE("KGWriteBuffer preserves buffered work when commit fails", "[kg_write_buffer]") {
+    TestHarness h;
+    auto [a, b] = h.insertTwoNodes();
+
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls"))));
+    REQUIRE((h.buffer->addDocEntity(h.makeEntity(1, a, "fn1"))));
+    REQUIRE((h.buffer->edgeCount() == 1));
+    REQUIRE((h.buffer->entityCount() == 1));
+
+    auto flushResult = h.buffer->flush();
+    REQUIRE_FALSE(flushResult);
+    REQUIRE((h.buffer->edgeCount() == 1));
+    REQUIRE((h.buffer->entityCount() == 1));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -194,20 +209,20 @@ TEST_CASE("KGWriteBuffer auto-flushes on maxEdges threshold", "[kg_write_buffer]
 
     auto nodes = h.kgStore->upsertNodes(
         {h.makeNode(1), h.makeNode(2), h.makeNode(3), h.makeNode(4), h.makeNode(5)});
-    REQUIRE(nodes);
+    REQUIRE((nodes));
     auto ids = nodes.value();
-    REQUIRE(ids.size() >= 4);
+    REQUIRE((ids.size() >= 4));
 
     // Add 3 unique edges — the 3rd should trigger auto-flush.
-    REQUIRE(h.buffer->addEdge(h.makeEdge(ids[0], ids[1], "r1")));
-    REQUIRE(h.buffer->edgeCount() == 1);
-    REQUIRE(h.buffer->addEdge(h.makeEdge(ids[1], ids[2], "r2")));
-    REQUIRE(h.buffer->edgeCount() == 2);
+    REQUIRE((h.buffer->addEdge(h.makeEdge(ids[0], ids[1], "r1"))));
+    REQUIRE((h.buffer->edgeCount() == 1));
+    REQUIRE((h.buffer->addEdge(h.makeEdge(ids[1], ids[2], "r2"))));
+    REQUIRE((h.buffer->edgeCount() == 2));
     // 3rd edge triggers auto-flush
-    REQUIRE(h.buffer->addEdge(h.makeEdge(ids[2], ids[3], "r3")));
-    REQUIRE(h.buffer->edgeCount() == 0); // flushed
+    REQUIRE((h.buffer->addEdge(h.makeEdge(ids[2], ids[3], "r3"))));
+    REQUIRE((h.buffer->edgeCount() == 0)); // flushed
 
-    REQUIRE(h.buffer->totalEdgesFlushed() == 3);
+    REQUIRE((h.buffer->totalEdgesFlushed() == 3));
 }
 
 TEST_CASE("KGWriteBuffer auto-flushes on document count threshold", "[kg_write_buffer]") {
@@ -219,23 +234,23 @@ TEST_CASE("KGWriteBuffer auto-flushes on document count threshold", "[kg_write_b
 
     auto [a, b] = h.insertTwoNodes();
 
-    REQUIRE(h.buffer->docCount() == 0);
-    REQUIRE(h.buffer->addEdge(h.makeEdge(a, b, "calls")));
-    REQUIRE(h.buffer->edgeCount() == 1);
+    REQUIRE((h.buffer->docCount() == 0));
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls"))));
+    REQUIRE((h.buffer->edgeCount() == 1));
 
     h.buffer->incrementDocCount();
-    REQUIRE(h.buffer->docCount() == 1);
-    REQUIRE(h.buffer->edgeCount() == 1); // not flushed yet
+    REQUIRE((h.buffer->docCount() == 1));
+    REQUIRE((h.buffer->edgeCount() == 1)); // not flushed yet
 
     h.buffer->incrementDocCount();
-    REQUIRE(h.buffer->docCount() == 2);
-    REQUIRE(h.buffer->edgeCount() == 1); // still not flushed
+    REQUIRE((h.buffer->docCount() == 2));
+    REQUIRE((h.buffer->edgeCount() == 1)); // still not flushed
 
     // 3rd doc triggers auto-flush
     h.buffer->incrementDocCount();
-    REQUIRE(h.buffer->docCount() == 0);  // reset after flush
-    REQUIRE(h.buffer->edgeCount() == 0); // flushed
-    REQUIRE(h.buffer->totalEdgesFlushed() == 1);
+    REQUIRE((h.buffer->docCount() == 0));  // reset after flush
+    REQUIRE((h.buffer->edgeCount() == 0)); // flushed
+    REQUIRE((h.buffer->totalEdgesFlushed() == 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -252,14 +267,14 @@ TEST_CASE("KGWriteBuffer disabled mode passes through directly", "[kg_write_buff
 
     // In disabled mode, addEdge calls addEdgesUnique directly.
     auto r = h.buffer->addEdge(h.makeEdge(a, b, "calls"));
-    REQUIRE(r);
-    REQUIRE(h.buffer->edgeCount() == 0); // not buffered
-    REQUIRE(h.buffer->totalEdgesAdded() == 1);
+    REQUIRE((r));
+    REQUIRE((h.buffer->edgeCount() == 0)); // not buffered
+    REQUIRE((h.buffer->totalEdgesAdded() == 1));
 
     // The edge should already be in the store (direct pass-through).
     auto edges = h.kgStore->getEdgesFrom(a);
-    REQUIRE(edges);
-    REQUIRE(edges.value().size() == 1);
+    REQUIRE((edges));
+    REQUIRE((edges.value().size() == 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +283,9 @@ TEST_CASE("KGWriteBuffer disabled mode passes through directly", "[kg_write_buff
 
 TEST_CASE("KGWriteBuffer flush with empty buffer is a no-op", "[kg_write_buffer]") {
     TestHarness h;
-    REQUIRE(h.buffer->flush());
-    REQUIRE(h.buffer->edgeCount() == 0);
-    REQUIRE(h.buffer->totalEdgesFlushed() == 0);
+    REQUIRE((h.buffer->flush()));
+    REQUIRE((h.buffer->edgeCount() == 0));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 0));
 }
 
 TEST_CASE("KGWriteBuffer addEdges bulk accepts vector", "[kg_write_buffer]") {
@@ -282,26 +297,26 @@ TEST_CASE("KGWriteBuffer addEdges bulk accepts vector", "[kg_write_buffer]") {
         h.makeEdge(a, b, "r2", 1.0f),
     };
 
-    REQUIRE(h.buffer->addEdges(batch));
-    REQUIRE(h.buffer->edgeCount() == 2);
-    REQUIRE(h.buffer->totalEdgesAdded() == 2);
+    REQUIRE((h.buffer->addEdges(batch)));
+    REQUIRE((h.buffer->edgeCount() == 2));
+    REQUIRE((h.buffer->totalEdgesAdded() == 2));
 
-    REQUIRE(h.buffer->flush());
-    REQUIRE(h.buffer->totalEdgesFlushed() == 2);
+    REQUIRE((h.buffer->flush()));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 2));
 }
 
 TEST_CASE("KGWriteBuffer resetCounters clears telemetry", "[kg_write_buffer]") {
     TestHarness h;
     auto [a, b] = h.insertTwoNodes();
 
-    REQUIRE(h.buffer->addEdge(h.makeEdge(a, b, "calls")));
-    REQUIRE(h.buffer->flush());
-    REQUIRE(h.buffer->totalEdgesAdded() == 1);
-    REQUIRE(h.buffer->totalEdgesFlushed() == 1);
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls"))));
+    REQUIRE((h.buffer->flush()));
+    REQUIRE((h.buffer->totalEdgesAdded() == 1));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 1));
 
     h.buffer->resetCounters();
-    REQUIRE(h.buffer->totalEdgesAdded() == 0);
-    REQUIRE(h.buffer->totalEdgesFlushed() == 0);
+    REQUIRE((h.buffer->totalEdgesAdded() == 0));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 0));
 }
 
 } // namespace

@@ -13,6 +13,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -299,12 +300,13 @@ private:
     std::size_t doc_count_ = 0;
 
     // Hot-query score cache: memoizes full-corpus BM25 score vectors.
-    // Keyed by query string, evicted LRU when full. Thread-safe only
-    // for single-threaded access (score() is const but uses mutable state).
+    // Keyed by query string and evicted LRU when full. Access is serialized
+    // with score_cache_mutex_ because score() is const but mutates cache state.
     struct ScoreCacheEntry {
         std::vector<float> scores;
         std::uint32_t concept_count = 0; // invalidated when concept index changes
     };
+    mutable std::mutex score_cache_mutex_;
     mutable std::list<std::pair<std::string, ScoreCacheEntry>> score_cache_list_;
     mutable std::unordered_map<std::string,
                                std::list<std::pair<std::string, ScoreCacheEntry>>::iterator>

@@ -26,6 +26,7 @@ namespace yamsfmt = fmt;
 #include <optional>
 #include <random>
 #include <source_location>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 
@@ -36,6 +37,10 @@ namespace {
 bool isHexHash(std::string_view hash) noexcept {
     return hash.size() == HASH_STRING_SIZE &&
            std::ranges::all_of(hash, [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+std::string errnoMessage(int err) {
+    return std::error_code(err, std::generic_category()).message();
 }
 
 bool isValidStorageKey(std::string_view key) noexcept {
@@ -298,7 +303,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         int fd = ::open(tempPath.c_str(), O_RDONLY);
         if (fd < 0) {
             spdlog::warn("Failed to open temp file for fsync: {} ({})", tempPath.string(),
-                         strerror(errno));
+                         errnoMessage(errno));
             std::filesystem::remove(tempPath);
             return Result<void>(ErrorCode::PermissionDenied);
         }
@@ -307,12 +312,18 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         // fsync() alone only flushes to the drive cache, not to
         // physical media. See Apple TN2250 and man fcntl.
         if (::fcntl(fd, F_FULLFSYNC) != 0) {
-            spdlog::warn("F_FULLFSYNC failed on {}: {}", tempPath.string(), strerror(errno));
+            spdlog::warn("F_FULLFSYNC failed on {}: {}", tempPath.string(), errnoMessage(errno));
             // Fall through to fsync as best-effort.
+            if (::fsync(fd) != 0) {
+                spdlog::warn("fsync failed on {}: {}", tempPath.string(), errnoMessage(errno));
+                ::close(fd);
+                std::filesystem::remove(tempPath);
+                return Result<void>(ErrorCode::IOError);
+            }
         }
 #else
         if (::fsync(fd) != 0) {
-            spdlog::warn("fsync failed on {}: {}", tempPath.string(), strerror(errno));
+            spdlog::warn("fsync failed on {}: {}", tempPath.string(), errnoMessage(errno));
             ::close(fd);
             std::filesystem::remove(tempPath);
             return Result<void>(ErrorCode::IOError);

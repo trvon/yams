@@ -429,8 +429,6 @@ public:
                                                               "addEdge failed for {}: {}",
                                                               result.hash.substr(0, 8),
                                                               r.error().message);
-                                            } else {
-                                                kgEdgesCreated++;
                                             }
                                         } else {
                                             auto hasBlobResult =
@@ -461,12 +459,17 @@ public:
                                 }
 
                                 if (ctx_.kgWriteBuffer) {
+                                    const auto edgesFlushedBefore =
+                                        ctx_.kgWriteBuffer->totalEdgesFlushed();
                                     auto flushResult = ctx_.kgWriteBuffer->flush();
                                     if (!flushResult) {
                                         spdlog::warn("[IndexingService] KG buffer flush failed: {}",
                                                      flushResult.error().message);
+                                    } else {
+                                        const auto edgesFlushedAfter =
+                                            ctx_.kgWriteBuffer->totalEdgesFlushed();
+                                        kgEdgesCreated += edgesFlushedAfter - edgesFlushedBefore;
                                     }
-                                    kgEdgesCreated = ctx_.kgWriteBuffer->totalEdgesFlushed();
                                 }
 
                                 if (kgNodesCreated > 0 || kgEdgesCreated > 0) {
