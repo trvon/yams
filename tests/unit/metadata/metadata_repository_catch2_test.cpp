@@ -3264,6 +3264,23 @@ TEST_CASE("MetadataRepository: tree snapshots and changes round-trip",
     CHECK((snapshots.value().front().metadata.at("git_commit") == "def456"));
     CHECK((snapshots.value().front().fileCount == 2));
 
+    auto fetchedTarget = fix.repository_->getTreeSnapshot(target.snapshotId);
+    if (!fetchedTarget.has_value()) {
+        INFO("getTreeSnapshot error: " << fetchedTarget.error().message);
+    }
+    REQUIRE((fetchedTarget.has_value()));
+    REQUIRE((fetchedTarget.value().has_value()));
+    CHECK((fetchedTarget.value()->snapshotId == target.snapshotId));
+    CHECK((fetchedTarget.value()->rootTreeHash == target.rootTreeHash));
+    CHECK((fetchedTarget.value()->metadata.at("directory_path") == "/repo"));
+    CHECK((fetchedTarget.value()->metadata.at("snapshot_label") == "target"));
+    CHECK((fetchedTarget.value()->metadata.at("git_commit") == "def456"));
+    CHECK((fetchedTarget.value()->fileCount == 2));
+
+    auto missingSnapshot = fix.repository_->getTreeSnapshot("missing-snapshot");
+    REQUIRE((missingSnapshot.has_value()));
+    CHECK_FALSE((missingSnapshot.value().has_value()));
+
     TreeDiffDescriptor descriptor;
     descriptor.baseSnapshotId = base.snapshotId;
     descriptor.targetSnapshotId = target.snapshotId;

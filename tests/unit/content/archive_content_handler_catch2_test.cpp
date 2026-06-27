@@ -391,6 +391,30 @@ TEST_CASE("ArchiveContentHandler resetStats zeros counters", "[content][archive]
     CHECK(stats.failedProcessing == 0);
 }
 
+TEST_CASE("ArchiveContentHandler processBuffer supports archive buffers",
+          "[content][archive][buffer][catch2]") {
+    ArchiveContentHandler handler;
+
+    const std::vector<std::byte> zipHeader{
+        std::byte{0x50}, std::byte{0x4B}, std::byte{0x03}, std::byte{0x04}, std::byte{0x14},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x08}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = handler.processBuffer(zipHeader, ".zip");
+    if (!result.has_value()) {
+        INFO("archive processBuffer error: " << result.error().message);
+    }
+    REQUIRE(result.has_value());
+    CHECK(result.value().handlerName == "ArchiveContentHandler");
+    CHECK(result.value().metadata.at("file_type") == "archive");
+    CHECK(result.value().metadata.at("source") == "buffer");
+    CHECK(result.value().metadata.at("hint") == ".zip");
+    REQUIRE(result.value().archiveData.has_value());
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // createArchiveHandler factory
 // ────────────────────────────────────────────────────────────────────────────────

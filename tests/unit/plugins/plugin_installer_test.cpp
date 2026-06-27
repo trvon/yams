@@ -90,7 +90,7 @@ struct PluginInstallerFixture {
 TEST_CASE_METHOD(PluginInstallerFixture, "Installer creation", "[plugins][installer]") {
     SECTION("makePluginInstaller creates valid installer") {
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
-        REQUIRE(installer != nullptr);
+        REQUIRE((installer != nullptr));
     }
 }
 
@@ -99,8 +99,8 @@ TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][in
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->listInstalled();
 
-        REQUIRE(result.has_value());
-        CHECK(result.value().empty());
+        REQUIRE((result.has_value()));
+        CHECK((result.value().empty()));
     }
 
     SECTION("finds existing plugin directories") {
@@ -111,12 +111,12 @@ TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][in
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->listInstalled();
 
-        REQUIRE(result.has_value());
-        CHECK(result.value().size() == 2u);
+        REQUIRE((result.has_value()));
+        CHECK((result.value().size() == 2u));
 
         auto& plugins = result.value();
-        CHECK(std::find(plugins.begin(), plugins.end(), "plugin-a") != plugins.end());
-        CHECK(std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end());
+        CHECK((std::find(plugins.begin(), plugins.end(), "plugin-a") != plugins.end()));
+        CHECK((std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end()));
     }
 }
 
@@ -126,12 +126,25 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->installedVersion("non-existent");
 
-        REQUIRE(result.has_value());
+        REQUIRE((result.has_value()));
         CHECK_FALSE(result.value().has_value());
     }
 
-    SECTION("reads version from manifest.json") {
-        // Create plugin directory with manifest
+    SECTION("reads version from yams-plugin.json") {
+        fs::create_directories(installDir / "test-plugin");
+        std::ofstream manifestFile(installDir / "test-plugin" / "yams-plugin.json");
+        manifestFile << R"({"version": "1.2.3", "name": "test-plugin"})";
+        manifestFile.close();
+
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->installedVersion("test-plugin");
+
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().has_value()));
+        CHECK((*result.value() == "1.2.3"));
+    }
+
+    SECTION("reads version from manifest.json as a fallback") {
         fs::create_directories(installDir / "test-plugin");
         std::ofstream manifestFile(installDir / "test-plugin" / "manifest.json");
         manifestFile << R"({"version": "1.2.3", "name": "test-plugin"})";
@@ -140,21 +153,21 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->installedVersion("test-plugin");
 
-        REQUIRE(result.has_value());
-        REQUIRE(result.value().has_value());
-        CHECK(*result.value() == "1.2.3");
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().has_value()));
+        CHECK((*result.value() == "1.2.3"));
     }
 
-    SECTION("returns 'unknown' without manifest.json") {
+    SECTION("returns 'unknown' without either manifest file") {
         // Create plugin directory without manifest
         fs::create_directories(installDir / "test-plugin");
 
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->installedVersion("test-plugin");
 
-        REQUIRE(result.has_value());
-        REQUIRE(result.value().has_value());
-        CHECK(*result.value() == "unknown");
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().has_value()));
+        CHECK((*result.value() == "unknown"));
     }
 
     SECTION("rejects path traversal names") {
@@ -162,7 +175,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
         auto result = installer->installedVersion("../test-plugin");
 
         CHECK_FALSE(result.has_value());
-        CHECK(result.error().code == ErrorCode::InvalidArgument);
+        CHECK((result.error().code == ErrorCode::InvalidArgument));
     }
 }
 
@@ -174,12 +187,12 @@ TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][instal
     SECTION("removes plugin directory") {
         // Create plugin directory
         fs::create_directories(installDir / "test-plugin");
-        REQUIRE(fs::exists(installDir / "test-plugin"));
+        REQUIRE((fs::exists(installDir / "test-plugin")));
 
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->uninstall("test-plugin");
 
-        CHECK(result.has_value());
+        CHECK((result.has_value()));
         CHECK_FALSE(fs::exists(installDir / "test-plugin"));
     }
 
@@ -188,21 +201,21 @@ TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][instal
         auto result = installer->uninstall("non-existent");
 
         CHECK_FALSE(result.has_value());
-        CHECK(result.error().code == ErrorCode::NotFound);
+        CHECK((result.error().code == ErrorCode::NotFound));
     }
 
     SECTION("rejects path traversal names without deleting outside install root") {
         auto outside = testDir / "outside";
         fs::create_directories(outside);
         std::ofstream(outside / "sentinel.txt") << "keep";
-        REQUIRE(fs::exists(outside / "sentinel.txt"));
+        REQUIRE((fs::exists(outside / "sentinel.txt")));
 
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->uninstall("../outside");
 
         CHECK_FALSE(result.has_value());
-        CHECK(result.error().code == ErrorCode::InvalidArgument);
-        CHECK(fs::exists(outside / "sentinel.txt"));
+        CHECK((result.error().code == ErrorCode::InvalidArgument));
+        CHECK((fs::exists(outside / "sentinel.txt")));
     }
 
 #if !defined(_WIN32)
@@ -216,13 +229,13 @@ TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][instal
 
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->uninstall("test-plugin");
-        REQUIRE(result.has_value());
-        REQUIRE(fs::exists(trustFile));
+        REQUIRE((result.has_value()));
+        REQUIRE((fs::exists(trustFile)));
 
         std::error_code ec;
         auto perms = fs::status(trustFile, ec).permissions();
         REQUIRE_FALSE(ec);
-        CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+        CHECK(((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none));
     }
 #endif
 }
@@ -235,11 +248,11 @@ TEST_CASE("InstallOptions defaults", "[plugins][installer][security]") {
     InstallOptions options;
 
     SECTION("auto-trust is on by default") {
-        CHECK(options.autoTrust);
+        CHECK((options.autoTrust));
     }
 
     SECTION("auto-load is on by default") {
-        CHECK(options.autoLoad);
+        CHECK((options.autoLoad));
     }
 
     SECTION("force is off by default") {
@@ -265,11 +278,11 @@ TEST_CASE("Checksum format requirements", "[plugins][installer][security]") {
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     SECTION("prefix is sha256:") {
-        CHECK(emptyFileSha256.substr(0, 7) == "sha256:");
+        CHECK((emptyFileSha256.substr(0, 7) == "sha256:"));
     }
 
     SECTION("total length is 71 characters") {
-        CHECK(emptyFileSha256.length() == 7 + 64);
+        CHECK((emptyFileSha256.length() == 7 + 64));
     }
 }
 
@@ -283,8 +296,8 @@ TEST_CASE("InstallResult contains security info", "[plugins][installer][security
     result.elapsed = std::chrono::milliseconds{500};
 
     CHECK_FALSE(result.checksum.empty());
-    CHECK(result.checksum.substr(0, 7) == "sha256:");
-    CHECK(result.sizeBytes > 0u);
+    CHECK((result.checksum.substr(0, 7) == "sha256:"));
+    CHECK((result.sizeBytes > 0u));
 }
 
 // =============================================================================
@@ -299,20 +312,20 @@ TEST_CASE("InstallProgress stages", "[plugins][installer][progress]") {
         auto extracting = InstallProgress::Stage::Extracting;
         auto complete = InstallProgress::Stage::Complete;
 
-        CHECK(querying != downloading);
-        CHECK(verifying != extracting);
-        CHECK(complete != querying);
+        CHECK((querying != downloading));
+        CHECK((verifying != extracting));
+        CHECK((complete != querying));
     }
 }
 
 TEST_CASE("InstallProgress default values", "[plugins][installer][progress]") {
     InstallProgress progress;
 
-    CHECK(progress.stage == InstallProgress::Stage::Querying);
-    CHECK(progress.message.empty());
-    CHECK(progress.progress == 0.0f);
-    CHECK(progress.bytesDownloaded == 0u);
-    CHECK(progress.totalBytes == 0u);
+    CHECK((progress.stage == InstallProgress::Stage::Querying));
+    CHECK((progress.message.empty()));
+    CHECK((progress.progress == 0.0f));
+    CHECK((progress.bytesDownloaded == 0u));
+    CHECK((progress.totalBytes == 0u));
 }
 
 // =============================================================================
@@ -329,8 +342,8 @@ TEST_CASE_METHOD(PluginInstallerFixture, "Trust file location", "[plugins][insta
     auto installer = makePluginInstaller(stubClient, installDir, trustFile);
 
     SECTION("trust file is in config directory") {
-        CHECK(trustFile.parent_path().filename() == "data");
-        CHECK(trustFile.filename() == "plugins.trust");
+        CHECK((trustFile.parent_path().filename() == "data"));
+        CHECK((trustFile.filename() == "plugins.trust"));
     }
 }
 
@@ -343,8 +356,8 @@ TEST_CASE_METHOD(PluginInstallerFixture, "checkUpdates behavior", "[plugins][ins
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
         auto result = installer->checkUpdates();
 
-        REQUIRE(result.has_value());
-        CHECK(result.value().empty());
+        REQUIRE((result.has_value()));
+        CHECK((result.value().empty()));
     }
 }
 
@@ -357,16 +370,16 @@ TEST_CASE("Default paths", "[plugins][installer][defaults]") {
         auto defaultDir = getDefaultPluginInstallDir();
 
         CHECK_FALSE(defaultDir.empty());
-        CHECK(defaultDir.string().find("yams") != std::string::npos);
-        CHECK(defaultDir.string().find("plugins") != std::string::npos);
+        CHECK((defaultDir.string().find("yams") != std::string::npos));
+        CHECK((defaultDir.string().find("plugins") != std::string::npos));
     }
 
     SECTION("default trust file is valid") {
         auto defaultFile = getDefaultPluginTrustFile();
 
         CHECK_FALSE(defaultFile.empty());
-        CHECK(defaultFile.string().find("yams") != std::string::npos);
-        CHECK(defaultFile.filename().string() == "plugins.trust");
+        CHECK((defaultFile.string().find("yams") != std::string::npos));
+        CHECK((defaultFile.filename().string() == "plugins.trust"));
     }
 }
 
@@ -381,16 +394,16 @@ TEST_CASE("Security best practices for plugin installer", "[plugins][installer][
 
         const std::string sampleChecksum =
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        CHECK(sampleChecksum.length() == expectedTotalLength);
+        CHECK((sampleChecksum.length() == expectedTotalLength));
     }
 
     SECTION("HTTPS is enforced for downloads") {
-        CHECK(std::string(DEFAULT_PLUGIN_REPO_URL).substr(0, 8) == "https://");
+        CHECK((std::string(DEFAULT_PLUGIN_REPO_URL).substr(0, 8) == "https://"));
     }
 
     SECTION("TLS verification enabled by default") {
         PluginRepoConfig config;
-        CHECK(config.verifyTls);
+        CHECK((config.verifyTls));
     }
 }
 

@@ -14,6 +14,7 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <span>
 #include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -27,6 +28,7 @@
 #include <yams/content/processing_error.h>
 #include <yams/content/processing_stats.h>
 #include <yams/content/text_content_handler.h>
+#include <yams/content/video_content_handler.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/text_extractor.h>
 
@@ -427,6 +429,49 @@ TEST_CASE("AudioContentHandler: Basic functionality", "[content][audio]") {
         auto result = handler.process(filePath);
         // Result is implementation-dependent for minimal headers
     }
+}
+
+TEST_CASE("AudioContentHandler: processBuffer supports audio buffers", "[content][audio][buffer]") {
+    auto& detector = FileTypeDetector::instance();
+    auto initResult = detector.initializeWithMagicNumbers();
+    REQUIRE(initResult);
+
+    AudioContentHandler handler;
+    const std::vector<uint8_t> wavHeader = {'R', 'I', 'F', 'F', 36,  0,   0,   0,  'W', 'A', 'V',
+                                            'E', 'f', 'm', 't', ' ', 16,  0,   0,  0,   1,   0,
+                                            1,   0,   68,  172, 0,   0,   136, 88, 1,   0,   2,
+                                            0,   16,  0,   'd', 'a', 't', 'a', 0,  0,   0,   0};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{wavHeader}), ".wav");
+    if (!result.has_value()) {
+        FAIL(result.error().message);
+    }
+    CHECK(result.value().handlerName == "AudioContentHandler");
+    CHECK(result.value().metadata.at("file_type") == "audio");
+    CHECK(result.value().metadata.at("source") == "buffer");
+    CHECK(result.value().metadata.at("hint") == ".wav");
+    REQUIRE(result.value().audioData.has_value());
+}
+
+TEST_CASE("VideoContentHandler: processBuffer supports video buffers", "[content][video][buffer]") {
+    auto& detector = FileTypeDetector::instance();
+    auto initResult = detector.initializeWithMagicNumbers();
+    REQUIRE(initResult);
+
+    VideoContentHandler handler;
+    const std::vector<uint8_t> mp4Header = {0x00, 0x00, 0x00, 0x10, 'f',  't',  'y',  'p',
+                                            'i',  's',  'o',  'm',  0x00, 0x00, 0x00, 0x00};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{mp4Header}), ".mp4");
+    if (!result.has_value()) {
+        INFO("video processBuffer error: " << result.error().message);
+    }
+    REQUIRE(result.has_value());
+    CHECK(result.value().handlerName == "VideoContentHandler");
+    CHECK(result.value().metadata.at("file_type") == "video");
+    CHECK(result.value().metadata.at("source") == "buffer");
+    CHECK(result.value().metadata.at("hint") == ".mp4");
+    REQUIRE(result.value().videoData.has_value());
 }
 
 // ===========================================================================

@@ -2,21 +2,24 @@
 
 **Date:** 2025-11-02  
 **Purpose:** Document where content extraction happens, identify consolidation opportunities  
-**Status:** Analysis Complete
+**Status:** Historical analysis; partially stale
+
+> **Implementation note (2026-06-26):** This map still explains the broad extraction flow, but several names and consolidation assumptions have moved. In current code, `RepairCoordinator` has been absorbed by `RepairService`, `IndexingService` now exists in `src/app/services/`, and some recommendations below are better read as follow-up design notes than as a live roadmap.
 
 ---
 
 ## Executive Summary
 
-Content extraction in YAMS is scattered across **5 major locations**:
+Content extraction in YAMS is scattered across **several major locations**:
 
 1. **PostIngestQueue** - Primary extraction path for newly added documents
-2. **RepairCoordinator** - Background repair for missing FTS5/embeddings
+2. **RepairService** - Background repair for missing FTS5/embeddings (superseding the older RepairCoordinator naming)
 3. **CLI repair command** - Manual FTS5 rebuild via `yams repair --fts5`
 4. **CLI doctor command** - Doctor diagnostic FTS5 repair
-5. **TUI reindex** - Single-document reindex via Browse interface
+5. **TUI / service reindex paths** - Single-document or targeted reindex flows
 
 All paths converge on:
+
 - `yams::extraction::util::extractDocumentText()` - Central extraction utility
 - `AppContext.contentExtractors` - Unified extractor registry (plugins + built-ins)
 
@@ -25,9 +28,11 @@ All paths converge on:
 ## 1. Content Extraction Entry Points
 
 ### 1.1 PostIngestQueue (Primary Path)
+
 **File:** `src/daemon/components/PostIngestQueue.cpp`  
 **Method:** `indexDocumentSync()`  
 **Flow:**
+
 ```
 Document Added → PostIngestQueue → indexDocumentSync()
   ↓
@@ -39,6 +44,7 @@ Optional: Queue for embedding generation
 ```
 
 **Key Code:**
+
 ```cpp
 auto txt = extractDocumentText(store_, hash, resolvedMime, extension, extractors_);
 if (txt && !txt->empty()) {
@@ -51,9 +57,11 @@ if (txt && !txt->empty()) {
 ---
 
 ### 1.2 RepairCoordinator (Background Repair)
+
 **File:** `src/daemon/components/RepairCoordinator.cpp`  
 **Method:** `runAsync()`  
 **Flow:**
+
 ```
 Periodic scan → Detect missing FTS5/embeddings
   ↓
@@ -65,6 +73,7 @@ Queue FTS5Job → InternalEventBus
 ```
 
 **Key Code:**
+
 ```cpp
 bool canExtractDocument(
     const std::string& mimeType,
@@ -96,9 +105,11 @@ bool canExtractDocument(
 ---
 
 ### 1.3 CLI Repair Command
+
 **File:** `src/cli/commands/repair_command.cpp`  
 **Method:** `rebuildFts5Index()`  
 **Flow:**
+
 ```
 yams repair --fts5 → rebuildFts5Index()
   ↓
@@ -115,6 +126,7 @@ For each document:
 ```
 
 **Key Code:**
+
 ```cpp
 auto extractedOpt = yams::extraction::util::extractDocumentText(
     ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
@@ -136,9 +148,11 @@ if (extractedOpt && !extractedOpt->empty()) {
 ---
 
 ### 1.4 CLI Doctor Command
+
 **File:** `src/cli/commands/doctor_command.cpp`  
 **Method:** `runRepair()`  
 **Flow:**
+
 ```
 yams doctor --repair → runRepair()
   ↓
@@ -150,9 +164,11 @@ Similar to repair_command, but part of diagnostic suite
 ---
 
 ### 1.5 TUI Reindex
+
 **File:** `src/cli/tui/tui_services.cpp`  
 **Method:** `reindexDocument()`  
 **Flow:**
+
 ```
 Browse UI → Reindex single document
   ↓
@@ -166,9 +182,11 @@ insertContent() → indexDocumentContent() → updateFuzzyIndex()
 ---
 
 ### 1.6 Embedding Repair Utility
+
 **File:** `src/repair/embedding_repair_util.cpp`  
 **Method:** `repairMissingEmbeddings()`  
 **Flow:**
+
 ```
 Batch of documents missing embeddings
   ↓
@@ -187,6 +205,7 @@ Store content + generate embeddings + update status
 
 **File:** `src/extraction/extraction_util.cpp`  
 **Signature:**
+
 ```cpp
 std::optional<std::string> extractDocumentText(
     std::shared_ptr<yams::api::IContentStore> store,
@@ -198,19 +217,20 @@ std::optional<std::string> extractDocumentText(
 ```
 
 **Extraction Strategy (Priority Order):**
+
 1. **Plugin extractors** (highest priority):
    - Iterate through `extractors` parameter
    - Call `extractor->supports(mime, extension)`
    - If match: `extractor->extractText(bytes, mime, extension)`
-   
+
 2. **HTML fallback**:
    - If MIME is `text/html` or extension is `.html`
    - Use `HtmlTextExtractor`
-   
+
 3. **Text MIME types** (via FileTypeDetector):
    - Check `detector.isTextMimeType(mime)`
    - Return raw bytes as UTF-8 string
-   
+
 4. **Extension-based fallback**:
    - Use `FileTypeDetector::getMimeTypeFromExtension()`
    - If detected MIME is text → return raw content
@@ -282,6 +302,7 @@ if (extractorResult) {
 ## 4. Consolidation Opportunities
 
 ### 4.1 ✅ DONE: Unified Extractor Registry
+
 - **Status:** Complete
 - **Implementation:** ContentExtractorFactory merges built-ins with plugins in ServiceManager
 - **Benefit:** Single source of truth for all extractors
@@ -289,6 +310,7 @@ if (extractorResult) {
 ### 4.2 🔄 OPPORTUNITY: Consolidate FTS5 Indexing Logic
 
 **Current State:** FTS5 indexing duplicated across:
+
 1. PostIngestQueue::persist_content_and_index()
 2. RepairCommand::rebuildFts5Index()
 3. DoctorCommand::runRepair()
@@ -296,6 +318,7 @@ if (extractorResult) {
 5. SearchService::lightIndexForHash_impl()
 
 **Proposed:** Create `IndexingService::indexContentForDocument()` utility:
+
 ```cpp
 namespace yams::app::services {
 
@@ -326,6 +349,7 @@ Result<IndexingStats> indexContentForDocument(
 ```
 
 **Benefits:**
+
 - ✅ Eliminate code duplication
 - ✅ Consistent error handling
 - ✅ Unified logging/metrics
@@ -364,6 +388,7 @@ class ContentNormalizationStage : public Stage { /* UTF-8 sanitization */ };
 ```
 
 **Benefits:**
+
 - ✅ Testable stages
 - ✅ Configurable pipeline per document type
 - ✅ Easy to add new stages (e.g., binary disassembly post-processing)
@@ -371,6 +396,7 @@ class ContentNormalizationStage : public Stage { /* UTF-8 sanitization */ };
 ### 4.4 🔄 OPPORTUNITY: Repair Logic Consolidation
 
 **Current State:** Repair scattered across:
+
 - RepairCoordinator (daemon background)
 - RepairCommand (CLI manual)
 - DoctorCommand (CLI diagnostic)
@@ -410,6 +436,7 @@ std::shared_ptr<IRepairService> makeRepairService(const AppContext& ctx);
 ```
 
 **Benefits:**
+
 - ✅ CLI commands become thin wrappers
 - ✅ Daemon uses same logic as CLI
 - ✅ TUI uses same logic as CLI
@@ -529,37 +556,43 @@ using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
 ## 7. Recommendations
 
 ### Short-Term (External extraction plugin work completion)
+
 1. ✅ **DONE:** ContentExtractorFactory integration
 2. ⏳ **IN PROGRESS:** Document extraction pipeline (this document)
 3. 🔄 **NEXT:** Create `IndexingService::indexContentForDocument()` utility
 4. 🔄 **NEXT:** Test BinaryExtractor end-to-end with Ghidra
 
 ### Medium-Term (Code Quality)
+
 5. 🔄 Consolidate RepairCommand + DoctorCommand repair logic
-6. 🔄 Create RepairService in app/services/
-7. 🔄 Extract ExtractionPipeline abstraction
+2. 🔄 Create RepairService in app/services/
+3. 🔄 Extract ExtractionPipeline abstraction
 
 ### Long-Term (Architecture)
+
 8. 🔄 Plugin marketplace / discovery
-9. 🔄 Extraction metrics / telemetry
-10. 🔄 Incremental re-extraction (only changed content)
+2. 🔄 Extraction metrics / telemetry
+3. 🔄 Incremental re-extraction (only changed content)
 
 ---
 
 ## 8. Testing Strategy
 
 ### Unit Tests Needed
+
 - ✅ ContentExtractorFactory registration
 - ⏳ IndexingService utility functions
 - ⏳ RepairService (when created)
 - ⏳ ExtractionPipeline stages (when created)
 
 ### Integration Tests Needed
+
 - ⏳ BinaryExtractor with real Ghidra plugin
 - ⏳ Full extraction pipeline (add → extract → index → search)
 - ⏳ Repair flow (break FTS5 → repair → verify)
 
 ### End-to-End Tests Needed
+
 - ⏳ PostIngestQueue with various file types
 - ⏳ RepairCoordinator background repair
 - ⏳ CLI repair command full rebuild
@@ -570,12 +603,14 @@ using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
 ## 9. Metrics & Monitoring
 
 ### Extraction Metrics (Proposed)
+
 - `extraction_attempts_total` (counter by mime_type, success/failure)
 - `extraction_duration_seconds` (histogram)
 - `extraction_content_size_bytes` (histogram)
 - `extractor_plugin_calls_total` (counter by plugin_name)
 
 ### Repair Metrics (Existing)
+
 - `repair_queue_depth` (gauge)
 - `repair_documents_processed_total` (counter)
 - `repair_fts5_operations_total` (counter by success/failure)

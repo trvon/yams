@@ -11,6 +11,8 @@ The YAMS MCP server exposes **3 composite tools** — `query`, `execute`, and `s
 yams serve
 ```
 
+Current protocol negotiation supports: `2024-10-07`, `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`.
+
 ### Tool Surface
 
 | Tool | Purpose | Operations |
@@ -40,6 +42,7 @@ Omit `target` to list all available operations:
 List available prompt templates (built-ins and file-backed). File-backed templates are Markdown files named `PROMPT-*.md` in the configured prompts directory (see user guide). Names are derived by stripping `PROMPT-` and extension and converting dashes to underscores.
 
 **Response:**
+
 ```json
 {
   "prompts": [
@@ -49,11 +52,20 @@ List available prompt templates (built-ins and file-backed). File-backed templat
 }
 ```
 
+### resources/list and resources/read
+
+These protocol methods expose MCP resources outside the 3 composite tools. In the current server they are primarily used for MCP Apps UI resources (for example `ui://...` resources when the client negotiates UI support).
+
+### Lifecycle note
+
+`tools/list`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get` are allowed before `notifications/initialized`. The `notifications/initialized` message still completes the normal MCP client lifecycle and enables readiness tracking.
+
 ### prompts/get
 
 Get a prompt template by name. File-backed prompts return the entire Markdown content as a single assistant message.
 
 **Request:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -64,6 +76,7 @@ Get a prompt template by name. File-backed prompts return the entire Markdown co
 ```
 
 **Response:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -83,6 +96,7 @@ Get a prompt template by name. File-backed prompts return the entire Markdown co
 Read-only operations with multi-step pipeline support. Each step's result is available as `$prev` in subsequent steps.
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -140,6 +154,7 @@ Suggest relevant memory snapshots for a draft topic or query by grouping existin
 | `global_search` | boolean | false | Bypass session isolation when session scoping is enabled |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "suggest_context", "params": {"query": "auth middleware refresh tokens", "limit": 3}}]
@@ -151,6 +166,7 @@ Suggest relevant memory snapshots for a draft topic or query by grouping existin
 When `session` scoping is enabled, `suggest_context` suppresses the most recently served snapshot set for the same normalized query. This keeps long-running sessions from immediately re-suggesting identical context on back-to-back calls.
 
 **Response:**
+
 ```json
 {
   "query": "auth middleware refresh tokens",
@@ -183,6 +199,7 @@ Inspect persisted semantic duplicate groups and their member documents.
 | `limit` | integer | 25 | Maximum groups to return |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "semantic_dedupe", "params": {"limit": 10}}]
@@ -190,6 +207,7 @@ Inspect persisted semantic duplicate groups and their member documents.
 ```
 
 **Response:**
+
 ```json
 {
   "total": 1,
@@ -232,6 +250,7 @@ Search for documents using keyword, semantic, or hybrid search with optional fuz
 | `context` | integer | 0 | Lines of context around matches |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "search", "params": {"query": "database optimization", "limit": 5}}]
@@ -239,6 +258,7 @@ Search for documents using keyword, semantic, or hybrid search with optional fuz
 ```
 
 **Response:**
+
 ```json
 {
   "total": 42,
@@ -276,6 +296,7 @@ Search for regex patterns within document contents.
 | `max_count` | integer | 0 | Stop after N matches per file |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "grep", "params": {"pattern": "class\\s+\\w+Handler", "line_numbers": true, "context": 2}}]
@@ -300,6 +321,7 @@ List documents with filtering and sorting.
 | `paths_only` | boolean | false | Return only file paths |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "list", "params": {"extension": ".py", "recent": 10, "sort_by": "modified", "sort_order": "desc"}}]
@@ -321,6 +343,7 @@ Retrieve a document by content hash with optional knowledge graph relationships.
 | `include_content` | boolean | false | Include full content in response |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "get", "params": {"hash": "e3b0c442...", "include_content": true}}]
@@ -346,6 +369,7 @@ Query the knowledge graph.
 | `reverse` | boolean | — | Traverse incoming edges |
 
 **Example:**
+
 ```json
 {
   "steps": [{"op": "graph", "params": {"name": "src/main.cpp", "depth": 2, "relation": "CALLS", "limit": 50}}]
@@ -380,11 +404,13 @@ Get storage statistics and analytics.
 | `file_types` | boolean | false | Include file type analysis |
 
 **Example:**
+
 ```json
 {"steps": [{"op": "status", "params": {"detailed": true}}]}
 ```
 
 **Response:**
+
 ```json
 {
   "total_objects": 1000,
@@ -402,6 +428,7 @@ Return the full JSON Schema for any operation's parameters. See [Progressive Dis
 ### Pipeline Examples
 
 **Search → Get (retrieve top result's full content):**
+
 ```json
 {
   "steps": [
@@ -412,6 +439,7 @@ Return the full JSON Schema for any operation's parameters. See [Progressive Dis
 ```
 
 **List → Grep (find pattern in recent documents):**
+
 ```json
 {
   "steps": [
@@ -422,6 +450,7 @@ Return the full JSON Schema for any operation's parameters. See [Progressive Dis
 ```
 
 **Graph traversal (find dependencies of a file):**
+
 ```json
 {
   "steps": [
@@ -438,6 +467,7 @@ Return the full JSON Schema for any operation's parameters. See [Progressive Dis
 Write operations executed sequentially. Stops on first error unless `continueOnError` is set.
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -468,6 +498,7 @@ Write operations executed sequentially. Stops on first error unless `continueOnE
 **Annotations:** `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`
 
 **Response:**
+
 ```json
 {
   "results": [
@@ -495,6 +526,7 @@ Store a document with optional metadata and tags.
 | `metadata` | object | — | Key-value metadata |
 
 **Example:**
+
 ```json
 {
   "operations": [
@@ -516,6 +548,7 @@ Update metadata for an existing document (identified by `hash` or `name`).
 | `metadata` | array | `key=value` pairs |
 
 **Example:**
+
 ```json
 {
   "operations": [
@@ -536,6 +569,7 @@ Delete documents by name or glob pattern.
 | `names` | array | Multiple names/patterns |
 
 **Example:**
+
 ```json
 {
   "operations": [
@@ -561,6 +595,7 @@ Restore documents from a collection or snapshot to the filesystem.
 | `exclude_patterns` | array | — | Exclude matching patterns |
 
 **Example:**
+
 ```json
 {
   "operations": [
@@ -574,6 +609,7 @@ Restore documents from a collection or snapshot to the filesystem.
 Download and store an artifact by URL with optional checksum verification.
 
 **Example:**
+
 ```json
 {
   "operations": [
@@ -585,6 +621,7 @@ Download and store an artifact by URL with optional checksum verification.
 ### Batch Example
 
 **Add a file, then tag it:**
+
 ```json
 {
   "operations": [
@@ -601,6 +638,7 @@ Download and store an artifact by URL with optional checksum verification.
 Manage sessions for scoped work.
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -628,11 +666,13 @@ Manage sessions for scoped work.
 | `watch` | Watch paths for changes during the session |
 
 **Example — start a session:**
+
 ```json
 {"action": "start", "params": {"label": "feature-review"}}
 ```
 
 **Example — pin an artifact:**
+
 ```json
 {"action": "pin", "params": {"hash": "abc123..."}}
 ```

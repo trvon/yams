@@ -163,4 +163,5 @@ Bad outcomes:
 
 - `AGENTS.md`
 - `docs/developer/contributing.md`
+- `docs/developer/build_system.md`
 - `docs/BUILD.md`

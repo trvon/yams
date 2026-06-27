@@ -546,18 +546,24 @@ public:
             return std::optional<std::string>(std::nullopt);
         }
 
-        // Try to read version from manifest.json
-        fs::path manifestPath = pluginDir / "manifest.json";
-        if (fs::exists(manifestPath)) {
+        // Try external-plugin then package-style manifest names.
+        for (const auto& manifestName : {"yams-plugin.json", "manifest.json"}) {
+            fs::path manifestPath = pluginDir / manifestName;
+            if (!fs::exists(manifestPath)) {
+                continue;
+            }
+
             std::ifstream file(manifestPath);
-            if (file) {
-                try {
-                    nlohmann::json manifest;
-                    file >> manifest;
-                    return std::optional<std::string>(manifest.value("version", "unknown"));
-                } catch (...) {
-                    // Malformed manifests fall through to the conservative "unknown" version.
-                }
+            if (!file) {
+                continue;
+            }
+
+            try {
+                nlohmann::json manifest;
+                file >> manifest;
+                return std::optional<std::string>(manifest.value("version", "unknown"));
+            } catch (...) {
+                // Malformed manifests fall through to the conservative "unknown" version.
             }
         }
 

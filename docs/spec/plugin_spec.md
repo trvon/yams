@@ -4,6 +4,8 @@
 
 The YAMS plugin system is built around a stable C ABI that enables plugins to expose services to the host and optionally call back into host services.
 
+> **Implementation note (2026-06-26):** The canonical ABI lives in the shipped headers under `include/yams/plugins/`. This document summarizes the current contract, but exact field layouts, optional callbacks, and interface version constants should be taken from those headers when implementing or reviewing a plugin.
+
 ### Plugin Entry Points
 
 Every plugin MUST implement the following symbols:
@@ -45,97 +47,66 @@ int yams_plugin_get_health_json(char** out_json);
 
 ### Error Codes
 
-Plugins SHOULD use standard error codes:
+Core loader entry points use the constants from `include/yams/plugins/abi.h`:
 
 ```c
 #define YAMS_PLUGIN_OK 0
-#define YAMS_PLUGIN_ERR_INVALID 1
-#define YAMS_PLUGIN_ERR_INCOMPATIBLE 2
-#define YAMS_PLUGIN_ERR_NOT_FOUND 3
-#define YAMS_PLUGIN_ERR_IO 4
-#define YAMS_PLUGIN_ERR_INTERNAL 5
-#define YAMS_PLUGIN_ERR_UNSUPPORTED 6
+#define YAMS_PLUGIN_ERR_INCOMPATIBLE -1
+#define YAMS_PLUGIN_ERR_NOT_FOUND -2
+#define YAMS_PLUGIN_ERR_INIT_FAILED -3
+#define YAMS_PLUGIN_ERR_INVALID -4
 ```
+
+Individual interfaces may define richer status enums of their own. For example,
+`model_provider_v1` uses `yams_status_t` with `YAMS_OK`,
+`YAMS_ERR_INVALID_ARG`, `YAMS_ERR_NOT_FOUND`, `YAMS_ERR_IO`,
+`YAMS_ERR_INTERNAL`, and `YAMS_ERR_UNSUPPORTED`.
 
 ## Interface VTables
 
-### Standard Interface Pattern
+### Interface Layout
 
-All interfaces follow this pattern:
+Interfaces are versioned C structs declared in their own headers. Do **not** assume a single
+universal vtable layout across all interfaces. The stable rule is:
 
-```c
-typedef struct iface_name_v1 {
-    void* handle;  // Plugin-specific context
-    // Interface methods...
-} iface_name_v1_t;
-```
+1. negotiate an interface by `(id, version)` through `yams_plugin_get_interface(...)`
+2. cast the returned pointer to the exact struct from the matching header
+3. treat nullable callbacks as optional / unsupported behavior
 
-### Required Interfaces
+### Common Interfaces
 
 #### model_provider_v1
 
 Header: `include/yams/plugins/model_provider_v1.h`
+Current interface version constant: `YAMS_IFACE_MODEL_PROVIDER_V1_VERSION = 4`
 
-```c
-typedef struct model_provider_v1 {
-    void* handle;
-    
-    // Set progress callback for long operations (optional)
-    int (*set_progress_callback)(void* handle, 
-                                 void (*callback)(void* user_data, const char* phase, int progress, int total),
-                                 void* user_data);
-    
-    // Load a model (non-blocking)
-    int (*load_model)(void* handle, const char* model_id, const char* model_path, const char* options_json);
-    
-    // Unload a model
-    int (*unload_model)(void* handle, const char* model_id);
-    
-    // Check if model is loaded
-    int (*is_model_loaded)(void* handle, const char* model_id, bool* out_loaded);
-    
-    // Get list of loaded models (plugin allocates arrays, host frees)
-    int (*get_loaded_models)(void* handle, char*** out_ids, uint32_t* out_count);
-    void (*free_model_list)(void* handle, char** ids, uint32_t count);
-    
-    // Generate single embedding
-    int (*generate_embedding)(void* handle, const char* model_id, 
-                             const uint8_t* input, size_t input_len,
-                             float** out_vec, uint32_t* out_dim);
-    void (*free_embedding)(void* handle, float* vec, uint32_t dim);
-    
-    // Generate batch embeddings
-    int (*generate_embedding_batch)(void* handle, const char* model_id,
-                                   const uint8_t** inputs, const size_t* lens, uint32_t batch,
-                                   float*** out_vecs, uint32_t* out_batch, uint32_t* out_dim);
-    void (*free_embedding_batch)(void* handle, float** vecs, uint32_t batch, uint32_t dim);
-    
-    // v1.2 extensions (optional, may return UNSUPPORTED)
-    int (*get_embedding_dim)(void* handle, const char* model_id, uint32_t* out_dim);
-    int (*get_runtime_info_json)(void* handle, const char* model_id, char** out_json);
-    void (*free_string)(void* handle, char* str);
-    int (*set_threading)(void* handle, const char* model_id, uint32_t intra_threads, uint32_t inter_threads);
-} model_provider_v1_t;
-```
+The current vtable includes:
+
+- `abi_version` and opaque `self`
+- model lifecycle: `load_model`, `unload_model`, `is_model_loaded`, `get_loaded_models`
+- embedding APIs: `generate_embedding`, `generate_embedding_batch`
+- progress/config helpers: `set_progress_callback`, `get_embedding_dim`,
+  `get_runtime_info_json`, `free_string`, `set_threading`
+- optional higher-level extensions: `score_documents`, `free_scores`,
+  `evict_under_pressure`
+
+Memory ownership is paired: any plugin-allocated buffer must be released through the matching
+`free_*` callback from the same vtable.
 
 #### content_extractor_v1
 
 Header: `include/yams/plugins/content_extractor_v1.h`
+Current interface version constant: `YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION = 1`
 
-```c
-typedef struct content_extractor_v1 {
-    void* handle;
-    
-    // Extract content from a document
-    int (*extract_content)(void* handle, const char* file_path,
-                           char** out_text, char** out_metadata_json);
-    void (*free_extracted_content)(void* handle, char* text, char* metadata);
-    
-    // Get supported file extensions (plugin allocates, host frees)
-    int (*get_supported_extensions)(void* handle, char*** out_extensions, uint32_t* out_count);
-    void (*free_extension_list)(void* handle, char** extensions, uint32_t count);
-} content_extractor_v1_t;
-```
+The current ABI is **buffer-oriented**, not file-path oriented. The vtable includes:
+
+- `abi_version`
+- `supports(const char* mime_type, const char* extension)`
+- `extract(const uint8_t* content, size_t content_len, yams_extraction_result_t** result)`
+- `free_result(yams_extraction_result_t* result)`
+
+`yams_extraction_result_t` carries extracted text, key/value metadata, and an optional error
+string.
 
 ## Host Services API (Optional)
 
@@ -143,34 +114,25 @@ Plugins that need to call back into YAMS can use the Host Services API.
 
 ### Host Context
 
-During `yams_plugin_init`, the host MAY pass a `yams_plugin_host_context_v1` struct:
+During `yams_plugin_init`, the host MAY pass a `yams_plugin_host_context_v1` from
+`include/yams/plugins/host_services_v1.h`.
 
-```c
-typedef struct yams_plugin_host_context_v1 {
-    uint32_t version;  // YAMS_PLUGIN_HOST_SERVICES_API_VERSION
-    const document_service_v1* document_service;
-    const search_service_v1* search_service;
-    // Additional services may be added in future versions
-} yams_plugin_host_context_v1_t;
-```
+The current host context includes:
 
-### Document Service v1
+- `version`
+- opaque `impl`
+- `document_service`
+- `search_service`
+- `grep_service`
 
-```c
-typedef struct document_service_v1 {
-    void* handle;
-    
-    int (*list_documents)(void* handle, const list_documents_request_t* req,
-                         list_documents_response_t** out_res);
-    void (*free_list_documents_response)(void* handle, list_documents_response_t* res);
-    
-    int (*get_document)(void* handle, const get_document_request_t* req,
-                       get_document_response_t** out_res);
-    void (*free_get_document_response)(void* handle, get_document_response_t* res);
-    
-    // Additional methods...
-} document_service_v1_t;
-```
+The same header defines the request/response structs and vtables for:
+
+- `yams_document_service_v1` (`store`, `retrieve`, `list`, `cat`, plus paired `free_*` helpers)
+- `yams_search_service_v1`
+- `yams_grep_service_v1`
+
+Plugins must null-check optional service pointers. Minimal daemon/test shims may pass a valid host
+context with some or all service pointers unset.
 
 ## Plugin Manifest
 
@@ -184,7 +146,7 @@ Each plugin MUST provide a JSON manifest via `yams_plugin_get_manifest_json()`:
   "interfaces": [
     {
       "id": "model_provider_v1",
-      "version": 2
+      "version": 4
     }
   ],
   "abi_version": 1,
@@ -205,7 +167,7 @@ Each plugin MUST provide a JSON manifest via `yams_plugin_get_manifest_json()`:
 ## Security Considerations
 
 - Plugins run in the same process space as the host
-- Host should validate plugin signatures and maintain a trust list
+- Install / distribution paths should validate checksums or signatures and maintain a trust list
 - Plugins should validate all input parameters and handle errors gracefully
 - Memory safety is critical - use proper bounds checking and null checks
 

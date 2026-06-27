@@ -10,6 +10,8 @@ yams serve --verbose                    # logs on stderr
 docker run -i ghcr.io/trvon/yams:latest serve
 ```
 
+`yams serve` is a stdio MCP adapter. It does not auto-start the background daemon; start or pre-warm the daemon separately when your workflow depends on daemon-backed operations.
+
 ## Client configuration
 
 | Client           | Config location                                               |
@@ -67,6 +69,8 @@ The server exposes **3 composite tools**. All operations are reached through the
 | `execute` | Write batch         | `add`, `update`, `delete`, `restore`, `download` |
 | `session` | Session lifecycle   | `start`, `stop`, `pin`, `unpin`, `watch` |
 
+Beyond the 3 composite tools, the server also exposes protocol-level discovery methods: `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`.
+
 Discover operation parameter schemas at runtime with `describe`:
 
 ```json
@@ -119,6 +123,10 @@ Stops on first error unless `continueOnError: true`.
 {"name": "session", "arguments": {"action": "start", "params": {"label": "review"}}}
 ```
 
+## Resources
+
+When the client negotiates MCP Apps UI support, YAMS exposes UI resources through `resources/list` and `resources/read`. These are protocol methods, not composite tools.
+
 ## Prompt templates
 
 `prompts/list` and `prompts/get` expose built-in templates (`search_codebase`, `summarize_document`, `rag/*`) plus any file-backed templates you drop in:
@@ -170,8 +178,8 @@ Minimal Python and Node.js clients: drive the `yams serve` subprocess with newli
 
 | Symptom                              | Fix                                                          |
 |--------------------------------------|--------------------------------------------------------------|
-| Client times out on connect          | Pre-warm daemon: `yams status`; check protocol version (supported 2024-11-05 … 2025-06-18) |
-| No `tools/list` response             | Client isn't sending `notifications/initialized` after `initialize` |
+| Client times out on connect          | Pre-warm or start daemon separately: `yams status`; check protocol version (supported 2024-10-07, 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25) |
+| No `tools/list` response             | Check stdin/stdout framing, client config, and absolute `yams` path. `tools/list` is allowed before `notifications/initialized`. |
 | Client doesn't list YAMS             | Check config path/JSON; use absolute `yams` path; restart the client |
 | Docker container exits immediately   | Missing `-i` — stdio needs an attached stdin                 |
 | `Ctrl+C` doesn't stop server         | Update to latest; else `kill -TERM <pid>`                    |
@@ -193,4 +201,4 @@ Readiness: during startup the daemon may report initializing. `yams status` and 
 ## References
 
 - [CLI reference](cli.md) · [Tool schemas](../api/mcp_tools.md) · [Protocol header](../../include/yams/mcp/mcp_server.h)
-- Issues: https://github.com/trvon/yams/issues
+- Issues: <https://github.com/trvon/yams/issues>
