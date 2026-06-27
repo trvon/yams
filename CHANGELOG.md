@@ -26,6 +26,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.18.0](https://github.com/trvon/yams/compare/v0.17.0...v0.18.0) (2026-06-27)
+
+
+### Added
+
+* mobile binding improvements ([8de8117](https://github.com/trvon/yams/commit/8de8117788660fd4619b75ee9cfd111ed938039e))
+* **packaging:** mature systemd service install + local validation ([aea9b64](https://github.com/trvon/yams/commit/aea9b644040961c60c8c4a2f4a4b3424ff356dd2))
+
+
+### Fixed
+
+* address PR review comments ([19bbd70](https://github.com/trvon/yams/commit/19bbd7012ae50b3319ee578e7b60e4aacd69fc80))
+* **cli:** remove read-path metadata writes ([961a128](https://github.com/trvon/yams/commit/961a12819c1917b26c91560cb084c6bde4e61ea2))
+* test fixes for ci ([a21dc6a](https://github.com/trvon/yams/commit/a21dc6ae02dc7ce41bb88f0774dacdf7f256c38e))
+* test fixes for ci ([aaae1e8](https://github.com/trvon/yams/commit/aaae1e8fa7dd3d9b89b479e73532c1639b64f232))
+* **testing:** stabilize TSAN coverage, harden daemon shutdown, and speed up KG/storage paths ([#53](https://github.com/trvon/yams/issues/53)) ([090a5ca](https://github.com/trvon/yams/commit/090a5ca69c6abe8c658122633c96e9f09ebecda5))
+* windows build and test fixes ([ca604bb](https://github.com/trvon/yams/commit/ca604bbcdf5c2cd5d7ed4bf2c9439ddb8ac4e27a))
+* windows test fixes for servicemanager ([d5e9b65](https://github.com/trvon/yams/commit/d5e9b65639db53297384e2c37b8caea979c28610))
+* windows test fixes for servicemanager ([bf6fbad](https://github.com/trvon/yams/commit/bf6fbadcda7de7417232a5835e698e0ed388b130))
+
+
+### Performance
+
+* additional optimizations and benchmark docs update ([6a7adac](https://github.com/trvon/yams/commit/6a7adac9d930e5bb910b76bdb5029077a3008eed))
+* **cli:** profile user-facing command paths ([12983fe](https://github.com/trvon/yams/commit/12983fe5752d8fa68cd4c42991033c62c971b615))
+* fix tests and profiling infrastructure ([e070e49](https://github.com/trvon/yams/commit/e070e49c9f56f528e41ca177344170d3bc85e482))
+* improve ingestion optimization and profiling infrastructure ([#52](https://github.com/trvon/yams/issues/52)) ([f90c281](https://github.com/trvon/yams/commit/f90c2819bd4fcbdc161c88752afbafc01ba7ef5d))
+* improving measurements of subsystems ([9f2a45c](https://github.com/trvon/yams/commit/9f2a45cae247f9eccc37cf06a53fb9dc96c30753))
+* improving profile and assertions in ingestion and retrieval paths ([886c600](https://github.com/trvon/yams/commit/886c600bcc99bcc1e70a6be14edcf5ddeeee6b4f))
+* improving profiling implementation and optimizations in ingestion path ([5f916c8](https://github.com/trvon/yams/commit/5f916c87d62fe8476d7c6f15c76d935a40d8d0d9))
+* **ingest:** cache dispatch policy resolution ([87ceb58](https://github.com/trvon/yams/commit/87ceb58087a5072b8f1bf05f49cd3058670048ab))
+* ingestion optimizations and profiling improvements ([9f959ec](https://github.com/trvon/yams/commit/9f959ecd02082969e104ee6f067096c10bba9ff3))
+* **ingest:** route metadata writes through dedicated writers ([8d98479](https://github.com/trvon/yams/commit/8d984794bba94733d0e175091881d6f31fa176e0))
+* **storage:** batch ref-count commits ([ce80b96](https://github.com/trvon/yams/commit/ce80b9601d3c6655b177c1feb444049743d8ecd8))
+
 ## [0.17.0](https://github.com/trvon/yams/compare/v0.16.2...v0.17.0) (2026-06-12)
 
 
