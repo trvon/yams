@@ -42,6 +42,21 @@ struct DaemonPreflight {
             socket_path = p.first;
             pid_path = p.second;
         }
+#elif defined(_WIN32)
+        // Windows AF_UNIX sun_path is also limited to ~108 bytes. Deeply-nested
+        // per-test temp dirs easily exceed this (bind() then fails with a cryptic
+        // "Name component" error), so fall back to a short path directly under the
+        // system temp root when the computed socket path is too long.
+        const size_t kUnixMax = 100; // keep margin
+        if (socket_path.size() > kUnixMax) {
+            std::error_code tec;
+            runtime_root = std::filesystem::temp_directory_path(tec);
+            unique_dir = runtime_root / (std::string("yr") + std::to_string(pid));
+            std::filesystem::create_directories(unique_dir, ec);
+            auto p = make_paths(unique_dir);
+            socket_path = p.first;
+            pid_path = p.second;
+        }
 #endif
         ::setenv("YAMS_RUNTIME_DIR", unique_dir.string().c_str(), 1);
         ::setenv("YAMS_SOCKET_PATH", socket_path.c_str(), 1);
