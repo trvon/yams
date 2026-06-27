@@ -1190,8 +1190,22 @@ TEST_CASE("StorageEngine getDeduplicationRatio is deprecated alias",
     REQUIRE((storage->store(hash, data)));
 
     auto stats = storage->getStats();
-    // Deprecated alias should return same value as getStorageDensity.
+    // Deprecated alias should return same value as getStorageDensity. Calling the
+    // deprecated accessor is the explicit intent here, so silence the deprecation
+    // warning (C4996 on MSVC is promoted to an error under /WX).
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
     CHECK((stats.getDeduplicationRatio() == stats.getStorageDensity()));
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
     std::error_code ec;
     std::filesystem::remove_all(testDir, ec);

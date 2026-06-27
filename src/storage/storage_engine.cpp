@@ -28,7 +28,10 @@ namespace yamsfmt = fmt;
 #include <source_location>
 #include <system_error>
 #include <thread>
-#include <unistd.h>
+#include <yams/compat/unistd.h>
+#ifdef _WIN32
+#include <windows.h> // CreateFileW / FlushFileBuffers (NOMINMAX/WIN32_LEAN_AND_MEAN set project-wide)
+#endif
 
 namespace yams::storage {
 
@@ -300,6 +303,25 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
     // and OS writeback loses data. SquirrelFS (2024) validates that
     // write→fsync→rename is crash-consistent on modern filesystems.
     if (pImpl->config.fsyncBeforeRename) {
+#ifdef _WIN32
+        // Windows has no fsync(); open the temp file and FlushFileBuffers to
+        // force its contents to stable storage before the rename commits.
+        HANDLE h = ::CreateFileW(tempPath.wstring().c_str(), GENERIC_READ | GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            spdlog::warn("Failed to open temp file for fsync: {}", tempPath.string());
+            std::filesystem::remove(tempPath);
+            return Result<void>(ErrorCode::PermissionDenied);
+        }
+        if (!::FlushFileBuffers(h)) {
+            spdlog::warn("FlushFileBuffers failed on {}", tempPath.string());
+            ::CloseHandle(h);
+            std::filesystem::remove(tempPath);
+            return Result<void>(ErrorCode::IOError);
+        }
+        ::CloseHandle(h);
+#else
         int fd = ::open(tempPath.c_str(), O_RDONLY);
         if (fd < 0) {
             spdlog::warn("Failed to open temp file for fsync: {} ({})", tempPath.string(),
@@ -330,6 +352,7 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         }
 #endif
         ::close(fd);
+#endif
     }
 
     // Temp file must exist and contain data before rename.

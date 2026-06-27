@@ -911,10 +911,19 @@ MetadataApi::validateFields(const metadata::DocumentMetadata& metadata) {
         errors.push_back({"sha256Hash", "Content hash is required", "Calculate document hash"});
     }
 
-    // Validate field formats
-    if (!metadata.info.filePath.empty() && metadata.info.filePath[0] != '/') {
-        errors.push_back(
-            {"filePath", "Path must be absolute", "Use absolute path starting with /"});
+    // Validate field formats. A path is absolute if it is POSIX-absolute ("/...")
+    // or Windows-absolute ("X:\\..." / "X:/..."). populatePathDerivedFields()
+    // canonicalizes paths and on Windows yields a drive-qualified path (e.g.
+    // "C:/tmp/a.txt"), which is not a leading-'/' string — so a leading-'/' check
+    // alone wrongly rejects valid Windows paths.
+    const std::string& fp = metadata.info.filePath;
+    const bool isAbsolute =
+        !fp.empty() &&
+        (fp[0] == '/' || fp[0] == '\\' ||
+         (fp.size() >= 2 && fp[1] == ':' &&
+          ((fp[0] >= 'A' && fp[0] <= 'Z') || (fp[0] >= 'a' && fp[0] <= 'z'))));
+    if (!fp.empty() && !isAbsolute) {
+        errors.push_back({"filePath", "Path must be absolute", "Use an absolute path"});
     }
 
     return errors;
