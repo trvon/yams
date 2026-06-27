@@ -251,8 +251,12 @@ TEST_CASE("InstallOptions defaults", "[plugins][installer][security]") {
         CHECK((options.autoTrust));
     }
 
-    SECTION("auto-load is on by default") {
-        CHECK((options.autoLoad));
+    SECTION("auto-load is off by default") {
+        CHECK_FALSE(options.autoLoad);
+    }
+
+    SECTION("no load callback is configured by default") {
+        CHECK_FALSE(static_cast<bool>(options.loadAfterInstall));
     }
 
     SECTION("force is off by default") {
@@ -291,7 +295,7 @@ TEST_CASE("InstallResult contains security info", "[plugins][installer][security
     result.pluginName = "test-plugin";
     result.version = "1.0.0";
     result.checksum = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
-    result.sizeBytes = 1024 * 1024; // 1MB
+    result.sizeBytes = 1024ULL * 1024ULL; // 1MB
     result.wasUpgrade = false;
     result.elapsed = std::chrono::milliseconds{500};
 
@@ -359,6 +363,18 @@ TEST_CASE_METHOD(PluginInstallerFixture, "checkUpdates behavior", "[plugins][ins
         REQUIRE((result.has_value()));
         CHECK((result.value().empty()));
     }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install preflight rejects auto-load without callback",
+                 "[plugins][installer][install]") {
+    auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+
+    InstallOptions options;
+    options.autoLoad = true;
+
+    auto result = installer->install("missing-plugin", options);
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::InvalidArgument));
 }
 
 // =============================================================================

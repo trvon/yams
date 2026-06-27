@@ -8,11 +8,13 @@
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -98,6 +100,15 @@ Result<void> validatePluginVersion(std::string_view version) {
                      "Invalid plugin version. Use only letters, numbers, '.', '_', '-' and '+'."};
     }
     return {};
+}
+
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
 }
 
 bool isRelativePathSafe(const fs::path& path) {
@@ -300,6 +311,11 @@ public:
         auto startTime = std::chrono::steady_clock::now();
         InstallResult result;
 
+        if (options.autoLoad && !options.dryRun && !options.loadAfterInstall) {
+            return Error{ErrorCode::InvalidArgument,
+                         "autoLoad requires a loadAfterInstall callback"};
+        }
+
         auto notifyProgress = [&](InstallProgress::Stage stage, const std::string& msg,
                                   float pct = 0.0f) {
             if (options.onProgress) {
@@ -483,11 +499,19 @@ public:
             addToTrustList(pluginDir);
         }
 
-        // Load plugin (if daemon is available)
-        if (options.autoLoad) {
+        // Optionally ask the caller to load the plugin into a running daemon.
+        if (options.autoLoad && options.loadAfterInstall) {
+            result.autoLoadAttempted = true;
             notifyProgress(InstallProgress::Stage::Loading, "Loading plugin...");
-            // TODO: Implement daemon communication to load plugin
-            // For now, the user can run `yams plugin load <name>` manually
+            auto loadResult = options.loadAfterInstall(result);
+            if (loadResult) {
+                result.autoLoadSucceeded = true;
+                result.autoLoadMessage = "Loaded into daemon";
+            } else {
+                result.autoLoadMessage = loadResult.error().message;
+                spdlog::warn("Plugin installed but auto-load failed for {}: {}", result.pluginName,
+                             result.autoLoadMessage);
+            }
         }
 
         notifyProgress(InstallProgress::Stage::Complete, "Installation complete!");
@@ -562,7 +586,9 @@ public:
                 nlohmann::json manifest;
                 file >> manifest;
                 return std::optional<std::string>(manifest.value("version", "unknown"));
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to parse plugin manifest '{}': {}", manifestPath.string(),
+                              e.what());
                 // Malformed manifests fall through to the conservative "unknown" version.
             }
         }
@@ -683,8 +709,8 @@ std::unique_ptr<IPluginInstaller> makePluginInstaller(std::shared_ptr<IPluginRep
 
 fs::path getDefaultPluginInstallDir() {
     // Check environment variable first
-    if (const char* envDir = std::getenv("YAMS_PLUGIN_DIR")) {
-        return fs::path(envDir);
+    if (auto envDir = getenvCopy("YAMS_PLUGIN_DIR")) {
+        return fs::path(*envDir);
     }
 
 #ifdef _WIN32
@@ -695,15 +721,21 @@ fs::path getDefaultPluginInstallDir() {
         CoTaskMemFree(localAppData);
         return result;
     }
-    return fs::path(std::getenv("LOCALAPPDATA")) / "yams" / "plugins";
+    if (auto localAppData = getenvCopy("LOCALAPPDATA")) {
+        return fs::path(*localAppData) / "yams" / "plugins";
+    }
+    return fs::path(".") / "yams" / "plugins";
 #else
     // Unix: ~/.local/lib/yams/plugins
     fs::path homeDir;
-    if (const char* home = std::getenv("HOME")) {
-        homeDir = home;
+    if (auto home = getenvCopy("HOME")) {
+        homeDir = *home;
     } else {
-        struct passwd* pw = getpwuid(getuid());
-        if (pw) {
+        struct passwd pwd;
+        struct passwd* pw = nullptr;
+        std::array<char, 16384> buffer{};
+        if (getpwuid_r(getuid(), &pwd, buffer.data(), buffer.size(), &pw) == 0 && pw != nullptr &&
+            pw->pw_dir != nullptr) {
             homeDir = pw->pw_dir;
         } else {
             homeDir = "/tmp";

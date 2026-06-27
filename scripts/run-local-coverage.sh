@@ -94,6 +94,11 @@ fi
 export YAMS_BUILD_DIR="$BUILD_DIR"
 export YAMS_ENABLE_MOBILE_BINDINGS=false
 export YAMS_EXTRA_MESON_FLAGS="${YAMS_COVERAGE_MESON_FLAGS:--Dbuild-tests=true -Denable-onnx=disabled -Denable-bench-tests=false -Dbuild-benchmarks=false}"
+# Keep the tracked coverage lane sanitizer-free. setup.sh preserves ENABLE_TSAN /
+# ENABLE_ASAN from the parent shell, and reusing a builddir configured with TSAN
+# or ASAN can destabilize gcov/gcda writeout on macOS.
+export ENABLE_TSAN=false
+export ENABLE_ASAN=false
 if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
 	if source_date_epoch="$(git log -1 --format=%ct HEAD 2>/dev/null)" && [[ -n "$source_date_epoch" ]]; then
 		export SOURCE_DATE_EPOCH="$source_date_epoch"
@@ -153,6 +158,40 @@ if [[ -d "$BUILD_DIR" && (-n "$CCACHE_BIN" || -n "$FAST_LINKER") ]]; then
 	fi
 fi
 
+INTRO_BUILDOPTIONS_JSON="$BUILD_DIR/meson-info/intro-buildoptions.json"
+if [[ -f "$INTRO_BUILDOPTIONS_JSON" ]]; then
+	profile_mismatch="$({
+		python3 - "$INTRO_BUILDOPTIONS_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    options = json.load(fh)
+
+values = {}
+for option in options:
+    values.setdefault(option.get('name'), []).append(option.get('value'))
+
+issues = []
+if any(value not in (None, '', 'none', []) for value in values.get('b_sanitize', [])):
+    issues.append(f"b_sanitize={values.get('b_sanitize')}")
+if any(value in (True, 'true') for value in values.get('enable-tsan', [])):
+    issues.append('enable-tsan=true')
+if any(value in (True, 'true') for value in values.get('enable-asan', [])):
+    issues.append('enable-asan=true')
+coverage_values = values.get('b_coverage', [])
+if coverage_values and not any(value in (True, 'true') for value in coverage_values):
+    issues.append(f"b_coverage={coverage_values}")
+
+print('; '.join(issues))
+PY
+	} || true)"
+	if [[ -n "$profile_mismatch" ]]; then
+		echo "[coverage] removing stale build dir due to coverage profile drift ($profile_mismatch)" >&2
+		rm -rf "$BUILD_DIR"
+	fi
+fi
+
 if [[ -n "$CCACHE_BIN" || -n "$FAST_LINKER" ]]; then
 	mkdir -p "$BUILD_DIR"
 	{
@@ -189,6 +228,10 @@ if command -v ccache >/dev/null 2>&1; then
 	echo "[coverage] ccache stats after compile:" >&2
 	ccache -s | tee "$CCACHE_STATS_FILE" >&2 || true
 fi
+# Coverage counters are build-dir local state. Clear stale *.gcda files before the
+# test run so changed sources do not try to merge against incompatible counter
+# layouts from an older build.
+find "$BUILD_DIR" -name '*.gcda' -delete
 "$MESON_BIN" test -C "$BUILD_DIR" "${TEST_ARGS[@]}"
 
 gcovr \

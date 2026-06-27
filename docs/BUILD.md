@@ -111,7 +111,7 @@ Skip `setup.sh` and drive Meson directly when you need custom profiles:
 ```bash
 conan install . -of build/release -s build_type=Release -s compiler.cppstd=20 --build=missing
 meson setup build/release \
-  --native-file build/release/build-release/conan/conan_meson_native.ini \
+  --native-file build/release/conan_meson_native.ini \
   --buildtype=debugoptimized -Db_ndebug=true
 meson compile -C build/release
 ```
@@ -122,7 +122,7 @@ Windows requires the local ONNX Runtime Conan recipe once:
 conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 conan install . -of build\release -pr:h conan/profiles/host-windows-msvc -pr:b default `
   -s build_type=Release --build=missing
-meson setup build\release --native-file build\release\build-release\conan\conan_meson_native.ini `
+meson setup build\release --native-file build\release\conan_meson_native.ini `
   --buildtype=debugoptimized -Db_ndebug=true
 meson compile -C build\release
 ```
@@ -131,9 +131,9 @@ meson compile -C build\release
 
 ```bash
 ./setup.sh Debug
-meson configure build/debug -Dbuild-tests=true
-meson compile -C build/debug
-meson test -C build/debug --print-errorlogs
+meson configure builddir -Dbuild-tests=true
+meson compile -C builddir
+meson test -C builddir --print-errorlogs
 ```
 
 For test-suite shaping guidance (fast correctness lane vs explicit slow stress /
@@ -152,7 +152,7 @@ migration / diagnostics suites), see [`docs/developer/testing.md`](developer/tes
 
 ```bash
 # Coverage (manual)
-./setup.sh Debug --coverage && meson test -C build/debug --suite unit && gcovr --html -o build/debug/coverage.html
+./setup.sh Debug --coverage && meson test -C builddir --suite unit && gcovr --html -o builddir/coverage.html
 
 # Or use the tracked local pre-push gate
 git config core.hooksPath .githooks

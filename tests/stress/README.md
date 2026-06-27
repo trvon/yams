@@ -49,10 +49,10 @@ meson compile -C builddir
 
 ### Basic Execution
 
-Run all stress tests once:
+Run all currently registered stress tests once:
 
 ```bash
-meson test -C builddir stress --suite stress
+meson test -C builddir --suite stress
 ```
 
 ### Running Tests Multiple Times
@@ -61,32 +61,29 @@ Meson provides a `--repeat` option to run tests in a loop:
 
 ```bash
 # Run stress tests 10 times
-meson test -C builddir stress --suite stress --repeat 10
+meson test -C builddir --suite stress --repeat 10
 
 # Run 100 times to detect intermittent issues
-meson test -C builddir stress --suite stress --repeat 100
+meson test -C builddir --suite stress --repeat 100
 
 # Run indefinitely until failure (Ctrl+C to stop)
-meson test -C builddir stress --suite stress --repeat 999999
+meson test -C builddir --suite stress --repeat 999999
 ```
 
 ### Advanced Options
 
 ```bash
 # Run with verbose output
-meson test -C builddir stress --suite stress --repeat 10 -v
+meson test -C builddir --suite stress --repeat 10 -v
 
 # Stop on first failure
-meson test -C builddir stress --suite stress --repeat 50 --maxfail 1
+meson test -C builddir --suite stress --repeat 50 --maxfail 1
 
 # Run without rebuilding (faster for repeated runs)
-meson test -C builddir stress --suite stress --repeat 100 --no-rebuild
+meson test -C builddir --suite stress --repeat 100 --no-rebuild
 
-# Run specific test patterns
-meson test -C builddir "ConcurrentStorageTest.ThousandConcurrentReaders" --repeat 20
-
-# Run multiple specific tests
-meson test -C builddir "CompressionStressTest.*" --repeat 10
+# Discover current stress test names before filtering
+meson test -C builddir --list | rg stress
 ```
 
 ### Parallel Test Execution
@@ -95,7 +92,7 @@ Run multiple test processes in parallel (use with caution on shared resources):
 
 ```bash
 # Run with 4 parallel jobs
-meson test -C builddir stress --suite stress --repeat 10 --num-processes 4
+meson test -C builddir --suite stress --repeat 10 --num-processes 4
 ```
 
 ### Timeout Configuration
@@ -104,24 +101,27 @@ Stress tests have a 1800 second (30 minute) timeout by default. Adjust if needed
 
 ```bash
 # Extend timeout to 1 hour
-meson test -C builddir stress --suite stress --repeat 10 --timeout-multiplier 2
+meson test -C builddir --suite stress --repeat 10 --timeout-multiplier 2
 ```
 
 ## Test Categories
 
 ### Quick Stress (< 5 minutes each)
+
 - `CompressionStressTest.ExtremelyLargeFiles`
 - `CompressionStressTest.RapidCycles`
 - `ConcurrentStorageTest.ThousandConcurrentReaders`
 - `ConcurrentStorageTest.HundredConcurrentWriters`
 
 ### Moderate Stress (5-15 minutes each)
+
 - `CompressionStressTest.SustainedHighThroughput`
 - `ConcurrentStorageTest.MixedReadWriteWorkload`
 - `ConcurrentStorageTest.HighContentionSameObjects`
 - `ConcurrentStorageTest.VariableObjectSizesConcurrent`
 
 ### Heavy Stress (15+ minutes each)
+
 - `CompressionStressTest.ResourceExhaustion`
 - `ConcurrentStorageTest.LongRunningSustainedLoad`
 - `ConcurrentStorageTest.ConnectionPoolWorkerSweep`
@@ -131,6 +131,7 @@ meson test -C builddir stress --suite stress --repeat 10 --timeout-multiplier 2
 ### Success Criteria
 
 All tests should:
+
 - Complete without crashes or hangs
 - Report zero data corruption or integrity failures
 - Meet performance targets (logged in output)
@@ -139,6 +140,7 @@ All tests should:
 ### Performance Metrics
 
 Key metrics reported:
+
 - **Throughput**: Operations per second, MB/s
 - **Latency**: Average, P50, P95, P99 response times
 - **Concurrency**: Number of simultaneous operations
@@ -160,14 +162,14 @@ Key metrics reported:
 For continuous integration, use selective stress testing:
 
 ```bash
-# Quick smoke test (5 iterations, critical tests only)
-meson test -C builddir "ConcurrentStorageTest.ThousandConcurrentReaders" --repeat 5
+# Quick smoke pass of the current stress suite
+meson test -C builddir --suite stress --repeat 5 --maxfail 1
 
 # Nightly full stress test
-meson test -C builddir stress --suite stress --repeat 50 --maxfail 3
+meson test -C builddir --suite stress --repeat 50 --maxfail 3
 
 # Pre-release validation (extensive)
-meson test -C builddir stress --suite stress --repeat 200 --maxfail 1
+meson test -C builddir --suite stress --repeat 200 --maxfail 1
 ```
 
 ## System Resource Requirements
@@ -183,6 +185,7 @@ The `LongRunningSustainedLoad` test may exhaust file descriptors on systems with
 **Performance achieved before exhaustion**: ~500,000 ops/sec (excellent!)
 
 **Solutions**:
+
 ```bash
 # Check current limit
 ulimit -n
@@ -205,22 +208,26 @@ ulimit -n 1048576
 ## Debugging Failed Stress Tests
 
 1. **Enable verbose logging**:
+
    ```bash
-   SPDLOG_LEVEL=debug meson test -C builddir stress --suite stress --repeat 10 -v
+   SPDLOG_LEVEL=debug meson test -C builddir --suite stress --repeat 10 -v
    ```
 
 2. **Run under debugger**:
+
    ```bash
    meson test -C builddir "TestName" --gdb
    ```
 
 3. **Isolate the failing test**:
+
    ```bash
    # Run just the failing test with high repeat count
    meson test -C builddir "FailingTest" --repeat 100 --verbose
    ```
 
 4. **Check system resources**:
+
    ```bash
    # Monitor during test execution
    watch -n 1 'free -h; echo; ps aux | grep yams_stress | head -20'
@@ -249,6 +256,7 @@ meson test -C builddir "FTS5StressTest.*"
 ### Modifying Test Parameters
 
 Edit test source files to adjust:
+
 - Thread counts
 - Operation counts
 - Data sizes
@@ -259,14 +267,14 @@ After modifications, rebuild and rerun:
 
 ```bash
 meson compile -C builddir
-meson test -C builddir stress --suite stress --repeat 10
+meson test -C builddir --suite stress --repeat 10
 ```
 
 ## Performance Baselines
 
 Expected performance on a modern workstation (adjust for your hardware):
 
-- **Compression**: 
+- **Compression**:
   - Zstandard level 1: ~500 MB/s
   - Zstandard level 6: ~100 MB/s
   - LZ4: ~1000 MB/s

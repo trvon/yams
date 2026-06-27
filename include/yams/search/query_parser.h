@@ -169,7 +169,11 @@ private:
 };
 
 /**
- * @brief Query optimizer - optimizes parsed queries
+ * @brief Query optimizer - applies currently supported AST simplifications.
+ *
+ * Today this optimizer only performs semantics-preserving rewrites that the
+ * current AST can represent directly. Add new passes only when they implement
+ * real behavior, not placeholder traversal stages.
  */
 class QueryOptimizer {
 public:
@@ -181,13 +185,7 @@ public:
     std::unique_ptr<QueryNode> optimize(std::unique_ptr<QueryNode> node);
 
 private:
-    /**
-     * @brief Optimization passes
-     */
     std::unique_ptr<QueryNode> eliminateDoubleNegation(std::unique_ptr<QueryNode> node);
-    std::unique_ptr<QueryNode> flattenBinaryOps(std::unique_ptr<QueryNode> node);
-    std::unique_ptr<QueryNode> simplifyConstants(std::unique_ptr<QueryNode> node);
-    std::unique_ptr<QueryNode> reorderForPerformance(std::unique_ptr<QueryNode> node);
 };
 
 /**

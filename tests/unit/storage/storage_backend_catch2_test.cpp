@@ -784,6 +784,18 @@ TEST_CASE("URLBackend - Initialization and bounded explicit until protocol-speci
         CHECK(result.error().message.find("Unsupported URL scheme") != std::string::npos);
     }
 
+    SECTION("Rejects s3 URLs until the object-storage backend is selected") {
+        URLBackend backend;
+        BackendConfig config;
+        config.type = "s3";
+        config.url = "s3://example-bucket/prefix";
+
+        auto result = backend.initialize(config);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::NotSupported);
+        CHECK(result.error().message.find("object_storage_s3") != std::string::npos);
+    }
+
     SECTION("List is bounded and explicit until protocol-specific listing exists") {
         URLBackend backend;
         BackendConfig config;

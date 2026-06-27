@@ -3,6 +3,7 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <boost/asio/awaitable.hpp>
@@ -23,6 +24,19 @@
 #include <yams/plugins/plugin_repo_client.hpp>
 
 namespace yams::cli {
+
+namespace {
+
+std::optional<std::string> getenvCopy(const char* name) {
+    static std::mutex envMutex;
+    std::lock_guard<std::mutex> lock(envMutex);
+    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 class PluginCommand : public ICommand {
 public:
@@ -198,6 +212,7 @@ private:
     void showPluginHealth(const std::string& name);
     void scanPlugins(const std::string& dir, const std::string& target);
     void loadPlugin(const std::string& arg, const std::string& cfg, bool dryRun);
+    Result<void> autoLoadInstalledPlugin(const std::filesystem::path& pluginPath);
     void unloadPlugin(const std::string& name);
     void trustList(bool details = false);
     void trustAdd(const std::string& path);
@@ -333,7 +348,8 @@ void PluginCommand::listPlugins() {
                                 }
                             }
                         }
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        spdlog::debug("Failed to parse plugin interface stats JSON: {}", e.what());
                     }
                 }
             }
@@ -673,6 +689,40 @@ void PluginCommand::scanPlugins(const std::string& dir, const std::string& targe
     }
 }
 
+Result<void> PluginCommand::autoLoadInstalledPlugin(const std::filesystem::path& pluginPath) {
+    using namespace yams::daemon;
+
+    ClientConfig cfg;
+    if (cli_->hasExplicitDataDir()) {
+        cfg.dataDir = cli_->getDataPath();
+    }
+    cfg.requestTimeout = std::chrono::milliseconds(20000);
+    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+        cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+    if (!leaseRes) {
+        return leaseRes.error();
+    }
+
+    auto leaseHandle = std::move(leaseRes.value());
+    auto& client = **leaseHandle;
+    PluginLoadRequest req;
+    req.pathOrName = pluginPath.string();
+    req.dryRun = false;
+
+    auto res = yams::cli::run_result<PluginLoadResponse>(client.call(req),
+                                                         std::chrono::milliseconds(20000));
+    if (!res) {
+        return res.error();
+    }
+    if (!res.value().loaded) {
+        return Error{ErrorCode::Unknown, res.value().message.empty()
+                                             ? "Plugin install completed but daemon did not "
+                                               "load the plugin"
+                                             : res.value().message};
+    }
+    return {};
+}
+
 void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJson, bool dryRun) {
     using namespace yams::daemon;
     try {
@@ -802,8 +852,8 @@ void PluginCommand::trustList(bool details) {
             if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
                 strictMode = parseBool(it->second, strictMode);
             }
-            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-                strictMode = parseBool(envStrict, strictMode);
+            if (auto envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT")) {
+                strictMode = parseBool(*envStrict, strictMode);
             }
 
             std::vector<std::filesystem::path> defaultRoots;
@@ -811,9 +861,9 @@ void PluginCommand::trustList(bool details) {
 #ifdef _WIN32
                 defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-                if (const char* home = std::getenv("HOME")) {
-                    defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
-                                           "plugins");
+                if (auto home = getenvCopy("HOME")) {
+                    defaultRoots.push_back(std::filesystem::path(*home) / ".local" / "lib" /
+                                           "yams" / "plugins");
                 }
 #ifdef __APPLE__
                 defaultRoots.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
@@ -1014,8 +1064,8 @@ void PluginCommand::trustStatus() {
     if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
         strictMode = parseBool(it->second, strictMode);
     }
-    if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-        strictMode = parseBool(envStrict, strictMode);
+    if (auto envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT")) {
+        strictMode = parseBool(*envStrict, strictMode);
     }
 
     std::vector<std::filesystem::path> defaultRoots;
@@ -1023,8 +1073,8 @@ void PluginCommand::trustStatus() {
 #ifdef _WIN32
         defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-        if (const char* home = std::getenv("HOME")) {
-            defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+        if (auto home = getenvCopy("HOME")) {
+            defaultRoots.push_back(std::filesystem::path(*home) / ".local" / "lib" / "yams" /
                                    "plugins");
         }
 #ifdef __APPLE__
@@ -1064,14 +1114,16 @@ void PluginCommand::trustStatus() {
                 trustedPaths = res.value().paths;
             }
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to query plugin trust list for status: {}", e.what());
     }
 
     for (const auto& p : trustedPaths) {
         effectiveRoots.insert(p);
     }
 
-    auto envPluginDirs = splitEnvPaths(std::getenv("YAMS_PLUGIN_DIR"));
+    const auto envPluginDir = getenvCopy("YAMS_PLUGIN_DIR");
+    auto envPluginDirs = splitEnvPaths(envPluginDir ? envPluginDir->c_str() : nullptr);
     for (const auto& p : envPluginDirs) {
         effectiveRoots.insert(p);
     }
@@ -1082,18 +1134,15 @@ void PluginCommand::trustStatus() {
               << "\n";
     std::cout << "Strict plugin-dir mode: " << (strictMode ? "on" : "off") << "\n";
 
+    const auto envPluginDirStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
+    const auto envDisableAbiPlugins = getenvCopy("YAMS_DISABLE_ABI_PLUGINS");
+
     std::cout << "\nEnvironment overrides:\n";
-    std::cout << "  YAMS_PLUGIN_DIR="
-              << (std::getenv("YAMS_PLUGIN_DIR") ? std::getenv("YAMS_PLUGIN_DIR") : "(unset)")
-              << "\n";
+    std::cout << "  YAMS_PLUGIN_DIR=" << (envPluginDir ? *envPluginDir : "(unset)") << "\n";
     std::cout << "  YAMS_PLUGIN_DIR_STRICT="
-              << (std::getenv("YAMS_PLUGIN_DIR_STRICT") ? std::getenv("YAMS_PLUGIN_DIR_STRICT")
-                                                        : "(unset)")
-              << "\n";
+              << (envPluginDirStrict ? *envPluginDirStrict : "(unset)") << "\n";
     std::cout << "  YAMS_DISABLE_ABI_PLUGINS="
-              << (std::getenv("YAMS_DISABLE_ABI_PLUGINS") ? std::getenv("YAMS_DISABLE_ABI_PLUGINS")
-                                                          : "(unset)")
-              << "\n";
+              << (envDisableAbiPlugins ? *envDisableAbiPlugins : "(unset)") << "\n";
 
     std::cout << "\nDefault plugin roots (" << defaultRoots.size() << "):\n";
     for (const auto& p : defaultRoots) {
@@ -1130,6 +1179,11 @@ void PluginCommand::installPlugin() {
         options.autoTrust = !installNoTrust_;
         options.autoLoad = !installNoLoad_;
         options.dryRun = installDryRun_;
+        if (options.autoLoad) {
+            options.loadAfterInstall = [this](const InstallResult& installResult) {
+                return autoLoadInstalledPlugin(installResult.installedPath);
+            };
+        }
 
         // Progress callback
         options.onProgress = [](const InstallProgress& progress) {
@@ -1163,7 +1217,12 @@ void PluginCommand::installPlugin() {
         std::cout << "  Elapsed: " << r.elapsed.count() << " ms\n";
 
         if (!installNoLoad_) {
-            std::cout << "\nTo load the plugin, run: yams plugin load " << r.pluginName << "\n";
+            if (r.autoLoadSucceeded) {
+                std::cout << "  Load: auto-loaded into daemon\n";
+            } else if (r.autoLoadAttempted) {
+                std::cout << "  Load warning: " << r.autoLoadMessage << "\n";
+                std::cout << "\nTo load the plugin, run: yams plugin load " << r.pluginName << "\n";
+            }
         }
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";

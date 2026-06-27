@@ -1,3 +1,4 @@
+#include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -1066,6 +1067,233 @@ public:
         return backend_->markEntityAsStale(node_key);
     }
 
+    Result<void> updateEmbeddings(const std::vector<VectorRecord>& records) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        for (const auto& record : records) {
+            if (record.chunk_id.empty()) {
+                return Error{ErrorCode::InvalidArgument,
+                             "updateEmbeddings requires non-empty chunk_id"};
+            }
+            auto result = backend_->updateVector(record.chunk_id, record);
+            if (!result) {
+                setError("Failed to update embedding for " + record.chunk_id + ": " +
+                         result.error().message);
+                return result.error();
+            }
+        }
+
+        clearError();
+        return {};
+    }
+
+    Result<std::vector<std::string>> getStaleEmbeddings(const std::string& model_id,
+                                                        const std::string& model_version) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (sqliteBackend == nullptr) {
+            return Error{ErrorCode::NotSupported,
+                         "Stale embedding queries are only supported on the sqlite-vec backend"};
+        }
+
+        sqlite3* db = sqliteBackend->getDbHandle();
+        if (db == nullptr) {
+            return Error{ErrorCode::NotInitialized, "Database handle not available"};
+        }
+
+        static constexpr const char* kSelectStaleEmbeddings = R"sql(
+SELECT chunk_id
+FROM vectors
+WHERE is_stale = 1
+  AND (?1 = '' OR model_id = ?1)
+  AND (?2 = '' OR model_version = ?2)
+ORDER BY embedded_at DESC, rowid ASC
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, kSelectStaleEmbeddings, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale embedding query: "} +
+                             sqlite3_errmsg(db)};
+        }
+
+        sqlite3_bind_text(stmt, 1, model_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, model_version.c_str(), -1, SQLITE_TRANSIENT);
+
+        std::vector<std::string> chunkIds;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (chunkId != nullptr) {
+                chunkIds.emplace_back(chunkId);
+            }
+        }
+
+        const int rc = sqlite3_errcode(db);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK && rc != SQLITE_DONE && rc != SQLITE_ROW) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to read stale embeddings: "} + sqlite3_errmsg(db)};
+        }
+
+        return chunkIds;
+    }
+
+    Result<std::vector<VectorRecord>> getEmbeddingsByVersion(const std::string& model_version,
+                                                             size_t limit) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (sqliteBackend == nullptr) {
+            return Error{ErrorCode::NotSupported,
+                         "Embedding version queries are only supported on the sqlite-vec backend"};
+        }
+
+        sqlite3* db = sqliteBackend->getDbHandle();
+        if (db == nullptr) {
+            return Error{ErrorCode::NotInitialized, "Database handle not available"};
+        }
+
+        static constexpr const char* kSelectEmbeddingsByVersion = R"sql(
+SELECT chunk_id
+FROM vectors
+WHERE model_version = ?1
+ORDER BY embedded_at DESC, rowid ASC
+LIMIT ?2
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, kSelectEmbeddingsByVersion, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare embedding version query: "} +
+                             sqlite3_errmsg(db)};
+        }
+
+        sqlite3_bind_text(stmt, 1, model_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(limit));
+
+        std::vector<std::string> chunkIds;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (chunkId != nullptr) {
+                chunkIds.emplace_back(chunkId);
+            }
+        }
+
+        const int rc = sqlite3_errcode(db);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK && rc != SQLITE_DONE && rc != SQLITE_ROW) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to read embeddings by version: "} +
+                             sqlite3_errmsg(db)};
+        }
+
+        std::vector<VectorRecord> records;
+        records.reserve(chunkIds.size());
+        for (const auto& chunkId : chunkIds) {
+            auto recordResult = backend_->getVector(chunkId);
+            if (!recordResult) {
+                return recordResult.error();
+            }
+            if (recordResult.value().has_value()) {
+                records.push_back(std::move(recordResult.value().value()));
+            }
+        }
+
+        return records;
+    }
+
+    Result<void> markAsStale(const std::string& chunk_id) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (sqliteBackend == nullptr) {
+            return Error{ErrorCode::NotSupported,
+                         "Stale embedding updates are only supported on the sqlite-vec backend"};
+        }
+
+        sqlite3* db = sqliteBackend->getDbHandle();
+        if (db == nullptr) {
+            return Error{ErrorCode::NotInitialized, "Database handle not available"};
+        }
+
+        static constexpr const char* kExistsByChunkId =
+            "SELECT 1 FROM vectors WHERE chunk_id = ? LIMIT 1";
+        sqlite3_stmt* existsStmt = nullptr;
+        if (sqlite3_prepare_v2(db, kExistsByChunkId, -1, &existsStmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale existence query: "} +
+                             sqlite3_errmsg(db)};
+        }
+        sqlite3_bind_text(existsStmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+        const bool exists = sqlite3_step(existsStmt) == SQLITE_ROW;
+        sqlite3_finalize(existsStmt);
+        if (!exists) {
+            return Error{ErrorCode::NotFound, "Vector not found for chunk_id: " + chunk_id};
+        }
+
+        static constexpr const char* kMarkVectorStale =
+            "UPDATE vectors SET is_stale = 1 WHERE chunk_id = ?";
+        sqlite3_stmt* updateStmt = nullptr;
+        if (sqlite3_prepare_v2(db, kMarkVectorStale, -1, &updateStmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale update statement: "} +
+                             sqlite3_errmsg(db)};
+        }
+        sqlite3_bind_text(updateStmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(updateStmt) != SQLITE_DONE) {
+            sqlite3_finalize(updateStmt);
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to mark vector as stale: "} + sqlite3_errmsg(db)};
+        }
+        sqlite3_finalize(updateStmt);
+
+        clearError();
+        return {};
+    }
+
+    Result<void> markAsDeleted(const std::string& chunk_id) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        (void)chunk_id;
+        return Result<void>(Error{ErrorCode::NotSupported,
+                                  "Soft delete is not supported by the current vectors schema; "
+                                  "use deleteVector/deleteVectorsByDocument instead"});
+    }
+
+    Result<size_t> purgeDeleted(std::chrono::hours age_threshold) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        (void)age_threshold;
+        return Result<size_t>(Error{ErrorCode::NotSupported,
+                                    "Purging deleted vectors requires soft-delete schema support "
+                                    "that is not present in the current vectors table"});
+    }
+
     bool buildIndex() { return buildIndexChecked().has_value(); }
 
     Result<void> buildIndexChecked() {
@@ -1735,42 +1963,29 @@ bool VectorDatabase::hasError() const {
 }
 
 Result<void> VectorDatabase::updateEmbeddings(const std::vector<VectorRecord>& records) {
-    // TODO: Implement batch update of embeddings
-    for (const auto& record : records) {
-        if (!updateVector(record.chunk_id, record)) {
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to update embedding: " + record.chunk_id};
-        }
-    }
-    return {};
+    return pImpl->updateEmbeddings(records);
 }
 
 Result<std::vector<std::string>>
-VectorDatabase::getStaleEmbeddings(const std::string& /*model_id*/,
-                                   const std::string& /*model_version*/) {
-    // TODO: Implement stale embedding detection
-    return std::vector<std::string>{};
+VectorDatabase::getStaleEmbeddings(const std::string& model_id, const std::string& model_version) {
+    return pImpl->getStaleEmbeddings(model_id, model_version);
 }
 
 Result<std::vector<VectorRecord>>
-VectorDatabase::getEmbeddingsByVersion(const std::string& /*model_version*/, size_t /*limit*/) {
-    // TODO: Implement version filtering
-    return std::vector<VectorRecord>{};
+VectorDatabase::getEmbeddingsByVersion(const std::string& model_version, size_t limit) {
+    return pImpl->getEmbeddingsByVersion(model_version, limit);
 }
 
-Result<void> VectorDatabase::markAsStale(const std::string& /*chunk_id*/) {
-    // TODO: Implement stale marking
-    return {};
+Result<void> VectorDatabase::markAsStale(const std::string& chunk_id) {
+    return pImpl->markAsStale(chunk_id);
 }
 
-Result<void> VectorDatabase::markAsDeleted(const std::string& /*chunk_id*/) {
-    // TODO: Implement soft delete
-    return {};
+Result<void> VectorDatabase::markAsDeleted(const std::string& chunk_id) {
+    return pImpl->markAsDeleted(chunk_id);
 }
 
-Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours /*age_threshold*/) {
-    // TODO: Implement purge of soft-deleted records
-    return size_t{0};
+Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours age_threshold) {
+    return pImpl->purgeDeleted(age_threshold);
 }
 
 // =========================================================================

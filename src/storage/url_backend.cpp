@@ -297,7 +297,12 @@ public:
         }
 
         // Validate scheme
-        if (scheme != "s3" && scheme != "http" && scheme != "https" && scheme != "ftp") {
+        if (scheme == "s3") {
+            return {Error{ErrorCode::NotSupported,
+                          "s3:// URLs require the object_storage_s3 backend; URLBackend only "
+                          "supports http(s):// and ftp:// endpoints"}};
+        }
+        if (scheme != "http" && scheme != "https" && scheme != "ftp") {
             return {Error{ErrorCode::InvalidArgument, "Unsupported URL scheme: " + scheme}};
         }
 
@@ -314,26 +319,7 @@ public:
     }
 
     auto configureAuth(CURL* curl) -> Result<void> {
-        if (scheme == "s3") {
-            // For S3, check AWS credentials
-            static std::mutex envMutex;
-            const char* accessKey = nullptr;
-            const char* secretKey = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(envMutex);
-                // NOLINTNEXTLINE(concurrency-mt-unsafe): guarded by envMutex
-                accessKey = std::getenv("AWS_ACCESS_KEY_ID");
-                // NOLINTNEXTLINE(concurrency-mt-unsafe): guarded by envMutex
-                secretKey = std::getenv("AWS_SECRET_ACCESS_KEY");
-            }
-
-            if ((accessKey != nullptr) && (secretKey != nullptr)) {
-                // TODO: Implement AWS Signature V4
-                // For now, we'll use basic auth as a placeholder
-                // In production, this needs proper AWS signing
-                spdlog::warn("S3 authentication not fully implemented - using placeholder");
-            }
-        } else if (!config.credentials.empty()) {
+        if (!config.credentials.empty()) {
             // Use credentials from URL or config
             auto userIt = config.credentials.find("username");
             auto passIt = config.credentials.find("password");
