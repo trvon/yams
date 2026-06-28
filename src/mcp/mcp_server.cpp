@@ -1280,17 +1280,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
     MCPSearchResponse out;
     // Propagate session explicitly (avoid env var coupling)
-    std::string __session;
+    std::string sessionName;
     if (!req.sessionName.empty()) {
-        __session = req.sessionName;
+        sessionName = req.sessionName;
     } else if (req.useSession) {
-        auto __svc = app::services::makeSessionService(nullptr);
-        __session = __svc->current().value_or("");
+        auto sessionSvc = app::services::makeSessionService(nullptr);
+        sessionName = sessionSvc->current().value_or("");
     }
-    if (!__session.empty()) {
-        spdlog::debug("[MCP] search: using session '{}'", __session);
+    if (!sessionName.empty()) {
+        spdlog::debug("[MCP] search: using session '{}'", sessionName);
         dreq.useSession = true;
-        dreq.sessionName = __session;
+        dreq.sessionName = sessionName;
         // Inject instance tag for session-scoped isolation (unless globalSearch)
         if (!req.tags.empty() || !instanceId_.empty()) {
             if (!instanceId_.empty() && !dreq.globalSearch) {
@@ -1713,17 +1713,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
     MCPGrepResponse out;
     // Propagate session explicitly (avoid env var coupling)
-    std::string __session;
+    std::string sessionName;
     if (!req.sessionName.empty()) {
-        __session = req.sessionName;
+        sessionName = req.sessionName;
     } else if (req.useSession) {
-        auto __svc = app::services::makeSessionService(nullptr);
-        __session = __svc->current().value_or("");
+        auto sessionSvc = app::services::makeSessionService(nullptr);
+        sessionName = sessionSvc->current().value_or("");
     }
-    if (!__session.empty()) {
-        spdlog::debug("[MCP] grep: using session '{}'", __session);
+    if (!sessionName.empty()) {
+        spdlog::debug("[MCP] grep: using session '{}'", sessionName);
         dreq.useSession = true;
-        dreq.sessionName = std::move(__session);
+        dreq.sessionName = std::move(sessionName);
     }
     // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
     auto res = co_await daemon_client_->streamingGrep(dreq);
@@ -2177,39 +2177,39 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
         daemon::AddDocumentRequest addReq;
         // Resolve stored path to absolute under daemon-resolved content store root if relative
-        std::filesystem::path __abs = std::filesystem::path(mcp_response.storedPath);
-        if (__abs.is_relative()) {
-            std::filesystem::path __base;
+        std::filesystem::path absPath = std::filesystem::path(mcp_response.storedPath);
+        if (absPath.is_relative()) {
+            std::filesystem::path baseDir;
             try {
                 auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
                 if (sres && sres.value()) {
                     const auto& s = *sres.value();
                     if (!s.contentStoreRoot.empty()) {
-                        __base = std::filesystem::path(s.contentStoreRoot).parent_path();
+                        baseDir = std::filesystem::path(s.contentStoreRoot).parent_path();
                     }
                 }
             } catch (...) {
             }
-            if (__base.empty()) {
+            if (baseDir.empty()) {
                 if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
                     xdgDataHome && *xdgDataHome) {
-                    __base = std::filesystem::path(xdgDataHome) / "yams";
+                    baseDir = std::filesystem::path(xdgDataHome) / "yams";
                 } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
-                    __base = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
+                    baseDir = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
                 } else {
-                    __base = std::filesystem::current_path();
+                    baseDir = std::filesystem::current_path();
                 }
             }
-            __abs = __base / __abs;
+            absPath = baseDir / absPath;
         }
-        std::error_code __canon_ec;
-        auto __canon = std::filesystem::weakly_canonical(__abs, __canon_ec);
-        if (!__canon_ec && !__canon.empty()) {
-            __abs = std::move(__canon);
+        std::error_code canonEc;
+        auto canonPath = std::filesystem::weakly_canonical(absPath, canonEc);
+        if (!canonEc && !canonPath.empty()) {
+            absPath = std::move(canonPath);
         }
         if (verbose) {
             spdlog::debug("[MCP] post-index: resolved stored path: '{}' -> '{}'",
-                          mcp_response.storedPath, __abs.string());
+                          mcp_response.storedPath, absPath.string());
         }
         addReq.path = __abs.string(); // normalized absolute path
 
@@ -2535,10 +2535,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             _p = resolved ? chosen.string() : (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
         }
         if (!_p.empty()) {
-            std::error_code __canon_ec;
-            auto __canon = std::filesystem::weakly_canonical(_p, __canon_ec);
-            if (!__canon_ec && !__canon.empty()) {
-                _p = __canon.string();
+            std::error_code canonEc;
+            auto canonPath = std::filesystem::weakly_canonical(_p, canonEc);
+            if (!canonEc && !canonPath.empty()) {
+                _p = canonPath.string();
             }
         }
         aopts.path = std::move(_p);
@@ -2560,13 +2560,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         aopts.tags.push_back("inst:" + instanceId_);
     }
     {
-        auto __svc = app::services::makeSessionService(nullptr);
-        auto __sess = __svc->current().value_or("");
-        if (!__sess.empty()) {
-            aopts.tags.push_back("session:" + __sess);
+        auto sessionSvc = app::services::makeSessionService(nullptr);
+        auto curSession = sessionSvc->current().value_or("");
+        if (!curSession.empty()) {
+            aopts.tags.push_back("session:" + curSession);
             aopts.metadata["session_uuid"] = "";
-            if (auto __info = __svc->getSessionInfo(__sess); __info && !__info->uuid.empty()) {
-                aopts.metadata["session_uuid"] = __info->uuid;
+            if (auto sessInfo = sessionSvc->getSessionInfo(curSession);
+                sessInfo && !sessInfo->uuid.empty()) {
+                aopts.metadata["session_uuid"] = sessInfo->uuid;
             }
             aopts.metadata["instance_id"] = instanceId_;
         }
@@ -2825,16 +2826,16 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         (req.sortOrder == "asc") ? true : false; // ascending means reverse order in server
 
     // Propagate session to services/daemon via environment for this handler
-    std::string __session;
+    std::string sessionName;
     if (!req.sessionName.empty()) {
-        __session = req.sessionName;
+        sessionName = req.sessionName;
     } else if (req.useSession) {
-        auto __svc = app::services::makeSessionService(nullptr);
-        __session = __svc->current().value_or("");
+        auto sessionSvc = app::services::makeSessionService(nullptr);
+        sessionName = sessionSvc->current().value_or("");
     }
-    if (!__session.empty()) {
-        spdlog::debug("[MCP] list: using session '{}'", __session);
-        daemon_req.sessionId = std::move(__session);
+    if (!sessionName.empty()) {
+        spdlog::debug("[MCP] list: using session '{}'", sessionName);
+        daemon_req.sessionId = std::move(sessionName);
     }
     // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
     // per request (was the primary cause of ~70x MCP list slowdown vs daemon IPC).

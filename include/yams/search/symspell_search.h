@@ -71,7 +71,7 @@ public:
     explicit SymSpellSearch(sqlite3* db, int maxEditDistance = 2, int prefixLength = 7,
                             bool readOnly = false);
 
-    ~SymSpellSearch();
+    ~SymSpellSearch() = default;
 
     // Non-copyable, non-movable (owns database resources)
     SymSpellSearch(const SymSpellSearch&) = delete;

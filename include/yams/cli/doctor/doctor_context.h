@@ -1,8 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <cstdint>
 #include <csignal>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -74,7 +74,7 @@ struct CachedDaemonState {
 class DoctorContext {
 public:
     explicit DoctorContext(YamsCLI* cli);
-    ~DoctorContext();
+    ~DoctorContext() = default;
 
     DoctorContext(const DoctorContext&) = delete;
     DoctorContext& operator=(const DoctorContext&) = delete;

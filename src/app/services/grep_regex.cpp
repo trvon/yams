@@ -182,6 +182,4 @@ GrepRegex& GrepRegex::operator=(GrepRegex&& other) noexcept {
     return *this;
 }
 
-GrepRegex::~GrepRegex() = default;
-
 } // namespace yams::app::services

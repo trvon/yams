@@ -541,7 +541,7 @@ Env:
     }
 
 private:
-    enum class Mode {
+    enum class Mode : std::uint8_t {
         None,
         Init,
         Use,

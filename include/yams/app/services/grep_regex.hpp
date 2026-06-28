@@ -85,7 +85,7 @@ public:
     // Movable, not copyable (RE2 is move-only).
     GrepRegex(GrepRegex&&) noexcept;
     GrepRegex& operator=(GrepRegex&&) noexcept;
-    ~GrepRegex();
+    ~GrepRegex() = default;
 
     // Delete copy.
     GrepRegex(const GrepRegex&) = delete;

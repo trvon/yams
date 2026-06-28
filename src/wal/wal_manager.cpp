@@ -481,7 +481,6 @@ WALManager::WALManager() : pImpl(std::make_unique<Impl>(Config{})) {}
 
 WALManager::WALManager(Config config) : pImpl(std::make_unique<Impl>(std::move(config))) {}
 
-WALManager::~WALManager() = default;
 WALManager::WALManager(WALManager&&) noexcept = default;
 WALManager& WALManager::operator=(WALManager&&) noexcept = default;
 

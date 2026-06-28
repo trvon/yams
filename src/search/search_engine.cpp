@@ -1460,7 +1460,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     allComponentResults.reserve(estimatedResults);
 
     // Component result collection helper with timing
-    enum class ComponentStatus { Success, Failed, TimedOut };
+    enum class ComponentStatus : std::uint8_t { Success, Failed, TimedOut };
 
     auto collectResults = [&](auto& future, const char* name, std::atomic<uint64_t>& queryCount,
                               std::atomic<uint64_t>& avgTime) -> ComponentStatus {
@@ -2492,8 +2492,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         double elapsedMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime)
                 .count();
-        const double reward = computeSimeonBanditReward(response.results.size(), elapsedMs,
-                                                        selectedSimeonBanditArm);
+        const double reward =
+            computeSimeonBanditReward(response.results.size(), elapsedMs, selectedSimeonBanditArm);
 
         std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
         auto profileIt = simeonBandits_.find(selectedSimeonBanditProfile);
@@ -4981,8 +4981,6 @@ SearchEngine::SearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> m
                            const SearchEngineConfig& config)
     : pImpl_(std::make_unique<Impl>(std::move(metadataRepo), std::move(vectorDb),
                                     std::move(embeddingGen), std::move(kgStore), config)) {}
-
-SearchEngine::~SearchEngine() = default;
 
 SearchEngine::SearchEngine(SearchEngine&&) noexcept = default;
 SearchEngine& SearchEngine::operator=(SearchEngine&&) noexcept = default;

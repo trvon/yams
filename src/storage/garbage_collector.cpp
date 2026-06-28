@@ -105,7 +105,6 @@ GarbageCollector::GarbageCollector(ReferenceCounter& refCounter, StorageEngine& 
     : pImpl(std::make_unique<Impl>(refCounter, storageEngine)) {}
 
 // Destructor
-GarbageCollector::~GarbageCollector() = default;
 
 // Move constructor
 GarbageCollector::GarbageCollector(GarbageCollector&&) noexcept = default;

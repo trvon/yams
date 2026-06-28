@@ -301,7 +301,7 @@ struct StorageStats {
 // File information
 struct FileInfo {
     Hash hash;
-    uint64_t size;
+    uint64_t size = 0;
     std::string mimeType;
     TimePoint createdAt; // Initialize to epoch
     std::string originalName;
@@ -310,8 +310,8 @@ struct FileInfo {
 // Chunk information
 struct ChunkInfo {
     Hash hash;
-    uint64_t offset;
-    size_t size;
+    uint64_t offset = 0;
+    size_t size = 0;
 
     // C++20 spaceship operator for comparisons
     auto operator<=>(const ChunkInfo&) const = default;
