@@ -1182,23 +1182,15 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
     if (workCoordinator_) {
         try {
-            const bool benchmarkFastShutdown =
-                envPresentCopy("YAMS_BENCH_OPT_LOOP") || envPresentCopy("YAMS_BENCH_DATASET");
             if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
                         shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
-                    if (benchmarkFastShutdown) {
-                        spdlog::info("[ServiceManager] Phase 5: Extended timeout expired during "
-                                     "benchmark shutdown; detaching remaining workers to avoid "
-                                     "losing completed benchmark results");
-                        workCoordinator_->abandonWorkersForShutdown();
-                    } else {
-                        spdlog::info("[ServiceManager] Phase 5: Extended timeout expired; "
-                                     "falling back to blocking join() to ensure clean teardown");
-                        workCoordinator_->join();
-                    }
+                    spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired with workers "
+                                 "still active; abandoning remaining workers to avoid "
+                                 "indefinite daemon hang during shutdown");
+                    workCoordinator_->abandonWorkersForShutdown();
                 }
             }
             spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");

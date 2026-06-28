@@ -108,7 +108,7 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.max_corpus_bytes == 256ULL * 1024ULL * 1024ULL);
     CHECK(cfg.build_doc_chunk_bytes == 16ULL * 1024ULL);
     CHECK(cfg.build_doc_max_chunks == 4u);
-    CHECK(cfg.fragment_geometry_enabled);
+    CHECK_FALSE(cfg.fragment_geometry_enabled); // retired by default; opt-in only
     CHECK(cfg.fragment_geometry_min_corpus_docs == 1000u);
     CHECK(cfg.fragment_geometry_max_docs == 20'000u);
     CHECK(cfg.fragment_geometry_max_corpus_bytes == 64ULL * 1024ULL * 1024ULL);

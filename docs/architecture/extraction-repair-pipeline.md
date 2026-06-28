@@ -1,638 +1,271 @@
-# YAMS Content Extraction & Repair Pipeline - Architecture Map
+# YAMS Content Extraction and Repair Pipeline
 
-**Date:** 2025-11-02  
-**Purpose:** Document where content extraction happens, identify consolidation opportunities  
-**Status:** Historical analysis; partially stale
-
-> **Implementation note (2026-06-26):** This map still explains the broad extraction flow, but several names and consolidation assumptions have moved. In current code, `RepairCoordinator` has been absorbed by `RepairService`, `IndexingService` now exists in `src/app/services/`, and some recommendations below are better read as follow-up design notes than as a live roadmap.
+**Date:** 2026-06-27
+**Purpose:** Describe the current extraction, indexing, and repair flow
+**Status:** Current implementation map
 
 ---
 
 ## Executive Summary
 
-Content extraction in YAMS is scattered across **several major locations**:
+YAMS no longer has one monolithic “extraction pipeline.” Current behavior is split across four owners:
 
-1. **PostIngestQueue** - Primary extraction path for newly added documents
-2. **RepairService** - Background repair for missing FTS5/embeddings (superseding the older RepairCoordinator naming)
-3. **CLI repair command** - Manual FTS5 rebuild via `yams repair --fts5`
-4. **CLI doctor command** - Doctor diagnostic FTS5 repair
-5. **TUI / service reindex paths** - Single-document or targeted reindex flows
+1. **`DocumentService`** — persists bytes, core metadata, path/version state, and lightweight sync work
+2. **`IngestService` / `IndexingService`** — decide how ingest enters the daemon and how directory batches are expanded
+3. **`PostIngestQueue`** — main extraction + content-index + async enrichment path for normal daemon ingest
+4. **`RepairService`** — bounded rebuild/repair path for missing MIME, FTS5 content, graph state, and embeddings
 
-All paths converge on:
-
-- `yams::extraction::util::extractDocumentText()` - Central extraction utility
-- `AppContext.contentExtractors` - Unified extractor registry (plugins + built-ins)
+Historical note: older docs and notes may refer to **`RepairCoordinator`**. Current code uses **`RepairService`** instead.
 
 ---
 
-## 1. Content Extraction Entry Points
+## 1. Shared Extractor Registry
 
-### 1.1 PostIngestQueue (Primary Path)
+`ServiceManager` owns the live extractor registry and passes it into both service-layer and daemon post-ingest code.
 
-**File:** `src/daemon/components/PostIngestQueue.cpp`  
-**Method:** `indexDocumentSync()`  
-**Flow:**
+Current sources of truth:
 
-```
-Document Added → PostIngestQueue → indexDocumentSync()
-  ↓
-extractDocumentText(store_, hash, mime, extension, extractors_)
-  ↓
-persist_content_and_index() → FTS5 + fuzzy index
-  ↓
-Optional: Queue for embedding generation
-```
+- `src/daemon/components/ServiceManager.cpp`
+  - `seedBuiltinContentExtractors()`
+  - plugin sync into `contentExtractors_`
+  - `getAppContext()` → `ctx.contentExtractors = contentExtractors_`
+- `src/daemon/components/PostIngestQueue.cpp`
+  - receives the same extractor list for normal ingest
 
-**Key Code:**
+Current shape:
 
-```cpp
-auto txt = extractDocumentText(store_, hash, resolvedMime, extension, extractors_);
-if (txt && !txt->empty()) {
-    persist_content_and_index(meta_, docId, d.fileName, *txt, resolvedMime);
-}
-```
-
-**Scope:** Handles all new documents as they're added to YAMS
+- YAMS always seeds the built-in text extractor as a baseline
+- plugin content extractors are appended when loaded
+- both `DocumentService`/`IndexingService` and `PostIngestQueue` see the same registry through `AppContext`
 
 ---
 
-### 1.2 RepairCoordinator (Background Repair)
+## 2. Normal Single-Document Ingest
 
-**File:** `src/daemon/components/RepairCoordinator.cpp`  
-**Method:** `runAsync()`  
-**Flow:**
+Primary daemon path:
 
-```
-Periodic scan → Detect missing FTS5/embeddings
-  ↓
-canExtractDocument() → Filter to extractable types
-  ↓
-Queue FTS5Job → InternalEventBus
-  ↓
-[Separate worker] → extractDocumentText() → Index
+```text
+StoreDocumentRequest
+  -> IngestService::processTask()
+  -> DocumentService::store()
+  -> PostIngestQueue
+  -> extraction + content index commit
+  -> async title / entity / symbol / KG / embedding follow-up
 ```
 
-**Key Code:**
+Key current behavior:
 
-```cpp
-bool canExtractDocument(
-    const std::string& mimeType,
-    const std::string& extension,
-    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& customExtractors,
-    std::shared_ptr<yams::api::IContentStore> contentStore,
-    const std::string& hash) {
-    
-    // 1) Check if any custom plugin extractor supports this format
-    for (const auto& extractor : customExtractors) {
-        if (extractor && extractor->supports(mimeType, extension)) {
-            return true;
-        }
-    }
-    
-    // 2) Use FileTypeDetector (magic_numbers.hpp)
-    auto& detector = yams::detection::FileTypeDetector::instance();
-    if (!mimeType.empty() && detector.isTextMimeType(mimeType)) {
-        return true;
-    }
-    
-    // 3) Extension-based fallback
-    // ...
-}
-```
+- `src/daemon/components/IngestService.cpp`
+  - single-document ingest routes to `DocumentService`
+  - sets:
+    - `skipInlineContentIndexing = true`
+    - `combineMetadataPathTree = true`
+- `src/app/services/document_service.cpp`
+  - persists the document first
+  - does not do the heavy extraction path for daemon-queued ingest
+- `src/daemon/components/IngestService.cpp`
+  - enqueues successful hashes into `PostIngestQueue`
 
-**Scope:** Background repair of documents missing FTS5 content or embeddings
+This split is intentional: normal daemon ingest favors **durable store first, heavier extraction second**.
+
+### Direct synchronous text path
+
+`DocumentService::store()` still has a narrow inline path for direct text adds:
+
+- `src/app/services/document_service.cpp`
+  - `applyStoreInlineContentIndex()`
+
+That path only runs when:
+
+- `skipInlineContentIndexing == false`, and
+- MIME is already text-like
+
+Use case: direct callers that need immediate searchability without waiting for post-ingest.
 
 ---
 
-### 1.3 CLI Repair Command
+## 3. Directory / Session / Watch Ingest
 
-**File:** `src/cli/commands/repair_command.cpp`  
-**Method:** `rebuildFts5Index()`  
-**Flow:**
+Primary batch path:
 
-```
-yams repair --fts5 → rebuildFts5Index()
-  ↓
-queryDocumentsByPattern("%") → Get all documents
-  ↓
-For each document:
-    extractDocumentText(ctx.store, hash, mime, ext, ctx.contentExtractors)
-    ↓
-    insertContent() → Store extracted text
-    ↓
-    indexDocumentContent() → FTS5
-    ↓
-    updateFuzzyIndex() → Fuzzy search
+```text
+StoreDocumentTask(recursive or directory)
+  -> IngestService::processTask()
+  -> IndexingService::addDirectory()
+  -> per-file DocumentService::store()
+  -> per-file PostIngestQueue enqueue
+  -> snapshot metadata + best-effort path/blob KG linking
 ```
 
-**Key Code:**
+Key current behavior:
 
-```cpp
-auto extractedOpt = yams::extraction::util::extractDocumentText(
-    ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
+- `src/app/services/indexing_service.cpp`
+  - expands the directory
+  - applies include/exclude filters
+  - honors `.gitignore` unless `noGitignore` is set
+  - precomputes hash / size / mtime before calling `DocumentService`
+  - enqueues post-ingest work for each successfully stored file
+  - writes `tree_snapshots` metadata after the batch completes
+- `src/daemon/components/IngestService.cpp`
+  - intentionally does **not** re-enqueue the whole directory result after `addDirectory()` returns
+  - this avoids duplicate post-ingest work
 
-if (extractedOpt && !extractedOpt->empty()) {
-    metadata::DocumentContent content;
-    content.documentId = d.id;
-    content.contentText = *extractedOpt;
-    content.extractionMethod = "repair";
-    
-    auto contentResult = ctx.metadataRepo->insertContent(content);
-    auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt, d.mimeType);
-    ctx.metadataRepo->updateFuzzyIndex(d.id);
-}
-```
+Important limitation:
 
-**Scope:** Manual full-database FTS5 rebuild triggered by user
+- `IndexingService` still leaves `treeRootHash` empty until fuller TreeBuilder integration lands
+- snapshot metadata exists now, but full Merkle-tree population is still not the active path here
 
 ---
 
-### 1.4 CLI Doctor Command
+## 4. Main Extraction + Content Index Path
 
-**File:** `src/cli/commands/doctor_command.cpp`  
-**Method:** `runRepair()`  
-**Flow:**
+For normal daemon ingest, `PostIngestQueue` is the real extraction owner.
 
+Primary functions:
+
+- `src/daemon/components/PostIngestQueue.cpp`
+  - `prepareMetadataEntry()`
+  - `commitBatchResults()`
+  - `dispatchSuccesses()`
+
+### 4.1 Extraction
+
+`prepareMetadataEntry()` currently prefers metadata-aware extraction first:
+
+```text
+extractDocumentContent()
+  -> text + optional bytes + extractor metadata
+  -> fallback to extractDocumentText() when needed
 ```
-yams doctor --repair → runRepair()
-  ↓
-Similar to repair_command, but part of diagnostic suite
-```
 
-**Scope:** Diagnostic repair, rarely used compared to dedicated repair command
+Current rules:
+
+- plugin-provided metadata can supply fields like title/author
+- plugin-provided title suppresses later GLiNER title inference
+- extracted text is capped before persistence to avoid oversized SQLite writes
+- non-text enrichments can request retained content bytes for later symbol/entity work
+
+### 4.2 Content persistence and search indexing
+
+`commitBatchResults()` batches successful extractions into metadata/index storage:
+
+- writes `BatchContentEntry` rows with `extractionMethod = "post_ingest"`
+- uses `contentIndexWriter_` when available
+- otherwise falls back to `metadataRepo->batchInsertContentAndIndex(...)`
+- marks extraction status / repair status on failures through the write lane
+
+This is the main path that makes normally ingested documents searchable by extracted content.
+
+### 4.3 Async follow-up stages
+
+After successful content commit, `dispatchSuccesses()` can enqueue:
+
+- knowledge-graph work
+- symbol extraction
+- entity extraction
+- title extraction
+- embedding preparation / embedding jobs
+
+Important boundary:
+
+- title + NL extraction is intentionally moved to a separate async stage
+- this avoids blocking the main extraction path and reduces contention with embedding/model resources
 
 ---
 
-### 1.5 TUI Reindex
+## 5. Repair and Rebuild Paths
 
-**File:** `src/cli/tui/tui_services.cpp`  
-**Method:** `reindexDocument()`  
-**Flow:**
+### 5.1 CLI surface
 
-```
-Browse UI → Reindex single document
-  ↓
-extractDocumentText(contentStore_, hash, info.mimeType, extension, extractors)
-  ↓
-insertContent() → indexDocumentContent() → updateFuzzyIndex()
-```
+`src/cli/commands/repair_command.cpp` is now a **thin RPC client**.
 
-**Scope:** Single-document reindex from Browse interface
+It no longer owns a separate local extraction pipeline. It delegates to daemon-side `RepairService`.
 
----
+### 5.2 Repair owner
 
-### 1.6 Embedding Repair Utility
+Current repair owner:
 
-**File:** `src/repair/embedding_repair_util.cpp`  
-**Method:** `repairMissingEmbeddings()`  
-**Flow:**
+- `src/daemon/components/RepairService.cpp`
 
-```
-Batch of documents missing embeddings
-  ↓
-For each: extractDocumentText(..., extractors)
-  ↓
-Store content + generate embeddings + update status
-```
+This service now owns the repair workflows that older docs attributed to `RepairCoordinator`.
 
-**Scope:** Generate embeddings for documents (also extracts text if missing)
+### 5.3 MIME repair
 
----
+Current MIME repair is conservative:
 
-## 2. Central Extraction Function
+- uses `FileTypeDetector`
+- prefers prefix reads from the content store instead of materializing full objects
+- updates MIME / extraction state without pretending every repair path is a full reindex
 
-### `extractDocumentText()` - Universal Extraction Utility
+### 5.4 FTS5 repair
 
-**File:** `src/extraction/extraction_util.cpp`  
-**Signature:**
+Current FTS5 rebuild path:
 
-```cpp
-std::optional<std::string> extractDocumentText(
-    std::shared_ptr<yams::api::IContentStore> store,
-    const std::string& hash,
-    const std::string& mime,
-    const std::string& extension,
-    const ContentExtractorList& extractors  // ← Unified registry
-);
-```
+- uses `extractDocumentText(...)`
+- writes content rows through `insertContent(...)`
+- rebuilds FTS5 entries through `indexDocumentContent(...)`
+- updates extraction status explicitly
 
-**Extraction Strategy (Priority Order):**
+This is a **repair path**, not a replay of the full post-ingest enrichment pipeline.
 
-1. **Plugin extractors** (highest priority):
-   - Iterate through `extractors` parameter
-   - Call `extractor->supports(mime, extension)`
-   - If match: `extractor->extractText(bytes, mime, extension)`
+### 5.5 Embedding repair
 
-2. **HTML fallback**:
-   - If MIME is `text/html` or extension is `.html`
-   - Use `HtmlTextExtractor`
+Current embedding repair path spans:
 
-3. **Text MIME types** (via FileTypeDetector):
-   - Check `detector.isTextMimeType(mime)`
-   - Return raw bytes as UTF-8 string
+- `src/daemon/components/RepairService.cpp`
+- `src/repair/embedding_repair_util.cpp`
 
-4. **Extension-based fallback**:
-   - Use `FileTypeDetector::getMimeTypeFromExtension()`
-   - If detected MIME is text → return raw content
+Behavior:
 
-**Returns:** `std::optional<std::string>` (nullopt if no extraction possible)
+- scans metadata for eligible docs missing embeddings
+- extracts text when needed
+- best-effort persists extracted text/content status if it was previously missing
+- generates document/chunk embeddings through the configured model path
 
 ---
 
-## 3. Extractor Registry Architecture
+## 6. Practical Ownership Map
 
-### ContentExtractorList Population
-
-**Source:** `ServiceManager::getAppContext()` @ line 3058
-
-```cpp
-yams::app::services::AppContext ServiceManager::getAppContext() const {
-    app::services::AppContext ctx;
-    // ...
-    ctx.contentExtractors = contentExtractors_;  // ← Unified registry
-    // ...
-}
-```
-
-### contentExtractors_ Initialization
-
-**Location:** `ServiceManager::initializeAsyncAwaitable()` @ lines 2042-2059
-
-```cpp
-// 1. Adopt plugin-based extractors (ABI plugins)
-auto extractorResult = init::step<size_t>(
-    "adopt_extractors", [&]() { return adoptContentExtractorsFromHosts(); });
-
-if (extractorResult) {
-    spdlog::info("ServiceManager: Adopted {} content extractors from plugins.",
-                 extractorResult.value());
-
-    // 2. Add built-in content extractors from ContentExtractorFactory
-    try {
-        auto builtInExtractors = yams::extraction::ContentExtractorFactory::instance().createAll();
-        if (!builtInExtractors.empty()) {
-            contentExtractors_.insert(contentExtractors_.end(),
-                                     builtInExtractors.begin(),
-                                     builtInExtractors.end());
-            spdlog::info("ServiceManager: Added {} built-in content extractors.",
-                        builtInExtractors.size());
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("ServiceManager: Failed to initialize built-in content extractors: {}", e.what());
-    }
-}
-```
-
-### Extractor Types
-
-1. **Plugin Extractors** (via ABI):
-   - Loaded from shared libraries (.so/.dll/.dylib)
-   - Registered via `adoptContentExtractorsFromHosts()`
-   - Wrapped in `AbiContentExtractorAdapter`
-   - Examples: PDF extractors from plugins
-
-2. **Built-in Extractors** (via ContentExtractorFactory):
-   - Compiled into YAMS binary
-   - Registered via `REGISTER_CONTENT_EXTRACTOR` macro
-   - Created via `ContentExtractorFactory::instance().createAll()`
-   - Examples: BinaryExtractor (commented out pending Ghidra)
+| Concern | Current owner | Notes |
+|---|---|---|
+| Persist bytes + core metadata | `DocumentService` | fast durable write path |
+| Expand directory ingest | `IndexingService` | per-file store + snapshot metadata |
+| Normal extraction + content indexing | `PostIngestQueue` | main runtime extraction path |
+| Immediate inline text indexing | `DocumentService` | only when caller leaves inline indexing enabled |
+| MIME repair | `RepairService` | prefix-read + detector driven |
+| FTS5 rebuild | `RepairService` | bounded repair path |
+| Embedding backfill | `RepairService` + `embedding_repair_util` | may extract text if missing |
+| Shared extractor registry | `ServiceManager` | built-in + plugin extractors |
 
 ---
 
-## 4. Consolidation Opportunities
+## 7. Intentional Boundaries and Caveats
 
-### 4.1 ✅ DONE: Unified Extractor Registry
+1. **Normal ingest is two-stage on purpose.**
+   - Store first in `DocumentService`
+   - Extract/index later in `PostIngestQueue`
 
-- **Status:** Complete
-- **Implementation:** ContentExtractorFactory merges built-ins with plugins in ServiceManager
-- **Benefit:** Single source of truth for all extractors
+2. **Repair does not fully replay post-ingest enrichments.**
+   - FTS5 repair restores searchable text/index state
+   - title/entity/symbol/KG work remains owned by normal post-ingest or specialized repair code
 
-### 4.2 🔄 OPPORTUNITY: Consolidate FTS5 Indexing Logic
+3. **Directory snapshots are real, but tree-root population is still partial.**
+   - snapshot metadata is written today
+   - full tree-root/Merkle integration is not yet the live path here
 
-**Current State:** FTS5 indexing duplicated across:
-
-1. PostIngestQueue::persist_content_and_index()
-2. RepairCommand::rebuildFts5Index()
-3. DoctorCommand::runRepair()
-4. TUIServices::reindexDocument()
-5. SearchService::lightIndexForHash_impl()
-
-**Proposed:** Create `IndexingService::indexContentForDocument()` utility:
-
-```cpp
-namespace yams::app::services {
-
-/**
- * @brief Unified FTS5 + fuzzy indexing for a single document
- * 
- * Handles:
- * - Text extraction (via extractDocumentText)
- * - Content storage (insertContent/updateContent)
- * - FTS5 indexing (indexDocumentContent)
- * - Fuzzy index update (updateFuzzyIndex)
- * - Status updates (contentExtracted, extractionStatus)
- * 
- * @param ctx Application context (store, metadataRepo, contentExtractors)
- * @param hash Document hash
- * @param documentId Document ID (if known, else -1 to query)
- * @param extractionMethod Tag for tracking (e.g., "repair", "post-ingest", "tui")
- * @return Result<IndexingStats> with success/failure counts
- */
-Result<IndexingStats> indexContentForDocument(
-    const AppContext& ctx,
-    const std::string& hash,
-    int64_t documentId = -1,
-    const std::string& extractionMethod = "default"
-);
-
-}
-```
-
-**Benefits:**
-
-- ✅ Eliminate code duplication
-- ✅ Consistent error handling
-- ✅ Unified logging/metrics
-- ✅ Easier to add new features (e.g., knowledge graph extraction)
-
-### 4.3 🔄 OPPORTUNITY: Extraction Pipeline Abstraction
-
-**Current State:** Extraction logic mixed with indexing/repair logic
-
-**Proposed:** Separate concerns into pipeline stages:
-
-```cpp
-namespace yams::extraction {
-
-/**
- * @brief Multi-stage extraction pipeline
- */
-class ExtractionPipeline {
-public:
-    struct Stage {
-        virtual Result<std::string> process(const std::string& input) = 0;
-        virtual std::string name() const = 0;
-    };
-    
-    void addStage(std::unique_ptr<Stage> stage);
-    Result<std::string> execute(const DocumentInfo& doc);
-};
-
-// Example stages:
-class TextExtractionStage : public Stage { /* uses extractDocumentText */ };
-class HtmlCleanupStage : public Stage { /* removes scripts/style */ };
-class LanguageDetectionStage : public Stage { /* detects language */ };
-class ContentNormalizationStage : public Stage { /* UTF-8 sanitization */ };
-
-}
-```
-
-**Benefits:**
-
-- ✅ Testable stages
-- ✅ Configurable pipeline per document type
-- ✅ Easy to add new stages (e.g., binary disassembly post-processing)
-
-### 4.4 🔄 OPPORTUNITY: Repair Logic Consolidation
-
-**Current State:** Repair scattered across:
-
-- RepairCoordinator (daemon background)
-- RepairCommand (CLI manual)
-- DoctorCommand (CLI diagnostic)
-- TUIServices (Browse UI)
-
-**Proposed:** Create `RepairService` in `app/services/`:
-
-```cpp
-namespace yams::app::services {
-
-enum class RepairScope {
-    FTS5Only,           // Rebuild FTS5 index
-    EmbeddingsOnly,     // Generate missing embeddings
-    Full,               // Both FTS5 + embeddings
-    SingleDocument,     // Target one document
-};
-
-struct RepairOptions {
-    RepairScope scope = RepairScope::Full;
-    bool force = false;              // Re-extract even if exists
-    size_t batchSize = 100;          // Documents per batch
-    std::chrono::seconds timeout{600}; // Per-document timeout
-    ProgressCallback progress;
-};
-
-class IRepairService {
-public:
-    virtual ~IRepairService() = default;
-    
-    virtual Result<RepairStats> repair(const RepairOptions& opts) = 0;
-    virtual Result<RepairStats> repairDocument(const std::string& hash, const RepairOptions& opts) = 0;
-};
-
-std::shared_ptr<IRepairService> makeRepairService(const AppContext& ctx);
-
-}
-```
-
-**Benefits:**
-
-- ✅ CLI commands become thin wrappers
-- ✅ Daemon uses same logic as CLI
-- ✅ TUI uses same logic as CLI
-- ✅ Single place for repair improvements
-- ✅ Easier to add metrics/monitoring
+4. **The extractor registry is unified; the entry paths are not.**
+   - same extractor list
+   - different orchestration depending on ingest vs repair vs direct sync text add
 
 ---
 
-## 5. Dataflow Diagram
+## 8. File Map
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     Document Ingestion                        │
-│                                                               │
-│  User adds document → ContentStore → DocumentAddedEvent      │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ↓
-         ┌─────────────────────────────┐
-         │    PostIngestQueue          │
-         │  (Primary Extraction Path)  │
-         └──────────────┬──────────────┘
-                        │
-                        ↓
-    ┌───────────────────────────────────────┐
-    │  extractDocumentText()                │
-    │  (Central Extraction Utility)         │
-    │                                       │
-    │  Inputs:                              │
-    │   - hash, MIME type, extension        │
-    │   - ContentExtractorList (unified)    │
-    │                                       │
-    │  Strategy:                            │
-    │   1. Plugin extractors (priority)     │
-    │   2. HTML fallback                    │
-    │   3. Text MIME types                  │
-    │   4. Extension-based fallback         │
-    └───────────────┬───────────────────────┘
-                    │
-                    ↓ (extracted text)
-         ┌──────────────────────────┐
-         │  FTS5 + Fuzzy Indexing   │
-         │  - insertContent()       │
-         │  - indexDocumentContent()│
-         │  - updateFuzzyIndex()    │
-         └──────────┬───────────────┘
-                    │
-                    ↓
-         ┌──────────────────────────┐
-         │  Optional: Embeddings    │
-         │  - Queue for generation  │
-         └──────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│                 Background Repair Path                        │
-│                                                               │
-│  RepairCoordinator scans → Detect missing FTS5/embeddings    │
-│         ↓                                                     │
-│  canExtractDocument() → Filter to extractable                │
-│         ↓                                                     │
-│  Queue FTS5Job → Worker → extractDocumentText() → Index      │
-└───────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│                    Manual Repair Paths                        │
-│                                                               │
-│  CLI: yams repair --fts5 → RepairCommand::rebuildFts5Index() │
-│  CLI: yams doctor --repair → DoctorCommand::runRepair()      │
-│  TUI: Browse → Reindex → TUIServices::reindexDocument()      │
-│                                                               │
-│  All call: extractDocumentText() → Index                     │
-└───────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 6. ContentExtractor Interface
-
-### IContentExtractor (Base Interface)
-
-**File:** `include/yams/extraction/content_extractor.h`
-
-```cpp
-class IContentExtractor {
-public:
-    virtual ~IContentExtractor() = default;
-    
-    // Check if this extractor can handle the given format
-    virtual bool supports(const std::string& mime, const std::string& extension) const = 0;
-    
-    // Extract text from binary content
-    virtual std::optional<std::string> extractText(
-        const std::vector<std::byte>& bytes,
-        const std::string& mime,
-        const std::string& extension
-    ) = 0;
-};
-
-using ContentExtractorList = std::vector<std::shared_ptr<IContentExtractor>>;
-```
-
-### Concrete Implementations
-
-1. **BinaryExtractor** (Built-in, conditionally enabled):
-   - File: `src/extraction/binary_extractor.cpp`
-   - Supports: ELF, PE, Mach-O, Java class, WASM
-   - Delegate: ExternalPluginExtractor → Ghidra plugin
-   - Status: Compiled, registration commented out (requires Ghidra)
-
-2. **AbiContentExtractorAdapter** (Plugin wrapper):
-   - File: `src/daemon/resource/abi_content_extractor_adapter.h`
-   - Wraps: Plugin-provided extractors via ABI
-   - Examples: PDF extractors from dynamically loaded plugins
-
----
-
-## 7. Recommendations
-
-### Short-Term (External extraction plugin work completion)
-
-1. ✅ **DONE:** ContentExtractorFactory integration
-2. ⏳ **IN PROGRESS:** Document extraction pipeline (this document)
-3. 🔄 **NEXT:** Create `IndexingService::indexContentForDocument()` utility
-4. 🔄 **NEXT:** Test BinaryExtractor end-to-end with Ghidra
-
-### Medium-Term (Code Quality)
-
-5. 🔄 Consolidate RepairCommand + DoctorCommand repair logic
-2. 🔄 Create RepairService in app/services/
-3. 🔄 Extract ExtractionPipeline abstraction
-
-### Long-Term (Architecture)
-
-8. 🔄 Plugin marketplace / discovery
-2. 🔄 Extraction metrics / telemetry
-3. 🔄 Incremental re-extraction (only changed content)
-
----
-
-## 8. Testing Strategy
-
-### Unit Tests Needed
-
-- ✅ ContentExtractorFactory registration
-- ⏳ IndexingService utility functions
-- ⏳ RepairService (when created)
-- ⏳ ExtractionPipeline stages (when created)
-
-### Integration Tests Needed
-
-- ⏳ BinaryExtractor with real Ghidra plugin
-- ⏳ Full extraction pipeline (add → extract → index → search)
-- ⏳ Repair flow (break FTS5 → repair → verify)
-
-### End-to-End Tests Needed
-
-- ⏳ PostIngestQueue with various file types
-- ⏳ RepairCoordinator background repair
-- ⏳ CLI repair command full rebuild
-- ⏳ TUI single-document reindex
-
----
-
-## 9. Metrics & Monitoring
-
-### Extraction Metrics (Proposed)
-
-- `extraction_attempts_total` (counter by mime_type, success/failure)
-- `extraction_duration_seconds` (histogram)
-- `extraction_content_size_bytes` (histogram)
-- `extractor_plugin_calls_total` (counter by plugin_name)
-
-### Repair Metrics (Existing)
-
-- `repair_queue_depth` (gauge)
-- `repair_documents_processed_total` (counter)
-- `repair_fts5_operations_total` (counter by success/failure)
-- `repair_embeddings_generated_total` (counter)
-
----
-
-## 10. References
-
-- **external extraction plugin work:** Binary File Extraction via Ghidra Plugin Integration
-- **Extraction Utility:** `src/extraction/extraction_util.cpp`
-- **ServiceManager:** `src/daemon/components/ServiceManager.cpp`
-- **RepairCoordinator:** `src/daemon/components/RepairCoordinator.cpp`
-- **PostIngestQueue:** `src/daemon/components/PostIngestQueue.cpp`
-- **ContentExtractorFactory:** `include/yams/extraction/content_extractor_factory.h`
-
----
-
-**Conclusion:**
-
-The YAMS extraction pipeline is now **unified at the registry level** (ContentExtractorFactory + plugin system), but **duplicated at the call-site level** (5+ locations calling extractDocumentText + indexing logic).
-
-The **primary consolidation opportunity** is creating utility services (`IndexingService`, `RepairService`) that wrap common patterns and reduce duplication across CLI commands, daemon components, and TUI interfaces.
-
-With ContentExtractorFactory integrated, **BinaryExtractor is ready to be enabled** once Ghidra is available in the environment.
+- `src/app/services/document_service.cpp`
+- `src/app/services/indexing_service.cpp`
+- `src/daemon/components/IngestService.cpp`
+- `src/daemon/components/PostIngestQueue.cpp`
+- `src/daemon/components/RepairService.cpp`
+- `src/repair/embedding_repair_util.cpp`
+- `src/daemon/components/ServiceManager.cpp`
+- `src/cli/commands/repair_command.cpp`

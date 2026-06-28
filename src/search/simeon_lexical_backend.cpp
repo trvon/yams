@@ -28,6 +28,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -44,6 +45,30 @@
 namespace yams::search {
 
 namespace {
+
+// Reconcile fragment-geometry rerank scores with a BM25 baseline.
+// score_fragment_geometry returns a z-scored blend (~[-3,+3]) for in-pool docs
+// and -inf for out-of-pool docs. Backfilling -inf with raw BM25 (~[0,88]) and
+// ranking off one vector buries the reranked pool beneath the non-candidates
+// (raw BM25 ≫ z-blend). Instead: keep in-pool docs on their z-blend order and
+// place every out-of-pool doc strictly BELOW the pool floor, ordered by a
+// saturating BM25 map — non-candidates are worse by BM25 and must rank under
+// the reranked pool. Operates in place on `geom`.
+void reconcileGeomWithBm25(std::vector<float>& geom, const std::vector<float>& bm25) {
+    float poolMin = std::numeric_limits<float>::infinity();
+    for (float v : geom) {
+        if (std::isfinite(v) && v < poolMin)
+            poolMin = v;
+    }
+    const bool havePool = std::isfinite(poolMin);
+    for (std::size_t i = 0; i < geom.size(); ++i) {
+        if (std::isfinite(geom[i]))
+            continue;
+        const float b = (i < bm25.size() && std::isfinite(bm25[i])) ? bm25[i] : 0.0f;
+        const float sat = b > 0.0f ? b / (b + 1.0f) : 0.0f; // monotonic in b, [0,1)
+        geom[i] = havePool ? (poolMin - 1.0f + sat) : b;
+    }
+}
 
 std::uint64_t rssBytesCurrent() noexcept {
 #if defined(__APPLE__)
@@ -816,6 +841,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
             full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
                                                    geomCfg);
             lexical = score_bm25(*index_);
+            // Keep the reranked pool above the BM25 tail (z-blend vs raw-BM25
+            // scale mismatch would otherwise bury the candidates).
+            reconcileGeomWithBm25(full, lexical);
         }
     } else if (cfg_.router_enabled && lexicalRouter != nullptr) {
         const auto features = lexicalRouter->features(query);

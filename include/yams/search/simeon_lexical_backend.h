@@ -111,12 +111,14 @@ public:
         // improve nDCG@10 by +0.009 on NFCorpus in simeon benchmarks.
         bool bm25_variants_rrf = false;
 
-        // Default-on fragment geometry reranker. Uses the primary BM25 variant
-        // as the lexical leg and PHSS-driven fragment propagation as the
-        // semantic leg. To keep local/test corpora stable, auto-activation is
-        // gated by fragment_geometry_min_corpus_docs and a vocabulary-richness
-        // preflight; below those thresholds yams falls back to plain BM25.
-        bool fragment_geometry_enabled = true;
+        // Fragment-geometry (PHSS topology) reranker. OFF by default: a per-arm
+        // retrieval bench showed it loses to plain SAB and lead_field even after
+        // its scale-mixing bug was fixed (nDCG@10 0.243 vs 0.35 baseline) while
+        // costing the bulk of index-build time (PMI learn + fragment build +
+        // PHSS). Opt-in for prose corpora via this flag; the scoreRouted path
+        // still consumes it (quality-router gated) when enabled. The simeon
+        // fragment_geometry/PHSS code remains as the research asset.
+        bool fragment_geometry_enabled = false;
         std::size_t fragment_geometry_min_corpus_docs = 1000;
         // Fragment geometry is bounded separately from the lexical build. The
         // builder keeps only a bounded PMI sample in memory, then streams a
