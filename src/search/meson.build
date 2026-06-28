@@ -11,6 +11,19 @@ yams_vector = dependency('yams_vector', required: false)
 #SymSpell dependency(defined in third_party / symspell / meson.build)
 #Note : symspell_dep must be declared before this file is processed
 
+# Tracy profiling (optional, -Denable-profiling=true) — mirrors src/daemon so
+# the YAMS_* zones in the scoring path actually emit. Zero-cost when off: the
+# profiling.h macros compile to nothing without -DTRACY_ENABLE.
+search_tracy_args = []
+search_tracy_deps = []
+if get_option('enable-profiling')
+  search_tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
+  if search_tracy_dep.found()
+    search_tracy_args += ['-DTRACY_ENABLE']
+    search_tracy_deps += search_tracy_dep
+  endif
+endif
+
 yams_search = static_library('yams_search',
   [
     'query_tokenizer.cpp',
@@ -56,7 +69,8 @@ yams_search = static_library('yams_search',
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),
   ],
-  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, symspell_dep],
+  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, symspell_dep] + search_tracy_deps,
+  cpp_args: search_tracy_args,
   install: true,
 )
 

@@ -5,7 +5,6 @@
 
 #include <simeon/concept_mining.hpp>
 #include <simeon/fragment_geometry.hpp>
-#include <simeon/prf.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -148,12 +147,6 @@ public:
             std::function<void(std::int64_t docId, std::string entityText, float confidence)>;
         EntityCallback entity_callback;
 
-        // RM3 pseudo-relevance feedback (Lavrenko & Croft 2001).
-        // SAB-smooth + RM3 improves scifact by +0.018 nDCG@10 in simeon
-        // benchmarks. Corpus-sensitive — defaults to off.
-        bool rm3_enabled = false;
-        simeon::PrfConfig rm3_config{};
-
         // Reserved for backend-owned bandit flows. Normal SearchEngine bandit
         // routing is controlled per request by SearchEngineConfig::simeonBanditArm.
         // Direct scoreBanditRouted() calls are available whenever the backend is
@@ -242,8 +235,6 @@ public:
     // The arm names are preset keys that map to tested (R_q, R_d, S) combos
     // from the simeon Omega search. Recognized presets include:
     //   "sab_smooth"              - plain SAB-smooth gamma=5
-    //   "sab_smooth_rm3_adaptive" - SAB-smooth gamma=5 + adaptive PRF
-    //   "sab_smooth_rm3_diverse"  - SAB-smooth gamma=5 + broader PRF
     //   "bm25_variants_rrf"       - RRF over SAB-smooth + ATIRE when available
     //   "atire"                   - ATIRE BM25 when available
     //   "keyphrase"               - keyphrase strategy when available
@@ -294,7 +285,6 @@ private:
 
     // Strategy router (new retrieval_strategy.hpp framework)
     std::unique_ptr<simeon::TextAdapter> text_adapter_;
-    std::vector<std::string> doc_lead_texts_;
     std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
     std::unique_ptr<simeon::StrategyRouter> strategy_router_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;

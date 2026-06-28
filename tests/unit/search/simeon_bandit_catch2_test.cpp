@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <yams/search/bandit_reward.h>
 #include <yams/search/search_engine_config.h>
 #include <yams/search/tuner_mab.h>
 
@@ -242,4 +243,30 @@ TEST_CASE("SearchEngineConfig: simeonBanditArm set and read", "[unit][search][ba
     cfg.simeonBanditArm = "sab_smooth_rm3_adaptive";
     CHECK(cfg.simeonBanditArm == "sab_smooth_rm3_adaptive");
     CHECK_FALSE(cfg.simeonBanditArm.empty());
+}
+
+TEST_CASE("computeSimeonBanditReward: arm-name independent (no rm3 bonus)",
+          "[unit][search][bandit]") {
+    // Same result count + latency must yield the same reward regardless of the
+    // arm name — the previous +0.05 "rm3" bonus is gone.
+    const double plain = computeSimeonBanditReward(5, 10.0, "sab_smooth");
+    const double rm3 = computeSimeonBanditReward(5, 10.0, "sab_smooth_rm3_adaptive");
+    const double rm3d = computeSimeonBanditReward(5, 10.0, "sab_smooth_rm3_diverse");
+    CHECK(plain == rm3);
+    CHECK(plain == rm3d);
+}
+
+TEST_CASE("computeSimeonBanditReward: monotone in result density, clamped",
+          "[unit][search][bandit]") {
+    // More results (same latency) -> not-smaller reward.
+    CHECK(computeSimeonBanditReward(2, 10.0, "a") <= computeSimeonBanditReward(8, 10.0, "a"));
+    // Faster (same results) -> not-smaller reward.
+    CHECK(computeSimeonBanditReward(5, 20.0, "a") <= computeSimeonBanditReward(5, 5.0, "a"));
+    // Clamped into [0, 0.95]; high density saturates at the cap, zero results -> 0.
+    const double hi = computeSimeonBanditReward(1000, 1.0, "a");
+    CHECK(hi <= 0.95);
+    CHECK(hi >= 0.0);
+    CHECK(computeSimeonBanditReward(0, 10.0, "a") == 0.0);
+    // elapsedMs floored at 1.0, so tiny/zero latency never divides by zero.
+    CHECK(computeSimeonBanditReward(1, 0.0, "a") >= 0.0);
 }

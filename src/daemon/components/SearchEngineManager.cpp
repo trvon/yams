@@ -282,11 +282,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // Test env: YAMS_SIMEON_STRATEGY_ROUTER_ENABLED=1
             lexicalCfg.strategy_router_enabled = bm25Policy.strategyRouterEnabled.value_or(false);
 
-            // RM3 SAB-smooth — test env: YAMS_SIMEON_RM3=1
-            if (const char* rm3Env = std::getenv("YAMS_SIMEON_RM3")) {
-                lexicalCfg.rm3_enabled = std::string(rm3Env) == "1";
-            }
-
             // Enable concept mining and wire its entity export to the KG
             // store so the graph reranker can match query concepts against
             // per-document concept bigrams.

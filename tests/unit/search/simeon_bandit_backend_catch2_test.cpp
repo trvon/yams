@@ -125,30 +125,6 @@ TEST_CASE("scoreBanditRouted: sab_smooth arm returns results",
     CHECK(result.value().scores.size() == ids.size());
 }
 
-TEST_CASE("scoreBanditRouted: sab_smooth_rm3_adaptive arm returns results",
-          "[search][simeon][bandit][backend][dispatch]") {
-    auto corpus = makeCorpus(kCorpus);
-    auto backend = buildBackend(corpus);
-
-    auto ids = fakeCandidateIds();
-    auto result = backend->scoreBanditRouted("beta", "sab_smooth_rm3_adaptive", ids);
-    REQUIRE(result.has_value());
-    CHECK(std::string(result.value().recipe_name) == "Bm25SabRm3Adaptive");
-    CHECK(result.value().scores.size() == ids.size());
-}
-
-TEST_CASE("scoreBanditRouted: sab_smooth_rm3_diverse arm returns results",
-          "[search][simeon][bandit][backend][dispatch]") {
-    auto corpus = makeCorpus(kCorpus);
-    auto backend = buildBackend(corpus);
-
-    auto ids = fakeCandidateIds();
-    auto result = backend->scoreBanditRouted("beta", "sab_smooth_rm3_diverse", ids);
-    REQUIRE(result.has_value());
-    CHECK(std::string(result.value().recipe_name) == "Bm25SabRm3Diverse");
-    CHECK(result.value().scores.size() == ids.size());
-}
-
 TEST_CASE("scoreBanditRouted: unknown arm falls back to sab_smooth",
           "[search][simeon][bandit][backend][dispatch]") {
     auto corpus = makeCorpus(kCorpus);
@@ -159,26 +135,6 @@ TEST_CASE("scoreBanditRouted: unknown arm falls back to sab_smooth",
     REQUIRE(result.has_value());
     CHECK(std::string(result.value().recipe_name) == "Bm25SabSmooth");
     CHECK(result.value().scores.size() == ids.size());
-}
-
-TEST_CASE("scoreBanditRouted: different arms produce different recipe labels",
-          "[search][simeon][bandit][backend][dispatch]") {
-    auto corpus = makeCorpus(kCorpus);
-    auto backend = buildBackend(corpus);
-
-    auto ids = fakeCandidateIds();
-
-    auto r1 = backend->scoreBanditRouted("beta", "sab_smooth", ids);
-    auto r2 = backend->scoreBanditRouted("beta", "sab_smooth_rm3_adaptive", ids);
-    auto r3 = backend->scoreBanditRouted("beta", "sab_smooth_rm3_diverse", ids);
-
-    REQUIRE(r1.has_value());
-    REQUIRE(r2.has_value());
-    REQUIRE(r3.has_value());
-
-    CHECK(std::string(r1.value().recipe_name) != std::string(r2.value().recipe_name));
-    CHECK(std::string(r1.value().recipe_name) != std::string(r3.value().recipe_name));
-    CHECK(std::string(r2.value().recipe_name) != std::string(r3.value().recipe_name));
 }
 
 TEST_CASE("scoreBanditRouted: returns zero for unknown candidate ids",

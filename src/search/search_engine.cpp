@@ -1,5 +1,7 @@
 #include <yams/search/search_engine.h>
 
+#include <yams/search/bandit_reward.h>
+
 #include <spdlog/spdlog.h>
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -945,8 +947,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (!simeonBanditsInitialized_) {
             std::vector<TunerMAB::Arm> arms;
             arms.push_back({"sab_smooth", 0.0, {}});
-            arms.push_back({"sab_smooth_rm3_adaptive", 0.0, {}});
-            arms.push_back({"sab_smooth_rm3_diverse", 0.0, {}});
             if (simeonLexical_->hasStrategyRouter()) {
                 arms.push_back({"keyphrase", 0.0, {}});
                 arms.push_back({"lead_field", 0.0, {}});
@@ -1974,7 +1974,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             traceCollector.markStageAttempted(name);
-            YAMS_ZONE_SCOPED_N(name);
+            YAMS_ZONE_SCOPED_DYN(name, std::char_traits<char>::length(name));
             auto start = std::chrono::steady_clock::now();
             auto results = queryFn();
             auto end = std::chrono::steady_clock::now();
@@ -2492,10 +2492,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         double elapsedMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime)
                 .count();
-        double resultCount = static_cast<double>(response.results.size());
-        double resultRate = std::clamp(resultCount / std::max(1.0, elapsedMs) * 10.0, 0.0, 0.95);
-        double armBonus = (selectedSimeonBanditArm.find("rm3") != std::string::npos) ? 0.05 : 0.0;
-        double reward = std::clamp(resultRate + armBonus, 0.0, 1.0);
+        const double reward = computeSimeonBanditReward(response.results.size(), elapsedMs,
+                                                        selectedSimeonBanditArm);
 
         std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
         auto profileIt = simeonBandits_.find(selectedSimeonBanditProfile);
