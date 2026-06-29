@@ -317,7 +317,7 @@ private:
 class GarbageCollector {
 public:
     GarbageCollector(ReferenceCounter& refCounter, StorageEngine& storageEngine);
-    ~GarbageCollector() = default;
+    ~GarbageCollector();
 
     // Delete copy, enable move
     GarbageCollector(const GarbageCollector&) = delete;

@@ -49,7 +49,7 @@ public:
                           std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                           const SearchEngineConfig& config = {});
 
-    ~SearchEngine() = default;
+    ~SearchEngine();
 
     SearchEngine(const SearchEngine&) = delete;
     SearchEngine& operator=(const SearchEngine&) = delete;

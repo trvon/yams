@@ -5054,4 +5054,6 @@ createSearchEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataR
                                           std::move(embeddingGen), std::move(kgStore), config);
 }
 
+SearchEngine::~SearchEngine() = default;
+
 } // namespace yams::search

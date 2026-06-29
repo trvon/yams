@@ -914,4 +914,6 @@ void WALManager::notifyTransactionClosed() {
     core::decrement_if_positive(pImpl->activeTransactions);
 }
 
+WALManager::~WALManager() = default;
+
 } // namespace yams::wal

@@ -17,7 +17,7 @@ public:
     class Iterator;
 
     WALFile(const std::filesystem::path& path, Mode mode);
-    ~WALFile() = default;
+    ~WALFile();
 
     WALFile(WALFile&&) noexcept;
     WALFile& operator=(WALFile&&) noexcept;

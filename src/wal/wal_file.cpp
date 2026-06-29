@@ -502,4 +502,6 @@ bool WALFile::canWrite() const {
     return pImpl && pImpl->mode != Mode::Read;
 }
 
+WALFile::~WALFile() = default;
+
 } // namespace yams::wal

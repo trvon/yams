@@ -337,4 +337,6 @@ Result<void> rebuildReferenceDatabase(const std::filesystem::path& dbPath,
     }
 }
 
+GarbageCollector::~GarbageCollector() = default;
+
 } // namespace yams::storage

@@ -97,4 +97,6 @@ void SymSpellSearch::clear() {
     // Placeholder: full implementation needs direct SQL access to purge the backing tables.
 }
 
+SymSpellSearch::~SymSpellSearch() = default;
+
 } // namespace yams::search

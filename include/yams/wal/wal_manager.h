@@ -55,7 +55,7 @@ public:
     // Constructor
     WALManager();
     explicit WALManager(Config config);
-    ~WALManager() = default;
+    ~WALManager();
 
     // Disable copy, enable move
     WALManager(const WALManager&) = delete;
