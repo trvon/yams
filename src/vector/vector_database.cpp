@@ -1068,22 +1068,16 @@ public:
     }
 
     Result<void> updateEmbeddings(const std::vector<VectorRecord>& records) {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
         for (const auto& record : records) {
             if (record.chunk_id.empty()) {
                 return Error{ErrorCode::InvalidArgument,
                              "updateEmbeddings requires non-empty chunk_id"};
             }
-            auto result = backend_->updateVector(record.chunk_id, record);
-            if (!result) {
-                setError("Failed to update embedding for " + record.chunk_id + ": " +
-                         result.error().message);
-                return result.error();
+            if (!updateVector(record.chunk_id, record)) {
+                const auto error = getLastError();
+                return Error{ErrorCode::DatabaseError,
+                             error.empty() ? "Failed to update embedding: " + record.chunk_id
+                                           : error};
             }
         }
 

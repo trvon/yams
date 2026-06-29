@@ -5,10 +5,9 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <ranges>
+#include <random>
 #include <regex>
 #include <string>
-#include <unordered_set>
 #include <yams/common/format.h>
 #include <yams/content/archive_content_handler.h>
 
@@ -324,7 +323,9 @@ std::string normalizeExtensionHint(std::string_view hint) {
 
     std::ranges::transform(extension, extension.begin(),
                            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return extension;
+    return std::ranges::find(archiveExtensions, extension) == archiveExtensions.end()
+               ? std::string{}
+               : extension;
 }
 
 std::string extensionForArchiveMime(std::string_view mimeType) {
@@ -343,6 +344,28 @@ std::string extensionForArchiveMime(std::string_view mimeType) {
     if (mimeType == "application/x-7z-compressed")
         return ".7z";
     return {};
+}
+
+bool isGenericArchiveDetection(const detection::FileSignature& signature) {
+    return signature.fileType == "binary" || signature.mimeType == "application/octet-stream";
+}
+
+bool hasConfirmedArchiveMetadata(const ContentResult& result) {
+    if (!result.archiveData) {
+        return false;
+    }
+    const auto& metadata = *result.archiveData;
+    return static_cast<ArchiveFormat>(metadata.format) != ArchiveFormat::Unknown ||
+           metadata.hasBasicInfo();
+}
+
+bool hasArchiveContainerMagic(std::span<const std::byte> data) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+    return (data.size() >= 4 && std::memcmp(bytes, "PK\x03\x04", 4) == 0) ||
+           (data.size() >= 4 && std::memcmp(bytes, "PK\x05\x06", 4) == 0) ||
+           (data.size() >= 6 && std::memcmp(bytes, "7z\xBC\xAF\x27\x1C", 6) == 0) ||
+           (data.size() >= 7 && std::memcmp(bytes, "Rar!\x1A\x07", 6) == 0) ||
+           (data.size() >= 265 && std::memcmp(bytes + 257, "ustar", 5) == 0);
 }
 
 std::string chooseArchiveTempExtension(std::span<const std::byte> data, std::string_view hint) {
@@ -367,10 +390,38 @@ Result<std::filesystem::path> writeArchiveBufferToTempFile(std::span<const std::
         return Error{ErrorCode::InvalidArgument, "Empty archive data"};
     }
 
-    const auto tempPath =
-        std::filesystem::temp_directory_path() /
-        yams::fmt_format("yams-archive-buffer-{}{}",
-                         std::chrono::steady_clock::now().time_since_epoch().count(), extension);
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937_64 gen(rd());
+
+    std::filesystem::path tempDir;
+    std::error_code ec;
+    bool created = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        tempDir = std::filesystem::temp_directory_path() /
+                  yams::fmt_format("yams-archive-buffer-{:016x}", gen());
+        if (std::filesystem::create_directory(tempDir, ec)) {
+            created = true;
+            std::filesystem::permissions(tempDir, std::filesystem::perms::owner_all,
+                                         std::filesystem::perm_options::replace, ec);
+            if (ec) {
+                std::filesystem::remove_all(tempDir);
+                return Error{
+                    ErrorCode::IOError,
+                    yams::fmt_format("Failed to secure temp archive directory: {}", ec.message())};
+            }
+            break;
+        }
+        if (ec) {
+            return Error{
+                ErrorCode::IOError,
+                yams::fmt_format("Failed to create temp archive directory: {}", ec.message())};
+        }
+    }
+    if (!created) {
+        return Error{ErrorCode::IOError, "Failed to allocate temp archive directory"};
+    }
+
+    const auto tempPath = tempDir / yams::fmt_format("buffer{}", extension);
 
     std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
     if (!file) {
@@ -382,7 +433,7 @@ Result<std::filesystem::path> writeArchiveBufferToTempFile(std::span<const std::
                static_cast<std::streamsize>(data.size()));
     if (!file) {
         std::error_code ec;
-        std::filesystem::remove(tempPath, ec);
+        std::filesystem::remove_all(tempPath.parent_path(), ec);
         return Error{ErrorCode::IOError,
                      yams::fmt_format("Failed to write temp archive file: {}", tempPath.string())};
     }
@@ -541,11 +592,11 @@ Result<ContentResult> ArchiveContentHandler::processBuffer(std::span<const std::
                                                            const std::string& hint,
                                                            const ContentConfig& config) {
     auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
+    bool requiresParserConfirmation = false;
     if (signatureResult && !canHandle(signatureResult.value())) {
         const auto& signature = signatureResult.value();
-        const bool genericBinary =
-            signature.fileType == "binary" || signature.mimeType == "application/octet-stream";
-        if (!genericBinary) {
+        requiresParserConfirmation = isGenericArchiveDetection(signature);
+        if (!requiresParserConfirmation) {
             return Error{ErrorCode::NotSupported,
                          yams::fmt_format("Not an archive file: detected as {} ({})",
                                           signature.mimeType, signature.fileType)};
@@ -559,11 +610,15 @@ Result<ContentResult> ArchiveContentHandler::processBuffer(std::span<const std::
 
     const auto cleanup = [&tempPath] {
         std::error_code ec;
-        std::filesystem::remove(tempPath.value(), ec);
+        std::filesystem::remove_all(tempPath.value().parent_path(), ec);
     };
 
     auto result = process(tempPath.value(), config);
     cleanup();
+    if (result && requiresParserConfirmation && !hasConfirmedArchiveMetadata(result.value()) &&
+        !hasArchiveContainerMagic(data)) {
+        return Error{ErrorCode::NotSupported, "Buffer did not contain parseable archive metadata"};
+    }
     if (result) {
         result.value().metadata["source"] = "buffer";
         if (!hint.empty()) {

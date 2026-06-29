@@ -25,6 +25,7 @@ namespace yamsfmt = fmt;
 #include <limits>
 #include <optional>
 #include <random>
+#include <shared_mutex>
 #include <source_location>
 #include <system_error>
 #include <thread>
@@ -130,18 +131,16 @@ Result<size_t> cleanupStaleTempFiles(const std::filesystem::path& tempDir) {
 
     if (!std::filesystem::exists(tempDir, ec)) {
         if (ec) {
-            return Error{ErrorCode::IOError,
-                         "Failed to check temp directory: " + tempDir.string() + ": " +
-                             ec.message()};
+            return Error{ErrorCode::IOError, "Failed to check temp directory: " + tempDir.string() +
+                                                 ": " + ec.message()};
         }
         return cleanedCount;
     }
 
     for (const auto& entry : std::filesystem::directory_iterator(tempDir, ec)) {
         if (ec) {
-            return Error{ErrorCode::IOError,
-                         "Failed to iterate temp directory: " + tempDir.string() + ": " +
-                             ec.message()};
+            return Error{ErrorCode::IOError, "Failed to iterate temp directory: " +
+                                                 tempDir.string() + ": " + ec.message()};
         }
         if (!entry.is_regular_file()) {
             continue;
@@ -149,9 +148,8 @@ Result<size_t> cleanupStaleTempFiles(const std::filesystem::path& tempDir) {
 
         const auto lastWrite = entry.last_write_time(ec);
         if (ec) {
-            return Error{ErrorCode::IOError,
-                         "Failed to read temp file timestamp: " + entry.path().string() + ": " +
-                             ec.message()};
+            return Error{ErrorCode::IOError, "Failed to read temp file timestamp: " +
+                                                 entry.path().string() + ": " + ec.message()};
         }
 
         const auto now = std::filesystem::file_time_type::clock::now();
@@ -161,9 +159,8 @@ Result<size_t> cleanupStaleTempFiles(const std::filesystem::path& tempDir) {
 
         std::filesystem::remove(entry.path(), ec);
         if (ec) {
-            return Error{ErrorCode::IOError,
-                         "Failed to remove temp file: " + entry.path().string() + ": " +
-                             ec.message()};
+            return Error{ErrorCode::IOError, "Failed to remove temp file: " +
+                                                 entry.path().string() + ": " + ec.message()};
         }
         ++cleanedCount;
     }
@@ -185,9 +182,8 @@ Result<size_t> pruneEmptyDirectories(const std::filesystem::path& root) {
     for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end;
          it.increment(ec)) {
         if (ec) {
-            return Error{ErrorCode::IOError,
-                         "Failed to iterate directory tree: " + root.string() + ": " +
-                             ec.message()};
+            return Error{ErrorCode::IOError, "Failed to iterate directory tree: " + root.string() +
+                                                 ": " + ec.message()};
         }
         if (it->is_directory()) {
             directories.push_back(it->path());
@@ -203,8 +199,7 @@ Result<size_t> pruneEmptyDirectories(const std::filesystem::path& root) {
         const bool isEmpty = std::filesystem::is_empty(dir, ec);
         if (ec) {
             return Error{ErrorCode::IOError,
-                         "Failed to inspect directory: " + dir.string() + ": " +
-                             ec.message()};
+                         "Failed to inspect directory: " + dir.string() + ": " + ec.message()};
         }
         if (!isEmpty) {
             continue;
@@ -213,8 +208,7 @@ Result<size_t> pruneEmptyDirectories(const std::filesystem::path& root) {
         std::filesystem::remove(dir, ec);
         if (ec) {
             return Error{ErrorCode::IOError,
-                         "Failed to prune directory: " + dir.string() + ": " +
-                             ec.message()};
+                         "Failed to prune directory: " + dir.string() + ": " + ec.message()};
         }
         ++removedCount;
     }
@@ -509,6 +503,9 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
         return {};
     }
 
+    // Block compaction from pruning shard directories while a write is in flight.
+    std::shared_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
+
     // Acquire per-hash write lock
     auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
     std::lock_guard<std::mutex> lock(hashMutex);
@@ -680,6 +677,9 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     }
 
     auto objectPath = getObjectPath(hash);
+
+    // Block compaction from pruning shard directories while a remove is in flight.
+    std::shared_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
 
     // Acquire per-hash write lock
     auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
@@ -949,6 +949,9 @@ Result<void> StorageEngine::verify() const {
 Result<void> StorageEngine::compact() {
     spdlog::debug("Starting storage compaction");
 
+    // Serialize with store/remove so empty shard pruning cannot race target parent creation.
+    std::unique_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
+
     auto cleaned = cleanupStaleTempFiles(pImpl->config.basePath / "temp");
     if (!cleaned) {
         spdlog::error("Storage compaction temp-file cleanup failed: {}", cleaned.error().message);
@@ -956,12 +959,12 @@ Result<void> StorageEngine::compact() {
     }
 
     size_t prunedDirectories = 0;
-    for (const auto& root : {pImpl->config.basePath / "objects",
-                             pImpl->config.basePath / "manifests"}) {
+    for (const auto& root :
+         {pImpl->config.basePath / "objects", pImpl->config.basePath / "manifests"}) {
         auto pruned = pruneEmptyDirectories(root);
         if (!pruned) {
-            spdlog::error("Storage compaction directory pruning failed for {}: {}",
-                          root.string(), pruned.error().message);
+            spdlog::error("Storage compaction directory pruning failed for {}: {}", root.string(),
+                          pruned.error().message);
             return pruned.error();
         }
         prunedDirectories += pruned.value();

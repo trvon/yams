@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <sstream>
 #include <string_view>
 #include <yams/search/query_parser.h>
@@ -236,8 +237,18 @@ std::unique_ptr<QueryNode> QueryParser::parseTerm() {
         if (current().type == TokenType::Term && !current().value.empty() &&
             std::ranges::all_of(current().value,
                                 [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
-            distance = std::stoi(current().value);
-            advance();
+            const auto& value = current().value;
+            const auto* begin = value.data();
+            const auto* end = begin + value.size();
+            int parsedDistance = 0;
+            const auto [ptr, ec] = std::from_chars(begin, end, parsedDistance);
+            if (ec == std::errc::result_out_of_range) {
+                throwError("Fuzzy distance is too large");
+            }
+            if (ec == std::errc{} && ptr == end) {
+                distance = parsedDistance;
+                advance();
+            }
         }
         return std::make_unique<FuzzyNode>(term, distance);
     }

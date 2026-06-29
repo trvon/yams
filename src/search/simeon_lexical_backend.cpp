@@ -28,9 +28,9 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <stop_token>
@@ -999,6 +999,10 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
         auto& lead = strategies_[2];
         lead->score_indexed(query, 0, ev, std::span<float>{full});
         recipe_label = "LeadField";
+    } else if (arm_name == "sab_smooth_rm3_adaptive" || arm_name == "sab_smooth_rm3_diverse") {
+        return Error{ErrorCode::InvalidArgument,
+                     "Simeon RM3 bandit arms were retired; use sab_smooth, keyphrase, "
+                     "lead_field, bm25_variants_rrf, or atire"};
     } else {
         // Unrecognized or unavailable arm: fall back to plain SAB.
         index_->score(query, std::span<float>{full});

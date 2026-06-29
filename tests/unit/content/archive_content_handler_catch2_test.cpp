@@ -18,6 +18,7 @@
 #include <chrono>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,16 @@ TEST_CASE("formatToString covers all ArchiveFormat values", "[content][archive][
 // ────────────────────────────────────────────────────────────────────────────────
 // ArchiveProcessingConfig defaults
 // ────────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("ArchiveContentHandler processBuffer rejects generic binary with archive hint",
+          "[content][archive][buffer][regression]") {
+    ArchiveContentHandler handler;
+    const std::vector<uint8_t> randomBytes = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01,
+                                              0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{randomBytes}), ".zip");
+    REQUIRE_FALSE(result.has_value());
+}
 
 TEST_CASE("ArchiveProcessingConfig has correct defaults", "[content][archive][catch2]") {
     ArchiveProcessingConfig cfg;

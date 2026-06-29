@@ -453,6 +453,21 @@ TEST_CASE("AudioContentHandler: processBuffer supports audio buffers", "[content
     REQUIRE(result.value().audioData.has_value());
 }
 
+TEST_CASE("AudioContentHandler: processBuffer rejects generic binary with audio hint",
+          "[content][audio][buffer][regression]") {
+    auto& detector = FileTypeDetector::instance();
+    auto initResult = detector.initializeWithMagicNumbers();
+    REQUIRE(initResult);
+
+    AudioContentHandler handler;
+    const std::vector<uint8_t> randomBytes = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                                              0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{randomBytes}), ".wav");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::NotSupported);
+}
+
 TEST_CASE("VideoContentHandler: processBuffer supports video buffers", "[content][video][buffer]") {
     auto& detector = FileTypeDetector::instance();
     auto initResult = detector.initializeWithMagicNumbers();
@@ -472,6 +487,21 @@ TEST_CASE("VideoContentHandler: processBuffer supports video buffers", "[content
     CHECK(result.value().metadata.at("source") == "buffer");
     CHECK(result.value().metadata.at("hint") == ".mp4");
     REQUIRE(result.value().videoData.has_value());
+}
+
+TEST_CASE("VideoContentHandler: processBuffer rejects generic binary with video hint",
+          "[content][video][buffer][regression]") {
+    auto& detector = FileTypeDetector::instance();
+    auto initResult = detector.initializeWithMagicNumbers();
+    REQUIRE(initResult);
+
+    VideoContentHandler handler;
+    const std::vector<uint8_t> randomBytes = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01,
+                                              0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{randomBytes}), ".mp4");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::NotSupported);
 }
 
 // ===========================================================================
