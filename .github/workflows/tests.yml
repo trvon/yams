@@ -552,7 +552,7 @@ jobs:
           if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ] || \
              [ "${{ matrix.suffix }}" = "linux-x86_64-ubsan" ]; then
             $ARCH_PREFIX meson compile -C builddir \
-              catch2_daemon_metrics \
+              catch2_daemon_metrics_status \
               catch2_post_ingest_queue_unit \
               catch2_storage_submodule \
               catch2_work_coordinator
