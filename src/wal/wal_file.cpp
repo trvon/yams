@@ -201,7 +201,6 @@ struct WALFile::Impl {
 WALFile::WALFile(const std::filesystem::path& path, Mode mode)
     : pImpl(std::make_unique<Impl>(path, mode)) {}
 
-WALFile::~WALFile() = default;
 WALFile::WALFile(WALFile&&) noexcept = default;
 WALFile& WALFile::operator=(WALFile&&) noexcept = default;
 
@@ -502,5 +501,7 @@ std::filesystem::path WALFile::getPath() const {
 bool WALFile::canWrite() const {
     return pImpl && pImpl->mode != Mode::Read;
 }
+
+WALFile::~WALFile() = default;
 
 } // namespace yams::wal

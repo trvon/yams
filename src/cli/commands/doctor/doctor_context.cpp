@@ -1,5 +1,5 @@
-#include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
@@ -79,8 +79,6 @@ std::atomic<bool>& DoctorSignalGuard::cancelFlag() {
 // ============================================================================
 
 DoctorContext::DoctorContext(YamsCLI* cli) : cli_(cli) {}
-
-DoctorContext::~DoctorContext() = default;
 
 const std::filesystem::path& DoctorContext::dataDir() const {
     if (!cachedDataDir_) {

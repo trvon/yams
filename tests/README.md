@@ -9,20 +9,27 @@ The YAMS test suite provides comprehensive testing coverage including unit tests
 ### Running Tests (Meson)
 
 ```bash
-# Configure with tests enabled
-conan install . -of build/debug -s build_type=Debug -b missing
-meson setup build/debug --native-file build/debug/build/Debug/generators/conan_meson_native.ini --buildtype=debug -Dbuild-tests=true
-meson compile -C build/debug
+# Typical debug path in this repo
+./setup.sh Debug
+meson configure builddir -Dbuild-tests=true
+meson compile -C builddir
 
 # Run suites
-meson test -C build/debug                 # all
-meson test -C build/debug -t unit         # unit only
-meson test -C build/debug -t integration  # integration only
-meson test -C build/debug -t stress       # stress (long-running)
+meson test -C builddir                  # all
+meson test -C builddir --suite unit     # unit only
+meson test -C builddir --suite integration
+meson test -C builddir --suite stress   # long-running
 
-# List tests
-meson test -C build/debug -l
+# List current tests and tags
+meson test -C builddir --list
 ```
+
+Use `meson test --list` as the source of truth for current test names/tags. Older
+examples that rely on historical suite labels are easy to drift.
+
+`--allow-running-no-tests` is reserved for Meson shard wrappers and opt-in
+filtered runs where "no matching tests" is expected. Do not use it as a normal
+catch-all for day-to-day local test commands.
 
 Integration timeouts and stress iters (Meson options)
 
@@ -30,10 +37,10 @@ You can tune integration-suite timeouts without editing sources by passing Meson
 
 ```bash
 # Examples (defaults: services=900s, ui=600s, smoke=300s)
-meson configure build/debug -Dintegration-timeout=900 -Dintegration-ui-timeout=600 -Dintegration-smoke-timeout=300 -Dstress-iters=100
+meson configure builddir -Dintegration-timeout=900 -Dintegration-ui-timeout=600 -Dintegration-smoke-timeout=300 -Dstress-iters=100
 
 # Or set at setup:
-meson setup build/debug --buildtype=debug -Dbuild-tests=true \
+meson setup builddir --buildtype=debug -Dbuild-tests=true \
   -Dintegration-timeout=900 -Dintegration-ui-timeout=600 -Dintegration-smoke-timeout=300 -Dstress-iters=100
 ```
 
@@ -57,12 +64,12 @@ The Services suite exercises add/list/get/grep via a live daemon in a temporary 
 
 ```bash
 # Run only the services integration executable (isolated; serial)
-meson test -C build/debug integration_services -v
+meson test -C builddir integration_services -v
 
 # Notes
 # - Requires AF_UNIX socket availability (macOS/Linux). If your environment forbids AF_UNIX
 #   binds, affected tests will SKIP with an explanatory message.
-# - Logs: build/debug/meson-logs/testlog.txt
+# - Logs: builddir/meson-logs/testlog.txt
 ```
 
 ### UI/CLI Integration (services layer)
@@ -73,7 +80,7 @@ checks serially against a temporary daemon sandbox.
 
 ```bash
 # Run only the UI/CLI expectations shard
-meson test -C build/debug integration_ui -v
+meson test -C builddir integration_ui -v
 
 # What it includes
 # - UiCliExpectationsIT.* (search/list/get structure and options)
@@ -85,6 +92,7 @@ meson test -C build/debug integration_ui -v
 ```
 
 ### Legacy CMake/CTest (for reference)
+
 These commands are retained for contributors still using the legacy build. Prefer Meson going forward.
 
 ```bash
@@ -446,22 +454,26 @@ chmod +x .git/hooks/pre-commit
 ### Common Issues
 
 **Tests fail with "fixture not found"**
+
 - Ensure test data directory exists
 - Check file permissions
 - Verify fixture manager initialization
 
 **Benchmarks show high variance**
+
 - Increase iteration count
 - Close other applications
 - Use performance CPU governor
 - Run in release mode
 
 **Coverage reports missing files**
+
 - Check CMake coverage flags
 - Ensure gcov/llvm-cov installed
 - Verify source file paths
 
 **Integration tests timeout**
+
 - Check for deadlocks
 - Increase timeout limits
 - Verify resource cleanup
@@ -470,15 +482,15 @@ chmod +x .git/hooks/pre-commit
 
 ```bash
 # Run single test case by tag (Catch2 filter)
-./build/debug/tests/<test_binary> "[pdf]"
+./builddir/tests/<test_binary> "[pdf]"
 
 # Run under gdb and break inside a Catch2 TEST_CASE
-gdb ./build/debug/tests/<test_binary>
+gdb ./builddir/tests/<test_binary>
 (gdb) break Catch::RunContext::runCurrentTest
 (gdb) run "[pdf]"
 
 # Verbose test output
-meson test -C build/debug -v --print-errorlogs
+meson test -C builddir -v --print-errorlogs
 
 # Run with sanitizers (configure once)
 meson setup build/asan --buildtype=debug -Dbuild-tests=true -Db_sanitize=address
@@ -520,6 +532,7 @@ Current performance baselines (as of v0.0.7):
 ## Contact
 
 For test-related questions:
+
 - Check existing test examples
 - Consult this documentation
 - Review CI logs for patterns

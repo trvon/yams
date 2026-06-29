@@ -105,7 +105,6 @@ GarbageCollector::GarbageCollector(ReferenceCounter& refCounter, StorageEngine& 
     : pImpl(std::make_unique<Impl>(refCounter, storageEngine)) {}
 
 // Destructor
-GarbageCollector::~GarbageCollector() = default;
 
 // Move constructor
 GarbageCollector::GarbageCollector(GarbageCollector&&) noexcept = default;
@@ -337,5 +336,7 @@ Result<void> rebuildReferenceDatabase(const std::filesystem::path& dbPath,
         return Result<void>(ErrorCode::Unknown);
     }
 }
+
+GarbageCollector::~GarbageCollector() = default;
 
 } // namespace yams::storage

@@ -157,8 +157,6 @@ RequestDispatcher::RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager
                                      StateComponent* state, DaemonMetrics* metrics)
     : lifecycle_(lifecycle), serviceManager_(serviceManager), state_(state), metrics_(metrics) {}
 
-RequestDispatcher::~RequestDispatcher() = default;
-
 ServiceManager* RequestDispatcher::getServiceManager() const {
     return serviceManager_;
 }

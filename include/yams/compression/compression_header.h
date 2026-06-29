@@ -122,10 +122,10 @@ static_assert(sizeof(CompressionHeader) == CompressionHeader::SIZE,
  * When HasMetadata flag is set, this structure follows the main header
  */
 struct ExtendedCompressionHeader {
-    uint32_t metadataSize;                 ///< Size of metadata section
-    uint32_t chunkCount;                   ///< Number of chunks (if chunked)
-    uint64_t totalChunks;                  ///< Total chunks in stream (if streaming)
-    uint64_t chunkIndex;                   ///< Current chunk index (if streaming)
+    uint32_t metadataSize = 0;             ///< Size of metadata section
+    uint32_t chunkCount = 0;               ///< Number of chunks (if chunked)
+    uint64_t totalChunks = 0;              ///< Total chunks in stream (if streaming)
+    uint64_t chunkIndex = 0;               ///< Current chunk index (if streaming)
     std::vector<std::byte> customMetadata; ///< Application-specific metadata
 
     /**

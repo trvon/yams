@@ -99,7 +99,7 @@ public:
     // Overload with metrics component for centralized status rendering
     RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager* serviceManager,
                       StateComponent* state, class DaemonMetrics* metrics);
-    ~RequestDispatcher();
+    ~RequestDispatcher() = default;
 
     boost::asio::awaitable<Response> dispatch(const Request& req);
     // Expose worker executor so SocketServer can pass it into RequestHandler config

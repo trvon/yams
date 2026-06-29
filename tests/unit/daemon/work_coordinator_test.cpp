@@ -699,19 +699,22 @@ TEST_CASE("WorkCoordinator spawnDetached cancels timer poller on stop",
     WorkCoordinator coordinator;
     coordinator.start(4);
 
-    std::atomic<bool> started{false};
+    auto started = std::make_shared<std::atomic<bool>>(false);
 
-    coordinator.spawnDetached(coordinator.getExecutor(), [&]() -> boost::asio::awaitable<void> {
-        started.store(true, std::memory_order_release);
+    auto exec = coordinator.getExecutor();
+    auto ioCtx = coordinator.getIOContext();
+    auto task = [started, ioCtx]() -> boost::asio::awaitable<void> {
+        started->store(true, std::memory_order_release);
         for (;;) {
-            boost::asio::steady_timer timer(*coordinator.getIOContext());
+            boost::asio::steady_timer timer(*ioCtx);
             timer.expires_after(5s);
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
-    }());
+    };
+    coordinator.spawnDetached(std::move(exec), task());
 
-    REQUIRE(
-        wait_for_condition(1000ms, 5ms, [&]() { return started.load(std::memory_order_acquire); }));
+    REQUIRE(wait_for_condition(1000ms, 5ms,
+                               [&]() { return started->load(std::memory_order_acquire); }));
 
     coordinator.stop();
     const bool joined = coordinator.joinWithTimeout(1000ms);

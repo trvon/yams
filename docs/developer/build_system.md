@@ -15,20 +15,32 @@ For step-by-step build instructions, see [Developer Setup](setup.md). For compil
 | Optional | ccache, lld, clang-tidy |
 
 ## 2. Directory Layout
-Out-of-source builds under `builddir/`:
-- Debug: `builddir/` (default with Meson)
-- Release: `build-release/`
+
+YAMS uses out-of-source builds.
+
+Common repo conventions:
+
+- Debug via `./setup.sh Debug`: `builddir/`
+- Release via `./setup.sh Release`: `build/release/`
+- Other scripted profiles: `build/<profile>/` (for example `build/profiling/`, `build/fuzzing/`)
+
+Manual Meson setup can use a different build directory, but the commands in this repo most often
+assume `builddir/` for debug and `build/release/` for release.
 
 ## 3. ONNX / GenAI Paths
+
 Options (Conan scope):
+
 - `enable_onnx` (default True) — toggles embedding / GenAI integration
 - `use_conan_onnx` (default False) — when True pull packaged ORT; when False allow system ORT
 
 Meson options:
+
 - `enable-onnx` — mirrors `enable_onnx`
 - `onnx-runtime-path` — optional path to system ONNX Runtime
 
 ## 4. Configure & Build
+
 ```bash
 # Using Meson (preferred)
 meson setup builddir --buildtype=debugoptimized -Db_ndebug=true
@@ -59,76 +71,83 @@ YAMS_CMAKE_PREFIX_PATH=/opt/yams-deps \
 
 ### Meson Test System (Primary)
 
-YAMS uses Meson for test organization with hierarchical suite structure:
+YAMS uses Meson test **tags** and explicit test names. The current tree does **not** expose a fully
+normalized `unit:smoke` / `bench:isolated` taxonomy, so prefer `meson test --list` before relying
+on older suite labels from historical docs.
+
+Reliable selectors today:
 
 ```bash
-# Quick smoke tests (< 2min)
-meson test -C builddir --suite unit:smoke
-
-# Fast unit tests (sharded for parallel execution)
-meson test -C builddir --suite unit
-
-# Database-heavy tests
-meson test -C builddir --suite unit:db
-
-# Integration tests
-meson test -C builddir --suite integration:smoke
-
-# Performance benchmarks
-meson test -C builddir --suite bench:perf
-
-# List all available tests
+# List current tests and tags
 meson test -C builddir --list
+
+# Broad tag groups
+meson test -C builddir --suite unit
+meson test -C builddir --suite integration
+meson test -C builddir --suite plugins
+meson test -C builddir --suite bench
+meson test -C builddir --suite stress
+
+# Common component tags
+meson test -C builddir --suite daemon
+meson test -C builddir --suite storage
+meson test -C builddir --suite search
+meson test -C builddir --suite metadata
+
+# Useful named entrypoints
+meson test -C builddir integration_smoke
+meson test -C builddir storage_submodule
+meson test -C builddir storage_submodule_slow
 ```
 
-#### Test Categories
+#### Current high-signal tags and entrypoints
 
-| Category | Suite | Description | Typical Runtime |
-|----------|-------|-------------|-----------------|
-| **Unit** | `unit:fast` | Fast, isolated unit tests | < 30s per shard |
-| | `unit:slow` | Heavy unit tests (DB, lifecycle) | 2-5 min |
-| | `unit:db` | Database-intensive tests | 1-3 min |
-| | `unit:vector` | Vector database tests | 1-2 min |
-| | `unit:smoke` | Quick validation subset | < 2 min |
-| | `unit:stable` | CI-safe gate tests | < 5 min |
-| **Integration** | `integration:smoke` | Basic integration workflows | 2-5 min |
-| | `integration:services` | Service layer integration | 5-10 min |
-| | `integration:daemon` | Daemon lifecycle tests | 5-10 min |
-| | `integration:cli` | CLI command tests | 3-5 min |
-| **Bench** | `bench:perf` | Performance benchmarks | 5-15 min |
-| | `bench:stress` | Load/stress tests | 10-30 min |
-| | `bench:isolated` | Heavy single-process tests | 5-10 min |
-| **Acceptance** | `acceptance` | End-to-end validation | 10-20 min |
+| Selector | Kind | Meaning |
+|----------|------|---------|
+| `unit` | tag | Broad unit-test coverage across subsystems |
+| `integration` | tag | Integration tests built under `tests/integration/*` |
+| `plugins` | tag | Plugin-focused tests, including dedicated plugin binaries |
+| `bench` | tag | Benchmarks registered through Meson |
+| `stress` | tag/name | Long-running stress coverage |
+| `slow` | tag | Explicit slow-path tests kept out of fast defaults |
+| `daemon`, `storage`, `search`, `metadata`, `cli`, `extraction`, `integrity` | tag | Component-oriented filtering |
+| `integration_smoke` | test name | Small isolated integration smoke binary |
+| `storage_submodule` | test name | Fast storage correctness path |
+| `storage_submodule_slow` | test name | Explicit slow storage soak path |
+
+Historical docs may still mention labels such as `unit:smoke`, `unit:stable`, `unit:db`,
+`unit:vector`, `integration:smoke`, `bench:perf`, or `bench:isolated`. Treat those as
+aspirational or stale unless `meson test --list` shows matching current tags/names.
 
 #### Common Test Workflows
 
 ```bash
-# Developer iteration (fastest feedback)
-meson test -C builddir --suite unit:smoke
-
-# Pre-commit validation (stable subset)
-meson test -C builddir --suite unit:stable
-
-# Full unit test suite (sharded)
+# Developer iteration
 meson test -C builddir --suite unit
 
-# Integration smoke (quick integration check)
-meson test -C builddir --suite integration:smoke
+# Focused subsystem pass
+meson test -C builddir --suite daemon
+meson test -C builddir --suite storage
 
-# Run ALL benchmarks (unified suite)
+# Quick integration sanity check
+meson test -C builddir integration_smoke
+
+# Storage fast/slow split
+meson test -C builddir storage_submodule
+meson test -C builddir storage_submodule_slow
+
+# Plugin-focused coverage
+meson test -C builddir --suite plugins
+
+# Benchmarks and stress
 meson test -C builddir --suite bench
-
-# Run only isolated benchmarks
-meson test -C builddir --suite bench:isolated
-
-# Run only performance benchmarks (exclude isolated)
-meson test -C builddir --suite bench:perf
+meson test -C builddir --suite stress
 
 # Specific test by name
 meson test -C builddir repair_scheduling_adapter
 
 # Verbose output
-meson test -C builddir --suite unit:smoke -v
+meson test -C builddir --suite unit -v
 
 # Parallel execution with custom jobs
 meson test -C builddir --suite unit -j 8
@@ -136,15 +155,18 @@ meson test -C builddir --suite unit -j 8
 
 #### Test Naming Conventions
 
-Tests follow the pattern: `<component>_<aspect>_<variant>`
+Preferred naming for new tests is still:
 
-Examples:
-- `content_store_basic` - Basic content store operations
-- `repair_scheduling_adapter` - Repair scheduling adapter coverage
-- `metadata_repository_cache` - Metadata repository caching
-- `daemon_warm_latency` - Daemon warm start latency benchmark
+- test names: `<component>_<aspect>_<variant>` where practical
+- Meson tags: broad behavior or subsystem labels (`unit`, `daemon`, `storage`, `slow`, ...)
 
-**Note**: Test organization and suite naming are being standardized; treat suite labels as best-effort until this work completes.
+The current tree still mixes:
+
+- focused descriptive names such as `integration_smoke` and `storage_submodule`
+- aggregate binaries such as `plugins_catch2` and `integrity_catch2`
+- migration-era tags such as `yams-3s4`, `yams-8b9`, and `pbi-009`
+
+So use `meson test --list` as the source of truth when discovering what to run.
 
 ## 6. Key Build Options
 
@@ -158,6 +180,7 @@ Examples:
 | `enable-sanitizers` | Debug ASan/UBSan toggle |
 
 Configure options:
+
 ```bash
 meson setup builddir -Denable-onnx=true -Dbuild-cli=true
 ```
@@ -205,13 +228,18 @@ Out-of-source only. Keep portable optimized builds on `debugoptimized` + `b_ndeb
 
 ## 12. Test Organization (Active Improvement)
 
-**Current State**: Test names and suites have some inconsistencies (e.g., `unit_isolated_*` tests in bench suite, milestone numbers in names).
+**Current State**: Test registration is broad and valuable, but naming is still mixed. The tree uses
+component tags, aggregate executables, explicit slow paths, and some migration-era milestone labels.
+Examples visible in `tests/meson.build` today include `plugins_catch2`, `integrity_catch2`,
+`integration_smoke`, `storage_submodule`, `storage_submodule_slow`, plus suite tags like
+`yams-3s4`, `yams-8b9`, and `pbi-009`.
 
-**In Progress**: test organization standardization is standardizing test organization with:
-- Semantic naming: `<component>_<aspect>_<variant>`
-- Hierarchical suites: `<category>[+<tag>]`
-- Clear categorization: unit/integration/bench/acceptance
-- Removal of temporal coupling (no milestone numbers in test names)
+**In Progress**: test organization standardization is moving toward:
+
+- semantic test names where practical: `<component>_<aspect>_<variant>`
+- stable Meson tags for behavior/subsystem filtering
+- explicit separation of fast, slow, stress, and benchmark paths
+- removal of temporal/milestone coupling from user-facing test discovery
 
 See the repository issues/PRs for the current plan and status.
 
@@ -221,18 +249,20 @@ See the repository issues/PRs for the current plan and status.
 # View all tests with current names
 meson test -C builddir --list
 
-# Example output shows current organization:
-# yams:unit / unit_shard0
-# yams:unit / unit_shard1
-# yams:unit+smoke / unit_smoke
-# yams:integration+smoke / integration_smoke
+# Example output will include test names plus suite tags, for example:
+# integration_smoke
+# plugins_catch2
+# storage_submodule
+# storage_submodule_slow
 ```
 
-**Migration in Progress**: Test names will be gradually updated to follow the new conventions while maintaining backward compatibility.
+**Migration in Progress**: test names and tags will keep evolving, so treat `meson test --list` as
+canonical and prefer updating docs when registration changes.
 
 ---
 
 **Revision notes**:
+
 - Migrated from CMake to Meson as primary build system
 - Added comprehensive test organization documentation
 - Linked to ongoing test standardization

@@ -5,6 +5,8 @@
 - Decision Makers: @trvon
 - Links: Epic yams-47l2
 
+> **Implementation note (2026-06-26):** Current code already uses the unified `vectors` schema and schema migration helpers, but the exact named rewrite described here did not land as written. The active backend remains `SqliteVecBackend`, and HNSW has been removed from the daemon data plane. Read this ADR as the design rationale behind the current direction, not as an exact file-by-file map of the shipping implementation.
+
 ## Context
 
 The current vector subsystem (`src/vector/sqlite_vec_backend.cpp`) has accumulated significant technical debt:
@@ -17,6 +19,7 @@ The current vector subsystem (`src/vector/sqlite_vec_backend.cpp`) has accumulat
 6. **Global mutex** - Single `std::mutex` for all operations, no read/write separation
 
 The `sqlite-vec-cpp` library (`third_party/sqlite-vec-cpp/`) provides:
+
 - `HNSWIndex<T, Metric>` with thread-safe operations (shared_mutex)
 - `hnsw_persistence.hpp` for SQLite shadow table save/load
 - `CosineMetric<float>` for distance calculations
@@ -82,6 +85,7 @@ for (auto& [rowid, distance] : results) {
 ```
 
 **chunk_id to rowid mapping:** Use SQLite index lookup (fast):
+
 ```sql
 SELECT rowid FROM vectors WHERE chunk_id = ?
 ```
@@ -178,13 +182,16 @@ std::map<std::string, std::string> deserializeMetadata(const std::string& json_s
 ### 7. File Structure
 
 New files:
+
 - `include/yams/vector/sqlite_vec_backend_v2.h`
 - `src/vector/sqlite_vec_backend_v2.cpp`
 
 Update:
+
 - `src/vector/vector_backend.cpp` - Factory returns V2
 
 Remove (after V2 stable):
+
 - `src/vector/sqlite_vec_backend.cpp`
 - `include/yams/vector/sqlite_vec_backend.h`
 - `src/vector/hnsw_backend.cpp`

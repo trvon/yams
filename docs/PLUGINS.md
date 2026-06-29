@@ -54,7 +54,7 @@ Strict mode: `[daemon].plugin_dir_strict = true` or `YAMS_PLUGIN_DIR_STRICT=1`. 
 | `content_extractor_v1` | `include/yams/plugins/content_extractor_v1.h`       | Document text extraction     |
 | `symbol_extractor_v1`  | `include/yams/plugins/symbol_extractor_v1.h`        | Source / binary symbols      |
 | `entity_extractor_v2`  | `include/yams/plugins/entity_extractor_v2.h`        | Named entity extraction      |
-| `model_provider_v1`    | `include/yams/ml/`                                  | Embedding model provider     |
+| `model_provider_v1`    | `include/yams/plugins/model_provider_v1.h`          | Embedding model provider     |
 | `object_storage_v1`    | See [docs/api/storage_plugin_v1.md](api/storage_plugin_v1.md) | Object storage       |
 
 Interface versions are tracked in [docs/spec/interface_versions.json](spec/interface_versions.json).
@@ -100,7 +100,7 @@ for line in sys.stdin:
 
 The higher-level `yams_sdk.BasePlugin` is in [external/yams-sdk/](../external/yams-sdk/).
 
-### Plugin directory layout
+### External plugin directory layout
 
 ```
 my_plugin/
@@ -110,7 +110,9 @@ my_plugin/
 └── plugin.py           # interpreter fallback
 ```
 
-Manifest fields and `${plugin_dir}` substitution: see [docs/spec/plugin_spec.md](spec/plugin_spec.md).
+This on-disk manifest is for **external plugins**. Native ABI plugins expose manifest metadata through `yams_plugin_get_manifest_json()` and do not require `yams-plugin.json` on disk.
+
+For runtime RPC details, see [docs/spec/external_plugin_jsonrpc_protocol.md](spec/external_plugin_jsonrpc_protocol.md). For a concrete in-repo manifest example, see `plugins/yams-ghidra-plugin/yams-plugin.json`.
 
 ### Process lifecycle
 

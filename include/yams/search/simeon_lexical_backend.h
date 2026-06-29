@@ -5,7 +5,6 @@
 
 #include <simeon/concept_mining.hpp>
 #include <simeon/fragment_geometry.hpp>
-#include <simeon/prf.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -111,12 +110,14 @@ public:
         // improve nDCG@10 by +0.009 on NFCorpus in simeon benchmarks.
         bool bm25_variants_rrf = false;
 
-        // Default-on fragment geometry reranker. Uses the primary BM25 variant
-        // as the lexical leg and PHSS-driven fragment propagation as the
-        // semantic leg. To keep local/test corpora stable, auto-activation is
-        // gated by fragment_geometry_min_corpus_docs and a vocabulary-richness
-        // preflight; below those thresholds yams falls back to plain BM25.
-        bool fragment_geometry_enabled = true;
+        // Fragment-geometry (PHSS topology) reranker. OFF by default: a per-arm
+        // retrieval bench showed it loses to plain SAB and lead_field even after
+        // its scale-mixing bug was fixed (nDCG@10 0.243 vs 0.35 baseline) while
+        // costing the bulk of index-build time (PMI learn + fragment build +
+        // PHSS). Opt-in for prose corpora via this flag; the scoreRouted path
+        // still consumes it (quality-router gated) when enabled. The simeon
+        // fragment_geometry/PHSS code remains as the research asset.
+        bool fragment_geometry_enabled = false;
         std::size_t fragment_geometry_min_corpus_docs = 1000;
         // Fragment geometry is bounded separately from the lexical build. The
         // builder keeps only a bounded PMI sample in memory, then streams a
@@ -145,12 +146,6 @@ public:
         using EntityCallback =
             std::function<void(std::int64_t docId, std::string entityText, float confidence)>;
         EntityCallback entity_callback;
-
-        // RM3 pseudo-relevance feedback (Lavrenko & Croft 2001).
-        // SAB-smooth + RM3 improves scifact by +0.018 nDCG@10 in simeon
-        // benchmarks. Corpus-sensitive — defaults to off.
-        bool rm3_enabled = false;
-        simeon::PrfConfig rm3_config{};
 
         // Reserved for backend-owned bandit flows. Normal SearchEngine bandit
         // routing is controlled per request by SearchEngineConfig::simeonBanditArm.
@@ -240,8 +235,6 @@ public:
     // The arm names are preset keys that map to tested (R_q, R_d, S) combos
     // from the simeon Omega search. Recognized presets include:
     //   "sab_smooth"              - plain SAB-smooth gamma=5
-    //   "sab_smooth_rm3_adaptive" - SAB-smooth gamma=5 + adaptive PRF
-    //   "sab_smooth_rm3_diverse"  - SAB-smooth gamma=5 + broader PRF
     //   "bm25_variants_rrf"       - RRF over SAB-smooth + ATIRE when available
     //   "atire"                   - ATIRE BM25 when available
     //   "keyphrase"               - keyphrase strategy when available
@@ -292,7 +285,6 @@ private:
 
     // Strategy router (new retrieval_strategy.hpp framework)
     std::unique_ptr<simeon::TextAdapter> text_adapter_;
-    std::vector<std::string> doc_lead_texts_;
     std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
     std::unique_ptr<simeon::StrategyRouter> strategy_router_;
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;

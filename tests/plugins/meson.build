@@ -146,12 +146,15 @@ if get_option('plugin-glint')
     install: false,
   )
 
-  test('glint_plugin', glint_test_exe,
+  catch2_allow_all_skipped = files('../scripts/catch2_allow_all_skipped.py')
+  test('glint_plugin', python_exe,
+    args: [catch2_allow_all_skipped, glint_test_exe],
     suite: ['plugins', 'glint', 'catch2'],
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,
     },
+    depends: glint_test_exe,
     timeout: 60,
   )
 endif

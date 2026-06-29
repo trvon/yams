@@ -481,7 +481,6 @@ WALManager::WALManager() : pImpl(std::make_unique<Impl>(Config{})) {}
 
 WALManager::WALManager(Config config) : pImpl(std::make_unique<Impl>(std::move(config))) {}
 
-WALManager::~WALManager() = default;
 WALManager::WALManager(WALManager&&) noexcept = default;
 WALManager& WALManager::operator=(WALManager&&) noexcept = default;
 
@@ -914,5 +913,7 @@ void WALManager::notifyTransactionClosed() {
     // Decrement active transactions atomically, avoiding underflow
     core::decrement_if_positive(pImpl->activeTransactions);
 }
+
+WALManager::~WALManager() = default;
 
 } // namespace yams::wal

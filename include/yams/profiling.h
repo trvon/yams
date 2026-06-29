@@ -11,11 +11,21 @@
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
 
-// Zone macros
-#define YAMS_ZONE_SCOPED() ZoneScoped
-#define YAMS_ZONE_SCOPED_N(name) ZoneScopedN(name)
-#define YAMS_ZONE_SCOPED_C(color) ZoneScopedC(color)
-#define YAMS_ZONE_SCOPED_NC(name, color) ZoneScopedNC(name, color)
+// Zone macros. Use a line-unique zone variable so multiple zones can live in
+// the same scope — Tracy's ZoneScoped* all reuse one fixed variable name
+// (___tracy_scoped_zone), which is a redefinition error when two appear in one
+// block.
+#define YAMS_ZONE_CONCAT_(a, b) a##b
+#define YAMS_ZONE_CONCAT(a, b) YAMS_ZONE_CONCAT_(a, b)
+#define YAMS_ZONE_SCOPED() ZoneNamed(YAMS_ZONE_CONCAT(__yamsZone_, __LINE__), true)
+#define YAMS_ZONE_SCOPED_N(name) ZoneNamedN(YAMS_ZONE_CONCAT(__yamsZone_, __LINE__), name, true)
+#define YAMS_ZONE_SCOPED_C(color) ZoneNamedC(YAMS_ZONE_CONCAT(__yamsZone_, __LINE__), color, true)
+#define YAMS_ZONE_SCOPED_NC(name, color)                                                           \
+    ZoneNamedNC(YAMS_ZONE_CONCAT(__yamsZone_, __LINE__), name, color, true)
+// Dynamic (runtime) zone name — ptr/len need not be compile-time constants.
+#define YAMS_ZONE_SCOPED_DYN(ptr, len)                                                             \
+    ZoneNamed(YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__), true);                                   \
+    YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__).Name(ptr, len)
 
 // Frame marking
 #define YAMS_FRAME_MARK() FrameMark
@@ -73,6 +83,7 @@
 #define YAMS_ZONE_SCOPED_N(name)
 #define YAMS_ZONE_SCOPED_C(color)
 #define YAMS_ZONE_SCOPED_NC(name, color)
+#define YAMS_ZONE_SCOPED_DYN(ptr, len)
 
 #define YAMS_FRAME_MARK()
 #define YAMS_FRAME_MARK_NAMED(name)

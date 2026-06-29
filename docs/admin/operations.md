@@ -7,17 +7,21 @@ Configuration, tuning, and deployment guidance for production YAMS deployments.
 YAMS persists content, indexes, and metadata in a single data directory.
 
 **Recommended locations:**
+
 - Linux: `/var/lib/yams`
 - macOS: `/usr/local/var/yams` or `/opt/yams/data`
 - Containers: bind mount host path to `/var/lib/yams`
 
-**Permissions:**
+**Manual ownership example (non-systemd deployments):**
+
 ```bash
 sudo useradd --system --home /var/lib/yams --shell /usr/sbin/nologin yams
 sudo mkdir -p /var/lib/yams
 sudo chown -R yams:yams /var/lib/yams
 sudo chmod 0750 /var/lib/yams
 ```
+
+For packaged systemd installs, skip the manual `useradd`/`chown` flow. The shipped `yams-daemon.service` uses `DynamicUser=yes` plus `StateDirectory`/`RuntimeDirectory`/`LogsDirectory`, so systemd manages runtime ownership.
 
 ## Deployment
 
@@ -41,6 +45,7 @@ sudo systemctl enable --now yams-daemon   # only needed if previously disabled
 ```
 
 Service defaults:
+
 - Runs as a transient `DynamicUser` (systemd-managed); no dedicated account is created
 - Data directory: `/var/lib/yams` (`StateDirectory`)
 - Socket: `/run/yams/yams-daemon.sock` (`RuntimeDirectory`)
@@ -73,6 +78,7 @@ docker run --rm -it \
 ```
 
 **Resource controls:**
+
 - Use `--cpus` and `--memory` limits
 - Mount code/config read-only; data directories write-only
 
@@ -81,11 +87,13 @@ docker run --rm -it \
 Discover options: `yams --help`
 
 **Guidelines:**
+
 - Prefer explicit CLI flags for clarity
 - Use environment variables for secrets and deployment paths
 - Store site-specific values in EnvironmentFile (systemd) or .env (containers)
 
 **Key environment variables:**
+
 - `YAMS_STORAGE`: data directory path
 - `YAMS_CONFIG`: config file override
 - `YAMS_TUNING_PROFILE`: efficient|balanced|aggressive
@@ -111,6 +119,7 @@ YAMS includes centralized TuneAdvisor and ResourceTuner for adaptive behavior:
 ### Embedding Batch Controls
 
 Adaptive DynamicBatcher with conservative defaults:
+
 - Safety factor: 0.90 (reserves token budget headroom)
 - Inter-batch pause: 0ms (add delay to reduce CPU spikes)
 - Advisory doc cap: unset (limits documents per batch)
@@ -126,12 +135,14 @@ Profiles bundle multiple tuning heuristics:
 | `aggressive` | High throughput under load | Faster growth, lower thresholds |
 
 **Set profile:**
+
 ```bash
 yams config set tuning.profile aggressive
 yams daemon restart
 ```
 
 Or via environment:
+
 ```bash
 export YAMS_TUNING_PROFILE=aggressive
 ```
@@ -172,16 +183,19 @@ export YAMS_CONNECTION_LIFETIME_S=0
 ### Workload-Specific
 
 **Ingest-heavy:**
+
 - Batch files (100-1000 docs)
 - Lower fsync cost (`synchronous=NORMAL`)
 - Defer FTS optimize until after ingest
 
 **Query-heavy:**
+
 - Higher fsync levels (`synchronous=FULL`)
 - Increase caches (OS + DB)
 - Optimize query shapes (prefix/suffix, filters)
 
 **Mixed:**
+
 - Schedule maintenance during off-peak
 - Conservative concurrency, throttle ingest during peak queries
 
@@ -202,14 +216,17 @@ See the repo `include/yams/config/config_defaults.h` for available keys.
 ### Vector Search Tuning
 
 **Embeddings:**
+
 - Precompute offline to reduce ingest latency
 - Normalize vectors if metric requires (cosine)
 
 **Index parameters:**
+
 - HNSW: tune `M`/`efConstruction` (build), `efSearch` (query)
 - IVF/PQ: select `nlist`/`nprobe`, quantization settings
 
 **Hybrid search:**
+
 - Filter with keyword first to reduce vector candidates
 
 ### Dimension Changes
@@ -217,17 +234,20 @@ See the repo `include/yams/config/config_defaults.h` for available keys.
 When switching embedding models, align vector schema:
 
 **Convergence order:**
+
 1. Config: `embeddings.embedding_dim` (preferred)
 2. Sentinel: `$YAMS_STORAGE/vectors_sentinel.json`
 3. Model: reported dimensions (fallback)
 
 **Recommended workflow:**
+
 ```bash
 yams model download <name> --apply-config  # Updates config + recreates vectors.db
 yams repair --embeddings                   # Regenerate vectors
 ```
 
 Or use doctor:
+
 ```bash
 yams doctor  # Accept "Recreate vectors.db" → "Restart daemon"
 yams repair --embeddings
@@ -243,16 +263,19 @@ yams repair --embeddings
 ## Monitoring
 
 **Observability:**
+
 ```bash
 yams status --json  # Check pool sizes, connections
 yams stats -v       # Detailed metrics
 ```
 
 **Health checks:**
+
 - Implement periodic read/search probes
 - Alert on failures, slow queries, error rates
 
 **Key metrics:**
+
 - Throughput: docs/s, bytes/s
 - Latency: p50/p95/p99
 - Resources: CPU, RSS, IO wait, disk latency (p99)
@@ -276,20 +299,24 @@ See the repo `src/daemon/components/DaemonMetrics.cpp` for implementation.
 ## Troubleshooting
 
 **Slow ingest:**
+
 - Reduce fsync cost (`synchronous=NORMAL`)
 - Increase batch and transaction size
 - Check disk latency (NVMe performance)
 
 **Slow queries:**
+
 - Run FTS optimize
 - Check cache sizing (hot set in memory)
 - For vector search: increase search params or pre-filtering
 
 **WAL growth:**
+
 - Schedule checkpoints
 - Ensure consumers aren't holding readers open
 
 **Memory pressure:**
+
 - Reduce caches and concurrency
 - Lower embedding batch safety, increase inter-batch pauses
 - Use Idle auto-embed policy
@@ -304,6 +331,7 @@ See the repo `src/daemon/components/DaemonMetrics.cpp` for implementation.
 ---
 
 **References:**
+
 - [User Guide: CLI](../user_guide/cli.md)
 - [Developer: Build System](../developer/build_system.md)
 - [Architecture: System](../architecture/system_architecture.md)

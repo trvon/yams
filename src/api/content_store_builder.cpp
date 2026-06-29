@@ -347,7 +347,7 @@ struct ContentStoreBuilder::Impl {
                 // Remove comments from value
                 size_t comment = value.find('#');
                 if (comment != std::string::npos) {
-                    value = value.substr(0, comment);
+                    value.resize(comment);
                     // Trim again after removing comment
                     value.erase(value.find_last_not_of(" \t") + 1);
                 }

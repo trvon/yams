@@ -1,10 +1,12 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <regex>
 #include <string>
 #include <yams/common/format.h>
@@ -238,6 +240,139 @@ extractUsingFFProbe(const std::filesystem::path& path) {
     return std::nullopt;
 }
 
+std::string normalizeExtensionHint(std::string_view hint) {
+    if (hint.empty()) {
+        return {};
+    }
+
+    std::filesystem::path hintPath{std::string(hint)};
+    std::string extension = hintPath.extension().string();
+    if (extension.empty() && hint.front() == '.') {
+        extension = std::string(hint);
+    }
+
+    std::ranges::transform(extension, extension.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return std::ranges::find(audioExtensions, extension) == audioExtensions.end() ? std::string{}
+                                                                                  : extension;
+}
+
+std::string extensionForAudioMime(std::string_view mimeType) {
+    if (mimeType == "audio/mpeg" || mimeType == "audio/mp3")
+        return ".mp3";
+    if (mimeType == "audio/wav" || mimeType == "audio/wave" || mimeType == "audio/x-wav")
+        return ".wav";
+    if (mimeType == "audio/flac" || mimeType == "audio/x-flac")
+        return ".flac";
+    if (mimeType == "audio/ogg" || mimeType == "audio/vorbis")
+        return ".ogg";
+    if (mimeType == "audio/aac")
+        return ".aac";
+    if (mimeType == "audio/mp4" || mimeType == "audio/m4a")
+        return ".m4a";
+    if (mimeType == "audio/x-ms-wma" || mimeType == "audio/wma")
+        return ".wma";
+    return {};
+}
+
+bool isGenericAudioDetection(const detection::FileSignature& signature) {
+    return signature.fileType == "binary" ||
+           signature.fileType.find("multimedia") != std::string::npos ||
+           signature.mimeType == "application/octet-stream" ||
+           signature.mimeType.find("various") != std::string::npos;
+}
+
+bool hasConfirmedAudioMetadata(const ContentResult& result) {
+    if (!result.audioData) {
+        return false;
+    }
+    const auto& metadata = *result.audioData;
+    return metadata.durationSeconds > 0.0 || metadata.bitrate > 0 || metadata.sampleRate > 0 ||
+           metadata.channels > 0 || !metadata.codec.empty() || !metadata.tags.empty();
+}
+
+bool hasAudioContainerMagic(std::span<const std::byte> data) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+    return (data.size() >= 12 && std::memcmp(bytes, "RIFF", 4) == 0 &&
+            std::memcmp(bytes + 8, "WAVE", 4) == 0) ||
+           (data.size() >= 3 && std::memcmp(bytes, "ID3", 3) == 0) ||
+           (data.size() >= 4 && std::memcmp(bytes, "fLaC", 4) == 0) ||
+           (data.size() >= 4 && std::memcmp(bytes, "OggS", 4) == 0);
+}
+
+std::string chooseAudioTempExtension(std::span<const std::byte> data, std::string_view hint) {
+    if (auto extension = normalizeExtensionHint(hint); !extension.empty()) {
+        return extension;
+    }
+
+    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
+    if (signatureResult) {
+        if (auto extension = extensionForAudioMime(signatureResult.value().mimeType);
+            !extension.empty()) {
+            return extension;
+        }
+    }
+
+    return ".wav";
+}
+
+Result<std::filesystem::path> writeAudioBufferToTempFile(std::span<const std::byte> data,
+                                                         std::string_view extension) {
+    if (data.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Empty audio data"};
+    }
+
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937_64 gen(rd());
+
+    std::filesystem::path tempDir;
+    std::error_code ec;
+    bool created = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        tempDir = std::filesystem::temp_directory_path() /
+                  yams::fmt_format("yams-audio-buffer-{:016x}", gen());
+        if (std::filesystem::create_directory(tempDir, ec)) {
+            created = true;
+            std::filesystem::permissions(tempDir, std::filesystem::perms::owner_all,
+                                         std::filesystem::perm_options::replace, ec);
+            if (ec) {
+                std::filesystem::remove_all(tempDir);
+                return Error{
+                    ErrorCode::IOError,
+                    yams::fmt_format("Failed to secure temp audio directory: {}", ec.message())};
+            }
+            break;
+        }
+        if (ec) {
+            return Error{
+                ErrorCode::IOError,
+                yams::fmt_format("Failed to create temp audio directory: {}", ec.message())};
+        }
+    }
+    if (!created) {
+        return Error{ErrorCode::IOError, "Failed to allocate temp audio directory"};
+    }
+
+    const auto tempPath = tempDir / yams::fmt_format("buffer{}", extension);
+
+    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return Error{ErrorCode::IOError,
+                     yams::fmt_format("Failed to create temp audio file: {}", tempPath.string())};
+    }
+
+    file.write(reinterpret_cast<const char*>(data.data()),
+               static_cast<std::streamsize>(data.size()));
+    if (!file) {
+        std::error_code ec;
+        std::filesystem::remove_all(tempPath.parent_path(), ec);
+        return Error{ErrorCode::IOError,
+                     yams::fmt_format("Failed to write temp audio file: {}", tempPath.string())};
+    }
+
+    return tempPath;
+}
+
 } // anonymous namespace
 
 // AudioContentHandler Implementation
@@ -291,9 +426,11 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
 
         // Extract audio metadata
         AudioMetadata audioMeta{};
+        bool metadataLoaded = false;
 
 #ifdef YAMS_HAVE_TAGLIB
-        // Use TagLib if available (most comprehensive)
+        // Use TagLib if available (most comprehensive), but fall back when it cannot parse the
+        // file so buffer-backed temp files still get basic metadata.
         TagLib::FileRef file(path.c_str());
         if (!file.isNull() && file.tag() && file.audioProperties()) {
             const auto* tag = file.tag();
@@ -329,24 +466,29 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
             if (!tag->comment().isEmpty()) {
                 audioMeta.tags["comment"] = tag->comment().to8Bit(true);
             }
-        }
-#else
-        // Fallback implementations
-        if (auto metadata = extractUsingFFProbe(path)) {
-            audioMeta = *metadata;
-        } else if (path.extension() == ".wav") {
-            if (auto wavMeta = analyzeWAVHeader(path)) {
-                audioMeta = *wavMeta;
-            }
-        }
-
-        // Try ID3v1 for MP3 files
-        if (path.extension() == ".mp3") {
-            if (auto id3v1 = extractID3v1(path)) {
-                audioMeta.tags = *id3v1;
-            }
+            metadataLoaded = true;
         }
 #endif
+
+        if (!metadataLoaded) {
+            if (auto metadata = extractUsingFFProbe(path)) {
+                audioMeta = *metadata;
+                metadataLoaded = true;
+            } else if (path.extension() == ".wav") {
+                if (auto wavMeta = analyzeWAVHeader(path)) {
+                    audioMeta = *wavMeta;
+                    metadataLoaded = true;
+                }
+            }
+
+            // Try ID3v1 for MP3 files even when richer parsers were unavailable.
+            if (path.extension() == ".mp3") {
+                if (auto id3v1 = extractID3v1(path)) {
+                    audioMeta.tags = *id3v1;
+                    metadataLoaded = true;
+                }
+            }
+        }
 
         // Set basic metadata
         const auto fileSize = std::filesystem::file_size(path);
@@ -392,12 +534,41 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> AudioContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
-    (void)data;
-    (void)hint;
-    (void)config;
-    // For buffer processing, we'd need to write to temp file or use memory-based parsers
-    // This is a more complex implementation - for now return not implemented
-    return Error{ErrorCode::NotImplemented, "Buffer processing not yet implemented for audio"};
+    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
+    bool requiresParserConfirmation = false;
+    if (signatureResult && !canHandle(signatureResult.value())) {
+        const auto& signature = signatureResult.value();
+        requiresParserConfirmation = isGenericAudioDetection(signature);
+        if (!requiresParserConfirmation) {
+            return Error{ErrorCode::NotSupported,
+                         yams::fmt_format("Not an audio file: detected as {} ({})",
+                                          signature.mimeType, signature.fileType)};
+        }
+    }
+
+    auto tempPath = writeAudioBufferToTempFile(data, chooseAudioTempExtension(data, hint));
+    if (!tempPath) {
+        return tempPath.error();
+    }
+
+    const auto cleanup = [&tempPath] {
+        std::error_code ec;
+        std::filesystem::remove_all(tempPath.value().parent_path(), ec);
+    };
+
+    auto result = process(tempPath.value(), config);
+    cleanup();
+    if (result && requiresParserConfirmation && !hasConfirmedAudioMetadata(result.value()) &&
+        !hasAudioContainerMagic(data)) {
+        return Error{ErrorCode::NotSupported, "Buffer did not contain parseable audio metadata"};
+    }
+    if (result) {
+        result.value().metadata["source"] = "buffer";
+        if (!hint.empty()) {
+            result.value().metadata["hint"] = hint;
+        }
+    }
+    return result;
 }
 
 Result<void> AudioContentHandler::validate(const std::filesystem::path& path) const {

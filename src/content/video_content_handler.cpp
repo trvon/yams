@@ -1,13 +1,13 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <ranges>
+#include <random>
 #include <regex>
 #include <string>
-#include <unordered_set>
 #include <yams/content/video_content_handler.h>
 // Ensure formatting uses unified wrapper
 #include <yams/common/format.h>
@@ -200,6 +200,147 @@ std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::
     return std::nullopt;
 }
 
+std::string normalizeExtensionHint(std::string_view hint) {
+    if (hint.empty()) {
+        return {};
+    }
+
+    std::filesystem::path hintPath{std::string(hint)};
+    std::string extension = hintPath.extension().string();
+    if (extension.empty() && hint.front() == '.') {
+        extension = std::string(hint);
+    }
+
+    std::ranges::transform(extension, extension.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return std::ranges::find(videoExtensions, extension) == videoExtensions.end() ? std::string{}
+                                                                                  : extension;
+}
+
+std::string extensionForVideoMime(std::string_view mimeType) {
+    if (mimeType == "video/mp4")
+        return ".mp4";
+    if (mimeType == "video/quicktime")
+        return ".mov";
+    if (mimeType == "video/x-msvideo" || mimeType == "video/avi")
+        return ".avi";
+    if (mimeType == "video/x-ms-wmv")
+        return ".wmv";
+    if (mimeType == "video/webm")
+        return ".webm";
+    if (mimeType == "video/ogg")
+        return ".ogv";
+    if (mimeType == "video/x-flv")
+        return ".flv";
+    if (mimeType == "video/x-matroska")
+        return ".mkv";
+    if (mimeType == "video/3gpp")
+        return ".3gp";
+    if (mimeType == "video/mp2t")
+        return ".ts";
+    if (mimeType == "video/x-ms-asf")
+        return ".asf";
+    return {};
+}
+
+bool isGenericVideoDetection(const detection::FileSignature& signature) {
+    return signature.fileType == "binary" ||
+           signature.fileType.find("multimedia") != std::string::npos ||
+           signature.mimeType == "application/octet-stream" ||
+           signature.mimeType.find("various") != std::string::npos;
+}
+
+bool hasConfirmedVideoMetadata(const ContentResult& result) {
+    if (!result.videoData) {
+        return false;
+    }
+    const auto& metadata = *result.videoData;
+    return metadata.durationSeconds > 0.0 || metadata.width > 0 || metadata.height > 0 ||
+           metadata.frameRate > 0.0 || !metadata.videoCodec.empty() ||
+           !metadata.audioCodec.empty() || !metadata.container.empty() || metadata.bitrate > 0;
+}
+
+bool hasVideoContainerMagic(std::span<const std::byte> data) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+    return (data.size() >= 12 && std::memcmp(bytes + 4, "ftyp", 4) == 0) ||
+           (data.size() >= 12 && std::memcmp(bytes, "RIFF", 4) == 0 &&
+            std::memcmp(bytes + 8, "AVI ", 4) == 0) ||
+           (data.size() >= 4 && std::memcmp(bytes, "\x1A\x45\xDF\xA3", 4) == 0);
+}
+
+std::string chooseVideoTempExtension(std::span<const std::byte> data, std::string_view hint) {
+    if (auto extension = normalizeExtensionHint(hint); !extension.empty()) {
+        return extension;
+    }
+
+    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
+    if (signatureResult) {
+        if (auto extension = extensionForVideoMime(signatureResult.value().mimeType);
+            !extension.empty()) {
+            return extension;
+        }
+    }
+
+    return ".mp4";
+}
+
+Result<std::filesystem::path> writeVideoBufferToTempFile(std::span<const std::byte> data,
+                                                         std::string_view extension) {
+    if (data.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Empty video data"};
+    }
+
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937_64 gen(rd());
+
+    std::filesystem::path tempDir;
+    std::error_code ec;
+    bool created = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        tempDir = std::filesystem::temp_directory_path() /
+                  yams::fmt_format("yams-video-buffer-{:016x}", gen());
+        if (std::filesystem::create_directory(tempDir, ec)) {
+            created = true;
+            std::filesystem::permissions(tempDir, std::filesystem::perms::owner_all,
+                                         std::filesystem::perm_options::replace, ec);
+            if (ec) {
+                std::filesystem::remove_all(tempDir);
+                return Error{
+                    ErrorCode::IOError,
+                    yams::fmt_format("Failed to secure temp video directory: {}", ec.message())};
+            }
+            break;
+        }
+        if (ec) {
+            return Error{
+                ErrorCode::IOError,
+                yams::fmt_format("Failed to create temp video directory: {}", ec.message())};
+        }
+    }
+    if (!created) {
+        return Error{ErrorCode::IOError, "Failed to allocate temp video directory"};
+    }
+
+    const auto tempPath = tempDir / yams::fmt_format("buffer{}", extension);
+
+    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return Error{ErrorCode::IOError,
+                     yams::fmt_format("Failed to create temp video file: {}", tempPath.string())};
+    }
+
+    file.write(reinterpret_cast<const char*>(data.data()),
+               static_cast<std::streamsize>(data.size()));
+    if (!file) {
+        std::error_code ec;
+        std::filesystem::remove_all(tempPath.parent_path(), ec);
+        return Error{ErrorCode::IOError,
+                     yams::fmt_format("Failed to write temp video file: {}", tempPath.string())};
+    }
+
+    return tempPath;
+}
+
 } // anonymous namespace
 
 // VideoContentHandler Implementation
@@ -318,12 +459,41 @@ Result<ContentResult> VideoContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> VideoContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
-    (void)data;
-    (void)hint;
-    (void)config;
-    // For buffer processing, we'd need to write to temp file or use memory-based parsers
-    // This is a more complex implementation - for now return not implemented
-    return Error{ErrorCode::NotImplemented, "Buffer processing not yet implemented for video"};
+    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
+    bool requiresParserConfirmation = false;
+    if (signatureResult && !canHandle(signatureResult.value())) {
+        const auto& signature = signatureResult.value();
+        requiresParserConfirmation = isGenericVideoDetection(signature);
+        if (!requiresParserConfirmation) {
+            return Error{ErrorCode::NotSupported,
+                         yams::fmt_format("Not a video file: detected as {} ({})",
+                                          signature.mimeType, signature.fileType)};
+        }
+    }
+
+    auto tempPath = writeVideoBufferToTempFile(data, chooseVideoTempExtension(data, hint));
+    if (!tempPath) {
+        return tempPath.error();
+    }
+
+    const auto cleanup = [&tempPath] {
+        std::error_code ec;
+        std::filesystem::remove_all(tempPath.value().parent_path(), ec);
+    };
+
+    auto result = process(tempPath.value(), config);
+    cleanup();
+    if (result && requiresParserConfirmation && !hasConfirmedVideoMetadata(result.value()) &&
+        !hasVideoContainerMagic(data)) {
+        return Error{ErrorCode::NotSupported, "Buffer did not contain parseable video metadata"};
+    }
+    if (result) {
+        result.value().metadata["source"] = "buffer";
+        if (!hint.empty()) {
+            result.value().metadata["hint"] = hint;
+        }
+    }
+    return result;
 }
 
 Result<void> VideoContentHandler::validate(const std::filesystem::path& path) const {

@@ -24,8 +24,6 @@
 #include <functional>
 #include <stdexcept>
 
-#include <boost/asio/detail/concurrency_hint.hpp>
-
 namespace yams::daemon {
 
 struct WorkCoordinator::DetachedCancellationState {
@@ -34,8 +32,8 @@ struct WorkCoordinator::DetachedCancellationState {
 };
 
 WorkCoordinator::WorkCoordinator()
-    : ioContext_(std::make_shared<boost::asio::io_context>(BOOST_ASIO_CONCURRENCY_HINT_SAFE)),
-      started_(false), highPriorityStrand_(ioContext_->get_executor()),
+    : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false),
+      highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
       backgroundPriorityStrand_(ioContext_->get_executor()),
       detachedCancellationState_(std::make_shared<DetachedCancellationState>()) {

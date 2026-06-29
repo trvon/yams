@@ -25,6 +25,7 @@ namespace yamsfmt = fmt;
 #include <limits>
 #include <optional>
 #include <random>
+#include <shared_mutex>
 #include <source_location>
 #include <system_error>
 #include <thread>
@@ -122,6 +123,97 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
     }
 
     return std::move(decompressed.value());
+}
+
+Result<size_t> cleanupStaleTempFiles(const std::filesystem::path& tempDir) {
+    size_t cleanedCount = 0;
+    std::error_code ec;
+
+    if (!std::filesystem::exists(tempDir, ec)) {
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to check temp directory: " + tempDir.string() +
+                                                 ": " + ec.message()};
+        }
+        return cleanedCount;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(tempDir, ec)) {
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to iterate temp directory: " +
+                                                 tempDir.string() + ": " + ec.message()};
+        }
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+
+        const auto lastWrite = entry.last_write_time(ec);
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to read temp file timestamp: " +
+                                                 entry.path().string() + ": " + ec.message()};
+        }
+
+        const auto now = std::filesystem::file_time_type::clock::now();
+        if (now - lastWrite <= std::chrono::hours(1)) {
+            continue;
+        }
+
+        std::filesystem::remove(entry.path(), ec);
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to remove temp file: " +
+                                                 entry.path().string() + ": " + ec.message()};
+        }
+        ++cleanedCount;
+    }
+
+    return cleanedCount;
+}
+
+Result<size_t> pruneEmptyDirectories(const std::filesystem::path& root) {
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) {
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Failed to check directory: " + root.string() + ": " + ec.message()};
+        }
+        return size_t{0};
+    }
+
+    std::vector<std::filesystem::path> directories;
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end;
+         it.increment(ec)) {
+        if (ec) {
+            return Error{ErrorCode::IOError, "Failed to iterate directory tree: " + root.string() +
+                                                 ": " + ec.message()};
+        }
+        if (it->is_directory()) {
+            directories.push_back(it->path());
+        }
+    }
+
+    std::ranges::sort(directories, [](const auto& lhs, const auto& rhs) {
+        return lhs.native().size() > rhs.native().size();
+    });
+
+    size_t removedCount = 0;
+    for (const auto& dir : directories) {
+        const bool isEmpty = std::filesystem::is_empty(dir, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Failed to inspect directory: " + dir.string() + ": " + ec.message()};
+        }
+        if (!isEmpty) {
+            continue;
+        }
+
+        std::filesystem::remove(dir, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Failed to prune directory: " + dir.string() + ": " + ec.message()};
+        }
+        ++removedCount;
+    }
+
+    return removedCount;
 }
 
 #ifdef YAMS_TESTING
@@ -411,6 +503,9 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
         return {};
     }
 
+    // Block compaction from pruning shard directories while a write is in flight.
+    std::shared_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
+
     // Acquire per-hash write lock
     auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
     std::lock_guard<std::mutex> lock(hashMutex);
@@ -582,6 +677,9 @@ Result<void> StorageEngine::remove(std::string_view hash) {
     }
 
     auto objectPath = getObjectPath(hash);
+
+    // Block compaction from pruning shard directories while a remove is in flight.
+    std::shared_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
 
     // Acquire per-hash write lock
     auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
@@ -849,42 +947,46 @@ Result<void> StorageEngine::verify() const {
 }
 
 Result<void> StorageEngine::compact() {
-    spdlog::debug("Storage compaction not yet implemented");
+    spdlog::debug("Starting storage compaction");
+
+    // Serialize with store/remove so empty shard pruning cannot race target parent creation.
+    std::unique_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
+
+    auto cleaned = cleanupStaleTempFiles(pImpl->config.basePath / "temp");
+    if (!cleaned) {
+        spdlog::error("Storage compaction temp-file cleanup failed: {}", cleaned.error().message);
+        return cleaned.error();
+    }
+
+    size_t prunedDirectories = 0;
+    for (const auto& root :
+         {pImpl->config.basePath / "objects", pImpl->config.basePath / "manifests"}) {
+        auto pruned = pruneEmptyDirectories(root);
+        if (!pruned) {
+            spdlog::error("Storage compaction directory pruning failed for {}: {}", root.string(),
+                          pruned.error().message);
+            return pruned.error();
+        }
+        prunedDirectories += pruned.value();
+    }
+
+    spdlog::debug(
+        "Storage compaction complete: removed {} stale temp files, pruned {} empty directories",
+        cleaned.value(), prunedDirectories);
     return {};
 }
 
 Result<void> StorageEngine::cleanupTempFiles() {
     spdlog::debug("Cleaning up temporary files...");
 
-    size_t cleanedCount = 0;
-    std::error_code ec;
-
-    try {
-        auto tempDir = pImpl->config.basePath / "temp";
-
-        for (const auto& entry : std::filesystem::directory_iterator(tempDir)) {
-            if (entry.is_regular_file()) {
-                // Remove temp files older than 1 hour
-                auto lastWrite = entry.last_write_time();
-                auto now = std::filesystem::file_time_type::clock::now();
-                auto age = now - lastWrite;
-
-                if (age > std::chrono::hours(1)) {
-                    std::filesystem::remove(entry.path(), ec);
-                    if (!ec) {
-                        cleanedCount++;
-                    }
-                }
-            }
-        }
-
-        spdlog::debug("Cleaned up {} temporary files", cleanedCount);
-        return {};
-
-    } catch (const std::exception& e) {
-        spdlog::error("Temp file cleanup failed: {}", e.what());
-        return Result<void>(ErrorCode::Unknown);
+    auto cleaned = cleanupStaleTempFiles(pImpl->config.basePath / "temp");
+    if (!cleaned) {
+        spdlog::error("Temp file cleanup failed: {}", cleaned.error().message);
+        return cleaned.error();
     }
+
+    spdlog::debug("Cleaned up {} temporary files", cleaned.value());
+    return {};
 }
 
 // AtomicFileWriter implementation

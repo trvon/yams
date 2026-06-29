@@ -190,13 +190,12 @@ TEST_CASE("StorageBackendFactory::create: registered backend init failure return
     CHECK(backend == nullptr);
 }
 
-TEST_CASE("StorageBackendFactory::create: URL and S3 backends initialize without network I/O",
+TEST_CASE("StorageBackendFactory::create: URL backends initialize and S3 stays plugin-gated",
           "[storage][factory][remote][url][s3]") {
     for (const auto& [type, url] : {
              std::pair{"http", "http://127.0.0.1:9/yams-test"},
              std::pair{"https", "https://example.invalid/yams-test"},
              std::pair{"ftp", "ftp://example.invalid/yams-test"},
-             std::pair{"s3", "s3://yams-test-bucket/prefix"},
          }) {
         BackendConfig cfg;
         cfg.type = type;
@@ -207,13 +206,25 @@ TEST_CASE("StorageBackendFactory::create: URL and S3 backends initialize without
         auto backend = StorageBackendFactory::create(cfg);
         REQUIRE(backend != nullptr);
         CHECK(backend->isRemote());
-        if (std::string_view(type) == "s3") {
-            // S3 may be served by an optional plugin or by the URLBackend fallback.
-            CHECK_FALSE(backend->getType().empty());
-        } else {
-            CHECK(backend->getType() == type);
-        }
+        CHECK(backend->getType() == type);
         CHECK(backend->flush().has_value());
+    }
+
+    BackendConfig s3Config;
+    s3Config.type = "s3";
+    s3Config.url = "s3://yams-test-bucket/prefix";
+    s3Config.requestTimeout = 1;
+    s3Config.maxRetries = 0;
+
+    auto pluginBackend = tryCreateS3PluginBackend(s3Config);
+    auto backend = StorageBackendFactory::create(s3Config);
+    if (pluginBackend != nullptr) {
+        REQUIRE(backend != nullptr);
+        CHECK(backend->isRemote());
+        CHECK_FALSE(backend->getType().empty());
+        CHECK(backend->flush().has_value());
+    } else {
+        CHECK(backend == nullptr);
     }
 }
 

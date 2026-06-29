@@ -65,7 +65,7 @@ public:
      */
     QueryConceptExtractor();
 
-    ~QueryConceptExtractor();
+    ~QueryConceptExtractor() = default;
 
     /**
      * @brief Check if entity extraction is available

@@ -15,8 +15,6 @@ QueryConceptExtractor::QueryConceptExtractor() : extractFunc_(nullptr) {
     spdlog::debug("QueryConceptExtractor: no extraction backend, concepts unavailable");
 }
 
-QueryConceptExtractor::~QueryConceptExtractor() = default;
-
 bool QueryConceptExtractor::isAvailable() const {
     return extractFunc_ != nullptr;
 }

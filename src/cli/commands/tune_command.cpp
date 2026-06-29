@@ -108,7 +108,7 @@ public:
     }
 
 private:
-    enum class Mode { None, Interactive, Status, Reset, Replay };
+    enum class Mode : std::uint8_t { None, Interactive, Status, Reset, Replay };
 
     YamsCLI* cli_ = nullptr;
     TuneOptions opts_;

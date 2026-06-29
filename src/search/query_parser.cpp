@@ -1,6 +1,7 @@
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <sstream>
-#include <stack>
 #include <string_view>
 #include <yams/search/query_parser.h>
 
@@ -190,7 +191,6 @@ std::unique_ptr<QueryNode> QueryParser::parsePrimary() {
     if (current().type == TokenType::Term) {
         // Check for field query
         size_t savedPos = currentToken_;
-        std::string term = current().value;
         advance();
 
         if (match(TokenType::Colon)) {
@@ -234,13 +234,20 @@ std::unique_ptr<QueryNode> QueryParser::parseTerm() {
     // Check for fuzzy modifier
     if (match(TokenType::Tilde)) {
         int distance = 2; // Default fuzzy distance
-        if (current().type == TokenType::Term) {
-            // Try to parse distance
-            try {
-                distance = std::stoi(current().value);
+        if (current().type == TokenType::Term && !current().value.empty() &&
+            std::ranges::all_of(current().value,
+                                [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+            const auto& value = current().value;
+            const auto* begin = value.data();
+            const auto* end = begin + value.size();
+            int parsedDistance = 0;
+            const auto [ptr, ec] = std::from_chars(begin, end, parsedDistance);
+            if (ec == std::errc::result_out_of_range) {
+                throwError("Fuzzy distance is too large");
+            }
+            if (ec == std::errc{} && ptr == end) {
+                distance = parsedDistance;
                 advance();
-            } catch (...) {
-                // Not a number, keep default
             }
         }
         return std::make_unique<FuzzyNode>(term, distance);
@@ -438,12 +445,7 @@ std::unique_ptr<QueryNode> QueryOptimizer::optimize(std::unique_ptr<QueryNode> n
     if (!node)
         return node;
 
-    node = eliminateDoubleNegation(std::move(node));
-    node = flattenBinaryOps(std::move(node));
-    node = simplifyConstants(std::move(node));
-    node = reorderForPerformance(std::move(node));
-
-    return node;
+    return eliminateDoubleNegation(std::move(node));
 }
 
 std::unique_ptr<QueryNode>
@@ -462,22 +464,6 @@ QueryOptimizer::eliminateDoubleNegation(std::unique_ptr<QueryNode> node) {
         }
     }
 
-    return node;
-}
-
-std::unique_ptr<QueryNode> QueryOptimizer::flattenBinaryOps(std::unique_ptr<QueryNode> node) {
-    // TODO: Implement flattening of nested AND/OR operations
-    return node;
-}
-
-std::unique_ptr<QueryNode> QueryOptimizer::simplifyConstants(std::unique_ptr<QueryNode> node) {
-    // TODO: Implement simplification of constant expressions
-    return node;
-}
-
-std::unique_ptr<QueryNode> QueryOptimizer::reorderForPerformance(std::unique_ptr<QueryNode> node) {
-    // TODO: Reorder terms to optimize query execution
-    // For example, put more selective terms first
     return node;
 }
 

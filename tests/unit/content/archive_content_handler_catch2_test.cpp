@@ -18,6 +18,7 @@
 #include <chrono>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,16 @@ TEST_CASE("formatToString covers all ArchiveFormat values", "[content][archive][
 // ────────────────────────────────────────────────────────────────────────────────
 // ArchiveProcessingConfig defaults
 // ────────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("ArchiveContentHandler processBuffer rejects generic binary with archive hint",
+          "[content][archive][buffer][regression]") {
+    ArchiveContentHandler handler;
+    const std::vector<uint8_t> randomBytes = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01,
+                                              0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    auto result = handler.processBuffer(std::as_bytes(std::span{randomBytes}), ".zip");
+    REQUIRE_FALSE(result.has_value());
+}
 
 TEST_CASE("ArchiveProcessingConfig has correct defaults", "[content][archive][catch2]") {
     ArchiveProcessingConfig cfg;
@@ -389,6 +400,30 @@ TEST_CASE("ArchiveContentHandler resetStats zeros counters", "[content][archive]
     CHECK(stats.totalFilesProcessed == 0);
     CHECK(stats.successfulProcessing == 0);
     CHECK(stats.failedProcessing == 0);
+}
+
+TEST_CASE("ArchiveContentHandler processBuffer supports archive buffers",
+          "[content][archive][buffer][catch2]") {
+    ArchiveContentHandler handler;
+
+    const std::vector<std::byte> zipHeader{
+        std::byte{0x50}, std::byte{0x4B}, std::byte{0x03}, std::byte{0x04}, std::byte{0x14},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x08}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = handler.processBuffer(zipHeader, ".zip");
+    if (!result.has_value()) {
+        INFO("archive processBuffer error: " << result.error().message);
+    }
+    REQUIRE(result.has_value());
+    CHECK(result.value().handlerName == "ArchiveContentHandler");
+    CHECK(result.value().metadata.at("file_type") == "archive");
+    CHECK(result.value().metadata.at("source") == "buffer");
+    CHECK(result.value().metadata.at("hint") == ".zip");
+    REQUIRE(result.value().archiveData.has_value());
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

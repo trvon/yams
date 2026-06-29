@@ -11,8 +11,6 @@ SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLengt
         maxEditDistance, prefixLength);
 }
 
-SymSpellSearch::~SymSpellSearch() = default;
-
 Result<void> SymSpellSearch::initializeSchema(sqlite3* db) {
     auto result = symspell::SQLiteStore::initializeDatabase(db);
     if (!result) {
@@ -98,5 +96,7 @@ void SymSpellSearch::clear() {
     // For now, this is a placeholder - full implementation needs db access
     // Placeholder: full implementation needs direct SQL access to purge the backing tables.
 }
+
+SymSpellSearch::~SymSpellSearch() = default;
 
 } // namespace yams::search

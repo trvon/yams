@@ -9,7 +9,7 @@
  * 3. Verify integrity (SHA-256 checksum)
  * 4. Extract to plugin directory
  * 5. Add to trust list
- * 6. Optionally load the plugin
+ * 6. Optionally ask the caller to load the plugin into a running daemon
  */
 
 #include <chrono>
@@ -50,6 +50,9 @@ struct InstallProgress {
 
 using InstallProgressCallback = std::function<void(const InstallProgress&)>;
 
+struct InstallResult;
+using InstallLoadCallback = std::function<Result<void>(const InstallResult&)>;
+
 /**
  * Installation options.
  */
@@ -57,11 +60,12 @@ struct InstallOptions {
     std::optional<std::string> version;  // Specific version (default: latest)
     std::filesystem::path installDir;    // Target directory (default: ~/.local/lib/yams/plugins)
     bool autoTrust{true};                // Add to trust list after install
-    bool autoLoad{true};                 // Load plugin after install (requires daemon)
+    bool autoLoad{false};                // Request caller-managed daemon load after install
     bool force{false};                   // Overwrite if already installed
     bool dryRun{false};                  // Preview only, don't install
     std::optional<std::string> checksum; // Override checksum verification
-    InstallProgressCallback onProgress{nullptr}; // Progress callback
+    InstallProgressCallback onProgress{nullptr};   // Progress callback
+    InstallLoadCallback loadAfterInstall{nullptr}; // Optional daemon/plugin load hook
 };
 
 /**
@@ -76,6 +80,9 @@ struct InstallResult {
     bool wasUpgrade{false}; // true if replaced existing version
     std::string previousVersion;
     std::chrono::milliseconds elapsed{0};
+    bool autoLoadAttempted{false};
+    bool autoLoadSucceeded{false};
+    std::string autoLoadMessage;
 };
 
 /**

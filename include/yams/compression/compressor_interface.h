@@ -28,12 +28,12 @@ enum class CompressionAlgorithm : uint8_t {
  * @brief Result of a compression operation
  */
 struct CompressionResult {
-    std::vector<std::byte> data;        ///< Compressed data
-    size_t originalSize;                ///< Size before compression
-    size_t compressedSize;              ///< Size after compression
-    CompressionAlgorithm algorithm;     ///< Algorithm used
-    uint8_t level;                      ///< Compression level used
-    std::chrono::milliseconds duration; ///< Time taken
+    std::vector<std::byte> data;                                 ///< Compressed data
+    size_t originalSize = 0;                                     ///< Size before compression
+    size_t compressedSize = 0;                                   ///< Size after compression
+    CompressionAlgorithm algorithm = CompressionAlgorithm::None; ///< Algorithm used
+    uint8_t level = 0;                                           ///< Compression level used
+    std::chrono::milliseconds duration;                          ///< Time taken
 
     /**
      * @brief Calculate compression ratio

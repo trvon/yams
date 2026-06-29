@@ -60,8 +60,9 @@ yams [OPTIONS] <command> [command-options]
 - `daemon` - Manage YAMS daemon process (start/stop/restart/status)
 - `doctor` - Diagnose system health, connectivity, and repair issues
 - `status` - Show quick system status and health overview
-- `stats` - Show detailed system statistics
+- `stats` - Alias of `status` with the same flags
 - `config` - Manage YAMS configuration settings
+- `auth` - Manage authentication keys and tokens (current subcommands are Phase 2 scaffolding)
 
 ### Advanced Features
 
@@ -69,6 +70,7 @@ yams [OPTIONS] <command> [command-options]
 - `plugin, plugins` - Manage plugins (list/scan/load/unload/trust)
 - `session` - Manage interactive session selectors and warming
 - `watch` - Enable session-based auto-ingest for a project
+- `tune` - Run interactive retrieval tuning and policy state management
 - `download` - Download artifacts and store directly into YAMS
 - `repair` - Repair and maintain storage integrity
 
@@ -76,8 +78,6 @@ yams [OPTIONS] <command> [command-options]
 
 - `serve` - Start MCP (Model Context Protocol) server
 - `completion` - Generate shell completion scripts (bash/zsh/fish/powershell)
-
-### Utilities
 
 ---
 
@@ -108,9 +108,9 @@ Notes:
 
 - The storage directory can be set globally via --storage/--data-dir or YAMS_STORAGE.
 - On first run, initialization will create the storage directory, database, and configuration.
-- Interactive mode prompts for optional model, grammar, and agent-skill setup.
-- Init also bootstraps a per-project session (scoping + watch).
-- Use `yams watch` to enable auto-ingest for existing projects.
+- Interactive mode prompts for optional model, grammar, reranker, and agent-skill setup.
+- Unless `YAMS_SESSION_CURRENT` is already set, init bootstraps a per-project session, adds the current project root as a selector, and enables watch for that session.
+- Use `yams watch` to manage auto-ingest for existing projects.
 
 Examples:
 
@@ -140,6 +140,8 @@ Enable or disable session-based auto-ingest for a project.
 Synopsis:
 
 - yams watch [OPTIONS]
+- yams watch start [OPTIONS]
+- yams watch stop [OPTIONS]
 - yams watch --stop [OPTIONS]
 
 Options:
@@ -153,7 +155,7 @@ Options:
 - --root <path>
   - Project root to watch (default: git root or cwd)
 - --session <name>
-  - Session name (default: auto)
+  - Session name (default: current `YAMS_SESSION_CURRENT` or derived `proj-<root>-<hash>`)
 - --no-use
   - Do not set the session as current
 - --no-selector
@@ -165,12 +167,13 @@ Notes:
 
 - If the session does not exist, `yams watch` creates it and sets watch settings.
 - If no root is provided, the git root is used when available.
+- `yams watch` requires a socket-backed daemon connection; it does not fall back to embedded mode.
 - `yams watch` waits for daemon readiness by default to avoid ingesting while the daemon is still initializing.
 
 Examples:
 
 ```bash
-# Enable watch for the current project (auto session)
+# Enable watch for the current project (derived project session)
 yams watch
 
 # Use a 5s polling interval
@@ -1085,9 +1088,36 @@ yams config grammar download cpp      # Download C++ grammar
 
 ---
 
+## auth {#cmd-auth}
+
+Manage authentication keys and tokens.
+
+Synopsis:
+
+- yams auth keygen [--type ed25519|rsa] [--output <path>] [--force]
+- yams auth list-keys [--verbose] [--format table|json]
+- yams auth revoke <key-id> [--force]
+- yams auth token [--key <path>] [--validity <duration>] [--claims <json>]
+- yams auth api-key --name <name> [--permissions <csv>] [--expires <date>]
+
+Notes:
+
+- Current auth subcommands are Phase 2 scaffolding. They print planned usage and exit instead of performing key management.
+- `yams init` already generates Ed25519 keys unless `--no-keygen` is used.
+
+Examples:
+
+```
+yams auth keygen --type ed25519 --force
+yams auth list-keys --format json
+yams auth token --validity 24h
+```
+
+---
+
 ## stats {#cmd-stats}
 
-Show storage statistics and health.
+Alias of `yams status` with the same flags.
 
 Synopsis:
 
@@ -1095,9 +1125,10 @@ Synopsis:
 
 Description:
 
-- Adaptive default view: when relevant, includes Recommendations and Service Status along with the compact footer; use -v for full System Health and detailed sections.
+- Uses the same implementation as `yams status`.
+- Adaptive default view: when relevant, includes Recommendations and Service Status along with the compact footer; use `-v` for full System Health and detailed sections.
 - Telemetry includes auto-repair counters (repair_queue_depth, repair_batches_attempted, repair_embeddings_generated, repair_failed_operations), latency percentiles (p50/p95), top_slowest components, and not_ready flags.
-- Use --json for machine-readable output.
+- Use `--json` for machine-readable output.
 
 Examples:
 
@@ -1396,6 +1427,45 @@ Examples:
 
 ```
 yams status
+```
+
+---
+
+## tune {#cmd-tune}
+
+Interactive relevance tuner and policy state management.
+
+Synopsis:
+
+- yams tune [options]
+- yams tune status [--json]
+- yams tune reset [--policy rules|contextual|all] [-y]
+- yams tune replay
+
+Options:
+
+- -q, --queries <n>
+  - Synthetic queries per session (default: 10)
+- -k, --top-k <n>
+  - Results to label per query (default: 5)
+- --seed <n>
+  - Random seed (0 uses system time)
+- --json
+  - Emit the persisted tuning session as JSON to stdout
+- --non-interactive
+  - Print setup instructions and exit
+
+Notes:
+
+- `yams tune` launches the interactive tuner when no subcommand is provided.
+- `yams tune replay` is currently a stub.
+
+Examples:
+
+```
+yams tune
+yams tune status --json
+yams tune reset --policy all -y
 ```
 
 ---

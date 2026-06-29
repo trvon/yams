@@ -3789,8 +3789,42 @@ Result<void> MetadataRepository::upsertTreeSnapshot(const TreeSnapshotRecord& re
 
 Result<std::optional<TreeSnapshotRecord>>
 MetadataRepository::getTreeSnapshot(std::string_view snapshotId) {
-    (void)snapshotId;
-    return Error{ErrorCode::NotImplemented, "Tree diff snapshot lookup not implemented"};
+    return executeReadQuery<std::optional<TreeSnapshotRecord>>(
+        [snapshotId](Database& db) -> Result<std::optional<TreeSnapshotRecord>> {
+            const char* sql = R"(
+            SELECT snapshot_id, tree_root_hash, directory_path, snapshot_label,
+                   git_commit, git_branch, git_remote, files_count, created_at
+            FROM tree_snapshots
+            WHERE snapshot_id = ?
+        )";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            stmt.bind(1, snapshotId);
+
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
+            if (!stepResult.value()) {
+                return std::optional<TreeSnapshotRecord>{std::nullopt};
+            }
+
+            TreeSnapshotRecord record;
+            record.snapshotId = stmt.getString(0);
+            record.rootTreeHash = stmt.isNull(1) ? "" : stmt.getString(1);
+            record.metadata["directory_path"] = stmt.getString(2);
+            record.metadata["snapshot_label"] = stmt.isNull(3) ? "" : stmt.getString(3);
+            record.metadata["git_commit"] = stmt.isNull(4) ? "" : stmt.getString(4);
+            record.metadata["git_branch"] = stmt.isNull(5) ? "" : stmt.getString(5);
+            record.metadata["git_remote"] = stmt.isNull(6) ? "" : stmt.getString(6);
+            record.fileCount = stmt.getInt64(7);
+            record.createdTime = stmt.getInt64(8);
+
+            return std::optional<TreeSnapshotRecord>{std::move(record)};
+        });
 }
 
 Result<std::vector<TreeSnapshotRecord>> MetadataRepository::listTreeSnapshots(int limit) {

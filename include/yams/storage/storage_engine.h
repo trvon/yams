@@ -155,6 +155,8 @@ public:
 
     // Maintenance operations
     Result<void> verify() const;
+    // Filesystem-backed compaction is intentionally narrow: clean stale temp files and prune
+    // empty shard directories. It does not rewrite live objects or replace garbage collection.
     Result<void> compact();
     Result<void> cleanupTempFiles();
 

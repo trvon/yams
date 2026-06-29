@@ -1,6 +1,7 @@
 #include <yams/search/simeon_lexical_backend.h>
 
 #include <yams/metadata/metadata_repository.h>
+#include <yams/profiling.h>
 
 #include <spdlog/spdlog.h>
 #include <simeon/bm25.hpp>
@@ -9,7 +10,6 @@
 #include <simeon/fragment_geometry.hpp>
 #include <simeon/fusion.hpp>
 #include <simeon/pmi.hpp>
-#include <simeon/prf.hpp>
 #include <simeon/query_router.hpp>
 #include <simeon/retrieval_strategy.hpp>
 #include <simeon/simeon.hpp>
@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <stop_token>
@@ -44,6 +45,30 @@
 namespace yams::search {
 
 namespace {
+
+// Reconcile fragment-geometry rerank scores with a BM25 baseline.
+// score_fragment_geometry returns a z-scored blend (~[-3,+3]) for in-pool docs
+// and -inf for out-of-pool docs. Backfilling -inf with raw BM25 (~[0,88]) and
+// ranking off one vector buries the reranked pool beneath the non-candidates
+// (raw BM25 ≫ z-blend). Instead: keep in-pool docs on their z-blend order and
+// place every out-of-pool doc strictly BELOW the pool floor, ordered by a
+// saturating BM25 map — non-candidates are worse by BM25 and must rank under
+// the reranked pool. Operates in place on `geom`.
+void reconcileGeomWithBm25(std::vector<float>& geom, const std::vector<float>& bm25) {
+    float poolMin = std::numeric_limits<float>::infinity();
+    for (float v : geom) {
+        if (std::isfinite(v) && v < poolMin)
+            poolMin = v;
+    }
+    const bool havePool = std::isfinite(poolMin);
+    for (std::size_t i = 0; i < geom.size(); ++i) {
+        if (std::isfinite(geom[i]))
+            continue;
+        const float b = (i < bm25.size() && std::isfinite(bm25[i])) ? bm25[i] : 0.0f;
+        const float sat = b > 0.0f ? b / (b + 1.0f) : 0.0f; // monotonic in b, [0,1)
+        geom[i] = havePool ? (poolMin - 1.0f + sat) : b;
+    }
+}
 
 std::uint64_t rssBytesCurrent() noexcept {
 #if defined(__APPLE__)
@@ -298,6 +323,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
 
     build_thread_ = yams::compat::jthread([this, repo = std::move(repo), ids = std::move(ids)](
                                               yams::compat::stop_token stop) mutable {
+        YAMS_SET_THREAD_NAME("simeon-build");
+        YAMS_ZONE_SCOPED_N("simeon::buildAsync");
         const auto t0 = std::chrono::steady_clock::now();
 
         if (stop.stop_requested()) {
@@ -338,7 +365,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::vector<std::int64_t> dense_doc_ids;
         dense_doc_ids.reserve(ids.size());
         std::vector<std::string> pmi_sample_texts;
-        std::vector<std::string> build_doc_texts; // for strategy router lead-field extraction
+        // Strategy-router lead-field texts, filled in build pass 1 (reusing the
+        // leadText already computed for the BM25 aux field) so no second
+        // extract_lead_tokens pass / full-corpus text copy is needed.
+        std::vector<std::string> docLeadTexts;
         if (considerFragmentGeometry) {
             const auto reserveDocs =
                 cfg_.fragment_geometry_pmi_sample_docs == 0
@@ -404,7 +434,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             mapping.emplace(docId, dense++);
             dense_doc_ids.push_back(docId);
             if (cfg_.strategy_router_enabled) {
-                build_doc_texts.emplace_back(buildText.view);
+                docLeadTexts.push_back(std::move(leadText));
             }
         }
         if (stop.stop_requested()) {
@@ -438,6 +468,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     }
                 }
                 if (!stop.stop_requested() && conceptTexts.size() == ids.size()) {
+                    YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                     std::vector<std::string_view> docViews;
                     docViews.reserve(conceptTexts.size());
                     for (const auto& t : conceptTexts)
@@ -471,21 +502,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         // Strategy router: build TextAdapter + EntropyRouter with BM25 +
         // Keyphrase + LeadField strategies for query-adaptive lexical retrieval.
         std::unique_ptr<simeon::TextAdapter> textAdapter;
-        std::vector<std::string> docLeadTexts;
         std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies;
         std::unique_ptr<simeon::StrategyRouter> strategyRouter;
         if (cfg_.strategy_router_enabled && !ids.empty()) {
             textAdapter = std::make_unique<simeon::TextAdapter>();
-
-            // Extract lead texts from the documents we just indexed.
-            const std::size_t ndocs = std::min(build_doc_texts.size(), ids.size());
-            docLeadTexts.reserve(ndocs);
-            for (std::size_t di = 0; di < ndocs && !stop.stop_requested(); ++di) {
-                simeon::AdapterEvidence ev =
-                    textAdapter->process_doc(std::to_string(ids[di]), build_doc_texts[di]);
-                docLeadTexts.push_back(std::move(ev.aux_field));
-            }
-
+            // docLeadTexts was filled in pass 1 (no second extraction pass).
             if (!stop.stop_requested() && primary) {
                 strategies.push_back(std::make_unique<simeon::Bm25Strategy>(*primary));
 
@@ -498,7 +519,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 strategyRouter = std::make_unique<simeon::EntropyRouter>();
                 spdlog::info("[simeon-lexical] strategy router: EntropyRouter "
                              "with {} strategies over {} docs",
-                             strategies.size(), ndocs);
+                             strategies.size(), docLeadTexts.size());
             }
         }
 
@@ -621,7 +642,6 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         fragment_encoder_ = std::move(fragmentEncoder);
         doc_frags_ = std::move(docFrags);
         text_adapter_ = std::move(textAdapter);
-        doc_lead_texts_ = std::move(docLeadTexts);
         strategies_ = std::move(strategies);
         strategy_router_ = std::move(strategyRouter);
         doc_id_to_index_ = std::move(mapping);
@@ -653,7 +673,7 @@ SimeonLexicalBackend::score(std::string_view query,
     // queries. LRU eviction keeps memory bounded. Cached only when
     // cfg_.score_cache_entries > 0 and no extra features are active.
     const bool cacheable = cfg_.score_cache_entries > 0 && !cfg_.bm25_variants_rrf &&
-                           !cfg_.rm3_enabled && !cfg_.fragment_geometry_enabled &&
+                           !cfg_.fragment_geometry_enabled &&
                            (!concept_index_ || cfg_.concept_config.concept_weight <= 0.0f);
     const auto currentDocCount = doc_count_;
     const auto currentConceptCount = concept_index_ ? concept_index_->size() : 0u;
@@ -692,8 +712,6 @@ SimeonLexicalBackend::score(std::string_view query,
         const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
-    } else if (cfg_.rm3_enabled && index_) {
-        simeon::score_with_prf(*index_, query, std::span<float>{full}, cfg_.rm3_config);
     } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
                                                cfg_.fragment_geometry_config);
@@ -703,14 +721,11 @@ SimeonLexicalBackend::score(std::string_view query,
         index_->score(query, std::span<float>{full});
     }
 
-    // Blend concept scores when available
+    // Blend concept scores when available (sparse: only matched-concept docs).
     if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
-        std::vector<float> conceptScores(currentDocCount, 0.0f);
-        concept_index_->score(query, std::span<float>{conceptScores});
-        const float cw = cfg_.concept_config.concept_weight;
-        for (size_t i = 0; i < currentDocCount; ++i) {
-            full[i] += cw * conceptScores[i];
-        }
+        YAMS_ZONE_SCOPED_N("simeon::concept_blend");
+        concept_index_->blend_into(query, std::span<float>{full},
+                                   cfg_.concept_config.concept_weight);
     }
 
     std::vector<float> out;
@@ -791,9 +806,6 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
         recipe_label = "Bm25VariantsRrf";
-    } else if (cfg_.rm3_enabled && index_ && !cfg_.fragment_geometry_enabled) {
-        simeon::score_with_prf(*index_, query, std::span<float>{full}, cfg_.rm3_config);
-        recipe_label = "Bm25Rm3";
     } else if (fragmentGeometryReady && lexicalRouter != nullptr) {
         const auto features = lexicalRouter->features(query);
         const auto qualityRecipe = lexicalRouter->choose_quality(features);
@@ -816,6 +828,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
             full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
                                                    geomCfg);
             lexical = score_bm25(*index_);
+            // Keep the reranked pool above the BM25 tail (z-blend vs raw-BM25
+            // scale mismatch would otherwise bury the candidates).
+            reconcileGeomWithBm25(full, lexical);
         }
     } else if (cfg_.router_enabled && lexicalRouter != nullptr) {
         const auto features = lexicalRouter->features(query);
@@ -828,12 +843,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
 
     // Blend concept scores when available
     if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
-        std::vector<float> conceptScores(doc_count_, 0.0f);
-        concept_index_->score(query, std::span<float>{conceptScores});
-        const float cw = cfg_.concept_config.concept_weight;
-        for (size_t i = 0; i < doc_count_; ++i) {
-            full[i] += cw * conceptScores[i];
-        }
+        YAMS_ZONE_SCOPED_N("simeon::concept_blend");
+        concept_index_->blend_into(query, std::span<float>{full},
+                                   cfg_.concept_config.concept_weight);
     }
 
     RescoreDecision decision;
@@ -924,12 +936,9 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
-        std::vector<float> conceptScores(doc_count_, 0.0f);
-        concept_index_->score(query, std::span<float>{conceptScores});
-        const float cw = cfg_.concept_config.concept_weight;
-        for (size_t i = 0; i < doc_count_; ++i) {
-            full[i] += cw * conceptScores[i];
-        }
+        YAMS_ZONE_SCOPED_N("simeon::concept_blend");
+        concept_index_->blend_into(query, std::span<float>{full},
+                                   cfg_.concept_config.concept_weight);
     }
 
     RescoreDecision decision;
@@ -954,29 +963,18 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    YAMS_ZONE_SCOPED_N("simeon::scoreBanditRouted");
+    YAMS_PLOT("simeon_candidate_count", static_cast<int64_t>(candidate_doc_ids.size()));
 
-    std::vector<float> full(doc_count_, 0.0f);
+    // Reused per-thread scratch — avoids a doc_count_-float malloc per query on
+    // the live scoring path. Each scorer below std::fill()s it before writing.
+    static thread_local std::vector<float> full;
+    full.assign(doc_count_, 0.0f);
     const char* recipe_label = "Bm25SabSmooth";
 
     // Dispatch on bandit arm name. Each arm corresponds to a simeon scoring
     // recipe tested in the Omega benchmark. Training-free at inference.
-    if (arm_name == "sab_smooth_rm3_adaptive") {
-        simeon::PrfConfig pc;
-        pc.k = 10;
-        pc.n_terms = 20;
-        pc.alpha = 0.5f;
-        simeon::score_with_prf(*index_, query, std::span<float>{full}, pc);
-        recipe_label = "Bm25SabRm3Adaptive";
-    } else if (arm_name == "sab_smooth_rm3_diverse") {
-        // Diverse RM3: larger feedback set, MMR-style diversity (not exposed
-        // here via the simple PrfConfig; we approximate with higher k/n_terms).
-        simeon::PrfConfig pc;
-        pc.k = 20;
-        pc.n_terms = 40;
-        pc.alpha = 0.5f;
-        simeon::score_with_prf(*index_, query, std::span<float>{full}, pc);
-        recipe_label = "Bm25SabRm3Diverse";
-    } else if (arm_name == "bm25_variants_rrf" && atire_index_) {
+    if (arm_name == "bm25_variants_rrf" && atire_index_) {
         const simeon::Bm25Index* variants[2] = {index_.get(), atire_index_.get()};
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
@@ -1001,6 +999,10 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
         auto& lead = strategies_[2];
         lead->score_indexed(query, 0, ev, std::span<float>{full});
         recipe_label = "LeadField";
+    } else if (arm_name == "sab_smooth_rm3_adaptive" || arm_name == "sab_smooth_rm3_diverse") {
+        return Error{ErrorCode::InvalidArgument,
+                     "Simeon RM3 bandit arms were retired; use sab_smooth, keyphrase, "
+                     "lead_field, bm25_variants_rrf, or atire"};
     } else {
         // Unrecognized or unavailable arm: fall back to plain SAB.
         index_->score(query, std::span<float>{full});
@@ -1009,12 +1011,9 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
-        std::vector<float> conceptScores(doc_count_, 0.0f);
-        concept_index_->score(query, std::span<float>{conceptScores});
-        const float cw = cfg_.concept_config.concept_weight;
-        for (size_t i = 0; i < doc_count_; ++i) {
-            full[i] += cw * conceptScores[i];
-        }
+        YAMS_ZONE_SCOPED_N("simeon::concept_blend");
+        concept_index_->blend_into(query, std::span<float>{full},
+                                   cfg_.concept_config.concept_weight);
     }
 
     RescoreDecision decision;

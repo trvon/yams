@@ -141,8 +141,12 @@ When in doubt, favor smaller PRs, more disclosure, and more human review.
   bootstrap, broad `SECTION()` fan-out, or fixed sleeps.
 - If a binary becomes a TSAN bottleneck, split it by behavior cluster so Meson
   can parallelize it while preserving failure locality.
-- See [`docs/developer/testing.md`](testing.md) for the detailed suite-shaping
-  policy and validation expectations.
+- Use `meson test -C <builddir> --list` to discover the current test names and
+  Meson suite tags before relying on older `unit:smoke`-style examples from
+  historical docs.
+- See [`docs/developer/testing.md`](testing.md) for suite-shaping policy and
+  [`docs/developer/build_system.md`](build_system.md) for the current Meson test
+  registration model.
 
 ## Documentation
 

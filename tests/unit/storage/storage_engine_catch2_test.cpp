@@ -784,6 +784,45 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns successful
     CHECK((compactResult.has_value()));
 }
 
+TEST_CASE_METHOD(StorageEngineFixture,
+                 "StorageEngine compact prunes empty shard directories and stale temp files",
+                 "[storage][compact][cleanup][catch2]") {
+    auto [hash, data] = generateTestData(1024);
+    REQUIRE((storage->store(hash, data).has_value()));
+
+    const auto objectShardDir = storagePath / "objects" / hash.substr(0, 2);
+    REQUIRE((storage->remove(hash).has_value()));
+    REQUIRE((std::filesystem::exists(objectShardDir)));
+
+    const auto manifestHash = std::string(62, 'a') + "bc";
+    const auto manifestKey = manifestHash + ".manifest";
+    REQUIRE((storage->store(manifestKey, data).has_value()));
+
+    const auto manifestShardDir = storagePath / "manifests" / manifestHash.substr(0, 2);
+    REQUIRE((storage->remove(manifestKey).has_value()));
+    REQUIRE((std::filesystem::exists(manifestShardDir)));
+
+    const auto staleTemp = storagePath / "temp" / "stale.tmp";
+    {
+        std::ofstream file(staleTemp, std::ios::binary);
+        REQUIRE((static_cast<bool>(file)));
+        file << "stale";
+    }
+    REQUIRE((std::filesystem::exists(staleTemp)));
+    std::error_code ec;
+    std::filesystem::last_write_time(staleTemp,
+                                     std::filesystem::file_time_type::clock::now() -
+                                         std::chrono::hours(2),
+                                     ec);
+    REQUIRE_FALSE(ec);
+
+    auto compactResult = storage->compact();
+    REQUIRE((compactResult.has_value()));
+    CHECK_FALSE((std::filesystem::exists(staleTemp)));
+    CHECK_FALSE((std::filesystem::exists(objectShardDir)));
+    CHECK_FALSE((std::filesystem::exists(manifestShardDir)));
+}
+
 TEST_CASE("StorageEngine verifies manifest keys during integrity check",
           "[storage][manifest][integrity][catch2]") {
     auto testDir = std::filesystem::temp_directory_path() /

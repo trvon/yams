@@ -5,6 +5,8 @@
 **Epic**: yams-eg1l
 **Task**: yams-7nib
 
+> **Implementation note (2026-06-26):** This document reflects the anchor-strategy era of the fusion stack. Current code no longer exposes `TEXT_ANCHOR`, `DENSE_FIRST`, or `CONCEPT_ANCHOR`; the active `FusionStrategy` enum is smaller (`WEIGHTED_SUM`, `RECIPROCAL_RANK`, `WEIGHTED_RECIPROCAL`, `COMB_MNZ`, `CONVEX`, `WEIGHTED_LINEAR_ZSCORE`). Treat this ADR as historical analysis that motivated simplification, not as a verbatim description of the current runtime.
+
 ## Context
 
 YAMS search engine currently implements 8 fusion strategies to merge results from 7 parallel components (FTS5, Vector, EntityVector, KG, PathTree, Tag, Metadata). This complexity causes:
@@ -73,6 +75,7 @@ CONCEPT_ANCHOR      ✓           ✓           ✓            vector    ~DENSE_
 | TEXT_ANCHOR | 0.2402 | 0.8233 | -0.5832 | **120x** vs DENSE_FIRST |
 
 **Full TEXT_ANCHOR results**:
+
 | Metric | Hybrid | Keyword | Delta |
 |--------|--------|---------|-------|
 | MRR | 0.2402 | 0.8233 | -0.5832 |
@@ -82,6 +85,7 @@ CONCEPT_ANCHOR      ✓           ✓           ✓            vector    ~DENSE_
 | MAP | 0.2417 | 0.8233 | -0.5816 |
 
 **Key observations**:
+
 1. TEXT_ANCHOR is **120x better** than DENSE_FIRST for hybrid search
 2. Keyword-only is still **3.4x better** than best hybrid strategy
 3. Recall is comparable (0.82 vs 0.88), but ranking quality differs significantly

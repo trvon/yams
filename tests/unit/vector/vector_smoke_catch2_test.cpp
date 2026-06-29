@@ -4,12 +4,16 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <yams/vector/vector_database.h>
 
 using namespace yams::vector;
+
+// Catch2 comparison macros trigger false-positive chained-comparison diagnostics in this file.
+// NOLINTBEGIN(bugprone-chained-comparison)
 
 namespace {
 
@@ -320,3 +324,106 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke update vector", "[vector][smok
     REQUIRE(got.has_value());
     CHECK(got.value().content == "updated content");
 }
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorSmoke lifecycle helpers update versioned and stale embeddings",
+                 "[vector][smoke][lifecycle][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    VectorRecord rec;
+    rec.chunk_id = "lifecycle_1";
+    rec.document_hash = "doc_lifecycle";
+    rec.embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    rec.content = "original lifecycle content";
+    rec.start_offset = 0;
+    rec.end_offset = rec.content.size();
+    rec.model_id = "model-alpha";
+    rec.model_version = "v1";
+    rec.embedding_version = 1;
+    rec.embedded_at = std::chrono::system_clock::now() - std::chrono::hours(2);
+    REQUIRE(db.insertVector(rec));
+
+    VectorRecord updated = rec;
+    updated.embedding = {0.0f, 1.0f, 0.0f, 0.0f};
+    updated.content = "updated lifecycle content";
+    updated.end_offset = updated.content.size();
+    updated.model_version = "v2";
+    updated.embedding_version = 2;
+    updated.embedded_at = std::chrono::system_clock::now();
+
+    auto updateResult = db.updateEmbeddings({updated});
+    REQUIRE(updateResult.has_value());
+
+    auto updatedRecord = db.getVector("lifecycle_1");
+    REQUIRE(updatedRecord.has_value());
+    CHECK(updatedRecord.value().model_version == "v2");
+    CHECK(updatedRecord.value().embedding_version == 2);
+    CHECK(updatedRecord.value().content == "updated lifecycle content");
+
+    auto byVersion = db.getEmbeddingsByVersion("v2", 10);
+    REQUIRE(byVersion.has_value());
+    REQUIRE(byVersion.value().size() == 1);
+    CHECK(byVersion.value().front().chunk_id == "lifecycle_1");
+    CHECK(byVersion.value().front().embedding_version == 2);
+    CHECK(byVersion.value().front().content == "updated lifecycle content");
+
+    auto staleBefore = db.getStaleEmbeddings("model-alpha", "v2");
+    REQUIRE(staleBefore.has_value());
+    CHECK(staleBefore.value().empty());
+
+    auto staleMark = db.markAsStale("lifecycle_1");
+    REQUIRE(staleMark.has_value());
+
+    auto staleAfter = db.getStaleEmbeddings("model-alpha", "v2");
+    REQUIRE(staleAfter.has_value());
+    REQUIRE(staleAfter.value().size() == 1);
+    CHECK(staleAfter.value().front() == "lifecycle_1");
+
+    auto got = db.getVector("lifecycle_1");
+    REQUIRE(got.has_value());
+    CHECK(got.value().is_stale);
+    CHECK(got.value().model_version == "v2");
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorSmoke soft delete helpers fail explicitly until schema supports them",
+                 "[vector][smoke][lifecycle][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+
+    VectorRecord rec;
+    rec.chunk_id = "delete_lifecycle_1";
+    rec.document_hash = "doc_delete_lifecycle";
+    rec.embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+    rec.content = "delete lifecycle content";
+    rec.start_offset = 0;
+    rec.end_offset = rec.content.size();
+    REQUIRE(db.insertVector(rec));
+
+    auto softDelete = db.markAsDeleted("delete_lifecycle_1");
+    REQUIRE_FALSE(softDelete.has_value());
+    CHECK(softDelete.error().code == yams::ErrorCode::NotSupported);
+
+    auto purgeDeleted = db.purgeDeleted(std::chrono::hours(24));
+    REQUIRE_FALSE(purgeDeleted.has_value());
+    CHECK(purgeDeleted.error().code == yams::ErrorCode::NotSupported);
+}
+
+// NOLINTEND(bugprone-chained-comparison)

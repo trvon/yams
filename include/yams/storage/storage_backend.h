@@ -20,7 +20,7 @@ namespace yams::storage {
  */
 struct BackendConfig {
     // Backend selection and addressing
-    std::string type = "filesystem"; // filesystem, s3, http, ftp
+    std::string type = "filesystem"; // filesystem, s3 (plugin), http, ftp
     std::string url;                 // Remote URL (e.g., s3://bucket/prefix)
     std::filesystem::path localPath; // Local base path for filesystem backend
 
@@ -43,7 +43,7 @@ struct BackendConfig {
     // Range GET support
     bool enableRangeGets = true;
 
-    // S3-specific options (scaffold/placeholder)
+    // S3/object-storage options shared with plugin backends and signers
     std::string region;
     bool usePathStyle = false;
     std::string checksumAlgorithm;
@@ -152,7 +152,7 @@ private:
 };
 
 /**
- * URL-based backend implementation (S3, HTTP, FTP)
+ * URL-based backend implementation (HTTP, HTTPS, FTP)
  * Uses libcurl for network operations
  */
 class URLBackend : public IStorageBackend {

@@ -169,6 +169,17 @@ if enable_dcheck
   message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')
 endif
 
+split_debug = get_option('split-debug')
+if split_debug
+  if cpp.has_argument('-gsplit-dwarf')
+    add_project_arguments('-gsplit-dwarf', language: 'cpp')
+    add_project_arguments('-gsplit-dwarf', language: 'c')
+    message('split-dwarf enabled: debug info emitted to .dwo files (reduced .o size)')
+  else
+    warning('split-debug requested but compiler does not support -gsplit-dwarf')
+  endif
+endif
+
 
 # --- General Hardening Flags ---
 hardening_cpp_args = []

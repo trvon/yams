@@ -205,6 +205,21 @@ if benchmark_dep.found()
 
   alias_target('bench_retrieval_quality', retrieval_quality_bench)
 
+  # Per-arm retrieval-quality bench: scores each SimeonLexicalBackend bandit arm
+  # directly over a judged corpus (nDCG/Recall/MRR), deterministic (no bandit
+  # exploration). Drives the strategy-router keep/enable/remove decision.
+  simeon_arm_quality_bench = executable('simeon_arm_quality_bench',
+    files(
+      'search/simeon_arm_quality_bench.cpp',
+    ),
+    include_directories: incs,
+    dependencies: search_bench_deps + [test_deps, dependency('nlohmann_json')],
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_simeon_arm_quality', simeon_arm_quality_bench)
+
   # Fusion strategy experiment - compares different fusion approaches
   fusion_experiment = executable('fusion_strategy_experiment',
     files(
