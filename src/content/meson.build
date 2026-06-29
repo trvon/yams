@@ -19,11 +19,8 @@ content_src = files(
   'image_content_handler.cpp',
   'audio_content_handler.cpp',
   'archive_content_handler.cpp',
+  'video_content_handler.cpp',
 )
-
-if ffprobe.found() or mediainfo.found()
-  content_src += files('video_content_handler.cpp')
-endif
 
 yams_content_cppargs = []
 if taglib_dep.found()
