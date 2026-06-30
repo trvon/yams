@@ -8,6 +8,9 @@
 #include <random>
 #include <regex>
 #include <string>
+#ifdef _MSC_VER
+#include <cstdlib>
+#endif
 #include <yams/content/video_content_handler.h>
 // Ensure formatting uses unified wrapper
 #include <yams/common/format.h>
@@ -30,6 +33,17 @@ consteval auto createVideoExtensions() {
 
 constexpr auto videoMimeTypes = createVideoMimeTypes();
 constexpr auto videoExtensions = createVideoExtensions();
+
+constexpr uint32_t byteswap32(uint32_t value) noexcept {
+#if defined(_MSC_VER)
+    return static_cast<uint32_t>(_byteswap_ulong(value));
+#elif defined(__clang__) || defined(__GNUC__)
+    return static_cast<uint32_t>(__builtin_bswap32(value));
+#else
+    return ((value & 0x000000FFu) << 24) | ((value & 0x0000FF00u) << 8) |
+           ((value & 0x00FF0000u) >> 8) | ((value & 0xFF000000u) >> 24);
+#endif
+}
 
 // Basic MP4 box header parser
 struct MP4BoxHeader {
@@ -61,7 +75,7 @@ std::optional<ExtendedVideoMetadata> analyzeMP4Header(const std::filesystem::pat
     // Look for 'ftyp' box to confirm MP4 format
     while (file.read(reinterpret_cast<char*>(&header), sizeof(header))) {
         // Convert from big-endian
-        header.size = __builtin_bswap32(header.size);
+        header.size = byteswap32(header.size);
 
         if (std::strncmp(header.type, "ftyp", 4) == 0) {
             // Basic MP4 file detected
