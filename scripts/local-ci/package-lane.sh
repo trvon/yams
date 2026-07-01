@@ -46,14 +46,17 @@ usage() { sed -n '2,30p' "${BASH_SOURCE[0]}"; }
 # ── Arch build lane ───────────────────────────────────────────────────────
 
 build_arch_lane() {
-	log "building cached Arch builder image ${ARCH_IMAGE}"
-	arch_build_args=(-f "${ARCH_DOCKERFILE}" -t "${ARCH_IMAGE}" "${REPO_ROOT}")
+	local arch_platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}"
+	log "building cached Arch builder image ${ARCH_IMAGE} (${arch_platform})"
+	arch_build_args=(-f "${ARCH_DOCKERFILE}" -t "${ARCH_IMAGE}")
 	[ "${NO_CACHE}" -eq 1 ] && arch_build_args+=(--no-cache)
-	docker build "${arch_build_args[@]}"
+	arch_build_args+=("${REPO_ROOT}")
+	docker build --platform="${arch_platform}" "${arch_build_args[@]}"
 
 	log "building Arch packages (version=${VERSION}) into ${BUILD_DIR}"
 	mkdir -p "${ABS_BUILD_DIR}"
 	docker run --rm \
+		--platform="${arch_platform}" \
 		-v "${REPO_ROOT}:/workspace/yams" \
 		-v yams-conan-cache-arch:/root/.conan2 \
 		-w /workspace \
@@ -65,10 +68,10 @@ build_arch_lane() {
 		-e HOST_UID="$(id -u)" \
 		-e HOST_GID="$(id -g)" \
 		"${ARCH_IMAGE}" \
-		bash -lc '/workspace/yams/scripts/build-arch-pkg.sh build; rc=\$?; chown -R "\${HOST_UID}:\${HOST_GID}" "/workspace/yams/""${BUILD_DIR}"" 2>/dev/null || true; exit \$rc'
+		bash -lc "set -euo pipefail; /workspace/yams/scripts/build-arch-pkg.sh build; rc=\$?; chown -R \"\${HOST_UID}:\${HOST_GID}\" \"/workspace/yams/${BUILD_DIR}\" 2>/dev/null || true; exit \$rc"
 
 	log "built Arch artifacts:"
-	find "${ABS_BUILD_DIR}" -maxdepth 2 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
+	find "${ABS_BUILD_DIR}" -maxdepth 4 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────
@@ -134,8 +137,9 @@ if [ "${DO_BUILD}" -eq 1 ]; then
 		;;
 	*)
 		log "building cached builder image ${IMAGE}"
-		build_args=(-f "${DOCKERFILE}" -t "${IMAGE}" "${REPO_ROOT}")
+		build_args=(-f "${DOCKERFILE}" -t "${IMAGE}")
 		[ "${NO_CACHE}" -eq 1 ] && build_args+=(--no-cache)
+		build_args+=("${REPO_ROOT}")
 		docker build "${build_args[@]}"
 
 		log "building packages (version=${VERSION}) into ${BUILD_DIR}"

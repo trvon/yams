@@ -10,6 +10,7 @@ pkgname=yams
 _pkgver="${_yams_version:-0.0.0}"
 pkgver="${_pkgver//-/_}"  # makepkg requires version without hyphens; use underscores
 pkgrel="${_yams_release:-1}"
+_yams_build_dir="build/pkg-makepkg-${CARCH}"
 pkgdesc="Yet Another Memory System — persistent content-addressed memory for LLMs"
 arch=(x86_64 aarch64)
 url="https://github.com/trvon/yams"
@@ -22,7 +23,6 @@ makedepends=(
     ninja
     python
     python-pip
-    python-venv
     ccache
     git
     zip
@@ -74,6 +74,7 @@ build() {
     # Build using setup.sh flow
     export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
     export YAMS_CONAN_ARCH="$(uname -m)"
+    export YAMS_BUILD_DIR="${_yams_build_dir}"
     export YAMS_ENABLE_MOBILE_BINDINGS=false
     export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${_pkgver} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto"
     export YAMS_INSTALL_PREFIX="/usr"
@@ -85,8 +86,8 @@ build() {
     # Source Conan build env for meson compile compatibility
     local conan_env=""
     for candidate in \
-        "build/release/build-release/conan/conanbuild.sh" \
-        "build/release/conan/conanbuild.sh"; do
+        "${_yams_build_dir}/build-release/conan/conanbuild.sh" \
+        "${_yams_build_dir}/conan/conanbuild.sh"; do
         if [ -f "$candidate" ]; then
             conan_env="$candidate"
             break
@@ -98,7 +99,7 @@ build() {
         set -u
     fi
 
-    meson compile -C build/release
+    meson compile -C "${_yams_build_dir}"
 }
 
 package() {
@@ -107,8 +108,8 @@ package() {
     # Source Conan build env
     local conan_env=""
     for candidate in \
-        "build/release/build-release/conan/conanbuild.sh" \
-        "build/release/conan/conanbuild.sh"; do
+        "${_yams_build_dir}/build-release/conan/conanbuild.sh" \
+        "${_yams_build_dir}/conan/conanbuild.sh"; do
         if [ -f "$candidate" ]; then
             conan_env="$candidate"
             break
@@ -121,7 +122,7 @@ package() {
     fi
 
     # Install into pkgdir (makepkg provides $pkgdir)
-    meson install -C build/release --destdir "${pkgdir}" --no-rebuild
+    meson install -C "${_yams_build_dir}" --destdir "${pkgdir}" --no-rebuild
 
     # Prune development-only payload (staged headers, pkg-config, static libs)
     bash scripts/prune-runtime-install.sh "${pkgdir}/usr" 2>/dev/null || true

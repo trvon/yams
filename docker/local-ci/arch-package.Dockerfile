@@ -7,12 +7,14 @@
 # Pattern: mirrors docker/local-ci/debian-package.Dockerfile.
 # Built and driven by scripts/local-ci/package-lane.sh (--only arch).
 
-FROM archlinux:latest
+FROM archlinux/archlinux:latest
 
 ENV PATH="/root/.local/bin:${PATH}"
 
 # Provision base build toolchain in a single layer (keeps caching clean).
 RUN set -euxo pipefail; \
+    grep -q '^DisableSandbox$' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf; \
+    grep -q '^[[:space:]]*DownloadUser' /etc/pacman.conf && sed -i 's/^[[:space:]]*DownloadUser/# DownloadUser/' /etc/pacman.conf || true; \
     # Pacman keyring must be initialized before installing packages
     pacman-key --init 2>/dev/null || true; \
     pacman-key --populate archlinux 2>/dev/null || true; \
@@ -25,7 +27,6 @@ RUN set -euxo pipefail; \
         ninja \
         python \
         python-pip \
-        python-venv \
         ccache \
         git \
         zip \

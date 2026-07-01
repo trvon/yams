@@ -53,6 +53,15 @@ usage() {
 	sed -n '2,40p' "${BASH_SOURCE[0]}"
 }
 
+arch_label() {
+	case "$(uname -m)" in
+	x86_64) echo "x86_64" ;;
+	aarch64 | arm64) echo "aarch64" ;;
+	armv7l) echo "armv7h" ;;
+	*) uname -m ;;
+	esac
+}
+
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--only)
@@ -94,12 +103,12 @@ fi
 
 discover_pkg() {
 	local pattern="$1"
-	find "${BUILD_DIR}" -maxdepth 1 -type f -name "${pattern}" 2>/dev/null | LC_ALL=C sort | tail -n1
+	find "${BUILD_DIR}" -maxdepth 4 -type f -name "${pattern}" 2>/dev/null | LC_ALL=C sort | tail -n1
 }
 
 [ -n "${DEB_PKG}" ] || DEB_PKG="$(discover_pkg 'yams-*.deb')"
 [ -n "${RPM_PKG}" ] || RPM_PKG="$(discover_pkg 'yams-*.rpm')"
-[ -n "${ARCH_PKG}" ] || ARCH_PKG="$(discover_pkg 'yams-*-x86_64.pkg.tar.zst')"
+[ -n "${ARCH_PKG}" ] || ARCH_PKG="$(discover_pkg "yams-*-${ARCH_PKG_ARCH:-x86_64}.pkg.tar.zst")"
 
 # Unique run tag so parallel invocations don't collide.
 RUN_TAG="$$"
@@ -115,19 +124,31 @@ validate_lane() {
 		return 1
 	fi
 
+	local platform_args=()
+	if [ "${name}" = "arch" ]; then
+		platform_args=(--platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}")
+	fi
+
 	log "${name}: building substrate image from ${dockerfile#${REPO_ROOT}/}"
-	docker build -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null
+	if ! docker build "${platform_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
+		fail "${name}: failed to build substrate image"
+		return 1
+	fi
 
 	local container="yams-validate-${name}-${RUN_TAG}"
 	docker rm -f "${container}" >/dev/null 2>&1 || true
 
 	log "${name}: booting systemd container"
-	docker run -d --name "${container}" \
+	if ! docker run -d --name "${container}" \
+		"${platform_args[@]}" \
 		--privileged \
 		--cgroupns=host \
 		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 		--tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
-		"${image}" >/dev/null
+		"${image}" >/dev/null; then
+		fail "${name}: failed to start systemd container"
+		return 1
+	fi
 
 	local rc=0
 	# shellcheck disable=SC2064
@@ -146,6 +167,7 @@ validate_lane() {
 	running | degraded) ok "${name}: systemd booted (${state})" ;;
 	*)
 		fail "${name}: systemd did not boot (state='${state}')"
+		docker logs "${container}" 2>/dev/null || true
 		return 1
 		;;
 	esac

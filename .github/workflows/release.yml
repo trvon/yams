@@ -215,36 +215,101 @@ jobs:
           exit 0
       - name: Build Arch Linux (container-based)
         if: matrix.arch_container == true
-        env:
-          YAMS_VERSION: ${{ steps.meta.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
 
+          case "${{ matrix.suffix }}" in
+            linux-x86_64) arch_name="x86_64" ;;
+            linux-arm64) arch_name="aarch64" ;;
+            *) echo "Unexpected Arch suffix: ${{ matrix.suffix }}" >&2; exit 1 ;;
+          esac
+
+          build_dir="build/pkg/arch-${arch_name}"
+          meson_build_dir="${build_dir}/meson-${arch_name}"
+
+          event="${{ github.event_name }}"
+          input_channel="${{ inputs.channel || '' }}"
+          short_hash="$(git rev-parse --short HEAD)"
+
+          if [ "$event" = "push" ]; then
+            channel="stable"
+            version="${GITHUB_REF_NAME#yams-v}"
+            if [ "$version" = "$GITHUB_REF_NAME" ]; then
+              version="${GITHUB_REF_NAME#v}"
+            fi
+            git_ref_value="${{ github.ref }}"
+          elif [ "$event" = "workflow_dispatch" ] && [ -n "$input_channel" ]; then
+            case "$input_channel" in
+              stable)
+                channel="stable"
+                version="${GITHUB_REF_NAME#yams-v}"
+                if [ "$version" = "$GITHUB_REF_NAME" ]; then
+                  version="${GITHUB_REF_NAME#v}"
+                fi
+                git_ref_value="${{ github.ref }}"
+                ;;
+              weekly)
+                channel="weekly"
+                year="$(date -u +%G)"
+                week="$(date -u +%V)"
+                version="weekly-${year}w${week}-${short_hash}"
+                git_ref_value="refs/tags/v${version}"
+                ;;
+              *)
+                channel="nightly"
+                date_compact="$(date -u +%Y%m%d)"
+                version="nightly-${date_compact}-${short_hash}"
+                git_ref_value="refs/tags/v${version}"
+                ;;
+            esac
+          elif [ "$event" = "schedule" ]; then
+            channel="nightly"
+            date_compact="$(date -u +%Y%m%d)"
+            version="nightly-${date_compact}-${short_hash}"
+            git_ref_value="refs/tags/v${version}"
+          else
+            channel="stable"
+            version="${GITHUB_REF_NAME#yams-v}"
+            if [ "$version" = "$GITHUB_REF_NAME" ]; then
+              version="${GITHUB_REF_NAME#v}"
+            fi
+            git_ref_value="${{ github.ref }}"
+          fi
+
+          echo "Arch release channel=${channel} version=${version} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
+
           # Build the Arch builder image (uses cached layers from docker/local-ci/arch-package.Dockerfile)
           docker build -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
-          mkdir -p "${BUILD_DIR:-build/release}"
+          mkdir -p "${build_dir}"
 
           # Run the full Arch build inside the container
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/workspace/yams" \
             -v yams-arch-conan-cache:/root/.conan2 \
             -w /workspace \
-            -e RELEASE_CHANNEL="${{ steps.meta.outputs.channel }}" \
-            -e GIT_REF="${{ github.ref }}" \
-            -e BUILD_DIR="${BUILD_DIR:-build/release}" \
-            -e YAMS_VERSION="${YAMS_VERSION}" \
+            -e RELEASE_CHANNEL="${channel}" \
+            -e GIT_REF="${git_ref_value}" \
+            -e BUILD_DIR="${build_dir}" \
+            -e YAMS_BUILD_DIR="${meson_build_dir}" \
             -e HOST_UID=0 \
             -e HOST_GID=0 \
             yams/ci-arch:latest \
             bash -lc '/workspace/yams/scripts/build-arch-pkg.sh build'
 
-          echo "Arch build complete. Artifacts in ${BUILD_DIR:-build/release}:"
-          find "${BUILD_DIR:-build/release}" -maxdepth 2 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
+          if ls "${build_dir}"/yams-*.pkg.tar.zst >/dev/null 2>&1; then
+            cp -v "${build_dir}"/yams-*.pkg.tar.zst "${GITHUB_WORKSPACE}/"
+          else
+            echo "ERROR: no Arch package produced in ${build_dir}" >&2
+            exit 1
+          fi
+
+          echo "Arch build complete. Artifacts in ${build_dir}:"
+          find "${build_dir}" -maxdepth 4 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
 
           # Write BUILD_DIR for subsequent steps
-          echo "BUILD_DIR=${BUILD_DIR:-build/release}" >> "${GITHUB_ENV}"
+          echo "BUILD_DIR=${build_dir}" >> "${GITHUB_ENV}"
 
       - name: Skip remaining steps for Arch container builds
         if: matrix.arch_container == true
@@ -292,8 +357,8 @@ jobs:
           echo "Cache hit: ${{ steps.cache_conan.outputs.cache-hit }}"
           for d in p r recipes metadata s; do
             if [ -d "$HOME/.conan2/$d" ]; then
-              echo "Directory $d present: $(find $HOME/.conan2/$d -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" entries || true
-              du -sh $HOME/.conan2/$d 2>/dev/null || true
+              echo "Directory $d present: $(find "$HOME/.conan2/$d" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" entries || true
+              du -sh "$HOME/.conan2/$d" 2>/dev/null || true
             else
               echo "Directory $d missing"
             fi
@@ -338,8 +403,8 @@ jobs:
             lld || true
           echo "Installed optional packages: liburing-dev libarchive-dev libtag1-dev libboost-all-dev ccache rpm fakeroot dpkg-dev meson cmake ninja-build clang clang-tools lld"
           # Ensure compilers are preferred
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "CXX=clang++" >> $GITHUB_ENV
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
 
       - name: Install Zig (Linux)
         if: runner.os == 'Linux' && matrix.arch_container != true
@@ -540,10 +605,12 @@ jobs:
       - name: Setup ccache env
         shell: bash
         run: |
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=700M" >> $GITHUB_ENV
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_COMPRESS=1"
+            echo "CCACHE_MAXSIZE=700M"
+          } >> "$GITHUB_ENV"
           ccache -z 2>/dev/null || true
 
       - name: Setup Conan (hosted Linux/macOS)
@@ -783,7 +850,8 @@ jobs:
            echo "YAMS_INSTALL_PREFIX=$YAMS_INSTALL_PREFIX" >> "$GITHUB_ENV"
 
           # For cross-compilation, ensure pkg-config is available
-          export PKG_CONFIG="$(command -v pkg-config)"
+          PKG_CONFIG="$(command -v pkg-config)"
+          export PKG_CONFIG
           echo "Using pkg-config: $PKG_CONFIG"
 
           # Version is already included in YAMS_EXTRA_MESON_FLAGS above. Keep this
@@ -807,12 +875,13 @@ jobs:
           done
           if [ -n "$CONAN_BUILD_ENV" ]; then
             set +u
+            # shellcheck disable=SC1090
             source "$CONAN_BUILD_ENV"
             set -u
           fi
           meson --version
           meson compile -C build/release
-          echo "BUILD_DIR=build/release" >> $GITHUB_ENV
+          echo "BUILD_DIR=build/release" >> "$GITHUB_ENV"
 
       - name: Upload build logs (artifacts)
         if: failure()
@@ -879,6 +948,7 @@ jobs:
           done
           if [ -n "$CONAN_BUILD_ENV" ]; then
             set +u
+            # shellcheck disable=SC1090
             source "$CONAN_BUILD_ENV"
             set -u
           fi
@@ -1046,27 +1116,35 @@ jobs:
       - name: Generate release summary
         shell: bash
         run: |
-          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
-          echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Artifacts"
+            echo "[View artifacts for this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+          } >> "$GITHUB_STEP_SUMMARY"
           SUMMARY_FILE="$BUILD_DIR/release_summary.md"
-          echo "## Release Build Information (${{ steps.meta.outputs.version }})" > "$SUMMARY_FILE"
-          echo "" >> "$SUMMARY_FILE"
-          echo "**Platform:** ${{ matrix.suffix }}" >> "$SUMMARY_FILE"
-          echo "**Build Type:** Release" >> "$SUMMARY_FILE"
-          echo "**Channel:** ${{ steps.meta.outputs.channel }}" >> "$SUMMARY_FILE"
+          {
+            echo "## Release Build Information (${{ steps.meta.outputs.version }})"
+            echo
+            echo "**Platform:** ${{ matrix.suffix }}"
+            echo "**Build Type:** Release"
+            echo "**Channel:** ${{ steps.meta.outputs.channel }}"
+          } > "$SUMMARY_FILE"
 
-          # Only mention CI validation if we actually have CI artifacts
-          if [ -d "ci-artifacts" ] && [ "$(ls -A ci-artifacts/ 2>/dev/null)" ]; then
-            echo "**CI Status:** Tests and benchmarks from CI workflow" >> "$SUMMARY_FILE"
-          fi
-          echo "" >> "$SUMMARY_FILE"
+          {
+            # Only mention CI validation if we actually have CI artifacts
+            if find "ci-artifacts" -mindepth 1 -print -quit >/dev/null 2>&1; then
+              echo "**CI Status:** Tests and benchmarks from CI workflow"
+            fi
+            echo
+          } >> "$SUMMARY_FILE"
 
           # Add benchmark results if available from CI or validation (jq preferred, fallback to grep)
-          if [ -d "$BUILD_DIR/bench_results" ] && ls "$BUILD_DIR/bench_results"/*.json >/dev/null 2>&1; then
-            echo "### Performance Metrics" >> "$SUMMARY_FILE"
-            echo "" >> "$SUMMARY_FILE"
-            echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |" >> "$SUMMARY_FILE"
-            echo "|-----------|--------------|-------------|--------|" >> "$SUMMARY_FILE"
+          if find "$BUILD_DIR/bench_results" -maxdepth 1 -type f -name '*.json' -print -quit >/dev/null 2>&1; then
+            {
+              echo "### Performance Metrics"
+              echo
+              echo "| Benchmark | Time (ns/op) | CPU (ns/op) | Memory |"
+              echo "|-----------|--------------|-------------|--------|"
+            } >> "$SUMMARY_FILE"
             if command -v jq >/dev/null 2>&1; then
               for json_file in "$BUILD_DIR/bench_results"/*.json; do
                 jq -r '.benchmarks[]? | "| ".name // "Unknown" | ".real_time // 0 | floor) | ".cpu_time // 0 | floor) | "' "$json_file" 2>/dev/null | while IFS= read -r line; do
@@ -1205,6 +1283,7 @@ jobs:
             yams-*.rpm
             yams-*.AppImage
             yams-*.pkg
+            yams-*.pkg.tar.zst
             winget-manifests/**
           retention-days: 1
 
@@ -1245,8 +1324,8 @@ jobs:
             exit 0
           fi
 
-          deb="$(ls -1 yams-*linux-${expected_arch}.deb 2>/dev/null | head -n1 || true)"
-          rpm="$(ls -1 yams-*linux-${expected_arch}.rpm 2>/dev/null | head -n1 || true)"
+          deb="$(find . -maxdepth 1 -type f -name "yams-*linux-${expected_arch}.deb" -print -quit | sed 's#^\./##')"
+          rpm="$(find . -maxdepth 1 -type f -name "yams-*linux-${expected_arch}.rpm" -print -quit | sed 's#^\./##')"
 
           args=()
           [ -n "${deb}" ] && args+=(--deb "${deb}")
@@ -1370,32 +1449,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
           rm -rf assets || true
           mkdir -p assets
           # Collect all per-platform release artifacts
           for dir in release-artifacts/release-*; do
             [ -d "$dir" ] || continue
             # Archives
-            cp -v $dir/*.tar.gz assets/ 2>/dev/null || true
-            cp -v $dir/*.zip assets/ 2>/dev/null || true
+            for file in "$dir"/*.tar.gz "$dir"/*.zip; do
+              cp -v "$file" assets/ 2>/dev/null || true
+            done
             # Packages
-            cp -v $dir/*.deb assets/ 2>/dev/null || true
-            cp -v $dir/*.rpm assets/ 2>/dev/null || true
-            cp -v $dir/*.AppImage assets/ 2>/dev/null || true
-            cp -v $dir/*.pkg.tar.zst assets/ 2>/dev/null || true
-            cp -v $dir/*.msi assets/ 2>/dev/null || true
+            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
+              cp -v "$file" assets/ 2>/dev/null || true
+            done
             # Arch repo metadata
             if [ -d "$dir/archrepo" ]; then
-              cp -rv $dir/archrepo assets/archrepo 2>/dev/null || true
+              cp -rv "$dir/archrepo" assets/archrepo 2>/dev/null || true
             fi
             # Summaries & bench json
             if [ -d "$dir/bench_results" ]; then
-              cp -v $dir/bench_results/*.json assets/ 2>/dev/null || true
+              for file in "$dir"/bench_results/*.json; do
+                cp -v "$file" assets/ 2>/dev/null || true
+              done
             fi
             if [ -f "$dir/release_summary.md" ]; then
               cp -v "$dir/release_summary.md" "assets/release_summary-$(basename "$dir").md" 2>/dev/null || true
             fi
           done
+          shopt -u nullglob
           echo "Final assets content:" >&2
           ls -al assets >&2 || true
 
@@ -1406,9 +1488,13 @@ jobs:
           cd assets
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
-          # Check if any distributable files exist before creating SHA256SUMS
-          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi|pkg\.tar\.zst)$' 2>/dev/null; then
-            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi|pkg\.tar\.zst)$' | while read -r f; do
+          mapfile -t distributables < <(find . -maxdepth 1 -type f \( \
+            -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o \
+            -name '*.AppImage' -o -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
+          \) -printf '%f\n' | sort)
+          if [ ${#distributables[@]} -gt 0 ]; then
+            : > SHA256SUMS
+            for f in "${distributables[@]}"; do
               sha256sum "$f" >> SHA256SUMS
             done
             sort -o SHA256SUMS SHA256SUMS
@@ -1439,7 +1525,7 @@ jobs:
         run: |
           COUNT=$(find assets -type f | wc -l | tr -d ' ')
           echo "Discovered $COUNT asset files" >&2
-          echo "file_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "file_count=$COUNT" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" -eq 0 ]; then
             echo "ERROR: No asset files assembled for release." >&2
             exit 1
@@ -1470,7 +1556,12 @@ jobs:
             fi
           done
           if [ -z "$ARM64_FILE" ]; then
-            ARM64_FILE="$(ls -1 assets/*-macos-arm64.zip 2>/dev/null | head -n 1 || true)"
+            shopt -s nullglob
+            for candidate in assets/*-macos-arm64.zip; do
+              ARM64_FILE="$candidate"
+              break
+            done
+            shopt -u nullglob
           fi
 
           for candidate in \
@@ -1698,7 +1789,12 @@ jobs:
             fi
           done
           if [ -z "$ARM64_FILE" ]; then
-            ARM64_FILE="$(ls -1 assets/*-macos-arm64.zip 2>/dev/null | head -n 1 || true)"
+            shopt -s nullglob
+            for candidate in assets/*-macos-arm64.zip; do
+              ARM64_FILE="$candidate"
+              break
+            done
+            shopt -u nullglob
           fi
 
           for candidate in \
@@ -2027,13 +2123,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! ls assets/*.pkg.tar.zst >/dev/null 2>&1; then
+          shopt -s nullglob
+          arch_packages=(assets/*.pkg.tar.zst)
+          shopt -u nullglob
+          if [ ${#arch_packages[@]} -eq 0 ]; then
             echo "No .pkg.tar.zst found; skipping Arch repo generation" >&2
             exit 0
           fi
           ARCH_ROOT="archrepo"
           mkdir -p "${ARCH_ROOT}/os/x86_64" "${ARCH_ROOT}/os/aarch64"
-          for pkg in assets/*.pkg.tar.zst; do
+          for pkg in "${arch_packages[@]}"; do
             pkg_name="$(basename "$pkg")"
             case "$pkg_name" in
               *-x86_64*) cp "$pkg" "${ARCH_ROOT}/os/x86_64/" ;;
@@ -2044,7 +2143,7 @@ jobs:
           if command -v repo-add >/dev/null 2>&1; then
             for arch_dir in "${ARCH_ROOT}/os/"*; do
               [ -d "$arch_dir" ] || continue
-              if ls "$arch_dir"/*.pkg.tar.zst 2>/dev/null | head -1 >/dev/null; then
+              if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
                 cd "$arch_dir"
                 repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" *.pkg.tar.zst || true
                 cd "${GITHUB_WORKSPACE}"
@@ -2060,9 +2159,9 @@ jobs:
             if command -v repo-add >/dev/null 2>&1; then
               for arch_dir in "${ARCH_ROOT}/os/"*; do
                 [ -d "$arch_dir" ] || continue
-                if ls "$arch_dir"/*.pkg.tar.zst 2>/dev/null | head -1 >/dev/null; then
+                if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
                   cd "$arch_dir"
-                  repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" *.pkg.tar.zst || true
+                  repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" -- ./*.pkg.tar.zst || true
                   cd "${GITHUB_WORKSPACE}"
                 fi
               done
@@ -2130,21 +2229,27 @@ jobs:
           echo "Checking if release $TAG already exists" >&2
           if command -v gh >/dev/null 2>&1; then
             if release_json="$(gh release view "$TAG" --json isDraft,url 2>/dev/null)"; then
-              echo "exists=true" >> $GITHUB_OUTPUT
-              draft="$(printf '%s' "$release_json" | sed -n 's/.*"isDraft":[[:space:]]*\(true\|false\).*/\1/p')"
-              url="$(printf '%s' "$release_json" | sed -n 's/.*"url":[[:space:]]*"\([^"]*\)".*/\1/p')"
-              echo "draft=${draft:-unknown}" >> $GITHUB_OUTPUT
-              echo "url=${url:-}" >> $GITHUB_OUTPUT
+              {
+                echo "exists=true"
+                draft="$(printf '%s' "$release_json" | sed -n 's/.*"isDraft":[[:space:]]*\(true\|false\).*/\1/p')"
+                url="$(printf '%s' "$release_json" | sed -n 's/.*"url":[[:space:]]*"\([^"]*\)".*/\1/p')"
+                echo "draft=${draft:-unknown}"
+                echo "url=${url:-}"
+              } >> "$GITHUB_OUTPUT"
             else
-              echo "exists=false" >> $GITHUB_OUTPUT
-              echo "draft=false" >> $GITHUB_OUTPUT
-              echo "url=" >> $GITHUB_OUTPUT
+              {
+                echo "exists=false"
+                echo "draft=false"
+                echo "url="
+              } >> "$GITHUB_OUTPUT"
             fi
           else
             echo "gh CLI not installed; skipping existence check" >&2
-            echo "exists=unknown" >> $GITHUB_OUTPUT
-            echo "draft=unknown" >> $GITHUB_OUTPUT
-            echo "url=" >> $GITHUB_OUTPUT
+            {
+              echo "exists=unknown"
+              echo "draft=unknown"
+              echo "url="
+            } >> "$GITHUB_OUTPUT"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -2209,9 +2314,11 @@ jobs:
             exit 1
           fi
 
-          echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
-          echo "total_expected=$TOTAL_EXPECTED" >> $GITHUB_OUTPUT
-          echo "threshold=$THRESHOLD" >> $GITHUB_OUTPUT
+          {
+            echo "success_count=$SUCCESS_COUNT"
+            echo "total_expected=$TOTAL_EXPECTED"
+            echo "threshold=$THRESHOLD"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Extract release notes from CHANGELOG.md (stable only)
         id: changelog
@@ -2254,8 +2361,8 @@ jobs:
             {
               echo "## ${RELEASE_NAME}"
               echo
-              printf -- '- Channel: `%s`\n' "$CHANNEL"
-              printf -- '- Commit: [`%s`](%s/commit/%s)\n' "$SHORT_SHA" "$REPO_URL" "$FULL_SHA"
+              printf -- "- Channel: \`%s\`\n" "$CHANNEL"
+              printf -- "- Commit: [\`%s\`](%s/commit/%s)\n" "$SHORT_SHA" "$REPO_URL" "$FULL_SHA"
               echo "- Changelog: [CHANGELOG.md]($REPO_URL/blob/main/CHANGELOG.md)"
             } > "$BODY_FILE"
           fi
@@ -2266,21 +2373,25 @@ jobs:
         shell: bash
         run: |
           mkdir -p assets
+          shopt -s nullglob
           # Collect all release files
           for dir in release-artifacts/release-*; do
             if [ -d "$dir" ]; then
               # Move main archive
-              mv $dir/*.{tar.gz,zip} assets/ 2>/dev/null || true
+              for file in "$dir"/*.tar.gz "$dir"/*.zip; do
+                mv "$file" assets/ 2>/dev/null || true
+              done
               # Move Linux packages
-              mv $dir/*.deb assets/ 2>/dev/null || true
-              mv $dir/*.rpm assets/ 2>/dev/null || true
-              mv $dir/*.AppImage assets/ 2>/dev/null || true
-              # Move macOS pkg packages
-              mv $dir/*.pkg assets/ 2>/dev/null || true
+              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg; do
+                mv "$file" assets/ 2>/dev/null || true
+              done
               # Collect benchmark results
-              cp $dir/bench_results/*.json assets/ 2>/dev/null || true
+              for file in "$dir"/bench_results/*.json; do
+                cp "$file" assets/ 2>/dev/null || true
+              done
             fi
           done
+          shopt -u nullglob
           echo "Collected assets:"
           ls -la assets/
       - name: "Dry-run: print release notes (act only)"
