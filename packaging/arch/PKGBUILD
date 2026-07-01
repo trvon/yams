@@ -1,0 +1,137 @@
+# Maintainer: YAMS Contributors <git@trevon.dev>
+# Contributor: YAMS Contributors <git@trevon.dev>
+#
+# Build with:
+#   VERSION=$(git describe --tags --abbrev=7) makepkg --syncdeps --rmdeps --install
+#
+# CI builds pass _yams_version=... and _yams_release=... to makepkg directly.
+
+pkgname=yams
+_pkgver="${_yams_version:-0.0.0}"
+pkgver="${_pkgver//-/_}"  # makepkg requires version without hyphens; use underscores
+pkgrel="${_yams_release:-1}"
+pkgdesc="Yet Another Memory System — persistent content-addressed memory for LLMs"
+arch=(x86_64 aarch64)
+url="https://github.com/trvon/yams"
+license=(Apache-2.0)
+makedepends=(
+    base-devel
+    clang
+    cmake
+    meson
+    ninja
+    python
+    python-pip
+    python-venv
+    ccache
+    git
+    zip
+    pkgconf
+    liburing
+    libarchive
+    taglib
+    sqlite
+    openssl
+    curl
+    protobuf
+    boost
+    lld
+)
+depends=(
+    gcc-libs
+    glibc
+    liburing
+    libarchive
+    taglib
+    sqlite
+    openssl
+    curl
+    boost-libs
+)
+optdepends=(
+    'onnxruntime: ONNX-based embedding acceleration'
+)
+install=yams.install
+source=("${pkgname}-${pkgver}.tar.gz::${_yams_git_source:-git+${url}}")
+sha256sums=('SKIP')
+
+build() {
+    cd "${srcdir}/yams"
+
+    # Use Conan + Meson (same flow as Debian/Fedora builds)
+    if ! command -v conan >/dev/null 2>&1; then
+        python -m venv /tmp/yams-conan-venv
+        source /tmp/yams-conan-venv/bin/activate
+        pip install --upgrade 'conan<3' meson ninja
+    fi
+
+    export PATH="${HOME}/.local/bin:${PATH}"
+
+    # Configure Conan
+    conan profile detect --force 2>/dev/null || true
+    cp .conan/global.conf "${HOME}/.conan2/global.conf" 2>/dev/null || true
+
+    # Build using setup.sh flow
+    export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
+    export YAMS_CONAN_ARCH="$(uname -m)"
+    export YAMS_ENABLE_MOBILE_BINDINGS=false
+    export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${_pkgver} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto"
+    export YAMS_INSTALL_PREFIX="/usr"
+    export CC=clang
+    export CXX=clang++
+
+    bash ./setup.sh Release
+
+    # Source Conan build env for meson compile compatibility
+    local conan_env=""
+    for candidate in \
+        "build/release/build-release/conan/conanbuild.sh" \
+        "build/release/conan/conanbuild.sh"; do
+        if [ -f "$candidate" ]; then
+            conan_env="$candidate"
+            break
+        fi
+    done
+    if [ -n "$conan_env" ]; then
+        set +u
+        source "$conan_env"
+        set -u
+    fi
+
+    meson compile -C build/release
+}
+
+package() {
+    cd "${srcdir}/yams"
+
+    # Source Conan build env
+    local conan_env=""
+    for candidate in \
+        "build/release/build-release/conan/conanbuild.sh" \
+        "build/release/conan/conanbuild.sh"; do
+        if [ -f "$candidate" ]; then
+            conan_env="$candidate"
+            break
+        fi
+    done
+    if [ -n "$conan_env" ]; then
+        set +u
+        source "$conan_env"
+        set -u
+    fi
+
+    # Install into pkgdir (makepkg provides $pkgdir)
+    meson install -C build/release --destdir "${pkgdir}" --no-rebuild
+
+    # Prune development-only payload (staged headers, pkg-config, static libs)
+    bash scripts/prune-runtime-install.sh "${pkgdir}/usr" 2>/dev/null || true
+
+    # Install systemd unit + preset
+    install -Dm644 packaging/systemd/yams-daemon.service \
+        "${pkgdir}/usr/lib/systemd/system/yams-daemon.service"
+    install -Dm644 packaging/systemd/80-yams.preset \
+        "${pkgdir}/usr/lib/systemd/system-preset/80-yams.preset"
+
+    # Install license
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

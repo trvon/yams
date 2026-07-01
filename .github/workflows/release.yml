@@ -153,6 +153,22 @@ jobs:
             build_packages: true
             meson_args: ""
             hosted: true
+          - os: arch-linux-hosted
+            runs_on: ubuntu-24.04
+            suffix: linux-x86_64
+            packaging: pkg.tar.zst
+            build_packages: true
+            meson_args: ""
+            hosted: false
+            arch_container: true
+          - os: arch-linux-hosted-arm64
+            runs_on: ubuntu-24.04-arm
+            suffix: linux-arm64
+            packaging: pkg.tar.zst
+            build_packages: true
+            meson_args: ""
+            hosted: false
+            arch_container: true
     runs-on: ${{ matrix.runs_on }}
     env:
       STAGE_DIR: stage
@@ -197,8 +213,48 @@ jobs:
         run: |
           echo "macos_only=true: skipping linux-hosted build-release job entry"
           exit 0
+      - name: Build Arch Linux (container-based)
+        if: matrix.arch_container == true
+        env:
+          YAMS_VERSION: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Build the Arch builder image (uses cached layers from docker/local-ci/arch-package.Dockerfile)
+          docker build -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
+
+          mkdir -p "${BUILD_DIR:-build/release}"
+
+          # Run the full Arch build inside the container
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace/yams" \
+            -v yams-arch-conan-cache:/root/.conan2 \
+            -w /workspace \
+            -e RELEASE_CHANNEL="${{ steps.meta.outputs.channel }}" \
+            -e GIT_REF="${{ github.ref }}" \
+            -e BUILD_DIR="${BUILD_DIR:-build/release}" \
+            -e YAMS_VERSION="${YAMS_VERSION}" \
+            -e HOST_UID=0 \
+            -e HOST_GID=0 \
+            yams/ci-arch:latest \
+            bash -lc '/workspace/yams/scripts/build-arch-pkg.sh build'
+
+          echo "Arch build complete. Artifacts in ${BUILD_DIR:-build/release}:"
+          find "${BUILD_DIR:-build/release}" -maxdepth 2 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
+
+          # Write BUILD_DIR for subsequent steps
+          echo "BUILD_DIR=${BUILD_DIR:-build/release}" >> "${GITHUB_ENV}"
+
+      - name: Skip remaining steps for Arch container builds
+        if: matrix.arch_container == true
+        shell: bash
+        run: |
+          echo "Arch container build completed — skipping host-level build steps"
+          # Signal success; subsequent packaging/upload steps handle arch artifacts
+
       - name: Verify runner architecture (act diagnostics)
-        if: github.actor == 'nektos/act' && matrix.os == 'linux-hosted'
+        if: github.actor == 'nektos/act' && matrix.os == 'linux-hosted' && matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -256,7 +312,7 @@ jobs:
             ccache-${{ runner.os }}-
 
       - name: Install optional system dependencies (Linux only)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.arch_container != true
         continue-on-error: true
         shell: bash
         run: |
@@ -286,7 +342,7 @@ jobs:
           echo "CXX=clang++" >> $GITHUB_ENV
 
       - name: Install Zig (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -675,9 +731,9 @@ jobs:
           # Set BUILD_DIR for subsequent steps
           "BUILD_DIR=build/release" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Release build for Linux/macOS targets
+      # Release build for Linux/macOS targets (not Arch container builds)
       - name: Configure and Build Release (Optimized)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
           echo "Optimized release build for ${{ matrix.suffix }}"
@@ -801,7 +857,7 @@ jobs:
           fi
 
       - name: Install (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
           # Ensure BUILD_DIR is properly set
@@ -838,7 +894,7 @@ jobs:
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
       - name: Prune staged runtime payload (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -1036,7 +1092,7 @@ jobs:
           cat "$SUMMARY_FILE"
 
       - name: Package
-        if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' && matrix.packaging != 'msi' }}
+        if: ${{ inputs.fast_mode != 'true' && github.actor != 'nektos/act' && matrix.packaging != 'msi' && matrix.packaging != 'pkg.tar.zst' }}
         shell: bash
         run: |
           STAGE_PATH="${{ env.STAGE_DIR }}"
@@ -1060,7 +1116,7 @@ jobs:
           echo "Created asset: $OUTDIR/$ASSET"
 
       - name: Build Linux packages (DEB/RPM)
-        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' && matrix.packaging != 'pkg.tar.zst' }}
         env:
           BASE_VERSION: ${{ steps.meta.outputs.base_version }}
         shell: bash
@@ -1079,7 +1135,7 @@ jobs:
           fi
 
       - name: Smoke-test ONNX plugin load (Linux)
-        if: ${{ runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        if: ${{ runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' && matrix.arch_container != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1123,7 +1179,7 @@ jobs:
         run: |
           # Only generate once (linux-hosted) to avoid artifact name collision across matrix entries.
           # Update to reflect current matrix total (5 platforms: linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64)
-          echo '{"total": 5}' > matrix.json
+          echo '{"total": 7}' > matrix.json
 
       - name: Upload matrix metadata
         if: matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -1153,7 +1209,7 @@ jobs:
           retention-days: 1
 
       - name: Verify Linux package artifacts
-        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' && matrix.arch_container != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1173,7 +1229,7 @@ jobs:
           echo "Linux package verification complete"
 
       - name: Validate Linux package install (systemd lanes)
-        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' && matrix.arch_container != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1326,8 +1382,12 @@ jobs:
             cp -v $dir/*.deb assets/ 2>/dev/null || true
             cp -v $dir/*.rpm assets/ 2>/dev/null || true
             cp -v $dir/*.AppImage assets/ 2>/dev/null || true
-            # Windows MSI packages
+            cp -v $dir/*.pkg.tar.zst assets/ 2>/dev/null || true
             cp -v $dir/*.msi assets/ 2>/dev/null || true
+            # Arch repo metadata
+            if [ -d "$dir/archrepo" ]; then
+              cp -rv $dir/archrepo assets/archrepo 2>/dev/null || true
+            fi
             # Summaries & bench json
             if [ -d "$dir/bench_results" ]; then
               cp -v $dir/bench_results/*.json assets/ 2>/dev/null || true
@@ -1347,8 +1407,8 @@ jobs:
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
           # Check if any distributable files exist before creating SHA256SUMS
-          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi)$' 2>/dev/null; then
-            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi)$' | while read -r f; do
+          if ls -1 | grep -qE '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi|pkg\.tar\.zst)$' 2>/dev/null; then
+            ls -1 | grep -E '\.(tar.gz|zip|deb|rpm|AppImage|pkg|msi|pkg\.tar\.zst)$' | while read -r f; do
               sha256sum "$f" >> SHA256SUMS
             done
             sort -o SHA256SUMS SHA256SUMS
@@ -1962,6 +2022,77 @@ jobs:
           path: yumrepo/
           retention-days: 7
 
+      - name: Build Arch repository metadata (stable only, arch packages present)
+        if: steps.meta.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! ls assets/*.pkg.tar.zst >/dev/null 2>&1; then
+            echo "No .pkg.tar.zst found; skipping Arch repo generation" >&2
+            exit 0
+          fi
+          ARCH_ROOT="archrepo"
+          mkdir -p "${ARCH_ROOT}/os/x86_64" "${ARCH_ROOT}/os/aarch64"
+          for pkg in assets/*.pkg.tar.zst; do
+            pkg_name="$(basename "$pkg")"
+            case "$pkg_name" in
+              *-x86_64*) cp "$pkg" "${ARCH_ROOT}/os/x86_64/" ;;
+              *-aarch64*) cp "$pkg" "${ARCH_ROOT}/os/aarch64/" ;;
+              *) cp "$pkg" "${ARCH_ROOT}/" ;;
+            esac
+          done
+          if command -v repo-add >/dev/null 2>&1; then
+            for arch_dir in "${ARCH_ROOT}/os/"*; do
+              [ -d "$arch_dir" ] || continue
+              if ls "$arch_dir"/*.pkg.tar.zst 2>/dev/null | head -1 >/dev/null; then
+                cd "$arch_dir"
+                repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" *.pkg.tar.zst || true
+                cd "${GITHUB_WORKSPACE}"
+              fi
+            done
+            cd "${ARCH_ROOT}"
+            [ -f yams.db.tar.gz ] && ln -sf yams.db.tar.gz yams.db
+            [ -f yams.files.tar.gz ] && ln -sf yams.files.tar.gz yams.files
+            cd "${GITHUB_WORKSPACE}"
+          else
+            echo "repo-add not available; installing pacman tools" >&2
+            sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools zstd pacman-package-manager 2>/dev/null || true
+            if command -v repo-add >/dev/null 2>&1; then
+              for arch_dir in "${ARCH_ROOT}/os/"*; do
+                [ -d "$arch_dir" ] || continue
+                if ls "$arch_dir"/*.pkg.tar.zst 2>/dev/null | head -1 >/dev/null; then
+                  cd "$arch_dir"
+                  repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" *.pkg.tar.zst || true
+                  cd "${GITHUB_WORKSPACE}"
+                fi
+              done
+              cd "${ARCH_ROOT}"
+              [ -f yams.db.tar.gz ] && ln -sf yams.db.tar.gz yams.db
+              [ -f yams.files.tar.gz ] && ln -sf yams.files.tar.gz yams.files
+              cd "${GITHUB_WORKSPACE}"
+            fi
+          fi
+          printf '%s\n' \
+            'Add Arch repo (unsigned):' \
+            '  sudo tee /etc/pacman.d/yams.conf <<REPO' \
+            '  [yams]' \
+            '  SigLevel = Optional TrustAll' \
+            '  Server = https://repo.yamsmemory.ai/archrepo/' \
+            '  REPO' \
+            '' \
+            'Then install:' \
+            '  sudo pacman -Sy yams' \
+            > "${ARCH_ROOT}/USAGE.txt"
+          tree "${ARCH_ROOT}" 2>/dev/null || find "${ARCH_ROOT}" -maxdepth 3 -type f -print
+
+      - name: Upload Arch repo artifact
+        if: steps.meta.outputs.channel == 'stable' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-repo
+          path: archrepo/
+          retention-days: 7
+
       - name: Generate latest manifest (latest.json)
         shell: bash
         run: |
@@ -2235,7 +2366,7 @@ jobs:
           verify_asset_url "$(basename "${arm64_candidates[0]}")"
           verify_asset_url "$(basename "${x86_64_candidates[0]}")"
 
-      - name: Publish APT/YUM/latest.json to R2 (stable only)
+      - name: Publish APT/YUM/Arch/latest.json to R2 (stable only)
         if: ${{ steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
@@ -2266,6 +2397,8 @@ jobs:
               *.gz) ct="application/gzip" ;;
               *.deb) ct="application/vnd.debian.binary-package" ;;
               *.rpm) ct="application/x-rpm" ;;
+              *.pkg.tar.zst) ct="application/zstd" ;;
+              *.db|*.files) ct="application/gzip" ;;
               *.asc) ct="application/pgp-signature" ;;
             esac
             echo "-- Upload $key" >&2
@@ -2286,6 +2419,11 @@ jobs:
           if [ -d yumrepo ]; then
             find yumrepo -type f -print0 | while IFS= read -r -d '' f; do
               rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
+            done
+          fi
+          if [ -d archrepo ]; then
+            find archrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#archrepo/}"; upload_file "$f" "archrepo/$rel";
             done
           fi
           if [ -f assets/latest.json ]; then

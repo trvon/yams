@@ -1,0 +1,38 @@
+# Arch Linux install script for YAMS
+# Handles systemd daemon registration, enable, start, stop, and teardown.
+
+UNIT=yams-daemon.service
+
+post_install() {
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null 2>&1 || true
+        # Enable per systemd preset (80-yams.preset ships with the package)
+        systemctl preset "${UNIT}" >/dev/null 2>&1 || true
+        # Start now (first install — pacman -U)
+        systemctl start "${UNIT}" >/dev/null 2>&1 || true
+    fi
+}
+
+post_upgrade() {
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null 2>&1 || true
+        # Restart if it was running, otherwise just re-enable
+        if systemctl is-active --quiet "${UNIT}" 2>/dev/null; then
+            systemctl restart "${UNIT}" >/dev/null 2>&1 || true
+        else
+            systemctl preset "${UNIT}" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+pre_remove() {
+    if [ -d /run/systemd/system ]; then
+        systemctl stop "${UNIT}" >/dev/null 2>&1 || true
+    fi
+}
+
+post_remove() {
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null 2>&1 || true
+    fi
+}

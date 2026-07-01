@@ -78,6 +78,14 @@ jobs:
           path: repo-artifacts/yum-repo
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download repo artifacts (arch-repo)
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve-run.outputs.run_id }}
+          name: arch-repo
+          path: repo-artifacts/arch-repo
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Prepare upload set
         id: prep
         shell: bash
@@ -91,6 +99,9 @@ jobs:
           if [ -d repo-artifacts/yum-repo ]; then
             mv repo-artifacts/yum-repo yumrepo
           fi
+          if [ -d repo-artifacts/arch-repo ]; then
+            mv repo-artifacts/arch-repo archrepo
+          fi
           # latest.json is inside assets attached to release; we attempt fetch from GitHub release API.
           TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName') || TAG=""
           if [ -z "$TAG" ]; then
@@ -102,11 +113,12 @@ jobs:
           # Summaries
           echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
           echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          echo "HAS_ARCH=$([ -d archrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to R2
-        if: ${{ steps.prep.outputs.HAS_APT == '1' || steps.prep.outputs.HAS_YUM == '1' }}
+        if: ${{ steps.prep.outputs.HAS_APT == '1' || steps.prep.outputs.HAS_YUM == '1' || steps.prep.outputs.HAS_ARCH == '1' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -136,6 +148,8 @@ jobs:
               *.gz) ct="application/gzip" ;;
               *.deb) ct="application/vnd.debian.binary-package" ;;
               *.rpm) ct="application/x-rpm" ;;
+              *.pkg.tar.zst) ct="application/zstd" ;;
+              *.db|*.files) ct="application/gzip" ;;
               *.asc) ct="application/pgp-signature" ;;
             esac
             echo "-- Upload $key" >&2
@@ -158,11 +172,16 @@ jobs:
               rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
             done
           fi
+          if [ -d archrepo ]; then
+            find archrepo -type f -print0 | while IFS= read -r -d '' f; do
+              rel="${f#archrepo/}"; upload_file "$f" "archrepo/$rel";
+            done
+          fi
           if [ -f latest.json ]; then
             upload_file latest.json latest.json
           fi
           echo "Publish complete." >&2
 
       - name: Warn if nothing to publish
-        if: ${{ steps.prep.outputs.HAS_APT != '1' && steps.prep.outputs.HAS_YUM != '1' }}
+        if: ${{ steps.prep.outputs.HAS_APT != '1' && steps.prep.outputs.HAS_YUM != '1' && steps.prep.outputs.HAS_ARCH != '1' }}
         run: echo "No repo artifacts found to publish." >&2
