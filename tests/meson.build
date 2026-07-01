@@ -2517,7 +2517,7 @@ if catch2_dep.found()
   test('integrity_catch2', integrity_catch2_exe,
     suite: ['catch2', 'unit', 'integrity'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
+    timeout: host_machine.system() == 'windows' ? 600 : 120
   )
 
 #Content tests

@@ -472,9 +472,16 @@ if host_machine.system() == 'windows'
 
   # As a last resort, probe the Conan cache directly (~/.conan2/p/**/p/bin) via a tiny Python helper
   py_mod = import('python')
-  python3 = py_mod.find_installation('python3', required: false)
-  if not python3.found()
+  if host_machine.system() == 'windows'
     python3 = py_mod.find_installation('python', required: false)
+    if not python3.found()
+      python3 = py_mod.find_installation('python3', required: false)
+    endif
+  else
+    python3 = py_mod.find_installation('python3', required: false)
+    if not python3.found()
+      python3 = py_mod.find_installation('python', required: false)
+    endif
   endif
 
   if python3.found()
@@ -660,7 +667,11 @@ else
   _effective_version = meson.project_version()
 endif
 
-python_exe = find_program('python3', 'python')
+if host_machine.system() == 'windows'
+  python_exe = find_program('python', 'python3')
+else
+  python_exe = find_program('python3', 'python')
+endif
 _git_cmd = find_program('git', required: false)
 _git_exe = _git_cmd.found() ? _git_cmd.full_path() : 'git'
 version_header_template = files('include/yams/version_generated.h.in')[0]

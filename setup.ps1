@@ -299,17 +299,171 @@ if (-not $env:YAMS_ENABLE_MODULES) {
 
 Write-Host "Decision trace: VS=$vsVersion (install=$vsInstallVersion), MSVC=$msvcVersion, Toolset=$($env:VCToolsVersion), C++=$($env:YAMS_CPPSTD), Modules=$enableModules"
 
+function Resolve-PythonExecutable {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+    if ($pyLauncher) {
+        try {
+            $resolved = & $pyLauncher -3 -c "import sys; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $resolved) {
+                $candidates.Add($resolved.Trim())
+            }
+        } catch {}
+    }
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+    if ($pythonCmd -and $pythonCmd -notmatch '\\WindowsApps\\') {
+        $candidates.Add($pythonCmd)
+    }
+
+    $scoopPythonRoot = Join-Path $env:USERPROFILE 'scoop\apps\python'
+    if (Test-Path $scoopPythonRoot) {
+        Get-ChildItem -Path $scoopPythonRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d' } |
+            Sort-Object Name -Descending |
+            ForEach-Object {
+                $candidate = Join-Path $_.FullName 'python.exe'
+                if (Test-Path $candidate) {
+                    $candidates.Add($candidate)
+                }
+            }
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+
+        try {
+            $normalized = [System.IO.Path]::GetFullPath($candidate)
+        } catch {
+            $normalized = $candidate
+        }
+
+        if ($seen.ContainsKey($normalized)) {
+            continue
+        }
+        $seen[$normalized] = $true
+
+        try {
+            $resolved = & $normalized -c "import sys; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $resolved) {
+                return $resolved.Trim()
+            }
+        } catch {}
+    }
+
+    return $null
+}
+
+function Prepend-PathEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathEntry
+    )
+
+    if ((Test-Path $PathEntry) -and ($env:PATH -notlike "*$PathEntry*")) {
+        $env:PATH = "$PathEntry;$env:PATH"
+    }
+}
+
+function Resolve-ToolExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName,
+
+        [string[]]$ScoopRelativePaths = @("$CommandName.exe"),
+
+        [string[]]$VersionArguments = @('--version')
+    )
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $commandPath = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+    if ($commandPath -and $commandPath -notmatch '\\WindowsApps\\' -and $commandPath -notmatch '\\scoop\\shims\\') {
+        $candidates.Add($commandPath)
+    }
+
+    $scoopToolRoot = Join-Path $env:USERPROFILE ("scoop\\apps\\" + $CommandName)
+    if (Test-Path $scoopToolRoot) {
+        Get-ChildItem -Path $scoopToolRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d' } |
+            Sort-Object Name -Descending |
+            ForEach-Object {
+                foreach ($relativePath in $ScoopRelativePaths) {
+                    $candidate = Join-Path $_.FullName $relativePath
+                    if (Test-Path $candidate) {
+                        $candidates.Add($candidate)
+                    }
+                }
+            }
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+
+        try {
+            $normalized = [System.IO.Path]::GetFullPath($candidate)
+        } catch {
+            $normalized = $candidate
+        }
+
+        if ($seen.ContainsKey($normalized)) {
+            continue
+        }
+        $seen[$normalized] = $true
+
+        try {
+            & $normalized @VersionArguments *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $normalized
+            }
+        } catch {}
+    }
+
+    return $null
+}
+
 # Ensure Python tools
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+$pythonExe = Resolve-PythonExecutable
+if (-not $pythonExe) {
     Write-Error 'python not found in PATH. Please install Python 3.x and retry.'
 }
+
+$pythonDir = Split-Path -Parent $pythonExe
+Prepend-PathEntry $pythonDir
+$pythonScriptsDir = Join-Path $pythonDir 'Scripts'
+if (Test-Path $pythonScriptsDir) {
+    Prepend-PathEntry $pythonScriptsDir
+}
+$env:PYTHON = $pythonExe
+$env:YAMS_PYTHON = $pythonExe
+Write-Host "Using Python: $pythonExe"
+
+$conanExe = Resolve-ToolExecutable -CommandName 'conan'
+$mesonExe = Resolve-ToolExecutable -CommandName 'meson'
+$ninjaExe = Resolve-ToolExecutable -CommandName 'ninja'
+$gitExe = Resolve-ToolExecutable -CommandName 'git' -ScoopRelativePaths @('cmd\\git.exe', 'bin\\git.exe')
+foreach ($toolExe in @($gitExe, $ninjaExe, $mesonExe, $conanExe)) {
+    if ($toolExe) {
+        Prepend-PathEntry (Split-Path -Parent $toolExe)
+    }
+}
+if ($conanExe) { Write-Host "Using Conan: $conanExe" }
+if ($mesonExe) { Write-Host "Using Meson: $mesonExe" }
+if ($ninjaExe) { Write-Host "Using Ninja: $ninjaExe" }
+if ($gitExe) { Write-Host "Using Git: $gitExe" }
 
 # Check if required tools are already installed (e.g., by CI workflow)
 # Only install if missing to avoid version conflicts with globally installed packages
 $needsInstall = @()
-if (-not (Get-Command conan -ErrorAction SilentlyContinue)) { $needsInstall += 'conan' }
-if (-not (Get-Command meson -ErrorAction SilentlyContinue)) { $needsInstall += 'meson' }
-if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { $needsInstall += 'ninja' }
+if (-not $conanExe) { $needsInstall += 'conan' }
+if (-not $mesonExe) { $needsInstall += 'meson' }
+if (-not $ninjaExe) { $needsInstall += 'ninja' }
 
 if ($needsInstall.Count -gt 0) {
     if ($Offline -or $SystemDeps) {
@@ -317,15 +471,15 @@ if ($needsInstall.Count -gt 0) {
     }
 
     Write-Host "Installing missing tools: $($needsInstall -join ', ')"
-    python -m pip install --user --upgrade pip | Out-Null
+    & $pythonExe -m pip install --user --upgrade pip | Out-Null
     # Install numpy as it is often required by boost build checks even if python is disabled
-    python -m pip install --user conan meson ninja numpy | Out-Null
+    & $pythonExe -m pip install --user conan meson ninja numpy | Out-Null
 } else {
     Write-Host "Build tools already installed (conan, meson, ninja)"
 }
 
 # Make sure user-local Python scripts are on PATH
-$UserBase = python -m site --user-base
+$UserBase = & $pythonExe -m site --user-base
 $UserBin = Join-Path $UserBase 'Scripts'
 if ($env:PATH -notlike "*$UserBin*") {
     $env:PATH = "$UserBin;$env:PATH"

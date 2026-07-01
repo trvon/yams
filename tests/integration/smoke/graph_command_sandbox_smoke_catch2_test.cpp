@@ -291,19 +291,18 @@ TEST_CASE("IntegrationSmoke.GraphCommandFallsBackToInProcessWhenDaemonUnavailabl
     fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
 
     INFO(out);
-    CHECK(rc == 0);
+    CHECK((rc == 0));
     INFO(out);
-    CHECK(out.find("Connection failed") == std::string::npos);
+    CHECK((out.find("Connection failed") == std::string::npos));
     INFO(out);
-    CHECK(out.find("Operation not permitted") == std::string::npos);
+    CHECK((out.find("Operation not permitted") == std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][integrationsmoke]") {
     const fs::path root = yams::test::make_temp_dir("yams_graph_socket_forced_");
     const fs::path dataDir = root / "data";
-    const fs::path blockedSocketDir = root / "blocked-socket";
+    const fs::path pinnedSocket = root / "missing-socket" / "daemon.sock";
     fs::create_directories(dataDir);
-    fs::create_directories(blockedSocketDir);
 
     yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("0"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
@@ -312,19 +311,16 @@ TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][inte
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
     yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
     yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
-    yams::test::ScopedEnvVar daemonSocket("YAMS_DAEMON_SOCKET",
-                                          (blockedSocketDir / "daemon.sock").string());
-
-    std::error_code ec;
-    fs::permissions(blockedSocketDir, fs::perms::none, fs::perm_options::replace, ec);
+    yams::test::ScopedEnvVar daemonSocket("YAMS_DAEMON_SOCKET", pinnedSocket.string());
+    yams::test::ScopedEnvVar daemonSocketPath("YAMS_DAEMON_SOCKET_PATH", pinnedSocket.string());
+    yams::test::ScopedEnvVar disableAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART",
+                                              std::string("1"));
 
     std::string out;
     const int rc = run_cli({"yams", "graph", "--list-types", "--json"}, &out);
 
-    fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
-
     INFO(out);
-    CHECK(rc != 0);
+    CHECK((rc != 0));
 }
 
 TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrationsmoke]") {
@@ -343,25 +339,25 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     const int jsonRc = run_cli(
         {"yams", "graph", "--explore", "exploreEntry", "--max-files", "1", "--json"}, &jsonOut);
     INFO(jsonOut);
-    REQUIRE(jsonRc == 0);
+    REQUIRE((jsonRc == 0));
     auto parsed = nlohmann::json::parse(jsonOut);
-    CHECK(parsed["query"] == "exploreEntry");
+    CHECK((parsed["query"] == "exploreEntry"));
     REQUIRE_FALSE(parsed["entrySymbols"].empty());
-    CHECK(parsed["entrySymbols"][0]["label"] == "exploreEntry");
+    CHECK((parsed["entrySymbols"][0]["label"] == "exploreEntry"));
     REQUIRE_FALSE(parsed["files"].empty());
-    CHECK(parsed["files"][0]["content"].get<std::string>().find("4\tint exploreEntry()") !=
-          std::string::npos);
+    CHECK((parsed["files"][0]["content"].get<std::string>().find("4\tint exploreEntry()") !=
+           std::string::npos));
     REQUIRE_FALSE(parsed["relationships"].empty());
-    CHECK(parsed["relationships"][0]["relation"] == "calls");
+    CHECK((parsed["relationships"][0]["relation"] == "calls"));
 
     std::string humanOut;
     const int humanRc =
         run_cli({"yams", "graph", "--explore", "exploreEntry", "--max-files", "1"}, &humanOut);
     INFO(humanOut);
-    REQUIRE(humanRc == 0);
-    CHECK(humanOut.find("Graph Explore") != std::string::npos);
-    CHECK(humanOut.find("exploreEntry --calls--> exploreTarget") != std::string::npos);
-    CHECK(humanOut.find("4\tint exploreEntry()") != std::string::npos);
+    REQUIRE((humanRc == 0));
+    CHECK((humanOut.find("Graph Explore") != std::string::npos));
+    CHECK((humanOut.find("exploreEntry --calls--> exploreTarget") != std::string::npos));
+    CHECK((humanOut.find("4\tint exploreEntry()") != std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {
@@ -380,18 +376,18 @@ TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][inte
     const int snapshotRc =
         run_cli({"yams", "graph", "--topology-snapshots", "--json"}, &snapshotOut);
     INFO(snapshotOut);
-    REQUIRE(snapshotRc == 0);
+    REQUIRE((snapshotRc == 0));
     auto snapshotJson = nlohmann::json::parse(snapshotOut);
-    CHECK(snapshotJson["snapshot"]["snapshot_id"] == fixture.snapshotId);
-    CHECK(snapshotJson["snapshot"]["cluster_count"].get<std::size_t>() >= 1);
+    CHECK((snapshotJson["snapshot"]["snapshot_id"] == fixture.snapshotId));
+    CHECK((snapshotJson["snapshot"]["cluster_count"].get<std::size_t>() >= 1));
 
     std::string clustersOut;
     const int clustersRc =
         run_cli({"yams", "graph", "--topology-clusters", "--json"}, &clustersOut);
     INFO(clustersOut);
-    REQUIRE(clustersRc == 0);
+    REQUIRE((clustersRc == 0));
     auto clustersJson = nlohmann::json::parse(clustersOut);
-    CHECK(clustersJson["snapshot_id"] == fixture.snapshotId);
+    CHECK((clustersJson["snapshot_id"] == fixture.snapshotId));
     REQUIRE_FALSE(clustersJson["clusters"].empty());
     CHECK(clustersJson["clusters"][0].contains("role_summary"));
     CHECK(clustersJson["clusters"][0].contains("scoped_member_count"));
@@ -400,10 +396,10 @@ TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][inte
     const int clusterRc =
         run_cli({"yams", "graph", "--cluster", fixture.firstClusterId, "--json"}, &clusterOut);
     INFO(clusterOut);
-    REQUIRE(clusterRc == 0);
+    REQUIRE((clusterRc == 0));
     auto clusterJson = nlohmann::json::parse(clusterOut);
-    CHECK(clusterJson["snapshot_id"] == fixture.snapshotId);
-    CHECK(clusterJson["cluster"]["cluster_id"] == fixture.firstClusterId);
+    CHECK((clusterJson["snapshot_id"] == fixture.snapshotId));
+    CHECK((clusterJson["cluster"]["cluster_id"] == fixture.firstClusterId));
     CHECK(clusterJson["cluster"].contains("role_summary"));
     CHECK(clusterJson["cluster"].contains("role_counts"));
     REQUIRE(clusterJson["members"].is_array());

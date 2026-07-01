@@ -1,6 +1,26 @@
 #pragma once
 
+#ifdef __has_include
+#if __has_include(<spdlog/spdlog.h>)
 #include <spdlog/spdlog.h>
+#elif __has_include("spdlog/spdlog.h")
+#include "spdlog/spdlog.h"
+#else
+namespace spdlog {
+template <typename... Args> inline void debug(const char*, Args&&...) {}
+template <typename... Args> inline void info(const char*, Args&&...) {}
+template <typename... Args> inline void warn(const char*, Args&&...) {}
+template <typename... Args> inline void error(const char*, Args&&...) {}
+} // namespace spdlog
+#endif
+#else
+namespace spdlog {
+template <typename... Args> inline void debug(const char*, Args&&...) {}
+template <typename... Args> inline void info(const char*, Args&&...) {}
+template <typename... Args> inline void warn(const char*, Args&&...) {}
+template <typename... Args> inline void error(const char*, Args&&...) {}
+} // namespace spdlog
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -803,6 +823,9 @@ inline bool is_socket_mode_forced_by_env() {
 
 inline bool explicit_socket_without_autostart() {
     const char* socketPath = std::getenv("YAMS_DAEMON_SOCKET_PATH");
+    if (socketPath == nullptr || *socketPath == '\0') {
+        socketPath = std::getenv("YAMS_DAEMON_SOCKET");
+    }
     if (socketPath == nullptr || *socketPath == '\0') {
         return false;
     }

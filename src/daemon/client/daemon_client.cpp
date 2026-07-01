@@ -1,5 +1,11 @@
 #define _CRT_SECURE_NO_WARNINGS
+#if __has_include(<yams/common/fs_utils.h>)
 #include <yams/common/fs_utils.h>
+#elif __has_include("yams/common/fs_utils.h")
+#include "yams/common/fs_utils.h"
+#else
+#include "../../../include/yams/common/fs_utils.h"
+#endif
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/client_transport.h>
@@ -511,7 +517,14 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
     if (pImpl->resolvedTransportMode_ == ClientTransportMode::Socket) {
         const bool socketForcedByEnv = []() {
             if (const char* raw = std::getenv("YAMS_DAEMON_SOCKET_PATH")) {
-                return *raw != '\0';
+                if (*raw != '\0') {
+                    return true;
+                }
+            }
+            if (const char* raw = std::getenv("YAMS_DAEMON_SOCKET")) {
+                if (*raw != '\0') {
+                    return true;
+                }
             }
             return false;
         }();

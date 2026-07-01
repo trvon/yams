@@ -1,4 +1,15 @@
+#if __has_include(<spdlog/spdlog.h>)
 #include <spdlog/spdlog.h>
+#elif __has_include("spdlog/spdlog.h")
+#include "spdlog/spdlog.h"
+#else
+namespace spdlog {
+template <typename... Args> inline void debug(const char*, Args&&...) {}
+template <typename... Args> inline void info(const char*, Args&&...) {}
+template <typename... Args> inline void warn(const char*, Args&&...) {}
+template <typename... Args> inline void error(const char*, Args&&...) {}
+} // namespace spdlog
+#endif
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -11,7 +22,13 @@
 #ifdef _MSC_VER
 #include <cstdlib>
 #endif
+#if __has_include(<yams/content/video_content_handler.h>)
 #include <yams/content/video_content_handler.h>
+#elif __has_include("yams/content/video_content_handler.h")
+#include "yams/content/video_content_handler.h"
+#else
+#include "../../include/yams/content/video_content_handler.h"
+#endif
 // Ensure formatting uses unified wrapper
 #include <yams/common/format.h>
 
@@ -35,15 +52,12 @@ constexpr auto videoMimeTypes = createVideoMimeTypes();
 constexpr auto videoExtensions = createVideoExtensions();
 
 constexpr uint32_t byteswap32(uint32_t value) noexcept {
-#if defined(_MSC_VER)
-    return static_cast<uint32_t>(_byteswap_ulong(value));
-#elif defined(__clang__) || defined(__GNUC__)
-    return static_cast<uint32_t>(__builtin_bswap32(value));
-#else
     return ((value & 0x000000FFu) << 24) | ((value & 0x0000FF00u) << 8) |
            ((value & 0x00FF0000u) >> 8) | ((value & 0xFF000000u) >> 24);
-#endif
 }
+
+static_assert(byteswap32(0x12345678u) == 0x78563412u,
+              "byteswap32 must remain constexpr across toolchains");
 
 // Basic MP4 box header parser
 struct MP4BoxHeader {
@@ -65,9 +79,7 @@ std::optional<ExtendedVideoMetadata> analyzeMP4Header(const std::filesystem::pat
         return std::nullopt;
 
     MP4BoxHeader header;
-    ExtendedVideoMetadata metadata;
-    metadata.format = VideoFormat::MP4;
-    metadata.container = "MP4";
+    bool foundFtyp = false;
 
     // Read file size for bitrate estimation
     const auto fileSize = std::filesystem::file_size(path);
@@ -78,8 +90,7 @@ std::optional<ExtendedVideoMetadata> analyzeMP4Header(const std::filesystem::pat
         header.size = byteswap32(header.size);
 
         if (std::strncmp(header.type, "ftyp", 4) == 0) {
-            // Basic MP4 file detected
-            metadata.confidence = 0.8f;
+            foundFtyp = true;
             break;
         }
 
@@ -90,6 +101,15 @@ std::optional<ExtendedVideoMetadata> analyzeMP4Header(const std::filesystem::pat
             break;
         }
     }
+
+    if (!foundFtyp) {
+        return std::nullopt;
+    }
+
+    ExtendedVideoMetadata metadata;
+    metadata.format = VideoFormat::MP4;
+    metadata.container = "MP4";
+    metadata.confidence = 0.8f;
 
     // Set basic file info
     if (fileSize > 0) {
