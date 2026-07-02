@@ -401,3 +401,32 @@ TEST_CASE("SimeonLexicalBackend scoreRouted routes OOV query to SabSmooth",
     REQUIRE(decision.has_value());
     CHECK(std::string(decision.value().recipe_name) == "Bm25SabSmooth");
 }
+
+TEST_CASE("SimeonLexicalBackend score timing counters accumulate",
+          "[search][simeon][catch2][instrumentation]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta"},
+        {"hash_b", "beta gamma epsilon"},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.score_cache_entries = 8;
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+
+    CHECK(backend.scoreCalls() == 0);
+    CHECK(backend.scoreCacheHits() == 0);
+
+    REQUIRE(backend.score("beta", corpus.docIds).has_value());
+    CHECK(backend.scoreCalls() == 1);
+    CHECK(backend.scoreCacheHits() == 0);
+
+    REQUIRE(backend.score("beta", corpus.docIds).has_value());
+    CHECK(backend.scoreCalls() == 2);
+    CHECK(backend.scoreCacheHits() == 1);
+
+    REQUIRE(backend.scoreRouted("gamma", corpus.docIds).has_value());
+    CHECK(backend.scoreCalls() == 3);
+    CHECK(backend.scoreMicrosTotal() > 0);
+}

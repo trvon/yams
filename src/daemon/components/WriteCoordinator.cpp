@@ -3,6 +3,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/metadata/kg_write_buffer.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace yams::daemon {
 
@@ -364,6 +366,34 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
         auto& kgBatch = *batchResult.value();
 
+        std::optional<metadata::KGWriteBuffer> edgeBuffer;
+        if (config_.kgDedupEnabled) {
+            prefetchDeferredNodeKeys(batches, nodeKeyToId);
+            metadata::KGWriteBufferConfig bufferConfig;
+            bufferConfig.maxDocs = 0;
+            bufferConfig.maxEdges = 0;
+            bufferConfig.maxEntities = 0;
+            bufferConfig.autoFlush = false;
+            edgeBuffer.emplace(*kg_, bufferConfig);
+        }
+        metadata::KGWriteBuffer* bufferPtr = edgeBuffer ? &*edgeBuffer : nullptr;
+
+        const auto drainEdgeBuffer = [&]() -> Result<void> {
+            if (!bufferPtr) {
+                return Result<void>();
+            }
+            const auto added = bufferPtr->totalEdgesAdded();
+            auto r = bufferPtr->flushInto(kgBatch);
+            if (r) {
+                const auto flushed = bufferPtr->totalEdgesFlushed();
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.edgesAdded += flushed;
+                stats_.edgesCoalesced += added - flushed;
+            }
+            bufferPtr->resetCounters();
+            return r;
+        };
+
         for (auto& batch : batches) {
             const auto sourceStart = std::chrono::steady_clock::now();
             std::uint64_t sourceOps = 0;
@@ -383,13 +413,30 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, InsertRelationshipOp> ||
                                       std::is_same_v<T, AddSymSpellTermsOp>) {
                             return;
-                        } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp> ||
-                                             std::is_same_v<T, AddDeferredDocEntitiesOp> ||
+                        } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
+                            r = applyOp(kgBatch, concrete, nodeKeyToId, bufferPtr);
+                        } else if constexpr (std::is_same_v<T, AddEdgesOp>) {
+                            r = applyOp(kgBatch, concrete, bufferPtr);
+                        } else if constexpr (std::is_same_v<T, AddDeferredDocEntitiesOp> ||
                                              std::is_same_v<T, UpsertNodesOp> ||
                                              std::is_same_v<T, AddAliasesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId);
+                        } else if constexpr (std::is_same_v<T, DeleteDocEntitiesForDocumentOp> ||
+                                             std::is_same_v<T, DeleteNodeByIdOp> ||
+                                             std::is_same_v<T, DeleteNodesForDocumentHashOp> ||
+                                             std::is_same_v<T, DeleteEdgesForSourceFileOp> ||
+                                             std::is_same_v<T, DeleteEdgesByRelationOp> ||
+                                             std::is_same_v<T, DeleteOrphanedEdgesOp> ||
+                                             std::is_same_v<T, DeleteOrphanedDocEntitiesOp>) {
+                            r = drainEdgeBuffer();
+                            if (r) {
+                                r = applyOp(kgBatch, concrete);
+                            }
                         } else {
                             r = applyOp(kgBatch, concrete);
+                        }
+                        if (r && bufferPtr && bufferPtr->edgeCount() >= config_.kgDedupMaxEdges) {
+                            r = drainEdgeBuffer();
                         }
                         if (!r) {
                             if (!firstOpError) {
@@ -420,6 +467,13 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                  batch->source, sourceApplyMs, sourceOps, sourceError);
                 }
             }
+        }
+        if (auto drained = drainEdgeBuffer(); !drained) {
+            if (!firstOpError) {
+                firstOpError = drained.error();
+            }
+            spdlog::warn("[WriteCoordinator] coalesced edge flush failed: {}",
+                         drained.error().message);
         }
         auto commitResult = kgBatch.commit();
         if (!commitResult) {
@@ -745,6 +799,80 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     return Result<void>();
 }
 
+void WriteCoordinator::prefetchDeferredNodeKeys(
+    const std::vector<std::unique_ptr<WriteBatch>>& batches,
+    std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+    if (!kg_) {
+        return;
+    }
+    std::vector<std::string> keys;
+    std::unordered_set<std::string> seen;
+    const auto offer = [&](const std::string& key) {
+        if (key.empty()) {
+            return;
+        }
+        if (seen.insert(key).second) {
+            keys.push_back(key);
+        }
+    };
+    for (const auto& batch : batches) {
+        if (!batch) {
+            continue;
+        }
+        for (const auto& op : batch->ops) {
+            std::visit(
+                [&](const auto& concrete) {
+                    using T = std::decay_t<decltype(concrete)>;
+                    if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
+                        for (const auto& edge : concrete.edges) {
+                            offer(edge.srcNodeKey);
+                            offer(edge.dstNodeKey);
+                        }
+                    } else if constexpr (std::is_same_v<T, AddDeferredDocEntitiesOp>) {
+                        for (const auto& entity : concrete.entities) {
+                            offer(entity.nodeKey);
+                        }
+                    } else if constexpr (std::is_same_v<T, AddAliasesOp>) {
+                        for (const auto& alias : concrete.aliases) {
+                            if (alias.nodeId == 0 && alias.source.has_value()) {
+                                auto pipePos = alias.source->find('|');
+                                if (pipePos != std::string::npos) {
+                                    offer(alias.source->substr(pipePos + 1));
+                                }
+                            }
+                        }
+                    }
+                },
+                op);
+        }
+    }
+    if (keys.empty()) {
+        return;
+    }
+    constexpr std::size_t kLookupChunk = 900;
+    std::size_t resolvedCount = 0;
+    for (std::size_t offset = 0; offset < keys.size(); offset += kLookupChunk) {
+        const auto end = std::min(offset + kLookupChunk, keys.size());
+        std::vector<std::string> chunk(keys.begin() + static_cast<long>(offset),
+                                       keys.begin() + static_cast<long>(end));
+        auto nodesRes = kg_->getNodesByKeys(chunk);
+        if (!nodesRes) {
+            spdlog::warn("[WriteCoordinator] bulk node-key prefetch failed: {}",
+                         nodesRes.error().message);
+            return;
+        }
+        for (const auto& node : nodesRes.value()) {
+            nodeKeyToId[node.nodeKey] = node.id;
+            ++resolvedCount;
+        }
+    }
+    YAMS_PLOT("wc.prefetch.node_keys", static_cast<int64_t>(keys.size()));
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.nodeKeyLookupsBatched += resolvedCount;
+    }
+}
+
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                                        UpsertNodesOp& op,
                                        std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
@@ -765,11 +893,14 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 }
 
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                                       AddEdgesOp& op) {
+                                       AddEdgesOp& op, metadata::KGWriteBuffer* edgeBuffer) {
     if (op.edges.empty())
         return Result<void>();
     Result<void> r;
     if (op.unique) {
+        if (edgeBuffer) {
+            return edgeBuffer->addEdges(op.edges);
+        }
         r = kgBatch.addEdgesUnique(op.edges);
     } else {
         auto er = kgBatch.addEdge(op.edges.front());
@@ -786,7 +917,8 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 Result<void>
 WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                           AddDeferredEdgesOp& op,
-                          const std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
+                          metadata::KGWriteBuffer* edgeBuffer) {
     if (op.edges.empty())
         return Result<void>();
     std::vector<metadata::KGEdge> resolved;
@@ -799,6 +931,7 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
             return std::nullopt;
         auto nodeRes = kg_->getNodeByKey(key);
         if (nodeRes && nodeRes.value().has_value()) {
+            nodeKeyToId[key] = nodeRes.value()->id;
             return nodeRes.value()->id;
         }
         return std::nullopt;
@@ -818,6 +951,9 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
     }
     if (resolved.empty())
         return Result<void>();
+    if (edgeBuffer) {
+        return edgeBuffer->addEdges(resolved);
+    }
     auto r = kgBatch.addEdgesUnique(resolved);
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -828,7 +964,7 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
 
 Result<void>
 WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddAliasesOp& op,
-                          const std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.aliases.empty())
         return Result<void>();
     std::vector<metadata::KGAlias> resolved;
@@ -848,6 +984,7 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, Ad
                     auto nodeRes = kg_->getNodeByKey(nodeKey);
                     if (nodeRes && nodeRes.value().has_value()) {
                         nodeId = nodeRes.value()->id;
+                        nodeKeyToId[nodeKey] = nodeId;
                     }
                 }
                 if (nodeId == 0)
@@ -883,7 +1020,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 Result<void>
 WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                           AddDeferredDocEntitiesOp& op,
-                          const std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.entities.empty())
         return Result<void>();
     std::vector<metadata::DocEntity> resolved;
@@ -897,6 +1034,7 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
             auto nodeRes = kg_->getNodeByKey(deferred.nodeKey);
             if (nodeRes && nodeRes.value().has_value()) {
                 nodeId = nodeRes.value()->id;
+                nodeKeyToId[deferred.nodeKey] = nodeId;
             }
         }
         if (nodeId == 0)

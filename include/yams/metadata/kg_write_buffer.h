@@ -115,6 +115,11 @@ public:
     /// WriteBatch. The buffer is cleared after a successful flush.
     Result<void> flush();
 
+    /// Flush all buffered edges and entities into an already-open WriteBatch
+    /// owned by the caller. Does not commit. The buffer is cleared after a
+    /// successful flush; on failure the buffered contents are restored.
+    Result<void> flushInto(KnowledgeGraphStore::WriteBatch& wb);
+
     /// Number of buffered edges (after dedup).
     [[nodiscard]] std::size_t edgeCount() const noexcept;
 

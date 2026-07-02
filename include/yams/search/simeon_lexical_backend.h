@@ -256,6 +256,16 @@ public:
         return score_cache_hits_.load(std::memory_order_relaxed);
     }
 
+    /// Number of outermost scoring calls (score/scoreRouted/scoreBanditRouted/searchTop).
+    [[nodiscard]] std::uint64_t scoreCalls() const noexcept {
+        return score_calls_.load(std::memory_order_relaxed);
+    }
+
+    /// Cumulative wall time spent in outermost scoring calls, in microseconds.
+    [[nodiscard]] std::uint64_t scoreMicrosTotal() const noexcept {
+        return score_micros_total_.load(std::memory_order_relaxed);
+    }
+
     /// Reset the score cache hit counter.
     void resetScoreCacheHits() { score_cache_hits_.store(0, std::memory_order_relaxed); }
 
@@ -304,6 +314,10 @@ private:
                                std::list<std::pair<std::string, ScoreCacheEntry>>::iterator>
         score_cache_map_;
     mutable std::atomic<std::uint64_t> score_cache_hits_{0};
+    mutable std::atomic<std::uint64_t> score_calls_{0};
+    mutable std::atomic<std::uint64_t> score_micros_total_{0};
+
+    struct ScoreTimingScope;
 };
 
 } // namespace yams::search

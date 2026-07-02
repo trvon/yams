@@ -430,6 +430,27 @@ if catch2_with_main_dep.found()
        timeout: 600,
        env: write_coordinator_bench_env)
 
+  simeon_lexical_score_bench = executable('simeon_lexical_score_bench',
+    files('simeon_lexical_score_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+  alias_target('bench_simeon_lexical_score', simeon_lexical_score_bench)
+
+  test('simeon_lexical_score_bench', simeon_lexical_score_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'simeon'],
+       is_parallel: false,
+       timeout: 600,
+       env: write_coordinator_bench_env)
+
   alias_target('bench_write_coordinator', write_coordinator_bench)
 
   metadata_contention_bench = executable('metadata_contention_bench',

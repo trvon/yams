@@ -320,3 +320,62 @@ TEST_CASE("KGWriteBuffer resetCounters clears telemetry", "[kg_write_buffer]") {
 }
 
 } // namespace
+
+TEST_CASE("KGWriteBuffer flushInto stages into caller-owned batch without committing",
+          "[kg_write_buffer]") {
+    TestHarness h;
+    auto [a, b] = h.insertTwoNodes();
+
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls", 0.5f))));
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls", 2.0f))));
+    REQUIRE((h.buffer->addEdge(h.makeEdge(b, a, "returns", 1.0f))));
+    REQUIRE((h.buffer->edgeCount() == 2));
+
+    auto batchResult = h.kgStore->beginWriteBatch();
+    REQUIRE((batchResult));
+    auto& wb = *batchResult.value();
+
+    auto staged = h.buffer->flushInto(wb);
+    REQUIRE((staged));
+    REQUIRE((h.buffer->edgeCount() == 0));
+    REQUIRE((h.buffer->entityCount() == 0));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 2));
+
+    REQUIRE((wb.commit()));
+
+    auto edges = h.kgStore->getEdgesFrom(a);
+    REQUIRE((edges));
+    REQUIRE((edges.value().size() == 1));
+    REQUIRE((edges.value()[0].weight == 2.0f));
+
+    const auto snapshot = h.kgStore->getEntityCountSnapshot();
+    REQUIRE((snapshot.edgeCount == 2));
+}
+
+TEST_CASE("KGWriteBuffer flushInto with empty buffer is a no-op", "[kg_write_buffer]") {
+    TestHarness h;
+    auto batchResult = h.kgStore->beginWriteBatch();
+    REQUIRE((batchResult));
+    auto& wb = *batchResult.value();
+    REQUIRE((h.buffer->flushInto(wb)));
+    REQUIRE((wb.commit()));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 0));
+}
+
+TEST_CASE("KGWriteBuffer flushInto restores buffer on insert failure", "[kg_write_buffer]") {
+    TestHarness h;
+    auto [a, b] = h.insertTwoNodes();
+
+    REQUIRE((h.buffer->addEdge(h.makeEdge(a, b, "calls"))));
+    REQUIRE((h.buffer->addDocEntity(h.makeEntity(1, a, "fn1"))));
+
+    auto batchResult = h.kgStore->beginWriteBatch();
+    REQUIRE((batchResult));
+    auto& wb = *batchResult.value();
+
+    auto staged = h.buffer->flushInto(wb);
+    REQUIRE_FALSE(staged);
+    REQUIRE((h.buffer->edgeCount() == 1));
+    REQUIRE((h.buffer->entityCount() == 1));
+    REQUIRE((h.buffer->totalEdgesFlushed() == 0));
+}

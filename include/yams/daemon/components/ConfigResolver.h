@@ -129,6 +129,11 @@ public:
         std::optional<std::uint32_t> batchSize;
     };
 
+    struct WriteCoordinatorTuning {
+        std::optional<bool> kgDedupEnabled;
+        std::optional<std::uint32_t> kgDedupMaxEdges;
+    };
+
     struct SimeonEncoderPolicy {
         std::optional<std::string> ngramMode;
         std::optional<std::uint32_t> ngramMin;
@@ -543,6 +548,13 @@ public:
      * - tuning.post_ingest.batch_size          = int (1..256)
      */
     static PostIngestCaps resolvePostIngestCaps();
+
+    /**
+     * @brief Resolve WriteCoordinator tuning from config file (TOML keys):
+     * - tuning.write_coordinator.kg_dedup_enabled   = bool (default true)
+     * - tuning.write_coordinator.kg_dedup_max_edges = int (1000..1000000)
+     */
+    static WriteCoordinatorTuning resolveWriteCoordinatorTuning();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

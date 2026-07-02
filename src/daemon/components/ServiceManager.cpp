@@ -2381,6 +2381,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             wcConfig.maxBatchSize = 50;
             wcConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
             wcConfig.channelCapacity = 1000;
+            auto wcTuning = ConfigResolver::resolveWriteCoordinatorTuning();
+            if (wcTuning.kgDedupEnabled.has_value()) {
+                wcConfig.kgDedupEnabled = *wcTuning.kgDedupEnabled;
+            }
+            if (wcTuning.kgDedupMaxEdges.has_value()) {
+                wcConfig.kgDedupMaxEdges = *wcTuning.kgDedupMaxEdges;
+            }
             writeCoordinator_ = std::make_unique<WriteCoordinator>(
                 *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
             writeCoordinator_->start();

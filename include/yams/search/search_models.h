@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -155,6 +156,8 @@ inline std::string documentIdFromComponent(const ComponentResult& comp) noexcept
     }
     return {};
 }
+
+inline constexpr std::string_view kSimeonLexicalScoreTimingKey = "simeon_lexical_score";
 
 struct SearchResponse {
     std::vector<SearchResult> results;

@@ -1531,6 +1531,37 @@ ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     return caps;
 }
 
+ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTuning() {
+    WriteCoordinatorTuning tuning;
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath = resolveDefaultConfigPath();
+        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+            return tuning;
+        }
+
+        auto kv = parseSimpleTomlFlat(cfgPath);
+
+        if (auto it = kv.find("tuning.write_coordinator.kg_dedup_enabled"); it != kv.end()) {
+            tuning.kgDedupEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("tuning.write_coordinator.kg_dedup_max_edges"); it != kv.end()) {
+            try {
+                auto raw = static_cast<std::uint32_t>(std::stoul(it->second));
+                if (raw >= 1000 && raw <= 1000000) {
+                    tuning.kgDedupMaxEdges = raw;
+                }
+            } catch (const std::exception&) {
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for write-coordinator tuning: {}", e.what());
+    }
+
+    return tuning;
+}
+
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
     std::string preferred;
 

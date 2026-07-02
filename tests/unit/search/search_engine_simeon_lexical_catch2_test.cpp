@@ -241,3 +241,40 @@ TEST_CASE("SearchEngine uses direct Simeon candidates for weak FTS queries",
     const auto ids = hashSet(response.value().results);
     CHECK(ids.count("hash_a") == 1u);
 }
+
+TEST_CASE("SearchEngine surfaces simeon lexical timing and cache statistics",
+          "[search][simeon][integration][catch2][instrumentation]") {
+    auto corpus = makeCorpus(kCorpus);
+
+    auto cfg = makeLexicalOnlyConfig();
+    cfg.includeComponentTiming = true;
+    auto engine = makeEngine(corpus, cfg);
+    auto backend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
+    auto* backendRaw = backend.get();
+    engine->setSimeonLexicalBackend(std::move(backend));
+    REQUIRE(waitReady(*backendRaw, std::chrono::seconds(5)));
+
+    SearchParams params;
+    params.limit = 10;
+    auto response = engine->searchWithResponse("beta", params);
+    REQUIRE(response.has_value());
+    CHECK(response.value().componentTimingMicros.contains(
+        std::string(kSimeonLexicalScoreTimingKey)));
+
+    const auto& stats = engine->getStatistics();
+    CHECK(stats.simeonLexicalScoreCalls.load() >= 1);
+    CHECK(stats.simeonLexicalScoreMicros.load() >= 1);
+
+    auto cfgNoTiming = makeLexicalOnlyConfig();
+    cfgNoTiming.includeComponentTiming = false;
+    auto plainEngine = makeEngine(corpus, cfgNoTiming);
+    auto plainBackend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
+    auto* plainBackendRaw = plainBackend.get();
+    plainEngine->setSimeonLexicalBackend(std::move(plainBackend));
+    REQUIRE(waitReady(*plainBackendRaw, std::chrono::seconds(5)));
+
+    auto plainResponse = plainEngine->searchWithResponse("beta", params);
+    REQUIRE(plainResponse.has_value());
+    CHECK_FALSE(plainResponse.value().componentTimingMicros.contains(
+        std::string(kSimeonLexicalScoreTimingKey)));
+}

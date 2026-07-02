@@ -27,6 +27,7 @@ template <typename T, typename Executor> class awaitable;
 
 namespace yams::metadata {
 class MetadataRepository;
+class KGWriteBuffer;
 } // namespace yams::metadata
 
 namespace yams::daemon {
@@ -206,6 +207,8 @@ public:
         std::chrono::milliseconds maxBatchDelayMs{100};
         std::size_t channelCapacity = 1000;
         std::size_t maxCoalescedOpsPerApply = 512;
+        bool kgDedupEnabled = true;
+        std::size_t kgDedupMaxEdges = 50000;
     };
 
     struct Stats {
@@ -242,6 +245,8 @@ public:
         std::uint64_t symbolsUpserted = 0;
         std::uint64_t edgesDeleted = 0;
         std::uint64_t docEntitiesDeleted = 0;
+        std::uint64_t edgesCoalesced = 0;
+        std::uint64_t nodeKeyLookupsBatched = 0;
         std::uint64_t maxBatchApplyMs = 0;
         std::uint64_t maxBatchQueueWaitMs = 0;
         std::uint64_t maxBatchExcessQueueWaitMs = 0;
@@ -278,17 +283,21 @@ public:
 private:
     boost::asio::awaitable<void, boost::asio::any_io_executor> writerLoop();
     Result<void> applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches);
+    void prefetchDeferredNodeKeys(const std::vector<std::unique_ptr<WriteBatch>>& batches,
+                                  std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, UpsertNodesOp& op,
                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
-    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddEdgesOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddEdgesOp& op,
+                         metadata::KGWriteBuffer* edgeBuffer);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddDeferredEdgesOp& op,
-                         const std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
+                         std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
+                         metadata::KGWriteBuffer* edgeBuffer);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddAliasesOp& op,
-                         const std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
+                         std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddDocEntitiesOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          AddDeferredDocEntitiesOp& op,
-                         const std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
+                         std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          UpsertSymbolMetadataOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,

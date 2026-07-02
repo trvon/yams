@@ -1,7 +1,7 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-06-09
-**Last Updated**: 2026-06-19
+**Last Updated**: 2026-07-02
 **YAMS Version**: 0.17.0
 **Build Configuration**: Release microbenchmarks (`meson compile -C build/release`); live-mirror suite (`meson compile -C builddir`)
 **Host**: Apple M4 Max, macOS, Clang 21, 16 cores
@@ -15,72 +15,71 @@
 - [KG Edge/Entity Insert Microbenchmarks](#kg-edgeentity-insert-microbenchmarks)
 - [Simeon Lexical Rescoring Observations](#simeon-lexical-rescoring-observations)
 - [Multi-Client Benchmarks](#multi-client-benchmarks)
+- [Appendix: Notes And Raw Runs](#appendix-notes-and-raw-runs)
 - [Storage Backends](#storage-backends)
 
 ## Executive Summary
 
-- Coverage: API, metadata, core, IPC, tree, WriteCoordinator, multi-client, local storage, grep, search microbenchmarks, and live-mirror ingestion/retrieval.
-- Medium-document ingest (`api_benchmarks`, clean release): `363.6 ops/s` p50.
-- IPC streaming (clean release): `StreamingFramer_32x10` 22,857 ops/s, `UnaryFramer_8KB` 233,046 ops/s — above the May 9 baselines.
-- Multi-client ingest: clean through 16 clients; 32 clients failed with 416 add failures.
-- Mixed read/write search p95: 525 ms in the 4-client case, 41 ms in the 16-client preseeded case.
-- Grep microbenchmarks: literal search is now close to `std::find`; newline scan still trails `memchr` on this host.
-- High-entropy Zstd L3 (1 MiB): 0.11 ms p50, 9,308 ops/s (incompressible input, ratio ~1.0).
-- Live-mirror suite (June 19, M4 Max, Simeon embeddings): 500-document ingestion completed in ~983 ms median (~509 docs/s) — improved from the June 18 1,086 ms / 460.4 docs/s baseline via the dedicated-writer ingestion centralization (MetadataInsertWriter + ContentIndexWriter); retrieval over 200 queries holds MRR 1.0 and Recall@10 0.1628.
+- Latest headline: live-mirror steady-state ingestion drift is attributed to `090a5ca6`;
+  per-object durable `StorageEngine::atomicWrite` fsyncs inflated manifest/chunk-ref writes.
+- June 19 live-mirror baseline remains ~983 ms median for 500 docs (~509 docs/s),
+  with retrieval MRR/MAP/nDCG@10 at 1.0.
+- July 1 KG write coalescing improved the coordinator-shaped A/B by ~1.35x median and
+  removed the versioning-bench apply spike (4,706 ms -> 35 ms max apply).
+- Hot-term posting-list cache was rejected: Simeon score latency is corpus-size-bound, not
+  term-frequency-bound.
+- Core clean-release refresh: medium-document ingest 363.6 ops/s p50; IPC streaming
+  `StreamingFramer_32x10` 22,857 ops/s; `UnaryFramer_8KB` 233,046 ops/s.
 
 ## Latest Local Refresh
 
-Throughput values use p50 latency where available.
+Throughput values use p50 latency where available. Detailed notes and raw runs are in
+[the appendix](#appendix-notes-and-raw-runs).
+
+### KG Write Coalescing In WriteCoordinator (2026-07-01)
+
+`WriteCoordinator::applyBatches` now bulk-prefetches node keys, coalesces duplicate
+edges per iteration, and memoizes fallback lookups. Result: lower median wall time and
+large apply-spike reduction in the daemon-shaped benchmark.
+
+| Config / Case | Result | Key signal |
+|---|---:|---|
+| KG dedup off | 623 ms median | 48.1k offered edges/s |
+| KG dedup on | 463 ms median | 64.8k offered edges/s |
+| Version churn max apply | 35 ms | down from 4,706 ms on 2026-06-19 |
+
+### Live-Mirror Wall-Time Drift (2026-07-01/02, attributed)
+
+Verdict: first bad tested commit is `090a5ca6`, specifically
+`StorageConfig::fsyncBeforeRename=true` and the resulting `F_FULLFSYNC`/`fsync` before
+each atomic rename. The hot path is `StorageEngine::atomicWrite` under content-store
+manifest and chunk-ref writes.
+
+| Build | 500-doc result | Content-store signal |
+|---|---:|---|
+| `aea9b644` parent-side control | 839 ms / 595.9 docs/s | `store_total` 642 ms cumulative |
+| `090a5ca6` | 3,296 ms / 151.7 docs/s | `store_total` 14,968 ms cumulative |
+| `090a5ca6` + `fsyncBeforeRename=false` probe | 776 ms / 644.3 docs/s | `store_total` 472 ms cumulative |
+
+Fix direction: preserve durable-store crash consistency, but avoid a full media flush per
+tiny live-mirror object/manifest; prefer a typed fsync policy or a higher-level batched
+sync boundary.
 
 ### Live-Mirror Ingestion And Retrieval (2026-06-19)
 
-Validated artifact: `/tmp/yams_live_mirror_suite_20260619_162112` (suite ingestion run 1,059 ms).
-Ingestion repeats (steady-state, poll 10 ms): 1,017 / 936 / 983 ms → median **~983 ms**.
+Validated artifact: `/tmp/yams_live_mirror_suite_20260619_162112`. The 500-document
+steady-state suite completed in ~983 ms median with retrieval quality unchanged.
 
-Configuration:
-
-- Build dir: `builddir`
-- Dataset: synthetic live-mirror workload
-- Corpus: 500 documents
-- Retrieval queries: 200
-- Top K: 10
-- Embeddings: real Simeon (`YAMS_EMBED_BACKEND=simeon`, `YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=0`)
-- Core systems enabled: plugin discovery, Glint, semantic graph/topology, post-ingest pipeline
-- Change since last refresh: write-path centralization onto dedicated-thread writers
-  (`MetadataInsertWriter` coalesces document inserts; `ContentIndexWriter` moves content-index
-  commits off the shared io_context). The synchronous store path is now well below the embedding/KG
-  enrichment floor — wall is enrichment-bound (`embedding_generation` / `kg_extraction` ≈ wall;
-  `metadata_storage` ≈ 0.6× wall).
-
-| Workload | Result | Notes |
-|----------|-------:|-------|
-| Ingestion wall time | ~983 ms median | `ingestion_e2e.json`; suite run 1,059 ms (vs 1,086 ms June 18) |
-| Ingestion throughput | ~509 docs/s | 500-document run (vs 460.4 docs/s June 18) |
-| Retrieval MRR | 1.0000 | `stage_trace.jsonl` `hybrid_summary` |
-| Retrieval MAP | 1.0000 | Hybrid search |
-| Retrieval nDCG@10 | 1.0000 | Hybrid search |
-| Retrieval Precision@10 | 1.0000 | Hybrid search |
-| Retrieval Recall@10 | 0.1628 | Synthetic qrels are broad; exact grep baseline shares this recall ceiling |
-
-Post-ingest timing signal from the suite ingestion run (1,059 ms):
-
-| Phase | Total | Calls | Notes |
-|-------|------:|------:|-------|
-| `process_batch` | 549.3 ms | 128 | Full post-ingest batch processing (was 703.6 ms) |
-| `commit_batch_results` | 385.9 ms | 128 | Content/FTS metadata writes (was 422.1 ms) |
-| `commit_content_index` | 383.3 ms | 128 | Now on the `ContentIndexWriter` thread (was 420.2 ms) |
-| `dispatch_successes` | 27.1 ms | 128 | DispatchPlan + io_context decongestion (was 194.8 ms) |
-| `prepare_metadata` | 135.1 ms | 128 | Extraction-result preparation |
-
-The retrieval stage trace contains a valid `hybrid_summary` event. The xctrace hot-zone export is usable for coarse direction (`total samples=95215000000`), with top visible samples in prune classification, SQLite VM execution, search internals, WAL checksum, and Simeon NEON dot product. Treat those samples as directional, not as a replacement for focused phase timings.
+| Workload | Result |
+|---|---:|
+| Ingestion wall time | ~983 ms median |
+| Ingestion throughput | ~509 docs/s |
+| Retrieval MRR / MAP / nDCG@10 / Precision@10 | 1.0000 |
+| Retrieval Recall@10 | 0.1628 |
 
 ### API And Metadata
 
-Refreshed 2026-06-19 from a clean release build (`build/release`, `--with-tests`; a stale
-`-DTRACY_ENABLE` flag that blocked the benchmark compile was cleared). These microbenchmarks
-exercise ContentStore / MetadataRepository paths that are largely independent of the June 2026
-ingestion-pipeline centralization work; the gains versus the June 9 row mostly reflect the clean
-(non-instrumented) build rather than that work.
+Refreshed 2026-06-19 from a clean release build (`build/release`, `--with-tests`).
 
 | Benchmark | p50 Latency | p50 Throughput | Notes |
 |-----------|------------:|---------------:|-------|
@@ -99,21 +98,20 @@ ingestion-pipeline centralization work; the gains versus the June 9 row mostly r
 
 ### Tree Builder
 
-| Files | Latency | Throughput | Notes |
-|-------|--------:|-----------:|-------|
-| 100 | 28.5 ms | 3,505/s | 512-byte files |
-| 500 | 98.1 ms | 5,098/s | 512-byte files |
-| 1,000 | 200.2 ms | 4,994/s | 512-byte files |
-| 5,000 | 955.6 ms | 5,232/s | 512-byte files |
-| 10,000 | 1,935.1 ms | 5,167/s | linear scaling still holds |
+| Files | Latency | Throughput |
+|-------|--------:|-----------:|
+| 100 | 28.5 ms | 3,505/s |
+| 500 | 98.1 ms | 5,098/s |
+| 1,000 | 200.2 ms | 4,994/s |
+| 5,000 | 955.6 ms | 5,232/s |
+| 10,000 | 1,935.1 ms | 5,167/s |
 
 ### WriteCoordinator
 
-| Phase | Elapsed | Metadata | Relationships | Nodes | Edges | Max Apply |
-|-------|--------:|---------:|--------------:|------:|------:|----------:|
-| Cold ingest, 100 files | 48.3 ms | 46 | 0 | 100 | 50 | 9 ms |
-| Version churn, 3 iter | 8.7 ms | 1108 | 79 | 1400 | 700 | 4706 ms |
-| Final totals | - | 1833 | 96 | 1600 | 800 | 4706 ms |
+| Phase | Elapsed | Nodes | Edges | Max Apply |
+|-------|--------:|------:|------:|----------:|
+| Cold ingest, 100 files | 101.9 ms | 200 | 100 | 26 ms |
+| Version churn, 3 iter | ~1.4 ms/iter | 1500 total | 750 total | 35 ms |
 
 ## Historical Comparisons
 
@@ -253,40 +251,97 @@ sizes. These metrics form the baseline for the KGWriteBuffer optimization (#2).
 | `UpsertNodes_OneByOne` | 100 | 15,357 nodes/s | individual upserts (small-batch parity with bulk) |
 | `UpsertNodes_OneByOne` | 500 | 10,537 nodes/s | |
 
-### Target for KGWriteBuffer (#2)
+### Target for KGWriteBuffer (#2) — landed 2026-07-01
 
-The one-by-one insert paths simulate the current ingest behavior where post-ingest
-KG extraction yields per-document edges/entities without batching. The KGWriteBuffer
-should bring one-by-one throughput close to the bulk path by accumulating writes in
-memory and flushing in batch.
-
-**Expected improvement**: 2-5x edges/sec in the one-by-one path, approaching the
-`AddEdges_NoDedup_Bulk` upper bound.
+The daemon-shaped bottleneck was deferred-edge resolution and duplicate-edge churn, not
+the isolated one-by-one insert path. The landed WriteCoordinator coalescing measured
+~1.35x median on the coordinator A/B and cut versioning-bench max apply to 35 ms. The
+microbench rows above remain regression sentinels.
 
 ---
 
 ## Simeon Lexical Rescoring Observations
 
-Captured from the live-mirror suite retrieval stage trace. The Simeon lexical backend
-(`SimeonLexicalBackend::score()`) runs per-component after FTS5 candidate retrieval.
+Verdict for hot-term posting-list cache (#3): **no-go**. `SimeonLexicalBackend::score()`
+latency is flat across common vs rare terms and scales with corpus size, so caching hot
+posting lists would not target the dominant cost.
 
-**Observed (June 19 suite, M4 Max)**: The Simeon NEON dot product appears in xctrace
-hot-zone samples, confirming SIMD acceleration is active. The `hybrid_summary` event
-in the stage trace captures fusion pipeline timing but does not break out the simeon
-lexical component separately from text scoring.
+| Corpus | Common p50/p95 | Rare p50/p95 | Query-cache warm p50 |
+|--------|---------------:|-------------:|---------------------:|
+| 1,000 docs / 2,000 vocab | 89.1 / 97.3 µs | 85.6 / 88.6 µs | 70.4 µs |
+| 10,000 docs / 8,000 vocab | 864.7 / 955.6 µs | 858.0 / 901.2 µs | 701.0 µs |
 
-**Gap for hot-term cache (#3)**: No per-term `score()` latency differentiation exists
-in the current baseline. The hot-term posting list cache optimization needs:
+Next useful lever: candidate-restricted scoring or the existing hot-query LRU cache, not
+per-term posting-list caching.
 
-- P50/P95 `score()` latency for top-100 IDF terms ("function", "class", "return")
-- P50/P95 `score()` latency for bottom-100 IDF terms (rare symbols)
-- Cache hit rate under the live-mirror query workload
+## Appendix: Notes And Raw Runs
 
-These will be instrumented via `SearchEngineConfig::includeComponentTiming` and
-`SearchEngine::Statistics` new counters (`simeonLexicalCacheHits`,
-`simeonLexicalScoreMicros`) in task #3.
+### Live-Mirror Drift Attribution
 
----
+Bisect/probe workload: direct `ingestion_e2e_bench`, 500 docs, poll 10 ms, Simeon
+embeddings. A HEAD control build reproduced the bad ~3.6 s class before the July 1
+WriteCoordinator changes, ruling out KG coalescing/ODR cleanup. KG timings stayed
+negligible.
+
+| Build | Result | Content-store phase timings |
+|---|---:|---|
+| `6a7adac9` report-era good | 925 ms / 540.5 docs/s | `store_total` 448 ms; `manifest_store` 0 ms; `chunk_store_refs` 13 ms; `ref_commit` 37 ms |
+| `aea9b644` parent-side control | 839 ms / 595.9 docs/s | `store_total` 642 ms; `manifest_store` 23 ms; `chunk_store_refs` 78 ms; `ref_commit` 47 ms |
+| `090a5ca6` | 3,296 ms / 151.7 docs/s | `store_total` 14,968 ms; `manifest_store` 7,253 ms; `chunk_store_refs` 5,258 ms; `ref_commit` 1,946 ms |
+| `090a5ca6` + `fsyncBeforeRename=false` | 776 ms / 644.3 docs/s | `store_total` 472 ms; `manifest_store` 5 ms; `chunk_store_refs` 20 ms; `ref_commit` 32 ms |
+
+The phase timers are cumulative across concurrent calls, so ~15 s cumulative
+`store_total` corresponds to a ~3.3 s wall-time run.
+
+### KG Write Coalescing Notes
+
+The original 2-5x expectation applied to an isolated one-by-one insert shape; the daemon
+path was already transaction-amortized by WriteCoordinator. The real costs were
+`getNodeByKey` N+1 lookups during deferred-edge resolution and duplicate-row
+`ON CONFLICT` churn.
+
+The KGWriteBuffer optimization (#2) landed in `WriteCoordinator::applyBatches`: bulk
+node-key prefetch via `getNodesByKeys`, per-iteration edge coalescing through
+`KGWriteBuffer::flushInto`, and memoized fallback lookups. Default-on; opt out via
+`tuning.write_coordinator.kg_dedup_enabled = false`. `kg_dedup_max_edges` bounds the
+in-memory buffer.
+
+A/B shape: `write_coordinator_bench` `[kg-dedup]`, 1,000 deferred-edge WriteBatches x
+30 edges, 60% hot-key traffic, 2,000 preseeded nodes, 5 repeats. Median speedup was
+~1.35x, with clean repeats up to ~1.7x and a high-duplicate small-batch shape reaching
+~2.2x. The one-by-one `kg_edge_insert_bench` rows are unchanged, as expected, because
+those isolated paths were not modified.
+
+### June 19 Live-Mirror Suite Notes
+
+Configuration: `builddir`, synthetic live-mirror workload, 500 documents, 200
+retrieval queries, top K 10, real Simeon embeddings, plugin discovery, Glint, semantic
+graph/topology, and post-ingest pipeline enabled.
+
+Post-ingest timing from the 1,059 ms suite run:
+
+| Phase | Total | Calls |
+|---|---:|---:|
+| `process_batch` | 549.3 ms | 128 |
+| `commit_batch_results` | 385.9 ms | 128 |
+| `commit_content_index` | 383.3 ms | 128 |
+| `dispatch_successes` | 27.1 ms | 128 |
+| `prepare_metadata` | 135.1 ms | 128 |
+
+### Simeon Lexical Cache Decision Notes
+
+Instrumentation added `SearchEngine::Statistics` counters for
+`simeonLexicalCacheHits`, `simeonLexicalScoreMicros`, and
+`simeonLexicalScoreCalls`; component timing reports
+`componentTimingMicros["simeon_lexical_score"]`.
+
+`simeon_lexical_score_bench` used a Zipf synthetic corpus, 100 most-common terms vs
+100 rarest terms, 3 calls per term. Per-term latency differed by less than 1% at p50
+and scaled linearly with corpus size, indicating full-corpus score-vector cost.
+
+The June 19 xctrace hot-zone export was useful only as coarse direction: visible samples
+included prune classification, SQLite VM execution, search internals, WAL checksum, and
+Simeon NEON dot product.
 
 ## Storage Backends
 

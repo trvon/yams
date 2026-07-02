@@ -253,7 +253,34 @@ ChunkedEnhancementText buildEnhancementText(std::string_view text,
     return result;
 }
 
+thread_local int g_scoreTimingDepth = 0;
+
 } // namespace
+
+struct SimeonLexicalBackend::ScoreTimingScope {
+    const SimeonLexicalBackend& backend;
+    std::chrono::steady_clock::time_point start;
+    bool outermost;
+
+    explicit ScoreTimingScope(const SimeonLexicalBackend& b)
+        : backend(b), start(std::chrono::steady_clock::now()),
+          outermost(g_scoreTimingDepth++ == 0) {}
+
+    ScoreTimingScope(const ScoreTimingScope&) = delete;
+    ScoreTimingScope& operator=(const ScoreTimingScope&) = delete;
+
+    ~ScoreTimingScope() {
+        --g_scoreTimingDepth;
+        if (outermost) {
+            const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
+            backend.score_calls_.fetch_add(1, std::memory_order_relaxed);
+            backend.score_micros_total_.fetch_add(static_cast<std::uint64_t>(micros),
+                                                  std::memory_order_relaxed);
+        }
+    }
+};
 
 SimeonLexicalBackend::SimeonLexicalBackend(Config cfg) : cfg_(cfg) {}
 SimeonLexicalBackend::~SimeonLexicalBackend() {
@@ -668,6 +695,7 @@ SimeonLexicalBackend::score(std::string_view query,
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    ScoreTimingScope scoreTiming(*this);
 
     // Hot-query score cache: avoid recomputing full-corpus BM25 for repeated
     // queries. LRU eviction keeps memory bounded. Cached only when
@@ -773,6 +801,7 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    ScoreTimingScope scoreTiming(*this);
 
     const auto* lexicalRouter = router_.get();
     const bool fragmentGeometryReady =
@@ -873,6 +902,7 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    ScoreTimingScope scoreTiming(*this);
 
     // Fall back to standard routed scoring when strategy router isn't active.
     if (!strategy_router_ || strategies_.empty()) {
@@ -963,6 +993,7 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    ScoreTimingScope scoreTiming(*this);
     YAMS_ZONE_SCOPED_N("simeon::scoreBanditRouted");
     YAMS_PLOT("simeon_candidate_count", static_cast<int64_t>(candidate_doc_ids.size()));
 
@@ -1038,6 +1069,7 @@ SimeonLexicalBackend::searchTop(std::string_view query, std::size_t limit,
     if (!ready_.load(std::memory_order_acquire) || !index_) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
+    ScoreTimingScope scoreTiming(*this);
 
     TopCandidateDecision out;
     if (limit == 0 || index_to_doc_id_.empty()) {

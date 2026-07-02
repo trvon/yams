@@ -39,7 +39,10 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/profiling.h>
+
+#include <boost/asio/io_context.hpp>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -406,4 +409,130 @@ TEST_CASE("WriteCoordinator throughput and versioning profile", "[bench][write-c
 
     outFile.close();
     spdlog::info("Results written to {}", cfg.outputPath);
+}
+
+TEST_CASE("WriteCoordinator KG dedup apply benchmark", "[bench][write-coordinator][kg-dedup]") {
+    YAMS_ZONE_SCOPED_N("Bench::WriteCoordinatorKgDedup");
+    const int batches = readIntEnv("YAMS_BENCH_KG_BATCHES", 200, 1, 20000);
+    const int edgesPerBatch = readIntEnv("YAMS_BENCH_KG_EDGES_PER_BATCH", 30, 1, 1000);
+    const int dupPct = readIntEnv("YAMS_BENCH_KG_DUP_PCT", 60, 0, 100);
+    const int nodePool = readIntEnv("YAMS_BENCH_KG_NODE_POOL", 2000, 10, 100000);
+    const int repeat = readIntEnv("YAMS_BENCH_REPEAT", 3, 1, 20);
+    const int hotPool = std::max(2, nodePool / 20);
+
+    std::string outputPath = "bench_results/write_coordinator_kg_dedup.jsonl";
+    if (const char* out = std::getenv("YAMS_BENCH_OUTPUT"))
+        outputPath = out;
+    ensureOutputDir(outputPath);
+    std::ofstream outFile(outputPath, std::ios::app);
+    REQUIRE(outFile.is_open());
+
+    auto runScenario = [&](bool dedup, int rep) -> json {
+        fs::path dir = fs::temp_directory_path() /
+                       ("wc_kg_dedup_bench_" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(dir);
+        auto dbPath = (dir / "kg.db").string();
+
+        yams::metadata::KnowledgeGraphStoreConfig kgCfg;
+        kgCfg.enable_alias_fts = false;
+        auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(dbPath, kgCfg);
+        REQUIRE(kgRes);
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg = std::move(kgRes.value());
+
+        std::vector<yams::metadata::KGNode> nodes;
+        nodes.reserve(static_cast<std::size_t>(nodePool));
+        for (int i = 0; i < nodePool; ++i) {
+            yams::metadata::KGNode node;
+            node.nodeKey = "bench:node:" + std::to_string(i);
+            node.type = "entity";
+            nodes.push_back(std::move(node));
+        }
+        REQUIRE(kg->upsertNodes(nodes));
+
+        boost::asio::io_context io;
+        WriteCoordinator::Config config;
+        config.maxBatchSize = 50;
+        config.maxBatchDelayMs = std::chrono::milliseconds(1);
+        config.channelCapacity = static_cast<std::size_t>(batches) + 8;
+        config.kgDedupEnabled = dedup;
+        WriteCoordinator coordinator(io, kg, {}, config);
+        coordinator.start();
+        std::thread writerLoop([&io] { io.run(); });
+
+        std::mt19937_64 rng(0xBE7CDEDBull + static_cast<std::uint64_t>(rep));
+        std::uniform_int_distribution<int> pctDist(0, 99);
+        std::uniform_int_distribution<int> hotDist(0, hotPool - 1);
+        std::uniform_int_distribution<int> coldDist(0, nodePool - 1);
+        std::uniform_real_distribution<float> weightDist(0.1f, 2.0f);
+
+        const auto pickKey = [&]() {
+            const int idx = pctDist(rng) < dupPct ? hotDist(rng) : coldDist(rng);
+            return "bench:node:" + std::to_string(idx);
+        };
+
+        const auto start = std::chrono::steady_clock::now();
+        for (int b = 0; b < batches; ++b) {
+            auto batch = std::make_unique<WriteBatch>();
+            batch->source = "bench/kg_dedup/" + std::to_string(b);
+            AddDeferredEdgesOp op;
+            op.edges.reserve(static_cast<std::size_t>(edgesPerBatch));
+            for (int e = 0; e < edgesPerBatch; ++e) {
+                DeferredEdgeOp edge;
+                edge.srcNodeKey = pickKey();
+                edge.dstNodeKey = pickKey();
+                edge.relation = "bench_rel";
+                edge.weight = weightDist(rng);
+                op.edges.push_back(std::move(edge));
+            }
+            batch->ops.emplace_back(std::move(op));
+            coordinator.enqueue(std::move(batch));
+        }
+        auto flushResult = coordinator.flush(std::chrono::minutes(5));
+        const auto wallMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+        REQUIRE(flushResult.has_value());
+
+        const auto stats = coordinator.getStats();
+        coordinator.shutdown();
+        io.stop();
+        if (writerLoop.joinable())
+            writerLoop.join();
+        kg.reset();
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+
+        const double offered = static_cast<double>(batches) * edgesPerBatch;
+        json j{{"benchmark", "kg_dedup_apply"},
+               {"timestamp", isoTimestamp()},
+               {"rep", rep},
+               {"dedup", dedup},
+               {"batches", batches},
+               {"edges_per_batch", edgesPerBatch},
+               {"dup_pct", dupPct},
+               {"node_pool", nodePool},
+               {"wall_ms", wallMs},
+               {"edges_offered_per_sec", offered / (wallMs / 1000.0)},
+               {"edges_added", stats.edgesAdded},
+               {"edges_coalesced", stats.edgesCoalesced},
+               {"node_key_lookups_batched", stats.nodeKeyLookupsBatched},
+               {"max_batch_apply_ms", stats.maxBatchApplyMs}};
+        return j;
+    };
+
+    for (int rep = 0; rep < repeat; ++rep) {
+        for (bool dedup : {false, true}) {
+            auto record = runScenario(dedup, rep);
+            writeRecord(outFile, record);
+            spdlog::info("[kg_dedup_apply] rep={} dedup={} wall_ms={:.1f} offered_eps={:.0f} "
+                         "added={} coalesced={} key_lookups={} max_apply_ms={}",
+                         rep, record["dedup"].get<bool>(), record["wall_ms"].get<double>(),
+                         record["edges_offered_per_sec"].get<double>(),
+                         record["edges_added"].get<std::uint64_t>(),
+                         record["edges_coalesced"].get<std::uint64_t>(),
+                         record["node_key_lookups_batched"].get<std::uint64_t>(),
+                         record["max_batch_apply_ms"].get<std::uint64_t>());
+        }
+    }
 }

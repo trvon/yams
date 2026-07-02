@@ -82,10 +82,7 @@ Result<void> KGWriteBuffer::flush() {
         return Result<void>();
     }
 
-    const bool hasEdges = !edgeBuffer_.empty();
-    const bool hasEntities = !entityBuffer_.empty();
-
-    if (!hasEdges && !hasEntities) {
+    if (edgeBuffer_.empty() && entityBuffer_.empty()) {
         return Result<void>();
     }
 
@@ -95,6 +92,33 @@ Result<void> KGWriteBuffer::flush() {
         return batchResult.error();
     }
     auto& wb = *batchResult.value();
+
+    auto edgesSnapshot = edgeBuffer_;
+    auto entitiesSnapshot = entityBuffer_;
+    const auto flushedBefore = totalEdgesFlushed_;
+
+    auto staged = flushInto(wb);
+    if (!staged) {
+        return staged;
+    }
+
+    auto commitResult = wb.commit();
+    if (!commitResult) {
+        edgeBuffer_ = std::move(edgesSnapshot);
+        entityBuffer_ = std::move(entitiesSnapshot);
+        totalEdgesFlushed_ = flushedBefore;
+        return commitResult;
+    }
+    return Result<void>();
+}
+
+Result<void> KGWriteBuffer::flushInto(KnowledgeGraphStore::WriteBatch& wb) {
+    const bool hasEdges = !edgeBuffer_.empty();
+    const bool hasEntities = !entityBuffer_.empty();
+
+    if (!hasEdges && !hasEntities) {
+        return Result<void>();
+    }
 
     std::unordered_map<EdgeKey, KGEdge> stagedEdges;
     std::vector<DocEntity> stagedEntities;
@@ -139,12 +163,6 @@ Result<void> KGWriteBuffer::flush() {
             restoreBuffers();
             return r;
         }
-    }
-
-    auto commitResult = wb.commit();
-    if (!commitResult) {
-        restoreBuffers();
-        return commitResult;
     }
 
     totalEdgesFlushed_ += flushedEdgeCount;

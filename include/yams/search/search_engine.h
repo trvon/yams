@@ -87,6 +87,9 @@ public:
         std::atomic<uint64_t> avgMetadataTimeMicros{0};
         std::atomic<uint64_t> avgResultsPerQuery{0};
         std::atomic<uint64_t> avgComponentsPerResult{0};
+        std::atomic<uint64_t> simeonLexicalCacheHits{0};
+        std::atomic<uint64_t> simeonLexicalScoreMicros{0};
+        std::atomic<uint64_t> simeonLexicalScoreCalls{0};
     };
 
     const Statistics& getStatistics() const;

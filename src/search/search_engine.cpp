@@ -827,6 +827,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     auto startTime = std::chrono::steady_clock::now();
     stats_.totalQueries.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t simeonScoreMicrosBefore =
+        simeonLexical_ ? simeonLexical_->scoreMicrosTotal() : 0;
     std::string simeonRouteRecipe;
     std::string selectedSimeonBanditArm;
     ProfileKey selectedSimeonBanditProfile;
@@ -4023,6 +4025,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     if (workingConfig.includeComponentTiming) {
         componentTiming.merge(response.componentTimingMicros);
         response.componentTimingMicros = std::move(componentTiming);
+        if (simeonLexical_) {
+            response.componentTimingMicros[std::string(kSimeonLexicalScoreTimingKey)] =
+                static_cast<int64_t>(simeonLexical_->scoreMicrosTotal() - simeonScoreMicrosBefore);
+        }
     }
     response.isDegraded =
         !response.timedOutComponents.empty() || !response.failedComponents.empty();
@@ -4408,6 +4414,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     auto durationMicros =
         std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
     stats_.totalQueryTimeMicros.fetch_add(durationMicros, std::memory_order_relaxed);
+    if (simeonLexical_) {
+        stats_.simeonLexicalCacheHits.store(simeonLexical_->scoreCacheHits(),
+                                            std::memory_order_relaxed);
+        stats_.simeonLexicalScoreMicros.store(simeonLexical_->scoreMicrosTotal(),
+                                              std::memory_order_relaxed);
+        stats_.simeonLexicalScoreCalls.store(simeonLexical_->scoreCalls(),
+                                             std::memory_order_relaxed);
+    }
 
     uint64_t totalQueries = stats_.totalQueries.load(std::memory_order_relaxed);
     if (totalQueries > 0) {
