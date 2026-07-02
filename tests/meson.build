@@ -1720,6 +1720,23 @@ if catch2_dep.found()
     install: false,
   )
 
+#Metadata Corruption Tests(Catch2) - corruption injection, detection, recovery
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+  catch2_metadata_corruption_exe = executable('catch2_metadata_corruption',
+    files(
+      'unit/metadata/database_corruption_catch2_test.cpp',
+      'unit/metadata/migration_corruption_catch2_test.cpp',
+      'unit/metadata/kg_store_corruption_catch2_test.cpp',
+      'unit/metadata/connection_pool_corruption_catch2_test.cpp',
+      'unit/metadata/writer_corruption_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #FTS5 Tests(Catch2) - FTS5 support detection and fallback
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2371,6 +2388,12 @@ if catch2_dep.found()
 
   test('database', catch2_database_exe,
     suite: ['catch2', 'unit', 'metadata', 'database'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('metadata_corruption', catch2_metadata_corruption_exe,
+    suite: ['catch2', 'unit', 'metadata', 'corruption'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )

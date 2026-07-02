@@ -3160,7 +3160,8 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
     // Quarantining a 45 GB DB for a repairable FTS5 issue would lose hours of
     // metadata rebuild work, so we open the DB degraded and let the repair
     // subsystem rebuild the index.
-    if (integrity.error().code == ErrorCode::DatabaseError) {
+    if (integrity.error().code == ErrorCode::DatabaseError ||
+        integrity.error().code == ErrorCode::CorruptedData) {
         const auto& msg = integrity.error().message;
         // quick_check reports FTS5 inverted-index errors with this pattern.
         if (msg.find("inverted index") != std::string::npos &&

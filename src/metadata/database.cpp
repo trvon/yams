@@ -61,6 +61,18 @@ bool is_sqlite_busy_or_locked(int rc) {
     return storage::sqlite_retry::isBusyOrLocked(rc);
 }
 
+bool is_sqlite_corrupt(int rc) {
+    const int primary = rc & 0xff;
+    return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB;
+}
+
+Error make_sqlite_error(int rc, std::string message) {
+    if (is_sqlite_corrupt(rc)) {
+        return Error{ErrorCode::CorruptedData, std::move(message)};
+    }
+    return Error{ErrorCode::DatabaseError, std::move(message)};
+}
+
 bool is_transient_integrity_check_message(std::string_view message) {
     std::string lower;
     lower.reserve(message.size());
@@ -291,7 +303,7 @@ Result<void> Statement::execute() {
                 errMsg += " [SQL: " + sqlSnippet + (strlen(sql) > 100 ? "..." : "") + "]";
             }
         }
-        return Error{ErrorCode::DatabaseError, errMsg};
+        return make_sqlite_error(rc, errMsg);
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to execute statement: max retries exceeded"};
@@ -325,7 +337,7 @@ Result<bool> Statement::step() {
                 errMsg += " (" + std::string(detail) + ")";
             }
         }
-        return Error{ErrorCode::DatabaseError, errMsg};
+        return make_sqlite_error(rc, errMsg);
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to step statement: max retries exceeded"};
@@ -515,7 +527,7 @@ Result<Statement> Database::prepare(const std::string& sql) {
     try {
         return Statement(db_, sql);
     } catch (const std::exception& e) {
-        return Error{ErrorCode::DatabaseError, e.what()};
+        return make_sqlite_error(sqlite3_errcode(db_), e.what());
     }
 }
 
@@ -630,7 +642,7 @@ Result<void> Database::execute(const std::string& sql) {
         std::string error = errMsg ? errMsg : "Unknown error";
         sqlite3_free(errMsg);
         spdlog::error("SQL exec failed ({}): {}", error, sql);
-        return Error{ErrorCode::DatabaseError, "Failed to execute SQL: " + error};
+        return make_sqlite_error(rc, "Failed to execute SQL: " + error);
     }
     return {};
 }
@@ -649,17 +661,21 @@ Result<void> Database::checkIntegrity() {
         if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
             return Error{ErrorCode::ResourceBusy, "quick_check prepare failed: " + err};
         }
-        return Error{ErrorCode::DatabaseError, "quick_check prepare failed: " + err};
+        return make_sqlite_error(rc, "quick_check prepare failed: " + err);
     }
 
     std::string firstLine;
     std::string allLines;
     int rowCount = 0;
+    int readOnlyValidationRows = 0;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const unsigned char* text = sqlite3_column_text(stmt, 0);
         std::string line = text ? reinterpret_cast<const char*>(text) : "";
         if (rowCount == 0) {
             firstLine = line;
+        }
+        if (line.find("attempt to write a readonly database") != std::string::npos) {
+            ++readOnlyValidationRows;
         }
         if (!allLines.empty()) {
             allLines += "; ";
@@ -677,16 +693,22 @@ Result<void> Database::checkIntegrity() {
         if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
             return Error{ErrorCode::ResourceBusy, "quick_check step failed: " + err};
         }
-        return Error{ErrorCode::DatabaseError, "quick_check step failed: " + err};
+        return make_sqlite_error(rc, "quick_check step failed: " + err);
     }
 
     if (rowCount == 1 && firstLine == "ok") {
         return {};
     }
+    // FTS5 inverted-index validation requires write access; on a read-only
+    // connection quick_check reports it as unable-to-validate. The structural
+    // btree check still ran, so validation-only rows are not corruption.
+    if (rowCount > 0 && readOnlyValidationRows == rowCount) {
+        return {};
+    }
     if (is_transient_integrity_check_message(allLines)) {
         return Error{ErrorCode::ResourceBusy, "quick_check reported: " + allLines};
     }
-    return Error{ErrorCode::DatabaseError, "quick_check reported: " + allLines};
+    return Error{ErrorCode::CorruptedData, "quick_check reported: " + allLines};
 }
 
 Result<void> Database::beginTransaction() {

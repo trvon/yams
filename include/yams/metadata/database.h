@@ -305,7 +305,10 @@ public:
      * @brief Run PRAGMA quick_check; fails if SQLite reports corruption.
      * Bounded ~ 10s by setting a busy timeout. Suitable for pre-flight on
      * daemon startup before migrations run. Transient SQLite lock/busy failures
-     * return ErrorCode::ResourceBusy and must not be treated as corruption.
+     * return ErrorCode::ResourceBusy and must not be treated as corruption;
+     * corruption reported via quick_check rows or SQLITE_CORRUPT/NOTADB returns
+     * ErrorCode::CorruptedData. On read-only connections, FTS5 inverted-index
+     * validation cannot run and those rows alone are treated as success.
      */
     Result<void> checkIntegrity();
 

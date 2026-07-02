@@ -8,6 +8,8 @@
 #include <fstream>
 #include <string>
 
+#include "../../common/sqlite_corruption.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -25,12 +27,22 @@ void writeFile(const fs::path& p, const std::string& content) {
     out.write(content.data(), static_cast<std::streamsize>(content.size()));
 }
 
-void corruptHeader(const fs::path& p) {
-    std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-    REQUIRE(f.is_open());
-    f.seekp(20, std::ios::beg);
-    const char garbage[] = "\xff\xff\xff\xff\xff\xff\xff\xff";
-    f.write(garbage, 8);
+using yams::test::corruptHeader;
+
+void seedTable(const fs::path& dbPath, int rows) {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+    REQUIRE(db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)"));
+    REQUIRE(db.execute("BEGIN IMMEDIATE"));
+    for (int i = 0; i < rows; ++i) {
+        auto stmt = db.prepare("INSERT INTO t(payload) VALUES(?)");
+        REQUIRE(stmt);
+        REQUIRE(stmt.value().bind(1, std::string(200, 'x')));
+        REQUIRE(stmt.value().execute());
+    }
+    REQUIRE(db.execute("COMMIT"));
+    REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
+    db.close();
 }
 
 } // namespace
@@ -128,6 +140,37 @@ TEST_CASE("quarantineAndRecreate fails cleanly when source is missing",
 
     auto sentinel = yams::daemon::readLatestRecoverySentinel(dbPath);
     REQUIRE_FALSE(sentinel.has_value());
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Database::checkIntegrity detection matrix", "[unit][daemon][db_recovery][corruption]") {
+    auto dir = makeScratchDir("yams_db_recovery_matrix");
+    auto dbPath = dir / "yams.db";
+    seedTable(dbPath, 500);
+
+    SECTION("truncated file") { yams::test::truncateFile(dbPath, 0.5); }
+    SECTION("corrupt table root page") {
+        yams::test::corruptPage(
+            dbPath, static_cast<std::uint64_t>(yams::test::tableRootPage(dbPath, "t")));
+    }
+    SECTION("corrupt mid-file page") {
+        const auto pageCount = yams::test::sqlitePageCount(dbPath);
+        REQUIRE(pageCount > 4);
+        yams::test::corruptPage(dbPath, pageCount / 2);
+    }
+
+    yams::metadata::Database db;
+    auto open = db.open(dbPath.string(), yams::metadata::ConnectionMode::ReadWrite);
+    if (!open) {
+        SUCCEED("open failed; corruption detected at open time");
+    } else {
+        auto check = db.checkIntegrity();
+        REQUIRE_FALSE(check);
+        CHECK(check.error().code != yams::ErrorCode::ResourceBusy);
+        db.close();
+    }
 
     std::error_code ec;
     fs::remove_all(dir, ec);

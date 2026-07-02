@@ -4,11 +4,14 @@
 #include <yams/metadata/database.h>
 
 #include <sqlite3.h>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+
+#include "../../common/sqlite_corruption.h"
 
 namespace fs = std::filesystem;
 
@@ -399,6 +402,148 @@ TEST_CASE("corrupt DB cleanup removes readable artifacts but keeps unreadable ev
     REQUIRE_FALSE(fs::exists(readableWal));
     REQUIRE_FALSE(fs::exists(readableShm));
     REQUIRE(fs::exists(unreadableCorrupt));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+void createAndPopulateWideDb(const fs::path& dbPath, int docCount,
+                             const std::vector<std::string>& hashes) {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+    REQUIRE(db.execute(kDocumentsTableDdl));
+    REQUIRE(db.execute("BEGIN IMMEDIATE"));
+    for (int i = 0; i < docCount; ++i) {
+        auto stmtResult = db.prepare(kDocumentsInsertSql);
+        REQUIRE(stmtResult);
+        auto stmt = std::move(stmtResult).value();
+        std::string filePath =
+            "/test/" + std::string(1200, 'a' + (i % 26)) + "_" + std::to_string(i) + ".txt";
+        REQUIRE(stmt.bind(1, filePath));
+        REQUIRE(stmt.bind(2, "file_" + std::to_string(i) + ".txt"));
+        REQUIRE(stmt.bind(3, std::string("txt")));
+        REQUIRE(stmt.bind(4, static_cast<int64_t>(1024)));
+        REQUIRE(stmt.bind(5, hashes[static_cast<size_t>(i)]));
+        REQUIRE(stmt.bind(6, std::string("text/plain")));
+        REQUIRE(stmt.bind(7, static_cast<int64_t>(1000 + i)));
+        REQUIRE(stmt.bind(8, static_cast<int64_t>(2000 + i)));
+        REQUIRE(stmt.bind(9, static_cast<int64_t>(3000 + i)));
+        REQUIRE(stmt.bind(10, 0));
+        REQUIRE(stmt.bind(11, std::string("pending")));
+        REQUIRE(stmt.bind(12, std::string("")));
+        REQUIRE(stmt.bind(13, std::string("/test")));
+        REQUIRE(stmt.bind(14, std::string("")));
+        REQUIRE(stmt.bind(15, std::string("path_hash_") + std::to_string(i)));
+        REQUIRE(stmt.bind(16, std::string("")));
+        REQUIRE(stmt.bind(17, static_cast<int64_t>(1)));
+        REQUIRE(stmt.bind(18, std::string("pending")));
+        REQUIRE(stmt.bind(19, static_cast<int64_t>(0)));
+        REQUIRE(stmt.bind(20, static_cast<int64_t>(0)));
+        REQUIRE(stmt.execute());
+    }
+    REQUIRE(db.execute("COMMIT"));
+    REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
+    db.close();
+}
+
+bool hasFallbackDiagnostic(const yams::daemon::DbSalvageResult& result) {
+    return std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
+                       [](const std::string& d) {
+                           return d.find("Falling back to row-by-row salvage") != std::string::npos;
+                       });
+}
+
+} // namespace
+
+TEST_CASE("salvageFromCorruptDb fails cleanly on truncated DB and preserves fresh DB",
+          "[unit][daemon][db_salvage][corruption]") {
+    auto dir = makeScratchDir("yams_salvage_truncated");
+    auto corruptPath = dir / "corrupt.db";
+    auto freshPath = dir / "fresh.db";
+    auto hashes = makeTestHashes(200);
+
+    createAndPopulateWideDb(corruptPath, 200, hashes);
+    {
+        yams::metadata::Database db;
+        REQUIRE(db.open(freshPath.string(), yams::metadata::ConnectionMode::Create));
+        REQUIRE(db.execute(kDocumentsTableDdl));
+        db.close();
+    }
+
+    yams::test::truncateFile(corruptPath, 0.6);
+
+    auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
+    REQUIRE_FALSE(res);
+
+    yams::metadata::Database fresh;
+    REQUIRE(fresh.open(freshPath.string(), yams::metadata::ConnectionMode::ReadWrite));
+    REQUIRE(fresh.checkIntegrity());
+    fresh.close();
+    CHECK((countDocuments(freshPath) == 0));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("salvageFromCorruptDb row-by-row fallback survives mid-file page corruption",
+          "[unit][daemon][db_salvage][corruption]") {
+    auto dir = makeScratchDir("yams_salvage_pagesmash");
+    auto corruptPath = dir / "corrupt.db";
+    auto freshPath = dir / "fresh.db";
+    auto hashes = makeTestHashes(200);
+
+    createAndPopulateWideDb(corruptPath, 200, hashes);
+    {
+        yams::metadata::Database db;
+        REQUIRE(db.open(freshPath.string(), yams::metadata::ConnectionMode::Create));
+        REQUIRE(db.execute(kDocumentsTableDdl));
+        db.close();
+    }
+
+    const auto pageCount = yams::test::sqlitePageCount(corruptPath);
+    REQUIRE(pageCount > 20);
+    for (std::uint32_t page = pageCount / 2; page < (pageCount / 2) + 3; ++page) {
+        yams::test::corruptPage(corruptPath, page);
+    }
+
+    auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
+    REQUIRE(res);
+    CHECK(hasFallbackDiagnostic(res.value()));
+    CHECK((res.value().documentsSalvaged > 0));
+    CHECK((res.value().documentsSalvaged < 200));
+    CHECK((countDocuments(freshPath) == static_cast<int>(res.value().documentsSalvaged)));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("salvaged fresh DB passes integrity check", "[unit][daemon][db_salvage][corruption]") {
+    auto dir = makeScratchDir("yams_salvage_clean_output");
+    auto corruptPath = dir / "corrupt.db";
+    auto freshPath = dir / "fresh.db";
+    auto hashes = makeTestHashes(200);
+
+    createAndPopulateWideDb(corruptPath, 200, hashes);
+    {
+        yams::metadata::Database db;
+        REQUIRE(db.open(freshPath.string(), yams::metadata::ConnectionMode::Create));
+        REQUIRE(db.execute(kDocumentsTableDdl));
+        db.close();
+    }
+
+    const auto pageCount = yams::test::sqlitePageCount(corruptPath);
+    REQUIRE(pageCount > 20);
+    yams::test::corruptPage(corruptPath, pageCount / 2);
+
+    auto res = yams::daemon::salvageFromCorruptDb(corruptPath, freshPath);
+    REQUIRE(res);
+
+    yams::metadata::Database fresh;
+    REQUIRE(fresh.open(freshPath.string(), yams::metadata::ConnectionMode::ReadWrite));
+    REQUIRE(fresh.checkIntegrity());
+    fresh.close();
 
     std::error_code ec;
     fs::remove_all(dir, ec);

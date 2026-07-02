@@ -2476,7 +2476,7 @@ public:
 
     Result<void> healthCheck() override {
         auto res = readPool()->withConnection(
-            [](Database& db) -> Result<void> { return db.execute("PRAGMA integrity_check"); });
+            [](Database& db) -> Result<void> { return db.checkIntegrity(); });
         if (!res) {
             spdlog::warn("KG store healthCheck failed: {}", res.error().message);
             return res.error();

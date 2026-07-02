@@ -58,7 +58,20 @@ Result<bool> MigrationManager::needsMigration() {
 }
 
 Result<void> MigrationManager::migrate() {
-    return migrateTo(getLatestVersion());
+    auto currentResult = getCurrentVersion();
+    if (!currentResult)
+        return currentResult.error();
+
+    const int latestVersion = getLatestVersion();
+    if (currentResult.value() > latestVersion) {
+        return Error{ErrorCode::InvalidState,
+                     "Database schema version " + std::to_string(currentResult.value()) +
+                         " is newer than the latest version known to this binary (" +
+                         std::to_string(latestVersion) +
+                         "); refusing implicit rollback. Upgrade yams or use migrateTo() "
+                         "explicitly."};
+    }
+    return migrateTo(latestVersion);
 }
 
 Result<void> MigrationManager::migrateTo(int targetVersion) {
@@ -163,6 +176,16 @@ Result<void> MigrationManager::rollbackTo(int targetVersion) {
                 recordMigration(-it->first, "Rollback: " + it->second.name, duration, true);
             if (!recordResult)
                 return recordResult;
+
+            auto clearStmt = db_.prepare("DELETE FROM migration_history WHERE version = ?");
+            if (!clearStmt)
+                return clearStmt.error();
+            auto clearBind = clearStmt.value().bind(1, it->first);
+            if (!clearBind)
+                return clearBind;
+            auto clearExec = clearStmt.value().execute();
+            if (!clearExec)
+                return clearExec;
         }
         ++it;
     }
@@ -203,8 +226,7 @@ Result<std::vector<MigrationHistory>> MigrationManager::getHistory() {
 }
 
 Result<void> MigrationManager::verifyIntegrity() {
-    // Check table integrity
-    auto result = db_.execute("PRAGMA integrity_check");
+    auto result = db_.checkIntegrity();
     if (!result)
         return result;
 
