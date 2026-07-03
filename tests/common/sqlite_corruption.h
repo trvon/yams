@@ -129,11 +129,14 @@ inline void corruptShm(const std::filesystem::path& dbPath) {
 }
 
 inline std::filesystem::path copySqliteFiles(const std::filesystem::path& dbPath,
-                                             std::string_view prefix) {
+                                             std::string_view prefix, bool copyShm = true) {
     namespace fs = std::filesystem;
     auto target = make_temp_sqlite_path(prefix);
     fs::copy_file(dbPath, target, fs::copy_options::overwrite_existing);
     for (const char* suffix : {"-wal", "-shm"}) {
+        if (!copyShm && std::string_view{suffix} == "-shm") {
+            continue;
+        }
         const auto source = fs::path(dbPath.string() + suffix);
         if (fs::exists(source)) {
             fs::copy_file(source, fs::path(target.string() + suffix),
@@ -159,7 +162,10 @@ snapshotMidTransaction(const std::filesystem::path& dbPath,
     }
     mutate(db);
 
-    auto target = copySqliteFiles(dbPath, prefix);
+    // SQLite's shared-memory sidecar is a transient WAL-index cache. Windows can hold byte-range
+    // locks on -shm while the source connection has an open write transaction, so copy only the
+    // durable database and WAL files for crash snapshots; SQLite rebuilds -shm on reopen.
+    auto target = copySqliteFiles(dbPath, prefix, false);
 
     auto rollback = db.execute("ROLLBACK");
     if (!rollback) {
