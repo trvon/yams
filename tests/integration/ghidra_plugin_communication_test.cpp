@@ -220,7 +220,7 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
 
         REQUIRE(response.contains("result"));
         REQUIRE(response["result"]["name"] == "yams_ghidra");
-        REQUIRE(response["result"]["version"] == "0.1.0");
+        REQUIRE(response["result"]["version"] == "0.0.1");
         REQUIRE(response["result"]["interfaces"].is_array());
         REQUIRE(response["result"]["interfaces"][0] == "content_extractor_v1");
     }

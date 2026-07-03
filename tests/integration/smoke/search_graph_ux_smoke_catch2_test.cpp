@@ -129,6 +129,8 @@ struct SearchGraphUxFixture {
     fs::path worktree{root / "repo"};
     fs::path sourceFile{worktree / "src" / "example.cpp"};
     fs::path externalFile{root / "corpus" / "external.txt"};
+    std::string agentToken{"agentux-" + root.filename().string()};
+    std::string globalToken{"globalcorpus-" + root.filename().string()};
     yams::test::ScopedEnvVar ipcTimeout{"YAMS_IPC_TIMEOUT_MS", std::to_string(kSmokeIpcTimeoutMs)};
     yams::test::ScopedEnvVar streamChunkTimeout{"YAMS_STREAM_CHUNK_TIMEOUT_MS",
                                                 std::to_string(kSmokeIpcTimeoutMs)};
@@ -140,10 +142,12 @@ struct SearchGraphUxFixture {
         fs::create_directories(externalFile.parent_path());
         yams::test::write_file(sourceFile, "#include <iostream>\n"
                                            "int main() {\n"
-                                           "    std::cout << \"agent-ux-token\" << std::endl;\n"
+                                           "    std::cout << \"" +
+                                           agentToken +
+                                           "\" << std::endl;\n"
                                            "    return 0;\n"
                                            "}\n");
-        yams::test::write_file(externalFile, "global-corpus-token\n");
+        yams::test::write_file(externalFile, globalToken + "\n");
     }
 };
 
@@ -170,7 +174,7 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -186,7 +190,8 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
     REQUIRE(rc == 0);
 
     out.clear();
-    rc = run_cli({"yams", "search", "agent-ux-token", "--type", "keyword", "--limit", "5"}, &out);
+    rc = run_cli({"yams", "search", fixture.agentToken, "--type", "keyword", "--limit", "5"},
+                 &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("src/example.cpp") != std::string::npos);
@@ -213,7 +218,7 @@ TEST_CASE("IntegrationSmoke.SearchNextHintMatchesFirstRenderedResult",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -253,7 +258,7 @@ TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -283,7 +288,7 @@ TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
 TEST_CASE("IntegrationSmoke.GraphNotFoundSuggestsIndexAndRetry", "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -309,7 +314,7 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -325,7 +330,7 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
     REQUIRE(rc == 0);
 
     out.clear();
-    rc = run_cli({"yams", "grep", "agent-ux-token", "--regex-only", "--line-numbers"}, &out);
+    rc = run_cli({"yams", "grep", fixture.agentToken, "--regex-only", "--line-numbers"}, &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("src/example.cpp") != std::string::npos);
@@ -339,7 +344,7 @@ TEST_CASE("IntegrationSmoke.GrepIgnoresUnrelatedActiveSessionSelectors",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -359,7 +364,7 @@ TEST_CASE("IntegrationSmoke.GrepIgnoresUnrelatedActiveSessionSelectors",
                           {(fixture.root / "somewhere-else" / "**/*").string()});
 
     out.clear();
-    rc = run_cli({"yams", "grep", "agent-ux-token", "--regex-only"}, &out);
+    rc = run_cli({"yams", "grep", fixture.agentToken, "--regex-only"}, &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("src/example.cpp") != std::string::npos);
@@ -370,8 +375,7 @@ TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand"
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;
 
-    yams::test::ScopedEnvVar embedded(
-        "YAMS_EMBEDDED", kTestTimeoutScale > 1 ? std::optional<std::string>{"1"} : std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
@@ -395,21 +399,21 @@ TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand"
     writeSessionSelectors(fixture.stateDir, "repo-session", {(fixture.worktree / "**/*").string()});
 
     out.clear();
-    rc = run_cli({"yams", "search", "global-corpus-token", "--type", "keyword", "--limit", "5"},
+    rc = run_cli({"yams", "search", fixture.globalToken, "--type", "keyword", "--limit", "5"},
                  &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("external.txt") != std::string::npos);
 
     out.clear();
-    rc = run_cli({"yams", "grep", "global-corpus-token", "--regex-only"}, &out);
+    rc = run_cli({"yams", "grep", fixture.globalToken, "--regex-only"}, &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("external.txt") != std::string::npos);
 
     out.clear();
     rc = run_cli(
-        {"yams", "search", "global-corpus-token", "--type", "keyword", "--limit", "5", "--cwd"},
+        {"yams", "search", fixture.globalToken, "--type", "keyword", "--limit", "5", "--cwd"},
         &out);
     INFO(out);
     REQUIRE(rc == 0);
@@ -417,7 +421,7 @@ TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand"
     CHECK(out.find("(no results)") != std::string::npos);
 
     out.clear();
-    rc = run_cli({"yams", "grep", "global-corpus-token", "--regex-only", "--cwd"}, &out);
+    rc = run_cli({"yams", "grep", fixture.globalToken, "--regex-only", "--cwd"}, &out);
     INFO(out);
     REQUIRE(rc == 0);
     CHECK(out.find("external.txt") == std::string::npos);

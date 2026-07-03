@@ -224,7 +224,8 @@ jobs:
           fi
           retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
           retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
-            install -y --fix-missing --no-install-recommends libomp-18-dev ccache
+            install -y --fix-missing --no-install-recommends \
+            cmake ninja-build pkg-config clang clang-tools lld libomp-18-dev ccache
 
       - name: Warm dependencies (${{ inputs.build_type }})
         # Always run on Linux to populate ccache (cache-hit can be true on a tiny

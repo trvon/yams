@@ -1138,7 +1138,10 @@ jobs:
           } >> "$SUMMARY_FILE"
 
           # Add benchmark results if available from CI or validation (jq preferred, fallback to grep)
-          if find "$BUILD_DIR/bench_results" -maxdepth 1 -type f -name '*.json' -print -quit >/dev/null 2>&1; then
+          mapfile -t benchmark_json_files < <(
+            find "$BUILD_DIR/bench_results" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort
+          )
+          if ((${#benchmark_json_files[@]} > 0)); then
             {
               echo "### Performance Metrics"
               echo
@@ -1146,20 +1149,26 @@ jobs:
               echo "|-----------|--------------|-------------|--------|"
             } >> "$SUMMARY_FILE"
             if command -v jq >/dev/null 2>&1; then
-              for json_file in "$BUILD_DIR/bench_results"/*.json; do
-                jq -r '.benchmarks[]? | "| ".name // "Unknown" | ".real_time // 0 | floor) | ".cpu_time // 0 | floor) | "' "$json_file" 2>/dev/null | while IFS= read -r line; do
-                  name=$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//;s/ *$//')
-                  rtime=$(echo "$line" | cut -d'|' -f3 | tr -d ' ')
-                  ctime=$(echo "$line" | cut -d'|' -f4 | tr -d ' ')
-                  # Derive memory throughput if bytes_per_second present
-                  mem=$(jq -r --arg n "$name" '.benchmarks[]? | select(.name==$n) | if (.bytes_per_second // 0) > 0 then ((.bytes_per_second/1024/1024)|tostring)+" MB/s" else (if (.items_per_second // 0) > 0 then ((.items_per_second)|tostring)+" ops/s" else "N/A" end) end' "$json_file" 2>/dev/null)
-                  [ -z "$mem" ] && mem="N/A"
-                  echo "| $name | $rtime | $ctime | $mem |" >> "$SUMMARY_FILE"
-                done
+              for json_file in "${benchmark_json_files[@]}"; do
+                jq -r '
+                  .benchmarks[]? |
+                  [
+                    (.name // "Unknown"),
+                    ((.real_time // 0) | floor | tostring),
+                    ((.cpu_time // 0) | floor | tostring),
+                    (if ((.bytes_per_second // 0) > 0) then
+                       (((.bytes_per_second / 1024 / 1024) | floor | tostring) + " MB/s")
+                     elif ((.items_per_second // 0) > 0) then
+                       (((.items_per_second) | floor | tostring) + " ops/s")
+                     else
+                       "N/A"
+                     end)
+                  ] | "| \(.[0]) | \(.[1]) | \(.[2]) | \(.[3]) |"
+                ' "$json_file" >> "$SUMMARY_FILE"
               done
             else
               # Minimal fallback: grep fields (less robust)
-              for json_file in "$BUILD_DIR/bench_results"/*.json; do
+              for json_file in "${benchmark_json_files[@]}"; do
                 grep '"name"' "$json_file" | sed -E 's/.*"name": *"([^"]+)".*/| \1 | ? | ? | N/A |/' >> "$SUMMARY_FILE" || true
               done
             fi

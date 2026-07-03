@@ -1017,24 +1017,21 @@ TEST_CASE("initializeStorage creates expected directory structure", "[storage][u
     cleanup();
 }
 
-TEST_CASE("initializeStorage returns error when parent is read-only",
+TEST_CASE("initializeStorage returns error when parent is not a directory",
           "[storage][utility][catch2]") {
-#ifdef _WIN32
-    SKIP("POSIX chmod-based permission test is not applicable on Windows");
-#else
     const auto testRoot =
         std::filesystem::temp_directory_path() /
-        std::format("yams_init_ro_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+        std::format("yams_init_file_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count());
     std::filesystem::create_directories(testRoot);
-    ::chmod(testRoot.c_str(), 0500); // read+execute only, no write
+    const auto parentFile = testRoot / "not-a-directory";
+    std::ofstream(parentFile) << "not a directory\n";
 
-    auto result = yams::storage::initializeStorage(testRoot / "storage");
+    auto result = yams::storage::initializeStorage(parentFile / "storage");
     REQUIRE_FALSE(result.has_value());
 
-    ::chmod(testRoot.c_str(), 0700);
     std::error_code ec;
     std::filesystem::remove_all(testRoot, ec);
-#endif
 }
 
 TEST_CASE("validateStorageIntegrity returns true for valid structure",

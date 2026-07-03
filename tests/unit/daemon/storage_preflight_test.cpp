@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #ifndef _WIN32
@@ -46,18 +47,17 @@ TEST_CASE("probeStorage: missing parent path is created (idempotent)",
     fs::remove_all(base);
 }
 
-#ifndef _WIN32
-TEST_CASE("probeStorage: read-only dir returns Error",
+TEST_CASE("probeStorage: non-directory path returns Error",
           "[unit][daemon][storage_preflight][catch2]") {
-    const auto dir = makeScratchDir("yams_preflight_ro");
-    REQUIRE(::chmod(dir.c_str(), 0500) == 0);
-    auto res = yams::daemon::probeStorage(dir);
-    // Restore so test cleanup can remove it.
-    ::chmod(dir.c_str(), 0700);
+    const auto dir = makeScratchDir("yams_preflight_file");
+    const auto filePath = dir / "not-a-directory";
+    std::ofstream(filePath) << "not a directory\n";
+
+    auto res = yams::daemon::probeStorage(filePath);
+
     fs::remove_all(dir);
     REQUIRE_FALSE(res.has_value());
 }
-#endif
 
 TEST_CASE("probeStorage: slow threshold triggers slow=true without erroring",
           "[unit][daemon][storage_preflight][catch2]") {

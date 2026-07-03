@@ -42,6 +42,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install PowerShell for local act image
+        if: github.actor == 'nektos/act'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends powershell
+          pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
       - name: Parse PowerShell packaging scripts
         shell: pwsh
         run: |

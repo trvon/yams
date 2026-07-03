@@ -276,6 +276,20 @@ per-term posting-list caching.
 
 ## Appendix: Notes And Raw Runs
 
+### GitHub Actions Status (2026-07-02)
+
+Checked with `gh run list` / `gh run view --log-failed` on 2026-07-02.
+
+| Workflow run | Status | Failure summary |
+|---|---|---|
+| Release nightly `28572376927` | failed | All build/package matrix jobs failed; warm caches succeeded and GitHub release creation was skipped. Non-Arch package jobs reached the release-summary step but exited with code 3 while parsing benchmark JSON via `jq`; Arch x86_64 failed later because `conan` was not on `PATH`; Arch arm64 failed during Docker setup with `exec /bin/sh: exec format error`. |
+| Tests `28558927596` (`experimental`) | failed | Static analysis and sanitizer/macOS/Linux-arm64 jobs passed. `linux-x86_64` was interrupted by runner shutdown (`ninja: build stopped: interrupted by user`, exit 143). `windows-x86_64` failed `metadata_corruption` (`database disk image is malformed`; 1 failed assertion). |
+| Tests `28553455525` (`main`, prior push) | failed | Linux x86_64, ASAN, UBSAN, and macOS arm64 passed. `linux-arm64` failed `integration_smoke` after SIGABRT / DCHECK with `src/new_file.cpp` not found. `windows-x86_64` failed `daemon_background_processing` with one failed assertion in `daemon_background_processing_test.cpp`. |
+
+Links: Release <https://github.com/trvon/yams/actions/runs/28572376927>; Tests
+experimental <https://github.com/trvon/yams/actions/runs/28558927596>; Tests main
+<https://github.com/trvon/yams/actions/runs/28553455525>.
+
 ### Live-Mirror Drift Attribution
 
 Bisect/probe workload: direct `ingestion_e2e_bench`, 500 docs, poll 10 ms, Simeon

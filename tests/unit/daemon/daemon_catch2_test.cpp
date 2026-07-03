@@ -683,10 +683,14 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon stale PID file cleanup", "[daemon][lifec
     daemon_->stop();
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon invalid socket path configuration", "[daemon][config]") {
+TEST_CASE_METHOD(DaemonFixture, "Daemon invalid socket parent configuration", "[daemon][config]") {
     SKIP_ON_WINDOWS();
 
-    config_.socketPath = "/root/cannot_write_here.sock";
+    const auto notADirectory = runtime_root_ / "socket-parent-file";
+    fs::create_directories(runtime_root_);
+    std::ofstream(notADirectory) << "not a directory\n";
+
+    config_.socketPath = notADirectory / "cannot-create.sock";
     daemon_ = std::make_unique<YamsDaemon>(config_);
 
     auto result = daemon_->start();
@@ -910,29 +914,32 @@ TEST_CASE_METHOD(DaemonFixture, "StatusResponse serialization includes ready fie
     REQUIRE(outSr.version == "test");
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon start fails with invalid data directory",
+TEST_CASE_METHOD(DaemonFixture, "Daemon start fails when data directory path is a file",
                  "[daemon][config]") {
     SKIP_ON_WINDOWS();
 
+    const auto notADirectory = runtime_root_ / "data-file";
+    fs::create_directories(runtime_root_);
+    std::ofstream(notADirectory) << "not a directory\n";
+
     DaemonConfig bad = config_;
-    bad.dataDir = "/root/forbidden_yams_test";
+    bad.dataDir = notADirectory;
     daemon_ = std::make_unique<YamsDaemon>(bad);
 
     auto result = daemon_->start();
     REQUIRE_FALSE(result);
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cannot be created in read-only directory",
+TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cannot be created below a file path",
                  "[daemon][errors]") {
     SKIP_ON_WINDOWS();
 
-    fs::path readonly_dir = runtime_root_ / "readonly";
-    fs::create_directories(readonly_dir);
-    fs::permissions(readonly_dir, fs::perms::owner_read | fs::perms::owner_exec,
-                    fs::perm_options::replace);
+    const auto notADirectory = runtime_root_ / "pid-parent-file";
+    fs::create_directories(runtime_root_);
+    std::ofstream(notADirectory) << "not a directory\n";
 
     DaemonConfig bad_config = config_;
-    bad_config.pidFile = readonly_dir / "yams.pid";
+    bad_config.pidFile = notADirectory / "yams.pid";
     daemon_ = std::make_unique<YamsDaemon>(bad_config);
 
     auto result = daemon_->start();
@@ -941,14 +948,17 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cannot be created in read-only 
         REQUIRE_FALSE(result.error().message.empty());
     }
 
-    fs::permissions(readonly_dir, fs::perms::owner_all, fs::perm_options::replace);
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cleaned up on start failure", "[daemon][errors]") {
     SKIP_ON_WINDOWS();
 
+    const auto notADirectory = runtime_root_ / "data-file-for-pid-cleanup";
+    fs::create_directories(runtime_root_);
+    std::ofstream(notADirectory) << "not a directory\n";
+
     DaemonConfig bad_config = config_;
-    bad_config.dataDir = "/nonexistent/forbidden_path";
+    bad_config.dataDir = notADirectory;
 
     daemon_ = std::make_unique<YamsDaemon>(bad_config);
     auto result = daemon_->start();
@@ -979,11 +989,15 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon double stop is idempotent", "[daemon][li
     REQUIRE_NOTHROW(daemon_->stop());
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon fails with missing socket directory", "[daemon][config]") {
+TEST_CASE_METHOD(DaemonFixture, "Daemon fails when socket parent is a file", "[daemon][config]") {
     SKIP_ON_WINDOWS();
 
+    const auto notADirectory = runtime_root_ / "socket-parent-file-2";
+    fs::create_directories(runtime_root_);
+    std::ofstream(notADirectory) << "not a directory\n";
+
     DaemonConfig bad_config = config_;
-    bad_config.socketPath = "/nonexistent_dir/subdir/yams.sock";
+    bad_config.socketPath = notADirectory / "subdir" / "yams.sock";
 
     daemon_ = std::make_unique<YamsDaemon>(bad_config);
     auto result = daemon_->start();

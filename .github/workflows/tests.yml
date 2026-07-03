@@ -262,6 +262,7 @@ jobs:
           # Install libbenchmark-dev for Google Benchmark support
           retry_cmd 4 sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
             install -y --fix-missing --no-install-recommends \
+            cmake ninja-build clang clang-tools lld ccache \
             libboost-all-dev pkg-config libbenchmark-dev xz-utils libomp-18-dev
           PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
           python3 -m venv "$PYTOOLS_DIR"
@@ -291,6 +292,18 @@ jobs:
           sudo ln -sf /opt/zig/zig /usr/local/bin/zig
           rm /tmp/zig.tar.xz
           zig version
+
+      - name: Ensure Node for act cache actions (Linux)
+        if: runner.os == 'Linux' && github.actor == 'nektos/act'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v node >/dev/null 2>&1; then
+            sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
+            sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends nodejs
+          fi
+          sudo ln -sf "$(command -v node)" /usr/local/bin/node
+          node --version
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         shell: bash
