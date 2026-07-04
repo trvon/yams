@@ -94,6 +94,19 @@ fs::path getCompiledPluginPath() {
 #endif
 }
 
+bool isCompatibleCompiledPlugin(const fs::path& plugin) {
+#if defined(__linux__)
+    std::ifstream input(plugin, std::ios::binary);
+    char magic[4]{};
+    input.read(magic, sizeof(magic));
+    return input.gcount() == static_cast<std::streamsize>(sizeof(magic)) && magic[0] == '\x7f' &&
+           magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+#else
+    (void)plugin;
+    return true;
+#endif
+}
+
 // Helper: read stdout with timeout, return string
 std::string readStdoutWithTimeout(PluginProcess& process,
                                   std::chrono::milliseconds timeout = RPC_TIMEOUT) {
@@ -454,6 +467,10 @@ TEST_CASE("PluginProcess launcher compiled executable",
     if (!fs::exists(compiled_plugin)) {
         SKIP("Compiled plugin not found at: " + compiled_plugin.string() +
              " - run 'python build.py' in yams-ghidra-plugin first");
+    }
+    if (!isCompatibleCompiledPlugin(compiled_plugin)) {
+        SKIP("Compiled plugin exists but is not executable for this test host: " +
+             compiled_plugin.string());
     }
 
     SECTION("Spawn compiled PyInstaller executable") {

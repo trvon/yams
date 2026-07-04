@@ -18,6 +18,45 @@ Logs and summaries are written under `build/local-ci/push-lane/`. On Apple Silic
 | `packages` | Local Docker package build; install validation only on Linux | Debugging package output |
 | `full` | `tests + release + packages` | High-risk pushes |
 
+## smolvm and pre-push CI gate
+
+`smolvm` supplies the Linux side of the blocking pre-push gate. Because smolvm
+cannot run macOS guests, the hook pairs it with a native macOS lane on Darwin
+hosts:
+
+```bash
+# Blocking gate: Linux build+tests in smolvm, then native macOS build+tests
+bash scripts/local-ci/pre-push-ci-gate.sh
+
+# Fast wiring check without expensive builds
+bash scripts/local-ci/pre-push-ci-gate.sh --self-test
+
+# Individual lanes
+bash scripts/local-ci/smolvm-lane.sh --profile linux-ci
+bash scripts/local-ci/native-macos-lane.sh --profile ci
+```
+
+smolvm profiles:
+
+| Profile | Runs |
+|---|---|
+| `smoke` | Boot Linux under smolvm and verify the repository mount. |
+| `syntax` | `smoke` plus `bash -n` for local CI/package scripts. |
+| `static` | `syntax` plus `shellcheck` and `actionlint` inside the VM. |
+| `linux-ci` | Ubuntu 24.04 smolvm Debug build plus unit/integration Meson suites. |
+
+The `linux-ci` lane cleans `build/smolvm-linux` by default
+(`YAMS_SMOLVM_CLEAN_BUILD=1`) because Meson/Conan generated files embed
+absolute guest-local Conan cache paths that are stale in the next fresh VM. It
+also defaults to single-job VM parallelism (`YAMS_SMOLVM_CONAN_JOBS=1`,
+`YAMS_SMOLVM_NINJA_JOBS=1`, `YAMS_SMOLVM_TEST_JOBS=1`) to avoid microVM OOM
+kills during Debug links. Raise those values only on hosts with enough memory,
+or override `YAMS_SMOLVM_TEST_ARGS` when you need a custom Meson test selector.
+
+This still is not full GitHub Actions parity: hosted Windows, release upload,
+and GitHub service behavior require CI/`act` confirmation. It does block pushes
+on local Linux+macOS build/test failures.
+
 ## Current status (2026-07-03)
 
 All known local blockers found by the full lane are fixed in-tree.
@@ -29,6 +68,7 @@ All known local blockers found by the full lane are fixed in-tree.
 | Targeted native tests | Passing | `integration_smoke`, `daemon_background_processing`, `metadata_corruption` passed together. |
 | Linux-hosted release fast-mode | Passing | Release summary generation now handles empty benchmark output. |
 | Package build-only on macOS | Passing | `package-lane-build-only` passed in full lane. |
+| pre-push CI gate | Prototyping | `pre-push-ci-gate.sh` blocks on smolvm Linux build/tests plus native macOS build/tests; `--self-test` verifies wiring. |
 
 Recommended final check:
 
@@ -36,9 +76,31 @@ Recommended final check:
 bash scripts/local-ci/push-lane.sh --profile full --keep-going
 ```
 
-## Opt-in pre-push hook
+## Pre-push hook
+
+Enable tracked hooks:
 
 ```bash
+git config core.hooksPath .githooks
+```
+
+Default pre-push behavior runs the blocking Linux+macOS CI gate. Coverage is no
+longer the default push gate; run it explicitly when you need coverage evidence.
+
+```bash
+# default: smolvm Linux build/tests + native macOS build/tests
+git push
+
+# prove hook/gate wiring without expensive builds
+YAMS_PREPUSH_GATE_SELF_TEST=1 git push
+
+# skip the blocking pre-push CI gate temporarily
+YAMS_SKIP_PREPUSH_CI_GATE=1 git push
+
+# run coverage explicitly
+YAMS_PREPUSH_COVERAGE=1 git push
+
+# optionally add the official act lane too
 YAMS_PREPUSH_GH_LANE=1 git push
 YAMS_PREPUSH_GH_LANE=1 YAMS_PREPUSH_GH_PROFILE=release git push
 ```
@@ -58,6 +120,15 @@ bash scripts/local-ci/push-lane.sh --profile full --keep-going
 
 # Use a specific local Meson build directory for targeted native tests
 YAMS_LOCAL_CI_BUILD_DIR=build/debug bash scripts/local-ci/push-lane.sh --profile tests
+
+# Run the advisory smolvm static lane
+bash scripts/local-ci/smolvm-lane.sh --profile static
+
+# Run the blocking Linux+macOS pre-push CI gate
+bash scripts/local-ci/pre-push-ci-gate.sh
+
+# Prove gate wiring quickly
+bash scripts/local-ci/pre-push-ci-gate.sh --self-test
 ```
 
 ## Appendix: field runs

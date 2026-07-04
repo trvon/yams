@@ -283,8 +283,13 @@ build_main() {
 
 	meson compile -C "${YAMS_BUILD_DIR}"
 
-	# Stage install
-	stage_root="${PKG_BUILD_DIR}/stage"
+	# Stage install. Meson interprets a relative --destdir from the build directory,
+	# so keep this absolute; otherwise the package step can archive an empty
+	# repo-root stage while the real payload lands under ${YAMS_BUILD_DIR}/...
+	case "${PKG_BUILD_DIR}" in
+	/*) stage_root="${PKG_BUILD_DIR}/stage" ;;
+	*) stage_root="${REPO_ROOT}/${PKG_BUILD_DIR}/stage" ;;
+	esac
 	rm -rf "${stage_root}"
 	meson install -C "${YAMS_BUILD_DIR}" --destdir "${stage_root}" --no-rebuild
 

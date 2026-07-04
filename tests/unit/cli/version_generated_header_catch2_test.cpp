@@ -26,10 +26,10 @@ int closePipe(FILE* pipe) {
 #endif
 }
 
-std::string runCommand(const char* command) {
+std::string runCommand(const std::string& command) {
     std::array<char, 256> buffer{};
     std::string output;
-    FILE* pipe = openPipe(command, "r");
+    FILE* pipe = openPipe(command.c_str(), "r");
     if (!pipe) {
         return {};
     }
@@ -41,6 +41,42 @@ std::string runCommand(const char* command) {
         output.pop_back();
     }
     return output;
+}
+
+std::string shellQuote(const std::string& value) {
+    std::string quoted{"'"};
+    for (char ch : value) {
+        if (ch == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += ch;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
+std::filesystem::path findSourceRoot() {
+    if (const char* sourceDir = std::getenv("YAMS_SOURCE_DIR")) {
+        return sourceDir;
+    }
+
+    std::error_code ec;
+    auto cwd = std::filesystem::current_path(ec);
+    if (ec) {
+        return {};
+    }
+    while (!cwd.empty()) {
+        if (std::filesystem::exists(cwd / ".git") || std::filesystem::exists(cwd / "meson.build")) {
+            return cwd;
+        }
+        auto parent = cwd.parent_path();
+        if (parent == cwd) {
+            break;
+        }
+        cwd = parent;
+    }
+    return {};
 }
 
 std::filesystem::path findGeneratedVersionHeader() {
@@ -83,7 +119,12 @@ std::string extractDefine(const std::string& text, const char* name) {
 } // namespace
 
 TEST_CASE("Version header tracks current git commit", "[cli][version]") {
-    const auto gitCommit = runCommand("git rev-parse --short=8 HEAD");
+    const auto sourceRoot = findSourceRoot();
+    REQUIRE_FALSE(sourceRoot.empty());
+
+    const auto quotedRoot = shellQuote(sourceRoot.string());
+    const auto gitCommit = runCommand("git -c safe.directory=" + quotedRoot + " -C " + quotedRoot +
+                                      " rev-parse --short=8 HEAD");
     REQUIRE_FALSE(gitCommit.empty());
 
     const auto headerPath = findGeneratedVersionHeader();
@@ -91,7 +132,7 @@ TEST_CASE("Version header tracks current git commit", "[cli][version]") {
     const auto headerText = readFile(headerPath);
     REQUIRE_FALSE(headerText.empty());
 
-    CHECK(extractDefine(headerText, "YAMS_GIT_COMMIT") == gitCommit);
+    CHECK((extractDefine(headerText, "YAMS_GIT_COMMIT") == gitCommit));
 }
 
 TEST_CASE("Version header uses ISO-8601 build timestamp", "[cli][version]") {

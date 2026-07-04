@@ -161,14 +161,6 @@ jobs:
             meson_args: ""
             hosted: false
             arch_container: true
-          - os: arch-linux-hosted-arm64
-            runs_on: ubuntu-24.04-arm
-            suffix: linux-arm64
-            packaging: pkg.tar.zst
-            build_packages: true
-            meson_args: ""
-            hosted: false
-            arch_container: true
     runs-on: ${{ matrix.runs_on }}
     env:
       STAGE_DIR: stage
@@ -1281,8 +1273,8 @@ jobs:
         shell: bash
         run: |
           # Only generate once to avoid artifact name collision across matrix entries.
-          # Current matrix total: 7 artifacts (5 native platform builds + 2 Arch package containers).
-          echo '{"total": 7}' > matrix.json
+          # Current matrix total: 6 artifacts (5 native platform builds + 1 Arch package container).
+          echo '{"total": 6}' > matrix.json
 
       - name: Upload matrix metadata
         if: matrix.os == 'linux-hosted' && matrix.suffix == 'linux-x86_64' && matrix.arch_container != true && github.actor != 'nektos/act'

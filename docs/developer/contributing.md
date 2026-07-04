@@ -125,13 +125,16 @@ When in doubt, favor smaller PRs, more disclosure, and more human review.
 - Add unit tests for new code and regressions; test error paths and edge cases.
 - Keep tests deterministic and isolated; avoid external network calls.
 - For async/background work, include timing-safe assertions or fakes.
-- Coverage is local-only now. Enable the tracked hooks with
-  `git config core.hooksPath .githooks`; the pre-push hook runs
-  `scripts/run-local-coverage.sh` for pushed C/C++ / Meson changes, prefers
-  ccache plus a fast linker when available, and prints a `gcovr` summary.
-  Default mode is unit-only for speed; add
+- Enable the tracked hooks with `git config core.hooksPath .githooks`.
+  The default pre-push hook runs the blocking Linux+macOS CI gate
+  (`scripts/local-ci/pre-push-ci-gate.sh`) instead of coverage.
+  Run coverage explicitly with `YAMS_PREPUSH_COVERAGE=1 git push`; that
+  dispatches `scripts/run-local-coverage.sh`, prefers ccache plus a fast linker
+  when available, and prints a `gcovr` summary. Add
   `YAMS_COVERAGE_INCLUDE_INTEGRATION=1` when you need integration coverage.
-  Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
+  Use `YAMS_PREPUSH_GATE_SELF_TEST=1 git push` to prove hook wiring without the
+  expensive build/test work. Temporary bypasses: `YAMS_SKIP_PREPUSH_CI_GATE=1 git push`
+  or `YAMS_SKIP_COVERAGE_HOOK=1 YAMS_PREPUSH_COVERAGE=1 git push`.
 - Optimize test runtime by reducing repeated setup and monolithic suite shape,
   not by deleting correctness checks. Slow stress/soak, migration,
   diagnostics-heavy, and long-wait coverage should keep an explicit suite or

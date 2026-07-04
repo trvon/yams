@@ -2,7 +2,27 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-"$REPO_ROOT/scripts/run-local-coverage.sh" "$@"
+
+if [ "${YAMS_SKIP_PREPUSH_CI_GATE:-0}" != "1" ]; then
+  gate_args=()
+  if [ "${YAMS_PREPUSH_GATE_SELF_TEST:-0}" = "1" ]; then
+    gate_args+=(--self-test)
+  fi
+  if [ -n "${YAMS_PREPUSH_GATE_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    extra_args=(${YAMS_PREPUSH_GATE_ARGS})
+    gate_args+=("${extra_args[@]}")
+  fi
+  "$REPO_ROOT/scripts/local-ci/pre-push-ci-gate.sh" "${gate_args[@]}"
+else
+  echo "[pre-push] YAMS_SKIP_PREPUSH_CI_GATE=1; skipping Linux+macOS CI gate" >&2
+fi
+
+if [ "${YAMS_PREPUSH_COVERAGE:-0}" = "1" ]; then
+  "$REPO_ROOT/scripts/run-local-coverage.sh" "$@"
+else
+  echo "[pre-push] coverage gate skipped; set YAMS_PREPUSH_COVERAGE=1 to run it" >&2
+fi
 
 if [ "${YAMS_PREPUSH_GH_LANE:-0}" = "1" ]; then
   PROFILE="${YAMS_PREPUSH_GH_PROFILE:-fast}"

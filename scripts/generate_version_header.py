@@ -10,7 +10,7 @@ import sys
 def _run_git(repo_root: str, git_exe: str, args: list[str]) -> str:
     try:
         proc = subprocess.run(
-            [git_exe, *args],
+            [git_exe, "-c", f"safe.directory={repo_root}", *args],
             cwd=repo_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -24,11 +24,14 @@ def _run_git(repo_root: str, git_exe: str, args: list[str]) -> str:
     return proc.stdout.strip()
 
 
-def _compute_effective_version(repo_root: str, git_exe: str, project_version: str,
-                               override_version: str) -> str:
+def _compute_effective_version(
+    repo_root: str, git_exe: str, project_version: str, override_version: str
+) -> str:
     if override_version:
         return override_version
-    tag = _run_git(repo_root, git_exe, ["describe", "--tags", "--match", "v*", "--abbrev=0"])
+    tag = _run_git(
+        repo_root, git_exe, ["describe", "--tags", "--match", "v*", "--abbrev=0"]
+    )
     if tag.startswith("v"):
         return tag[1:]
     if tag:
@@ -39,7 +42,10 @@ def _compute_effective_version(repo_root: str, git_exe: str, project_version: st
 def _now_timestamp() -> str:
     epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if epoch:
-        dt = _dt.datetime.fromtimestamp(int(epoch), _dt.timezone.utc)
+        try:
+            dt = _dt.datetime.fromtimestamp(int(epoch), _dt.timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            dt = _dt.datetime.now(_dt.timezone.utc)
     else:
         dt = _dt.datetime.now(_dt.timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -67,8 +73,12 @@ def main() -> int:
     git_exe = sys.argv[6]
 
     template = template_path.read_text()
-    effective_version = _compute_effective_version(repo_root, git_exe, project_version, override_version)
-    git_describe = _run_git(repo_root, git_exe, ["describe", "--tags", "--always", "--dirty"])
+    effective_version = _compute_effective_version(
+        repo_root, git_exe, project_version, override_version
+    )
+    git_describe = _run_git(
+        repo_root, git_exe, ["describe", "--tags", "--always", "--dirty"]
+    )
     git_commit = _run_git(repo_root, git_exe, ["rev-parse", "--short=8", "HEAD"])
     build_timestamp = _now_timestamp()
 

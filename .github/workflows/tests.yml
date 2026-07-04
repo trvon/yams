@@ -509,7 +509,13 @@ jobs:
         run: |
           set -euo pipefail
           CONF_FILE="$HOME/.conan2/global.conf"
-          LINE="core.download:parallel=8"
+          DOWNLOAD_PARALLEL=8
+          BUILD_JOBS=""
+          if [ "${{ matrix.suffix }}" = "linux-arm64" ]; then
+            DOWNLOAD_PARALLEL=2
+            BUILD_JOBS=2
+          fi
+          LINE="core.download:parallel=${DOWNLOAD_PARALLEL}"
           mkdir -p "$(dirname "$CONF_FILE")"
           if [ -f "$CONF_FILE" ]; then
             TMP_FILE="$(mktemp)"
@@ -523,9 +529,25 @@ jobs:
           else
             printf '%s\n' "$LINE" > "$CONF_FILE"
           fi
+          if [ -n "$BUILD_JOBS" ]; then
+            if grep -q '^tools.build:jobs=' "$CONF_FILE"; then
+              TMP_FILE="$(mktemp)"
+              awk -v line="tools.build:jobs=${BUILD_JOBS}" '
+                BEGIN { replaced = 0 }
+                /^tools\.build:jobs=/ { if (!replaced) { print line; replaced = 1 } ; next }
+                { print }
+                END { if (!replaced) print line }
+              ' "$CONF_FILE" > "$TMP_FILE"
+              mv "$TMP_FILE" "$CONF_FILE"
+            else
+              printf '%s\n' "tools.build:jobs=${BUILD_JOBS}" >> "$CONF_FILE"
+            fi
+          fi
           echo "Configured $LINE in $CONF_FILE"
           grep -n '^core.download:parallel=' "$CONF_FILE" || true
+          grep -n '^tools.build:jobs=' "$CONF_FILE" || true
           conan config show core.download:parallel 2>/dev/null || true
+          conan config show tools.build:jobs 2>/dev/null || true
           conan --version
 
       - name: Configure and Build with Meson (Unix)
@@ -550,6 +572,16 @@ jobs:
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
+          MESON_COMPILE_JOBS=""
+          if [ "${{ matrix.suffix }}" = "linux-arm64" ]; then
+            # Hosted arm64 runners are more memory-sensitive; unbounded Conan/Ninja
+            # parallelism can starve the runner until GitHub loses communication.
+            MESON_COMPILE_JOBS=2
+            export CONAN_CPU_COUNT=2
+            export CMAKE_BUILD_PARALLEL_LEVEL=2
+            export MAKEFLAGS="-j2"
+            export YAMS_CONAN_EXTRA_OPTIONS="-c tools.build:jobs=2 ${YAMS_CONAN_EXTRA_OPTIONS:-}"
+          fi
           # Disable TSAN in CI - boost::asio strand destruction causes heap-use-after-free
           # that TSAN detects but cannot be suppressed. Run TSAN locally for development.
           export ENABLE_TSAN=false
@@ -570,7 +602,11 @@ jobs:
               catch2_storage_submodule \
               catch2_work_coordinator
           else
-            $ARCH_PREFIX meson compile -C builddir
+            if [ -n "$MESON_COMPILE_JOBS" ]; then
+              $ARCH_PREFIX meson compile -C builddir -j "$MESON_COMPILE_JOBS"
+            else
+              $ARCH_PREFIX meson compile -C builddir
+            fi
           fi
 
       - name: Configure and Build with Meson (Windows)

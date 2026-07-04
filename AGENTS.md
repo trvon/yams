@@ -72,13 +72,16 @@ contract in the prompt; the graph here is rich: function-level nodes with
 - Compile: `meson compile -C build/debug -j4 <target>` — never run parallel
   meson compiles (build-dir lock contention).
 - Run: `build/debug/tests/<target>` or `meson test -C build/debug <name>`.
-- CI no longer runs coverage; use the tracked local pre-push hook instead.
-  Enable it with `git config core.hooksPath .githooks`. The hook dispatches
+- Enable tracked hooks with `git config core.hooksPath .githooks`. The default
+  pre-push hook runs the blocking Linux+macOS CI gate, not coverage.
+  Run coverage explicitly with `YAMS_PREPUSH_COVERAGE=1 git push`; it dispatches
   `scripts/run-local-coverage.sh`, builds `build/coverage`, prefers ccache and
   a fast linker override when available, runs the unit-suite fast path by
   default, and prints a `gcovr` text summary for pushed C/C++ / Meson changes.
   Opt into integration coverage with `YAMS_COVERAGE_INCLUDE_INTEGRATION=1`.
-  Temporary bypass: `YAMS_SKIP_COVERAGE_HOOK=1 git push`.
+  Use `YAMS_PREPUSH_GATE_SELF_TEST=1 git push` to prove hook wiring without the
+  expensive build/test work. Temporary bypasses: `YAMS_SKIP_PREPUSH_CI_GATE=1 git push`
+  or `YAMS_SKIP_COVERAGE_HOOK=1 YAMS_PREPUSH_COVERAGE=1 git push`.
 - Optimize test **overlap and suite shape**, not away correctness. Keep a fast
   default correctness lane, but move stress/soak, migration, heavy log-capture,
   and multi-second wait tests into explicit slow suites or binaries instead of
