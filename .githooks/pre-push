@@ -13,7 +13,11 @@ if [ "${YAMS_SKIP_PREPUSH_CI_GATE:-0}" != "1" ]; then
     extra_args=(${YAMS_PREPUSH_GATE_ARGS})
     gate_args+=("${extra_args[@]}")
   fi
-  "$REPO_ROOT/scripts/local-ci/pre-push-ci-gate.sh" "${gate_args[@]}"
+  if [ "${#gate_args[@]}" -gt 0 ]; then
+    "$REPO_ROOT/scripts/local-ci/pre-push-ci-gate.sh" "${gate_args[@]}"
+  else
+    "$REPO_ROOT/scripts/local-ci/pre-push-ci-gate.sh"
+  fi
 else
   echo "[pre-push] YAMS_SKIP_PREPUSH_CI_GATE=1; skipping Linux+macOS CI gate" >&2
 fi
