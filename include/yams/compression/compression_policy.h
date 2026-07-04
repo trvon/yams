@@ -143,11 +143,14 @@ public:
                                                            ".mp3", ".zip",  ".gz",  ".bz2", ".7z",
                                                            ".rar", ".webm", ".mkv", ".avi"};
 
-        // Performance rules
+        // Performance/resource admission rules
         double maxCpuUsage{0.5};             ///< Max 50% CPU for background
         size_t maxConcurrentCompressions{4}; ///< Max parallel compressions
         size_t minFreeSpaceBytes{static_cast<size_t>(1024) * static_cast<size_t>(1024) *
                                  static_cast<size_t>(1024)}; ///< Need 1GB free space
+        bool enforceCpuUsageLimit{true};                     ///< Check live CPU pressure
+        bool enforceConcurrentCompressionLimit{true};        ///< Check active compression count
+        bool enforceFreeSpaceLimit{true};                    ///< Check live free disk space
 
         // Algorithm preferences
         uint8_t defaultZstdLevel{3}; ///< Fast compression

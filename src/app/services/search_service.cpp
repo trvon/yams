@@ -702,12 +702,13 @@ static inline size_t recommendedWorkers(size_t items) {
 #endif
     rec = std::max(rec, hw / 2);
     size_t workers = std::clamp<size_t>(rec, 1, hw);
-    if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); gcap && *gcap) {
+    if (const char* gcap = std::getenv("YAMS_DAEMON_WORKERS_MAX"); // NOLINT(concurrency-mt-unsafe)
+        gcap && *gcap) {
         try {
             auto cap = static_cast<size_t>(std::stoul(gcap));
             if (cap > 0)
                 workers = std::min(workers, cap);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
     }
     workers = std::min(workers, items > 0 ? items : size_t{1});
@@ -782,11 +783,11 @@ public:
         }
 
         // Symbol weight configurable via env var (default 0.15 = 15% boost)
-        if (const char* w = std::getenv("YAMS_SYMBOL_WEIGHT")) {
+        if (const char* w = std::getenv("YAMS_SYMBOL_WEIGHT")) { // NOLINT(concurrency-mt-unsafe)
             try {
                 symbolWeight_ = std::stof(w);
                 symbolWeight_ = std::max(0.0f, std::min(1.0f, symbolWeight_));
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
     }
@@ -965,7 +966,8 @@ public:
                     // - "dir/*.ext" should match dir/*.ext (prepend **)
                     // - "**/pattern" and "/pattern" are already absolute
                     if (!normalized.empty() && normalized.front() == '*' &&
-                        (normalized.size() == 1 || normalized[1] != '*')) {
+                        (normalized.size() == 1 ||
+                         normalized[1] != '*')) { // NOLINT(bugprone-branch-clone)
                         // Single * at start (e.g., "*.md") - match anywhere in path
                         normalized = "**/" + normalized;
                     } else if (!normalized.empty() && normalized.front() != '*' &&
@@ -1231,7 +1233,7 @@ public:
     }
 
     Result<void> lightIndexForHash(const std::string& hash,
-                                   std::size_t maxBytes = 2 * 1024 * 1024) override {
+                                   std::size_t maxBytes = 2ULL * 1024ULL * 1024ULL) override {
         if (!ctx_.workerExecutor) {
             return Error{ErrorCode::NotInitialized, "Worker executor not available"};
         }
@@ -1461,9 +1463,18 @@ private:
         static auto globToSqlLike = [](const std::string& glob) {
             std::string like;
             like.reserve(glob.size());
-            for (char c : glob) {
+            for (std::size_t i = 0; i < glob.size(); ++i) {
+                const char c = glob[i];
                 if (c == '*') {
-                    like += '%';
+                    if (i + 1 < glob.size() && glob[i + 1] == '*') {
+                        like += '%';
+                        ++i;
+                        if (i + 1 < glob.size() && glob[i + 1] == '/') {
+                            ++i;
+                        }
+                    } else {
+                        like += '%';
+                    }
                 } else if (c == '?') {
                     like += '_';
                 } else {
@@ -1627,7 +1638,7 @@ private:
             if (hasWildcard(rawPattern)) {
                 std::string pattern = rawPattern;
                 if (!pattern.empty() && pattern.front() == '*' &&
-                    (pattern.size() == 1 || pattern[1] != '*')) {
+                    (pattern.size() == 1 || pattern[1] != '*')) { // NOLINT(bugprone-branch-clone)
                     pattern = "**/" + pattern;
                 } else if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
                            pattern.find(":/") == std::string::npos && pattern.find("**/") != 0) {
@@ -2007,7 +2018,7 @@ private:
                         break;
                     const auto& r = *candidates[i];
                     SearchItem it;
-                    it.id = static_cast<int64_t>(i + 1);
+                    it.id = r.document.id;
                     it.hash = r.document.sha256Hash;
                     it.title = r.document.fileName;
                     it.path = r.document.filePath;

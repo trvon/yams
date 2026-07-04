@@ -279,13 +279,20 @@ jobs:
 
           echo "Arch release channel=${channel} version=${version} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
 
+          case "${arch_name}" in
+            x86_64) docker_platform="linux/amd64" ;;
+            aarch64) docker_platform="linux/arm64" ;;
+            *) echo "Unexpected Arch architecture: ${arch_name}" >&2; exit 1 ;;
+          esac
+
           # Build the Arch builder image (uses cached layers from docker/local-ci/arch-package.Dockerfile)
-          docker build -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
+          docker build --platform "${docker_platform}" -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"
 
           # Run the full Arch build inside the container
           docker run --rm \
+            --platform "${docker_platform}" \
             -v "${GITHUB_WORKSPACE}:/workspace/yams" \
             -v yams-arch-conan-cache:/root/.conan2 \
             -w /workspace \
@@ -334,7 +341,7 @@ jobs:
           fi
 
       - name: Cache Conan packages
-        if: github.actor != 'nektos/act'
+        if: github.actor != 'nektos/act' && matrix.arch_container != true
         id: cache_conan
         uses: actions/cache@v4
         continue-on-error: true
@@ -351,7 +358,7 @@ jobs:
             conan2-${{ runner.os }}-linux-x86_64-
             conan2-${{ runner.os }}-
       - name: Conan cache diagnostics
-        if: always()
+        if: always() && matrix.arch_container != true
         shell: bash
         run: |
           echo "Cache hit: ${{ steps.cache_conan.outputs.cache-hit }}"
@@ -364,7 +371,7 @@ jobs:
             fi
           done
       - name: Restore ccache
-        if: github.actor != 'nektos/act'
+        if: github.actor != 'nektos/act' && matrix.arch_container != true
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:
@@ -442,13 +449,13 @@ jobs:
           echo "Stdlib flags sanitized for macOS (forcing -stdlib=libc++)."
 
       - name: Determine release channel and version/tag
+        if: matrix.arch_container != true
         id: meta
         shell: bash
         run: |
           set -euo pipefail
 
           EVENT="${{ github.event_name }}"
-          SCHEDULE_CRON="${{ github.event.schedule || '' }}"
           INPUT_CHANNEL="${{ inputs.channel || '' }}"
           SHORT_HASH=$(git rev-parse --short HEAD)
 
@@ -492,16 +499,18 @@ jobs:
           BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
           BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
-          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$channel" = "stable" ]; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "channel=$channel"
+            echo "version=$VERSION"
+            echo "tag=$TAG_OUT"
+            echo "release_name=$RELEASE_NAME"
+            echo "base_version=$BASE_NUMERIC_VERSION"
+            if [ "$channel" = "stable" ]; then
+              echo "prerelease=false"
+            else
+              echo "prerelease=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
@@ -603,6 +612,7 @@ jobs:
           echo "ninja version (post-check): $(ninja --version || echo 'missing')"
 
       - name: Setup ccache env
+        if: matrix.arch_container != true
         shell: bash
         run: |
           {
@@ -622,6 +632,7 @@ jobs:
           echo "Conan detected default profile. A platform-specific profile (host-macos-apple-clang or host-linux-clang) will be applied explicitly later."
 
       - name: Detect clang version (log only)
+        if: matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -639,6 +650,7 @@ jobs:
             echo "Detected clang major: $RAW_VER"
           fi
       - name: Compare profile vs detected clang (advice)
+        if: matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -663,7 +675,7 @@ jobs:
           fi
 
       - name: Check Conan (self-hosted sanity)
-        if: ${{ !matrix.hosted }}
+        if: ${{ !matrix.hosted && matrix.arch_container != true }}
         shell: bash
         run: conan --version || echo "Conan is expected to be pre-installed and configured on self-hosted runners"
 
@@ -703,6 +715,7 @@ jobs:
           echo "zig version: $(zig version || echo 'missing')"
 
       - name: Tune Conan client (parallel downloads)
+        if: matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -912,6 +925,7 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Collect benchmark results
+        if: always() && matrix.arch_container != true
         shell: bash
         run: |
           mkdir -p "$BUILD_DIR/bench_results"
@@ -988,7 +1002,7 @@ jobs:
           bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
 
       - name: Verify staged runtime assets (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
           set -euo pipefail
@@ -1114,6 +1128,7 @@ jobs:
           }
 
       - name: Generate release summary
+        if: matrix.arch_container != true
         shell: bash
         run: |
           {
@@ -1138,9 +1153,10 @@ jobs:
           } >> "$SUMMARY_FILE"
 
           # Add benchmark results if available from CI or validation (jq preferred, fallback to grep)
-          mapfile -t benchmark_json_files < <(
-            find "$BUILD_DIR/bench_results" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort
-          )
+          benchmark_json_files=()
+          while IFS= read -r json_file; do
+            benchmark_json_files+=("$json_file")
+          done < <(find "$BUILD_DIR/bench_results" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort)
           if ((${#benchmark_json_files[@]} > 0)); then
             {
               echo "### Performance Metrics"
@@ -1261,15 +1277,15 @@ jobs:
       # Release notes are sourced directly from CHANGELOG.md during release creation
 
       - name: Publish matrix.json (expected platform count)
-        if: matrix.os == 'linux-hosted'
+        if: matrix.os == 'linux-hosted' && matrix.suffix == 'linux-x86_64' && matrix.arch_container != true
         shell: bash
         run: |
-          # Only generate once (linux-hosted) to avoid artifact name collision across matrix entries.
-          # Update to reflect current matrix total (5 platforms: linux-x86_64, linux-arm64, macos-arm64, macos-x86_64, windows-x86_64)
+          # Only generate once to avoid artifact name collision across matrix entries.
+          # Current matrix total: 7 artifacts (5 native platform builds + 2 Arch package containers).
           echo '{"total": 7}' > matrix.json
 
       - name: Upload matrix metadata
-        if: matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
+        if: matrix.os == 'linux-hosted' && matrix.suffix == 'linux-x86_64' && matrix.arch_container != true && github.actor != 'nektos/act'
         uses: actions/upload-artifact@v4
         with:
           name: matrix-meta
@@ -1280,7 +1296,7 @@ jobs:
         if: github.actor != 'nektos/act'
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
+          name: release-${{ matrix.os }}-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
           path: |
             yams-*.tar.gz
             yams-*.zip
@@ -1345,7 +1361,7 @@ jobs:
           fi
 
           chmod +x scripts/local-ci/package-validate.sh
-          bash scripts/local-ci/package-validate.sh "${args[@]}"
+          bash scripts/local-ci/package-validate.sh --only linux "${args[@]}"
 
   create-release:
     name: Create GitHub Release
@@ -1380,7 +1396,6 @@ jobs:
           set -euo pipefail
 
           EVENT="${{ github.event_name }}"
-          SCHEDULE_CRON="${{ github.event.schedule || '' }}"
           INPUT_CHANNEL="${{ inputs.channel || '' }}"
           SHORT_HASH=$(git rev-parse --short HEAD)
 
@@ -1424,16 +1439,18 @@ jobs:
           BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
           BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
 
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG_OUT" >> "$GITHUB_OUTPUT"
-          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "base_version=$BASE_NUMERIC_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$channel" = "stable" ]; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "channel=$channel"
+            echo "version=$VERSION"
+            echo "tag=$TAG_OUT"
+            echo "release_name=$RELEASE_NAME"
+            echo "base_version=$BASE_NUMERIC_VERSION"
+            if [ "$channel" = "stable" ]; then
+              echo "prerelease=false"
+            else
+              echo "prerelease=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
           echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
@@ -1497,7 +1514,10 @@ jobs:
           cd assets
           echo "Generating SHA256SUMS for release assets" >&2
           # Exclude bench JSON and summaries from checksum manifest (only distributable binaries)
-          mapfile -t distributables < <(find . -maxdepth 1 -type f \( \
+          distributables=()
+          while IFS= read -r f; do
+            distributables+=("$f")
+          done < <(find . -maxdepth 1 -type f \( \
             -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o \
             -name '*.AppImage' -o -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
           \) -printf '%f\n' | sort)
@@ -1584,7 +1604,12 @@ jobs:
             fi
           done
           if [ -z "$X86_64_FILE" ]; then
-            X86_64_FILE="$(ls -1 assets/*-macos-x86_64.zip 2>/dev/null | head -n 1 || true)"
+            shopt -s nullglob
+            for candidate in assets/*-macos-x86_64.zip; do
+              X86_64_FILE="$candidate"
+              break
+            done
+            shopt -u nullglob
           fi
 
           ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
@@ -1816,7 +1841,12 @@ jobs:
             fi
           done
           if [ -z "$X86_64_FILE" ]; then
-            X86_64_FILE="$(ls -1 assets/*-macos-x86_64.zip 2>/dev/null | head -n 1 || true)"
+            shopt -s nullglob
+            for candidate in assets/*-macos-x86_64.zip; do
+              X86_64_FILE="$candidate"
+              break
+            done
+            shopt -u nullglob
           fi
 
           ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
@@ -2154,7 +2184,7 @@ jobs:
               [ -d "$arch_dir" ] || continue
               if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
                 cd "$arch_dir"
-                repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" *.pkg.tar.zst || true
+                repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" ./*.pkg.tar.zst || true
                 cd "${GITHUB_WORKSPACE}"
               fi
             done
@@ -2306,8 +2336,14 @@ jobs:
           # Determine expected builds:
           # 1) Prefer matrix.json (if provided)
           # 2) Otherwise, fall back to number of artifact groups downloaded
-          if [ -f "release-artifacts/matrix.json" ]; then
-            TOTAL_EXPECTED=$(cat "release-artifacts/matrix.json" | tr -d '\r' | grep -Eo '"total"[[:space:]]*:[[:space:]]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
+          MATRIX_JSON=""
+          if [ -f "release-artifacts/matrix-meta/matrix.json" ]; then
+            MATRIX_JSON="release-artifacts/matrix-meta/matrix.json"
+          elif [ -f "release-artifacts/matrix.json" ]; then
+            MATRIX_JSON="release-artifacts/matrix.json"
+          fi
+          if [ -n "$MATRIX_JSON" ]; then
+            TOTAL_EXPECTED=$(tr -d '\r' < "$MATRIX_JSON" | grep -Eo '"total"[[:space:]]*:[[:space:]]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
           fi
           if [ -z "$TOTAL_EXPECTED" ] || [ "$TOTAL_EXPECTED" -eq 0 ]; then
             TOTAL_EXPECTED="$SUCCESS_COUNT"

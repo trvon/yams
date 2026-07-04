@@ -18,6 +18,7 @@
 # Examples:
 #   bash scripts/local-ci/package-lane.sh                 # build + validate (deb + rpm)
 #   bash scripts/local-ci/package-lane.sh --only deb      # deb lane only
+#   bash scripts/local-ci/package-lane.sh --only all      # deb + rpm + Arch lanes
 #   bash scripts/local-ci/package-lane.sh --build-only    # just produce packages
 #   bash scripts/local-ci/package-lane.sh --validate-only # reuse existing packages
 #   bash scripts/local-ci/package-lane.sh --no-cache      # rebuild the builder image
@@ -32,7 +33,7 @@ DOCKERFILE="${REPO_ROOT}/docker/local-ci/debian-package.Dockerfile"
 ARCH_IMAGE="yams/ci-arch-package:latest"
 ARCH_DOCKERFILE="${REPO_ROOT}/docker/local-ci/arch-package.Dockerfile"
 BUILD_DIR="build/release-pkg" # relative to repo root; kept separate from dev build/
-ONLY="all"
+ONLY="linux"
 DO_BUILD=1
 DO_VALIDATE=1
 NO_CACHE=0
@@ -165,6 +166,9 @@ if [ "${DO_BUILD}" -eq 1 ]; then
 
 		log "built artifacts:"
 		find "${ABS_BUILD_DIR}" -maxdepth 1 -type f \( -name 'yams-*.deb' -o -name 'yams-*.rpm' \) -print
+		if [ "${ONLY}" = "all" ]; then
+			build_arch_lane
+		fi
 		;;
 	esac
 fi

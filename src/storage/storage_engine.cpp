@@ -311,12 +311,14 @@ std::filesystem::path StorageEngine::getObjectPath(std::string_view hash) const 
 }
 
 std::filesystem::path StorageEngine::getTempPath() const {
-    // Temp directory is created at construction time (see Impl ctor);
-    // skip redundant ensureDirectories on every store call.
-
-    // Assert temp dir still exists (catch external cleanup in dev/CI).
-    YAMS_DCHECK(std::filesystem::exists(pImpl->config.basePath / "temp"),
-                "Temp directory must exist (created at construction)");
+    // Temp directories can disappear under external cleanup of ephemeral stores (for example
+    // /tmp cleanup between construction and a later write). Recreate it here instead of treating
+    // that as a process-fatal invariant.
+    std::error_code ec;
+    if (!yams::common::ensureDirectories(pImpl->config.basePath / "temp", ec)) {
+        throw std::runtime_error(
+            yamsfmt::format("Failed to create temp directory: {}", ec.message()));
+    }
 
     // Generate random temp filename using pre-computed hex table
     static thread_local std::random_device rd;

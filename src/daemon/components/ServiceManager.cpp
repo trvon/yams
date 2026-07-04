@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -236,6 +237,32 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
+
+std::optional<std::uintmax_t> sqliteLogicalFileSize(sqlite3* db) {
+    auto readPragma = [db](const char* sql) -> std::optional<std::uintmax_t> {
+        sqlite3_stmt* rawStmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &rawStmt, nullptr) != SQLITE_OK) {
+            return std::nullopt;
+        }
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(rawStmt,
+                                                                        sqlite3_finalize);
+        if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
+            return std::nullopt;
+        }
+        const auto value = sqlite3_column_int64(stmt.get(), 0);
+        if (value <= 0) {
+            return std::nullopt;
+        }
+        return static_cast<std::uintmax_t>(value);
+    };
+
+    auto pageCount = readPragma("PRAGMA page_count");
+    auto pageSize = readPragma("PRAGMA page_size");
+    if (!pageCount || !pageSize) {
+        return std::nullopt;
+    }
+    return (*pageCount) * (*pageSize);
+}
 } // namespace
 
 using yams::Error;
@@ -3247,6 +3274,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         this);
     auto vacuumR = vacuumDb.execute("VACUUM");
     sqlite3_progress_handler(vacuumDb.rawHandle(), 0, nullptr, nullptr);
+    const auto logicalSize = vacuumR ? sqliteLogicalFileSize(vacuumDb.rawHandle()) : std::nullopt;
     vacuumDb.close();
     if (!vacuumR) {
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
@@ -3258,7 +3286,20 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         return;
     }
 
-    const auto newSize = std::filesystem::file_size(dbPath, ec);
+    auto newSize = std::filesystem::file_size(dbPath, ec);
+    if (!ec && logicalSize && *logicalSize > 0 && *logicalSize < newSize) {
+        std::error_code resizeEc;
+        std::filesystem::resize_file(dbPath, *logicalSize, resizeEc);
+        if (!resizeEc) {
+            spdlog::info("[ServiceManager] auto-VACUUM truncated trailing unused bytes: {} MB -> "
+                         "{} MB",
+                         newSize / kMiB, *logicalSize / kMiB);
+            newSize = *logicalSize;
+        } else {
+            spdlog::debug("[ServiceManager] auto-VACUUM tail truncate skipped: {}",
+                          resizeEc.message());
+        }
+    }
     if (!ec) {
         spdlog::info("[ServiceManager] auto-VACUUM complete: {} MB -> {} MB", dbSize / kMiB,
                      newSize / kMiB);

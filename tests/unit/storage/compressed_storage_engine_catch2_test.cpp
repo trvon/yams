@@ -60,6 +60,12 @@ std::vector<std::byte> generateHighEntropyData(size_t size) {
     return data;
 }
 
+void disableLiveResourceGates(CompressionPolicy::Rules& rules) {
+    rules.enforceCpuUsageLimit = false;
+    rules.enforceConcurrentCompressionLimit = false;
+    rules.enforceFreeSpaceLimit = false;
+}
+
 struct CompressedStorageFixture {
     CompressedStorageFixture() {
         testDir = std::filesystem::temp_directory_path() /
@@ -238,7 +244,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine basic store 
     // Retrieve data
     auto retrieveResult = engine->retrieve(hash);
     REQUIRE(retrieveResult.has_value());
-    CHECK(retrieveResult.value() == data);
+    CHECK((retrieveResult.value() == data));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine exists check",
@@ -263,7 +269,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine exists check
 
     auto exists2 = engine->exists(hash);
     REQUIRE(exists2.has_value());
-    CHECK(exists2.value());
+    CHECK((exists2.value()));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine compression disabled",
@@ -282,7 +288,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine compression 
 
     auto retrieveResult = engine->retrieve(hash);
     REQUIRE(retrieveResult.has_value());
-    CHECK(retrieveResult.value() == data);
+    CHECK((retrieveResult.value() == data));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine toggle compression",
@@ -291,13 +297,13 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine toggle compr
     config.enableCompression = true;
 
     auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
-    CHECK(engine->isCompressionEnabled());
+    CHECK((engine->isCompressionEnabled()));
 
     engine->setCompressionEnabled(false);
     CHECK_FALSE(engine->isCompressionEnabled());
 
     engine->setCompressionEnabled(true);
-    CHECK(engine->isCompressionEnabled());
+    CHECK((engine->isCompressionEnabled()));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine statistics",
@@ -319,11 +325,11 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine statistics",
 
     // Get stats
     auto stats = engine->getStats();
-    CHECK(stats.totalObjects.load() > 0);
+    CHECK((stats.totalObjects.load() > 0));
 
     auto compressionStats = engine->getCompressionStats();
     // Check that stats have reasonable values
-    CHECK(compressionStats.totalCompressedFiles.load() >= 0);
+    CHECK((compressionStats.totalCompressedFiles.load() >= 0));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine remove",
@@ -358,12 +364,12 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
 
     CompressionPolicy::Rules newRules;
     newRules.neverCompressBelow = 8192;             // Change from default 4096
-    newRules.alwaysCompressAbove = 5 * 1024 * 1024; // 5MB instead of 10MB
+    newRules.alwaysCompressAbove = 5ULL * 1024ULL * 1024ULL; // 5MB instead of 10MB
     engine->setPolicyRules(newRules);
 
     auto updatedRules = engine->getPolicyRules();
-    CHECK(updatedRules.neverCompressBelow == 8192);
-    CHECK(updatedRules.alwaysCompressAbove == 5 * 1024 * 1024);
+    CHECK((updatedRules.neverCompressBelow == 8192));
+    CHECK((updatedRules.alwaysCompressAbove == 5ULL * 1024ULL * 1024ULL));
 
     auto data = generateCompressibleData(4096);
     auto hash = yams::crypto::SHA256Hasher::hash(std::span<const std::byte>(data));
@@ -372,7 +378,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
     auto raw = underlying->retrieveRaw(hash);
     REQUIRE(raw.has_value());
     CHECK_FALSE(raw.value().header.has_value());
-    CHECK(raw.value().data == data);
+    CHECK((raw.value().data == data));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine concurrent access",
@@ -404,7 +410,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine concurrent a
         thread.join();
     }
 
-    CHECK(successCount.load() == numThreads * itemsPerThread);
+    CHECK((successCount.load() == numThreads * itemsPerThread));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine async operations",
@@ -427,7 +433,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine async operat
     auto retrieveFuture = engine->retrieveAsync(hash);
     auto retrieveResult = retrieveFuture.get();
     REQUIRE(retrieveResult.has_value());
-    CHECK(retrieveResult.value() == data);
+    CHECK((retrieveResult.value() == data));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operations",
@@ -445,7 +451,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operat
     }
 
     auto results = engine->storeBatch(items);
-    CHECK(results.size() == items.size());
+    CHECK((results.size() == items.size()));
 
     int successCount = 0;
     for (const auto& result : results) {
@@ -453,7 +459,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operat
             successCount++;
         }
     }
-    CHECK(successCount == static_cast<int>(items.size()));
+    CHECK((successCount == static_cast<int>(items.size())));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture,
@@ -475,7 +481,7 @@ TEST_CASE_METHOD(CompressedStorageFixture,
 
     auto retrieveResult = engine->retrieve(hash);
     REQUIRE(retrieveResult.has_value());
-    CHECK(retrieveResult.value() == data);
+    CHECK((retrieveResult.value() == data));
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture,
@@ -520,8 +526,8 @@ TEST_CASE_METHOD(CompressedStorageFixture,
     auto raw = underlying->retrieveRaw(hash);
     REQUIRE(raw.has_value());
     CHECK_FALSE(raw.value().header.has_value());
-    CHECK(raw.value().data.size() == data.size());
-    CHECK(raw.value().data == data);
+    CHECK((raw.value().data.size() == data.size()));
+    CHECK((raw.value().data == data));
 }
 
 TEST_CASE("CompressedStorageEngine compresses before generic backend store",
@@ -542,12 +548,12 @@ TEST_CASE("CompressedStorageEngine compresses before generic backend store",
     REQUIRE(engine.store(hash, data).has_value());
 
     auto uploaded = capturing->captured(hash);
-    CHECK(uploaded.size() < data.size());
-    CHECK(CompressionHeader::parse(uploaded).has_value());
+    CHECK((uploaded.size() < data.size()));
+    CHECK((CompressionHeader::parse(uploaded).has_value()));
 
     auto readBack = engine.retrieve(hash);
     REQUIRE(readBack.has_value());
-    CHECK(readBack.value() == data);
+    CHECK((readBack.value() == data));
 }
 
 TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for generic backend",
@@ -568,7 +574,7 @@ TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for gen
     REQUIRE(engine.store(hash, data).has_value());
 
     auto uploaded = capturing->captured(hash);
-    CHECK(uploaded == data);
+    CHECK((uploaded == data));
     CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
 }
 
@@ -589,13 +595,13 @@ TEST_CASE("CompressedStorageEngine rejects corrupted compressed payload from gen
 
     REQUIRE(engine.store(hash, data).has_value());
     auto corrupted = capturing->captured(hash);
-    REQUIRE(corrupted.size() > CompressionHeader::SIZE);
+    REQUIRE((corrupted.size() > CompressionHeader::SIZE));
     corrupted[CompressionHeader::SIZE] ^= std::byte{0x01};
     REQUIRE(capturing->store(hash, corrupted).has_value());
 
     auto readBack = engine.retrieve(hash);
     REQUIRE_FALSE(readBack.has_value());
-    CHECK(readBack.error().code == ErrorCode::HashMismatch);
+    CHECK((readBack.error().code == ErrorCode::HashMismatch));
 }
 
 TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unchanged",
@@ -625,7 +631,7 @@ TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unch
 
     auto readBack = engine.retrieve(hash);
     REQUIRE(readBack.has_value());
-    CHECK(readBack.value() == raw);
+    CHECK((readBack.value() == raw));
 }
 
 TEST_CASE("CompressedStorageEngine stores raw bytes when compressor is unavailable",
@@ -649,7 +655,7 @@ TEST_CASE("CompressedStorageEngine stores raw bytes when compressor is unavailab
     }
 
     auto uploaded = capturing->captured(hash);
-    CHECK(uploaded == data);
+    CHECK((uploaded == data));
     CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
 }
 
@@ -676,7 +682,7 @@ TEST_CASE("CompressedStorageEngine rejects compressed bytes when decompressor is
         ScopedZstdUnavailable unavailable;
         auto readBack = engine.retrieve(hash);
         REQUIRE_FALSE(readBack.has_value());
-        CHECK(readBack.error().code == ErrorCode::InvalidArgument);
+        CHECK((readBack.error().code == ErrorCode::InvalidArgument));
     }
 }
 
@@ -693,15 +699,15 @@ TEST_CASE("CompressedStorageEngine shutdown clears queued async compression jobs
 
     REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '1')).has_value());
     REQUIRE(engine.testing_enqueueCompressionJob(std::string(64, '2')).has_value());
-    CHECK(engine.testing_asyncQueueDepth() == 2);
+    CHECK((engine.testing_asyncQueueDepth() == 2));
 
     engine.testing_shutdownAsyncWorkers();
 
-    CHECK(engine.testing_asyncQueueDepth() == 0);
-    CHECK(engine.waitForAsyncOperations(std::chrono::milliseconds{0}));
+    CHECK((engine.testing_asyncQueueDepth() == 0));
+    CHECK((engine.waitForAsyncOperations(std::chrono::milliseconds{0})));
     auto rejected = engine.testing_enqueueCompressionJob(std::string(64, '3'));
     REQUIRE_FALSE(rejected.has_value());
-    CHECK(rejected.error().code == ErrorCode::SystemShutdown);
+    CHECK((rejected.error().code == ErrorCode::SystemShutdown));
 }
 
 TEST_CASE("CompressedStorageEngine triggerCompressionScan queues uncompressed objects",
@@ -715,6 +721,7 @@ TEST_CASE("CompressedStorageEngine triggerCompressionScan queues uncompressed ob
     config.compressionThreshold = 0;
     config.policyRules.neverCompressBelow = 0;
     config.policyRules.neverCompressBefore = std::chrono::hours{0};
+    disableLiveResourceGates(config.policyRules);
     config.policyRules.defaultZstdLevel = 3;
 
     CompressedStorageEngine engine(std::static_pointer_cast<IStorageEngine>(capturing), config);
@@ -729,14 +736,14 @@ TEST_CASE("CompressedStorageEngine triggerCompressionScan queues uncompressed ob
 
     auto queued = engine.triggerCompressionScan();
     REQUIRE(queued.has_value());
-    CHECK(queued.value() == 2);
+    CHECK((queued.value() == 2));
 
     bool finished = engine.waitForAsyncOperations(std::chrono::seconds{5});
-    CHECK(finished);
+    CHECK((finished));
 
     auto uploaded1 = capturing->captured(hash1);
-    CHECK(CompressionHeader::parse(uploaded1).has_value());
+    CHECK((CompressionHeader::parse(uploaded1).has_value()));
 
     auto uploaded2 = capturing->captured(hash2);
-    CHECK(CompressionHeader::parse(uploaded2).has_value());
+    CHECK((CompressionHeader::parse(uploaded2).has_value()));
 }

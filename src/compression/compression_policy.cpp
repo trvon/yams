@@ -1,8 +1,10 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
+#include <mutex>
 #include <thread>
 #include <yams/compression/compression_policy.h>
 #include <yams/compression/compression_utils.h>
@@ -23,6 +25,8 @@ std::string toLowerCase(std::string str) {
  */
 double getCurrentCPUUsage() {
     // Simplified implementation - in production would use platform-specific APIs
+    static std::mutex cpuMutex;
+    std::lock_guard lock(cpuMutex);
     static auto lastCheck = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
 
@@ -54,6 +58,40 @@ size_t getActiveCompressionCount() {
     // In a real implementation, this would track actual operations
     static std::atomic<size_t> activeCount{0};
     return activeCount.load();
+}
+
+bool hasSystemResourcesForRules(const CompressionPolicy::Rules& rules) {
+    // Check CPU usage
+    if (rules.enforceCpuUsageLimit) {
+        double cpuUsage = getCurrentCPUUsage();
+        if (cpuUsage > rules.maxCpuUsage) {
+            spdlog::debug("CPU usage too high: {:.1f}% > {:.1f}%", cpuUsage * 100,
+                          rules.maxCpuUsage * 100);
+            return false;
+        }
+    }
+
+    // Check free disk space
+    if (rules.enforceFreeSpaceLimit) {
+        auto freeSpace = getFreeDiskSpace();
+        if (freeSpace < rules.minFreeSpaceBytes) {
+            spdlog::debug("Insufficient disk space: {} MB < {} MB", freeSpace / (1024ULL * 1024ULL),
+                          rules.minFreeSpaceBytes / (1024ULL * 1024ULL));
+            return false;
+        }
+    }
+
+    // Check concurrent compressions
+    if (rules.enforceConcurrentCompressionLimit) {
+        auto activeCompressions = getActiveCompressionCount();
+        if (activeCompressions >= rules.maxConcurrentCompressions) {
+            spdlog::debug("Too many concurrent compressions: {} >= {}", activeCompressions,
+                          rules.maxConcurrentCompressions);
+            return false;
+        }
+    }
+
+    return true;
 }
 } // namespace
 
@@ -93,7 +131,7 @@ CompressionDecision CompressionPolicy::shouldCompress(const api::ContentMetadata
     }
 
     // Step 5: Check system resources
-    if (!hasSystemResources()) {
+    if (!hasSystemResourcesForRules(rules_)) {
         return CompressionDecision::dontCompress("Insufficient system resources");
     }
 
@@ -200,31 +238,8 @@ bool CompressionPolicy::isCompressibleType(const std::string& mimeType,
 }
 
 bool CompressionPolicy::hasSystemResources() const {
-    // Check CPU usage
-    double cpuUsage = getCurrentCPUUsage();
-    if (cpuUsage > rules_.maxCpuUsage) {
-        spdlog::debug("CPU usage too high: {:.1f}% > {:.1f}%", cpuUsage * 100,
-                      rules_.maxCpuUsage * 100);
-        return false;
-    }
-
-    // Check free disk space
-    auto freeSpace = getFreeDiskSpace();
-    if (freeSpace < rules_.minFreeSpaceBytes) {
-        spdlog::debug("Insufficient disk space: {} MB < {} MB", freeSpace / (1024ULL * 1024ULL),
-                      rules_.minFreeSpaceBytes / (1024ULL * 1024ULL));
-        return false;
-    }
-
-    // Check concurrent compressions
-    auto activeCompressions = getActiveCompressionCount();
-    if (activeCompressions >= rules_.maxConcurrentCompressions) {
-        spdlog::debug("Too many concurrent compressions: {} >= {}", activeCompressions,
-                      rules_.maxConcurrentCompressions);
-        return false;
-    }
-
-    return true;
+    std::lock_guard lock(rulesMutex_);
+    return hasSystemResourcesForRules(rules_);
 }
 
 std::string CompressionPolicy::getExtension(const std::string& filename) {

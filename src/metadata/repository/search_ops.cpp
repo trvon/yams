@@ -11,10 +11,37 @@
 #include <yams/profiling.h>
 #include <yams/search/symspell_search.h>
 
-#include "document_query_filters.hpp"
 #include "search_query_helpers.hpp"
 
 namespace yams::metadata {
+
+namespace {
+float normalizeFuzzySimilarityThreshold(float minSimilarity) {
+    if (!(minSimilarity >= 0.0F)) {
+        return 0.0F;
+    }
+    return std::min(minSimilarity, 1.0F);
+}
+
+double fuzzyTermSimilarity(std::string_view queryTerm, std::string_view candidateTerm,
+                           int editDistance) {
+    if (editDistance <= 0) {
+        return 1.0;
+    }
+    const auto width = std::max(queryTerm.size(), candidateTerm.size());
+    if (width == 0) {
+        return 1.0;
+    }
+    const auto similarity = 1.0 - (static_cast<double>(editDistance) / static_cast<double>(width));
+    return std::max(0.0, similarity);
+}
+
+void appendUniqueExpandedTerm(std::vector<std::string>& expandedTerms, std::string term) {
+    if (std::ranges::find(expandedTerms, term) == expandedTerms.end()) {
+        expandedTerms.push_back(std::move(term));
+    }
+}
+} // namespace
 
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
@@ -59,7 +86,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         std::string sanitizedQuery = sanitizeFTS5Query(query);
         const auto ftsMode = parseFts5ModeEnv();
         auto parseEnvFlag = [](const char* key, bool defaultValue) {
-            const char* env = std::getenv(key);
+            const char* env = std::getenv(key); // NOLINT(concurrency-mt-unsafe)
             if (!env || !*env) {
                 return defaultValue;
             }
@@ -73,7 +100,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         const bool nlAutoPhrase = parseEnvFlag("YAMS_FTS_NL_AUTO_PHRASE", true);
         const bool nlAutoPrefix = parseEnvFlag("YAMS_FTS_NL_PREFIX", true);
         int nlMinResults = 3;
-        if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); s && *s) {
+        if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); // NOLINT(concurrency-mt-unsafe)
+            s && *s) {
             nlMinResults = std::max(0, std::atoi(s));
         }
         const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", false);
@@ -89,7 +117,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         }
 
         bool ftsDebug = false;
-        if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); env && std::string(env) == "1") {
+        if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); // NOLINT(concurrency-mt-unsafe)
+            env && std::string(env) == "1") {
             ftsDebug = true;
             spdlog::warn("[FTS5] raw='{}' sanitized='{}' limit={} offset={} docIds={}", query,
                          sanitizedQuery, limit, offset, (docIds ? docIds->size() : 0));
@@ -355,7 +384,7 @@ Result<SearchResults>
 MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, int limit,
                                 const std::optional<std::vector<int64_t>>& docIds) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::fuzzySearch");
-    (void)minSimilarity;
+    const float similarityThreshold = normalizeFuzzySimilarityThreshold(minSimilarity);
 
     auto initResult = ensureSymSpellInitialized();
     if (!initResult || !symspellIndex_) {
@@ -369,7 +398,8 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         SearchResults results;
         results.query = query;
 
-        spdlog::debug("[FUZZY] fuzzySearch starting for query='{}' limit={}", query, limit);
+        spdlog::debug("[FUZZY] fuzzySearch starting for query='{}' minSimilarity={} limit={}",
+                      query, similarityThreshold, limit);
         auto totalStart = std::chrono::high_resolution_clock::now();
 
         std::string ftsQuery;
@@ -391,16 +421,20 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
                 opts.returnAll = true;
                 opts.maxResults = 5;
 
+                appendUniqueExpandedTerm(expandedTerms, term);
+
                 auto suggestions = symspellIndex_->search(term, opts);
                 if (!suggestions.empty()) {
                     for (const auto& s : suggestions) {
                         std::string cleaned = stripPunctuation(std::string(s.term));
-                        if (!cleaned.empty()) {
-                            expandedTerms.push_back(std::move(cleaned));
+                        if (cleaned.empty()) {
+                            continue;
+                        }
+                        if (fuzzyTermSimilarity(term, cleaned, s.editDistance) >=
+                            similarityThreshold) {
+                            appendUniqueExpandedTerm(expandedTerms, std::move(cleaned));
                         }
                     }
-                } else {
-                    expandedTerms.push_back(term);
                 }
             }
 

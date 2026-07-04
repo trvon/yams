@@ -20,8 +20,9 @@
 #   - systemd-in-docker needs --privileged + cgroup access (handled below)
 #
 # Examples:
-#   bash scripts/local-ci/package-validate.sh
-#   bash scripts/local-ci/package-validate.sh --only deb
+#   bash scripts/local-ci/package-validate.sh                 # validate deb + rpm
+#   bash scripts/local-ci/package-validate.sh --only deb      # validate deb only
+#   bash scripts/local-ci/package-validate.sh --only all      # validate deb + rpm + arch
 #   bash scripts/local-ci/package-validate.sh --deb path/to/yams.deb --rpm path/to/yams.rpm
 #
 # Notes:
@@ -39,7 +40,7 @@ FEDORA_DOCKERFILE="${REPO_ROOT}/packaging/systemd/fedora-lane.Dockerfile"
 ARCH_DOCKERFILE="${REPO_ROOT}/packaging/systemd/arch-lane.Dockerfile"
 SOCKET_PATH="/run/yams/yams-daemon.sock"
 
-ONLY="all"
+ONLY="linux"
 BUILD_DIR="${BUILD_DIR_DEFAULT}"
 DEB_PKG=""
 RPM_PKG=""
@@ -53,12 +54,14 @@ usage() {
 	sed -n '2,40p' "${BASH_SOURCE[0]}"
 }
 
-arch_label() {
-	case "$(uname -m)" in
-	x86_64) echo "x86_64" ;;
-	aarch64 | arm64) echo "aarch64" ;;
-	armv7l) echo "armv7h" ;;
-	*) uname -m ;;
+should_run_lane() {
+	local lane="$1"
+	case "${ONLY}" in
+	all) return 0 ;;
+	linux) [ "${lane}" = "deb" ] || [ "${lane}" = "rpm" ] ;;
+	deb | rpm | arch) [ "${ONLY}" = "${lane}" ] ;;
+	*,*) case ",${ONLY}," in *",${lane},"*) return 0 ;; *) return 1 ;; esac ;;
+	*) return 1 ;;
 	esac
 }
 
@@ -96,6 +99,14 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
+case "${ONLY}" in
+all | linux | deb | rpm | arch | *,*) ;;
+*)
+	fail "unsupported --only value: ${ONLY} (expected linux, all, deb, rpm, arch, or comma-separated lanes)"
+	exit 2
+	;;
+esac
+
 if ! command -v docker >/dev/null 2>&1; then
 	fail "docker not found on PATH"
 	exit 2
@@ -129,7 +140,7 @@ validate_lane() {
 		platform_args=(--platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}")
 	fi
 
-	log "${name}: building substrate image from ${dockerfile#${REPO_ROOT}/}"
+	log "${name}: building substrate image from ${dockerfile#"${REPO_ROOT}"/}"
 	if ! docker build "${platform_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
 		fail "${name}: failed to build substrate image"
 		return 1
@@ -254,8 +265,10 @@ validate_lane() {
 }
 
 OVERALL=0
+RAN=0
 
-if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "deb" ]; then
+if should_run_lane deb; then
+	RAN=$((RAN + 1))
 	deb_base="$(basename "${DEB_PKG:-yams.deb}")"
 	# Remove the Docker base image's policy-rc.d (exit 101), which blocks service
 	# auto-start during apt install. A real Debian/Ubuntu host has no such file, so
@@ -266,7 +279,8 @@ if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "deb" ]; then
 		"apt-get purge -y yams" || OVERALL=1
 fi
 
-if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "rpm" ]; then
+if should_run_lane rpm; then
+	RAN=$((RAN + 1))
 	rpm_base="$(basename "${RPM_PKG:-yams.rpm}")"
 	validate_lane "fedora" "${FEDORA_DOCKERFILE}" "yams/validate-fedora:42" "${RPM_PKG}" \
 		"dnf install -y /root/${rpm_base}" \
@@ -274,7 +288,8 @@ if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "rpm" ]; then
 		"" || OVERALL=1
 fi
 
-if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "arch" ]; then
+if should_run_lane arch; then
+	RAN=$((RAN + 1))
 	arch_base="$(basename "${ARCH_PKG:-yams.pkg.tar.zst}")"
 	# Pacman defaults to confirming prompts; --noconfirm prevents interactive hangs.
 	# --overwrite '*' handles any file conflicts on re-installs in the same container.
@@ -282,6 +297,11 @@ if [ "${ONLY}" = "all" ] || [ "${ONLY}" = "arch" ]; then
 		"pacman -Sy --noconfirm >/dev/null 2>&1; pacman -U --noconfirm --overwrite '*' /root/${arch_base} && pacman -Q yams >/dev/null" \
 		"pacman -R --noconfirm yams" \
 		"" || OVERALL=1
+fi
+
+if [ "${RAN}" -eq 0 ]; then
+	fail "no package validation lanes selected by --only ${ONLY}"
+	exit 2
 fi
 
 if [ "${OVERALL}" -eq 0 ]; then

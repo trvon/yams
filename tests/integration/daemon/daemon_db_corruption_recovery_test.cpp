@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
@@ -23,10 +24,12 @@ namespace fs = std::filesystem;
 
 namespace {
 constexpr std::uintmax_t kOversizedDbBytes = 600ULL * 1024 * 1024;
+constexpr std::uintmax_t kCompactedDbMaxBytes = 1024ULL * 1024;
 
 void writeCorruptDb(const fs::path& path) {
     std::ofstream out(path, std::ios::binary);
-    const std::string header = "SQLite format 3\0";
+    std::string header = "SQLite format 3";
+    header.push_back('\0');
     out.write(header.data(), static_cast<std::streamsize>(header.size()));
     const std::string garbage(4096, '\xff');
     out.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
@@ -100,6 +103,22 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
     return std::nullopt;
 }
 
+bool waitForDbBelowSize(const fs::path& dbPath, std::uintmax_t maxBytes,
+                        std::chrono::steady_clock::duration timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::error_code ec;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto size = fs::file_size(dbPath, ec);
+        if (!ec && size < maxBytes) {
+            return true;
+        }
+        ec.clear();
+        std::this_thread::sleep_for(100ms);
+    }
+    const auto size = fs::file_size(dbPath, ec);
+    return !ec && size < maxBytes;
+}
+
 } // namespace
 
 TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
@@ -141,10 +160,10 @@ TEST_CASE("Daemon auto-recovers from corrupt metadata DB on startup",
     // After a corruption-triggered recovery the daemon should report the
     // ready phase and remember which file was quarantined so the CLI can
     // surface "recovered from …" in `yams daemon status`.
-    REQUIRE(status.value().databasePhase == "ready");
+    REQUIRE((status.value().databasePhase == "ready"));
     REQUIRE_FALSE(status.value().databaseRecoveredFrom.empty());
-    CHECK(status.value().databaseRecoveredFrom == quarantinedPath->string());
-    CHECK(status.value().databaseRecoveredFrom.find(dataDir.string()) == 0);
+    CHECK((status.value().databaseRecoveredFrom == quarantinedPath->string()));
+    CHECK((status.value().databaseRecoveredFrom.find(dataDir.string()) == 0));
 
     harness.stop();
 
@@ -163,7 +182,10 @@ TEST_CASE("Daemon startup checkpoints stale WAL and auto-vacuums oversized metad
     const auto dbPath = dataDir / "yams.db";
     seedValidDb(dbPath, "vacuum_seed");
     fs::resize_file(dbPath, kOversizedDbBytes);
-    REQUIRE(fs::file_size(dbPath) == kOversizedDbBytes);
+    REQUIRE((fs::file_size(dbPath) == kOversizedDbBytes));
+    std::error_code spaceEc;
+    const auto spaceBeforeStart = fs::space(dataDir, spaceEc);
+    const bool expectAutoVacuum = !spaceEc && spaceBeforeStart.available > kOversizedDbBytes;
     const std::string staleWalPayload = "oversized-sidecar";
     writeDummyWal(dbPath, staleWalPayload);
 
@@ -187,15 +209,24 @@ TEST_CASE("Daemon startup checkpoints stale WAL and auto-vacuums oversized metad
 
     auto status = yams::cli::run_sync(client.status(), 5s);
     REQUIRE(status.has_value());
-    CHECK(status.value().databasePhase == "ready");
+    CHECK((status.value().databasePhase == "ready"));
     CHECK(status.value().databaseRecoveredFrom.empty());
     CHECK_FALSE(walSidecarStillMatchesPayload(dbPath, staleWalPayload));
-    CHECK(startupProbeRowCount(dbPath) == 1U);
+    CHECK((startupProbeRowCount(dbPath) == 1U));
+
+    if (expectAutoVacuum) {
+        CHECK(waitForDbBelowSize(dbPath, kCompactedDbMaxBytes, 30s));
+    } else {
+        WARN("Skipping DB shrink assertion because this runner has insufficient free space for "
+             "startup auto-VACUUM");
+    }
 
     harness.stop();
     CHECK(walSidecarCleared(dbPath));
-    CHECK(fs::file_size(dbPath) < 1024 * 1024);
-    CHECK(startupProbeRowCount(dbPath) == 1U);
+    if (expectAutoVacuum) {
+        CHECK((fs::file_size(dbPath) < kCompactedDbMaxBytes));
+    }
+    CHECK((startupProbeRowCount(dbPath) == 1U));
 
     std::error_code ec;
     fs::remove_all(dataDir, ec);

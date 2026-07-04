@@ -2448,6 +2448,54 @@ TEST_CASE("MetadataRepository: fuzzy search returns content matches",
     CHECK((searchResults.results.front().document.id == docId));
 }
 
+TEST_CASE("MetadataRepository: fuzzy search honors minSimilarity threshold",
+          "[unit][metadata][repository]") {
+    MetadataRepositoryFixture fix;
+
+    auto exactDoc = makeDocumentWithPath(
+        "/notes/fuzzy_threshold_exact.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE1");
+    auto nearDoc = makeDocumentWithPath(
+        "/notes/fuzzy_threshold_near.txt",
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE2");
+
+    auto exactInsert = fix.repository_->insertDocument(exactDoc);
+    REQUIRE((exactInsert.has_value()));
+    auto nearInsert = fix.repository_->insertDocument(nearDoc);
+    REQUIRE((nearInsert.has_value()));
+
+    constexpr char kExactTerm[] = "fuzzthresholdtarget";
+    constexpr char kNearTerm[] = "fuzzthresholtarget";
+    REQUIRE(
+        fix.repository_
+            ->indexDocumentContent(exactInsert.value(), exactDoc.fileName, kExactTerm, "text/plain")
+            .has_value());
+    REQUIRE(
+        fix.repository_
+            ->indexDocumentContent(nearInsert.value(), nearDoc.fileName, kNearTerm, "text/plain")
+            .has_value());
+    REQUIRE((fix.repository_->tryAddSymSpellTerms({std::pair<std::string, int64_t>{kExactTerm, 1},
+                                                   {kNearTerm, 1}})
+                 .has_value()));
+
+    auto lowThreshold = fix.repository_->fuzzySearch(kExactTerm, 0.0f, 10);
+    REQUIRE((lowThreshold.has_value()));
+    auto highThreshold = fix.repository_->fuzzySearch(kExactTerm, 1.0f, 10);
+    REQUIRE((highThreshold.has_value()));
+
+    auto hasDocId = [](const SearchResults& results, int64_t docId) {
+        return std::ranges::any_of(results.results, [docId](const SearchResult& result) {
+            return result.document.id == docId;
+        });
+    };
+
+    CHECK((hasDocId(lowThreshold.value(), exactInsert.value())));
+    CHECK((hasDocId(lowThreshold.value(), nearInsert.value())));
+    CHECK((hasDocId(highThreshold.value(), exactInsert.value())));
+    CHECK_FALSE((hasDocId(highThreshold.value(), nearInsert.value())));
+    CHECK((lowThreshold.value().results.size() >= highThreshold.value().results.size()));
+}
+
 TEST_CASE("MetadataRepository: keyword search does not implicitly run fuzzy fallback",
           "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;

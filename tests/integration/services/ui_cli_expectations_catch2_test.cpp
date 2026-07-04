@@ -17,9 +17,9 @@
 #include <thread>
 #include <vector>
 
+#include "../../common/test_helpers_catch2.h"
 #include "../daemon/test_async_helpers.h"
 #include "../daemon/test_daemon_harness.h"
-#include "../../common/test_helpers_catch2.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -37,6 +37,9 @@
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+// Catch2 assertions and sandbox probes intentionally trip generic clang-tidy rules in this
+// integration suite.
+// NOLINTBEGIN(bugprone-chained-comparison, bugprone-unused-return-value, bugprone-empty-catch)
 namespace {
 
 bool uiCliFdTraceEnabled() {
@@ -312,7 +315,10 @@ auto retryKgWriteForTest(WriteFn writeFn,
 }
 
 } // namespace
+// NOLINTEND(bugprone-chained-comparison, bugprone-unused-return-value, bugprone-empty-catch)
 
+// Catch2 assertion decomposition in the test cases below is noisy under chained-comparison lint.
+// NOLINTBEGIN(bugprone-chained-comparison)
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: grep paths-only honors include and tags",
                  "[integration][services][ui-cli][batch1]") {
     start();
@@ -1088,6 +1094,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy bounds similarity zero 
     opts.path = (root() / "ingest").string();
     opts.recursive = true;
     opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
     REQUIRE(ing.addViaDaemon(opts));
 
     auto* sm = serviceManager();
@@ -1422,8 +1429,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: path wildcard matches",
     opts.path = (root() / "ingest").string();
     opts.recursive = true;
     opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
     REQUIRE(ing.addViaDaemon(opts));
-    std::this_thread::sleep_for(200ms);
 
     auto* sm = serviceManager();
     REQUIRE(sm != nullptr);
@@ -1434,16 +1441,24 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: path wildcard matches",
     request.query = "**/*.yml";
     request.pathsOnly = true;
     request.limit = 10;
-    auto result = yams::test_async::res(searchSvc->search(request), 3s);
-    REQUIRE(result);
-
     bool sawYml = false;
-    for (const auto& path : result.value().paths) {
-        if (path.find(".yml") != std::string::npos) {
-            sawYml = true;
-            break;
+    yams::app::services::SearchResponse response;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline && !sawYml) {
+        auto result = yams::test_async::res(searchSvc->search(request), 3s);
+        REQUIRE(result);
+        response = std::move(result.value());
+        for (const auto& path : response.paths) {
+            if (path.find(".yml") != std::string::npos) {
+                sawYml = true;
+                break;
+            }
+        }
+        if (!sawYml) {
+            std::this_thread::sleep_for(100ms);
         }
     }
+    INFO("paths=" << response.paths.size());
     CHECK(sawYml);
 }
 
@@ -1935,3 +1950,4 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: tag filter matchAny vs matchA
     CHECK(allOnlyMd);
     CHECK(anyHasMd);
 }
+// NOLINTEND(bugprone-chained-comparison)

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <thread>
 #include <vector>
 #include <yams/api/content_metadata.h>
@@ -15,8 +16,18 @@ using namespace yams::compression;
 using namespace yams::api;
 
 namespace {
+void disableLiveResourceGates(CompressionPolicy::Rules& rules) {
+    rules.enforceCpuUsageLimit = false;
+    rules.enforceConcurrentCompressionLimit = false;
+    rules.enforceFreeSpaceLimit = false;
+}
+
 struct CompressionPolicyFixture {
-    CompressionPolicyFixture() : policy_(std::make_unique<CompressionPolicy>()) {}
+    CompressionPolicyFixture() : policy_(std::make_unique<CompressionPolicy>()) {
+        auto rules = policy_->rules();
+        disableLiveResourceGates(rules);
+        policy_->updateRules(rules);
+    }
 
     // Helper to create test metadata
     ContentMetadata createMetadata(const std::string& name, uint64_t size,
@@ -52,10 +63,10 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - DefaultRules",
                  "[compression][policy][catch2]") {
     auto rules = policy_->rules();
 
-    CHECK(rules.compressAfterAge == std::chrono::hours(24 * 7));
-    CHECK(rules.archiveAfterAge == std::chrono::hours(24 * 30));
-    CHECK(rules.neverCompressBelow == 4096);
-    CHECK(rules.alwaysCompressAbove == 10 * 1024 * 1024);
+    CHECK((rules.compressAfterAge == std::chrono::hours(24 * 7)));
+    CHECK((rules.archiveAfterAge == std::chrono::hours(24 * 30)));
+    CHECK((rules.neverCompressBelow == 4096));
+    CHECK((rules.alwaysCompressAbove == 10ULL * 1024ULL * 1024ULL));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - TooNewFile",
@@ -65,7 +76,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - TooNewFile",
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK(decision.reason.find("File too new") != std::string::npos);
+    CHECK((decision.reason.find("File too new") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - TooSmallFile",
@@ -75,60 +86,63 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - TooSmallFile",
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK(decision.reason.find("too small") != std::string::npos);
+    CHECK((decision.reason.find("too small") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - LargeFileShouldCompress",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("large.txt", 20 * 1024 * 1024); // 20MB
+    auto metadata = createMetadata("large.txt", 20ULL * 1024ULL * 1024ULL); // 20MB
     auto pattern = createAccessPattern(std::chrono::hours(48));
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK(decision.shouldCompress);
-    CHECK(decision.reason.find("Large file") != std::string::npos);
+    CHECK((decision.reason.find("Large file") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - OldFileShouldUseLZMA",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("old.txt", 1024 * 1024);          // 1MB
+    auto metadata = createMetadata("old.txt", 1024ULL * 1024ULL);    // 1MB
     auto pattern = createAccessPattern(std::chrono::hours(24 * 35)); // 35 days old
     pattern.accessCount = 2;                                         // Rarely accessed
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK(decision.shouldCompress);
-    CHECK(decision.algorithm == CompressionAlgorithm::LZMA);
-    CHECK(decision.reason.find("Old file") != std::string::npos);
+    CHECK((decision.algorithm == CompressionAlgorithm::LZMA));
+    CHECK((decision.reason.find("Old file") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ActiveFileShouldUseZstandard",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("active.txt", 1024 * 1024);      // 1MB
+    auto metadata = createMetadata("active.txt", 1024ULL * 1024ULL); // 1MB
     auto pattern = createAccessPattern(std::chrono::hours(24 * 3)); // 3 days old
     pattern.accessCount = 100;                                      // Frequently accessed
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK(decision.shouldCompress);
-    CHECK(decision.algorithm == CompressionAlgorithm::Zstandard);
+    CHECK((decision.algorithm == CompressionAlgorithm::Zstandard));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ExcludedMimeTypes",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("photo.jpg", 5 * 1024 * 1024, "image/jpeg");
+    auto metadata = createMetadata("photo.jpg", 5ULL * 1024ULL * 1024ULL, "image/jpeg");
     auto pattern = createAccessPattern(std::chrono::hours(24 * 10));
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK(decision.reason.find("Content appears to be already compressed") != std::string::npos);
+    CHECK((decision.reason.find("Content appears to be already compressed") !=
+           std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ExcludedExtensions",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("archive.zip", 5 * 1024 * 1024, "application/octet-stream");
+    auto metadata =
+        createMetadata("archive.zip", 5ULL * 1024ULL * 1024ULL, "application/octet-stream");
     auto pattern = createAccessPattern(std::chrono::hours(24 * 10));
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK(decision.reason.find("Content appears to be already compressed") != std::string::npos);
+    CHECK((decision.reason.find("Content appears to be already compressed") !=
+           std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CompressibleTypes",
@@ -139,7 +153,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CompressibleType
         {"config.xml", "application/xml"}, {"script.js", "application/javascript"}};
 
     for (const auto& [filename, mimeType] : testCases) {
-        auto metadata = createMetadata(filename, 100 * 1024, mimeType);
+        auto metadata = createMetadata(filename, 100ULL * 1024ULL, mimeType);
         auto pattern = createAccessPattern(std::chrono::hours(24 * 10));
 
         auto decision = policy_->shouldCompress(metadata, pattern);
@@ -150,7 +164,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CompressibleType
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - FileTemperatureClassification",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("test.txt", 1024 * 1024);
+    auto metadata = createMetadata("test.txt", 1024ULL * 1024ULL);
 
     SECTION("Hot file - many accesses per day") {
         auto pattern = createAccessPattern(std::chrono::hours(24 * 5));
@@ -158,8 +172,8 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - FileTemperatureC
 
         auto decision = policy_->shouldCompress(metadata, pattern);
         CHECK(decision.shouldCompress);
-        CHECK(decision.algorithm == CompressionAlgorithm::Zstandard);
-        CHECK(decision.level == 1); // Fast compression for hot files
+        CHECK((decision.algorithm == CompressionAlgorithm::Zstandard));
+        CHECK((decision.level == 1)); // Fast compression for hot files
     }
 
     SECTION("Cold file - few accesses") {
@@ -168,16 +182,17 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - FileTemperatureC
 
         auto decision = policy_->shouldCompress(metadata, pattern);
         CHECK(decision.shouldCompress);
-        CHECK(decision.algorithm == CompressionAlgorithm::LZMA);
+        CHECK((decision.algorithm == CompressionAlgorithm::LZMA));
     }
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CustomRules",
                  "[compression][policy][catch2]") {
     CompressionPolicy::Rules customRules;
+    disableLiveResourceGates(customRules);
     customRules.compressAfterAge = std::chrono::hours(1);
     customRules.neverCompressBelow = 1024;         // 1KB
-    customRules.alwaysCompressAbove = 1024 * 1024; // 1MB
+    customRules.alwaysCompressAbove = 1024ULL * 1024ULL; // 1MB
     customRules.defaultZstdLevel = 5;
     customRules.defaultLzmaLevel = 7;
 
@@ -192,14 +207,14 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CustomRules",
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - AlgorithmSelection",
                  "[compression][policy][catch2]") {
-    auto metadata = createMetadata("test.txt", 100 * 1024 * 1024); // 100MB
+    auto metadata = createMetadata("test.txt", 100ULL * 1024ULL * 1024ULL); // 100MB
 
     SECTION("Large file with low access should use LZMA") {
         auto pattern = createAccessPattern(std::chrono::hours(24 * 100)); // 100 days old
         pattern.accessCount = 1; // 0.01 accesses/day (truly cold)
 
         auto algo = policy_->selectAlgorithm(metadata, pattern);
-        CHECK(algo == CompressionAlgorithm::LZMA);
+        CHECK((algo == CompressionAlgorithm::LZMA));
     }
 
     SECTION("Large file with high access should use Zstandard") {
@@ -207,7 +222,44 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - AlgorithmSelecti
         pattern.accessCount = 200; // 20 accesses/day
 
         auto algo = policy_->selectAlgorithm(metadata, pattern);
-        CHECK(algo == CompressionAlgorithm::Zstandard);
+        CHECK((algo == CompressionAlgorithm::Zstandard));
+    }
+}
+
+TEST_CASE_METHOD(CompressionPolicyFixture,
+                 "CompressionPolicy - Resource gates are independently configurable",
+                 "[compression][policy][resources][catch2]") {
+    CompressionPolicy::Rules rules;
+    rules.maxCpuUsage = 0.0;
+    rules.minFreeSpaceBytes = std::numeric_limits<size_t>::max();
+    rules.maxConcurrentCompressions = 0;
+
+    SECTION("default resource gates enforce live limits") {
+        CompressionPolicy policy(rules);
+        CHECK_FALSE(policy.hasSystemResources());
+    }
+
+    SECTION("all resource gates can be disabled for intrinsic policy decisions") {
+        disableLiveResourceGates(rules);
+        CompressionPolicy policy(rules);
+        CHECK(policy.hasSystemResources());
+    }
+
+    SECTION("each resource gate remains separate") {
+        disableLiveResourceGates(rules);
+        rules.enforceCpuUsageLimit = true;
+        CompressionPolicy cpuPolicy(rules);
+        CHECK_FALSE(cpuPolicy.hasSystemResources());
+
+        disableLiveResourceGates(rules);
+        rules.enforceFreeSpaceLimit = true;
+        CompressionPolicy diskPolicy(rules);
+        CHECK_FALSE(diskPolicy.hasSystemResources());
+
+        disableLiveResourceGates(rules);
+        rules.enforceConcurrentCompressionLimit = true;
+        CompressionPolicy concurrencyPolicy(rules);
+        CHECK_FALSE(concurrencyPolicy.hasSystemResources());
     }
 }
 
@@ -218,7 +270,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ThreadSafety",
     std::vector<std::thread> threads;
     std::atomic<int> successCount{0};
 
-    auto metadata = createMetadata("test.txt", 1024 * 1024);
+    auto metadata = createMetadata("test.txt", 1024ULL * 1024ULL);
     auto pattern = createAccessPattern(std::chrono::hours(24 * 10));
 
     for (int i = 0; i < numThreads; ++i) {
@@ -242,5 +294,5 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ThreadSafety",
         t.join();
     }
 
-    CHECK(successCount > 0);
+    CHECK((successCount > 0));
 }
