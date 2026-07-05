@@ -797,6 +797,9 @@ jobs:
           # Set version
           $env:YAMS_EXTRA_MESON_FLAGS = "-Dyams-version=${{ steps.meta.outputs.version }}"
 
+          # Windows hosted runners can lose communication under unbounded Ninja parallelism.
+          $env:YAMS_NINJA_JOBS = "2"
+
           # Run the build via setup.ps1
           .\setup.ps1 -BuildType Release
 

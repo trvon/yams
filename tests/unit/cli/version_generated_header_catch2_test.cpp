@@ -43,16 +43,16 @@ std::string runCommand(const std::string& command) {
     return output;
 }
 
-std::string shellQuote(const std::string& value) {
-    std::string quoted{"'"};
+std::string commandQuote(const std::string& value) {
+    std::string quoted{"\""};
     for (char ch : value) {
-        if (ch == '\'') {
-            quoted += "'\\''";
+        if (ch == '"') {
+            quoted += "\\\"";
         } else {
             quoted += ch;
         }
     }
-    quoted += "'";
+    quoted += "\"";
     return quoted;
 }
 
@@ -122,7 +122,7 @@ TEST_CASE("Version header tracks current git commit", "[cli][version]") {
     const auto sourceRoot = findSourceRoot();
     REQUIRE_FALSE(sourceRoot.empty());
 
-    const auto quotedRoot = shellQuote(sourceRoot.string());
+    const auto quotedRoot = commandQuote(sourceRoot.string());
     const auto gitCommit = runCommand("git -c safe.directory=" + quotedRoot + " -C " + quotedRoot +
                                       " rev-parse --short=8 HEAD");
     REQUIRE_FALSE(gitCommit.empty());

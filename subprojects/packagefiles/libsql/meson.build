@@ -1,7 +1,7 @@
 project('libsql', 'c', version: '0.3.4')
 
 cargo = find_program('cargo', required: true)
-python = find_program('python3', 'python', required: true)
+python = find_program('python', 'python3', required: true)
 cc = meson.get_compiler('c')
 
 buildtype = get_option('buildtype')

@@ -1053,6 +1053,14 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         }
     }
 
+    if ($dbBackend -eq 'libsql') {
+        $libsqlPatchMeson = 'subprojects\packagefiles\libsql\meson.build'
+        $libsqlSubprojectMeson = 'subprojects\libsql\meson.build'
+        if ((Test-Path $libsqlPatchMeson) -and (Test-Path $libsqlSubprojectMeson)) {
+            Copy-Item -Force $libsqlPatchMeson $libsqlSubprojectMeson
+        }
+    }
+
     Write-Host "Database backend: $dbBackend"
 
     $wrapMode = if ($env:YAMS_MESON_WRAP_MODE) {
@@ -1149,6 +1157,14 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         }
     }
 
+    if ($dbBackend -eq 'libsql') {
+        $libsqlPatchMeson = 'subprojects\packagefiles\libsql\meson.build'
+        $libsqlSubprojectMeson = 'subprojects\libsql\meson.build'
+        if ((Test-Path $libsqlPatchMeson) -and (Test-Path $libsqlSubprojectMeson)) {
+            Copy-Item -Force $libsqlPatchMeson $libsqlSubprojectMeson
+        }
+    }
+
     Write-Host "Database backend: $dbBackend"
 
     $wrapMode = if ($env:YAMS_MESON_WRAP_MODE) {
@@ -1183,7 +1199,21 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 }
 
 Write-Host 'Compiling...'
-meson compile -C $buildDir
+$compileArgs = @('compile', '-C', $buildDir)
+if ($env:YAMS_NINJA_JOBS) {
+    $ninjaJobs = 0
+    if ([int]::TryParse($env:YAMS_NINJA_JOBS, [ref]$ninjaJobs) -and $ninjaJobs -gt 0) {
+        Write-Host "Limiting Ninja parallelism to $ninjaJobs job(s) (YAMS_NINJA_JOBS)"
+        $compileArgs += @('--jobs', $ninjaJobs.ToString())
+    } else {
+        Write-Warning "Ignoring invalid YAMS_NINJA_JOBS='$($env:YAMS_NINJA_JOBS)'"
+    }
+}
+meson @compileArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Meson compile failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 # Note: Windows runtime DLLs (onnxruntime.dll, tbb*.dll) are now deployed
 # automatically by Meson custom_target during the build phase.
