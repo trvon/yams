@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.18.1](https://github.com/trvon/yams/compare/v0.18.0...v0.18.1) (2026-07-05)
+
+
+### Fixed
+
+* ci stabilizations for release ([43ebe26](https://github.com/trvon/yams/commit/43ebe26d365aeb035ee567d1a3b8fab6e4feef6b))
+* **ci:** stabilize Windows release builds ([9b7dbac](https://github.com/trvon/yams/commit/9b7dbacdf692b00803179b4017dd46b3b69050d7))
+* harden pre-push hook ([9f2e06d](https://github.com/trvon/yams/commit/9f2e06ddc4ccefefac0853ccbc691aac12c4d948))
+* stabilize CI release gates ([b2ede10](https://github.com/trvon/yams/commit/b2ede10e549b8444a750222d3f077b9d8857a452))
+
 ## [0.18.0](https://github.com/trvon/yams/compare/v0.17.0...v0.18.0) (2026-07-03)
 
 
