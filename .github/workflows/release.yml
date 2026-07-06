@@ -2174,43 +2174,33 @@ jobs:
               *) cp "$pkg" "${ARCH_ROOT}/" ;;
             esac
           done
-          if command -v repo-add >/dev/null 2>&1; then
-            for arch_dir in "${ARCH_ROOT}/os/"*; do
-              [ -d "$arch_dir" ] || continue
-              if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
-                cd "$arch_dir"
-                repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" ./*.pkg.tar.zst || true
-                cd "${GITHUB_WORKSPACE}"
-              fi
-            done
-            cd "${ARCH_ROOT}"
-            [ -f yams.db.tar.gz ] && ln -sf yams.db.tar.gz yams.db
-            [ -f yams.files.tar.gz ] && ln -sf yams.files.tar.gz yams.files
-            cd "${GITHUB_WORKSPACE}"
-          else
+          if ! command -v repo-add >/dev/null 2>&1; then
             echo "repo-add not available; installing pacman tools" >&2
-            sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools zstd pacman-package-manager 2>/dev/null || true
-            if command -v repo-add >/dev/null 2>&1; then
-              for arch_dir in "${ARCH_ROOT}/os/"*; do
-                [ -d "$arch_dir" ] || continue
-                if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
-                  cd "$arch_dir"
-                  repo-add -q "${GITHUB_WORKSPACE}/${ARCH_ROOT}/yams.db.tar.gz" -- ./*.pkg.tar.zst || true
-                  cd "${GITHUB_WORKSPACE}"
-                fi
-              done
-              cd "${ARCH_ROOT}"
-              [ -f yams.db.tar.gz ] && ln -sf yams.db.tar.gz yams.db
-              [ -f yams.files.tar.gz ] && ln -sf yams.files.tar.gz yams.files
-              cd "${GITHUB_WORKSPACE}"
-            fi
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libarchive-tools zstd pacman-package-manager
           fi
+          if ! command -v repo-add >/dev/null 2>&1; then
+            echo "ERROR: repo-add unavailable; cannot build Arch repository database" >&2
+            exit 1
+          fi
+          for arch_dir in "${ARCH_ROOT}/os/"*; do
+            [ -d "$arch_dir" ] || continue
+            if find "$arch_dir" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit | grep -q .; then
+              (
+                cd "$arch_dir"
+                rm -f yams.db yams.db.tar.gz yams.files yams.files.tar.gz
+                repo-add -q yams.db.tar.gz ./*.pkg.tar.zst
+                ln -sf yams.db.tar.gz yams.db
+                [ -f yams.files.tar.gz ] && ln -sf yams.files.tar.gz yams.files
+              )
+            fi
+          done
           printf '%s\n' \
             'Add Arch repo (unsigned):' \
             '  sudo tee /etc/pacman.d/yams.conf <<REPO' \
             '  [yams]' \
             '  SigLevel = Optional TrustAll' \
-            '  Server = https://repo.yamsmemory.ai/archrepo/' \
+            "  Server = https://repo.yamsmemory.ai/archrepo/os/\$arch" \
             '  REPO' \
             '' \
             'Then install:' \
@@ -2553,10 +2543,19 @@ jobs:
               *.asc) ct="application/pgp-signature" ;;
             esac
             echo "-- Upload $key" >&2
-            "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
-              --remote \
-              --file "$src" \
-              --content-type "$ct"
+            for attempt in 1 2 3 4 5; do
+              if "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
+                --remote \
+                --file "$src" \
+                --content-type "$ct"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "R2 upload failed after ${attempt} attempts: $key" >&2
+                return 1
+              fi
+              sleep $((attempt * 5))
+            done
           }
           if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
             echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key

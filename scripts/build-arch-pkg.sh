@@ -41,7 +41,6 @@ BUILD_DIR="${BUILD_DIR:-build/release-pkg}"
 # Keep package builds separate from dev builds to avoid Conan cache collisions
 PKG_BUILD_DIR="${BUILD_DIR}"
 CHANNEL="${RELEASE_CHANNEL:-nightly}"
-STAGE_DIR=""
 VERSION=""
 HOST_UID="${HOST_UID:-}"
 HOST_GID="${HOST_GID:-}"
@@ -233,7 +232,10 @@ build_arch_package_from_stage() {
 
 	(
 		cd "${package_root}"
-		bsdtar -cf - . | zstd -T0 -19 -o "${package_path}"
+		shopt -s dotglob nullglob
+		package_entries=(*)
+		COPYFILE_DISABLE=1 bsdtar --no-mac-metadata -cf - "${package_entries[@]}" |
+			zstd -T0 -19 -o "${package_path}"
 	)
 
 	printf '%s\n' "${package_path}"
@@ -277,6 +279,7 @@ build_main() {
 	done
 	if [ -n "$conan_env" ]; then
 		set +u
+		# shellcheck source=/dev/null
 		source "$conan_env"
 		set -u
 	fi
@@ -425,8 +428,7 @@ package_only)
 	exit 0
 	;;
 *)
-	fail "unknown command: ${1:-}"
 	usage
-	exit 2
+	fail "unknown command: ${1:-}"
 	;;
 esac

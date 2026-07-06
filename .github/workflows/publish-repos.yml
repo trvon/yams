@@ -39,8 +39,7 @@ jobs:
             BRANCH=$(echo "$RUN_INFO" | jq -r '.head_branch')
             EVENT=$(echo "$RUN_INFO" | jq -r '.event')
             if [[ "$CONCLUSION" != "success" ]]; then
-              echo "::error::Run $RUN_ID did not succeed (conclusion=$CONCLUSION)"
-              exit 1
+              echo "::warning::Run $RUN_ID did not succeed (conclusion=$CONCLUSION); using explicit run_id for repo artifact republish"
             fi
             if [[ "$BRANCH" != "main" ]]; then
               echo "::warning::Run $RUN_ID is from branch '$BRANCH', not main"
@@ -111,9 +110,11 @@ jobs:
             gh release download "$TAG" --pattern latest.json --dir . || echo "No latest.json asset yet"
           fi
           # Summaries
-          echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
-          echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
-          echo "HAS_ARCH=$([ -d archrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          {
+            echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)"
+            echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)"
+            echo "HAS_ARCH=$([ -d archrepo ] && echo 1 || echo 0)"
+          } >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -153,10 +154,19 @@ jobs:
               *.asc) ct="application/pgp-signature" ;;
             esac
             echo "-- Upload $key" >&2
-            "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
-              --remote \
-              --file "$src" \
-              --content-type "$ct"
+            for attempt in 1 2 3 4 5; do
+              if "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
+                --remote \
+                --file "$src" \
+                --content-type "$ct"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "R2 upload failed after ${attempt} attempts: $key" >&2
+                return 1
+              fi
+              sleep $((attempt * 5))
+            done
           }
           if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
             echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
