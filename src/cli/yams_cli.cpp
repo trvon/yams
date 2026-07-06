@@ -19,7 +19,6 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ConfigResolver.h>
-#include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/metadata/database.h>
@@ -141,7 +140,7 @@ std::filesystem::path YamsCLI::resolveConfiguredDaemonPidFilePath() {
     if (!pidPath.empty()) {
         return pidPath;
     }
-    return yams::daemon::YamsDaemon::resolveSystemPath(yams::daemon::YamsDaemon::PathType::PidFile);
+    return yams::config::resolve_daemon_pid_file_path();
 }
 
 YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(executor)) {

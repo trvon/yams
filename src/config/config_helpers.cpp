@@ -5,17 +5,35 @@
 #include <yams/config/config_helpers.h>
 
 #ifdef _WIN32
+#if defined(__has_include)
+#if __has_include(<process.h>)
+#include <process.h>
+#endif
+#else
+#include <process.h>
+#endif
 #include <shlobj.h>
 #include <windows.h>
 #else
-#include <unistd.h> // For getuid()
+#include <unistd.h> // For geteuid(), getpid(), getuid()
 #endif
 
 namespace yams::config {
+namespace {
+
+std::string getenv_copy(const char* key) {
+    const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe)
+    if (raw && *raw) {
+        return raw;
+    }
+    return {};
+}
+
+} // namespace
 
 std::filesystem::path expand_tilde(const std::string& path) {
     if (!path.empty() && path[0] == '~') {
-        if (const char* home = std::getenv("HOME")) {
+        if (const auto home = getenv_copy("HOME"); !home.empty()) {
             // path may be "~" (bare home) or "~/..." (relative to home).
             // path.substr(2) would throw std::out_of_range for a bare "~".
             if (path.size() >= 2 && path[1] == '/') {
@@ -34,19 +52,19 @@ std::filesystem::path expand_tilde(const std::string& path) {
 std::filesystem::path get_config_dir() {
 #ifdef _WIN32
     // Windows: Use APPDATA (roaming) for config that should sync
-    if (const char* appData = std::getenv("APPDATA")) {
+    if (const auto appData = getenv_copy("APPDATA"); !appData.empty()) {
         return std::filesystem::path(appData) / "yams";
     }
     // Fallback to USERPROFILE
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
+    if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Roaming" / "yams";
     }
 #else
     // Unix: Follow XDG Base Directory Specification
-    if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME")) {
+    if (const auto xdgConfig = getenv_copy("XDG_CONFIG_HOME"); !xdgConfig.empty()) {
         return std::filesystem::path(xdgConfig) / "yams";
     }
-    if (const char* home = std::getenv("HOME")) {
+    if (const auto home = getenv_copy("HOME"); !home.empty()) {
         return std::filesystem::path(home) / ".config" / "yams";
     }
 #endif
@@ -56,28 +74,28 @@ std::filesystem::path get_config_dir() {
 
 std::filesystem::path get_data_dir() {
     // Check YAMS_DATA_DIR environment variable first (used by test fixtures)
-    if (const char* dataDir = std::getenv("YAMS_DATA_DIR"); dataDir && *dataDir) {
+    if (const auto dataDir = getenv_copy("YAMS_DATA_DIR"); !dataDir.empty()) {
         return std::filesystem::path(dataDir);
     }
     // Also check legacy YAMS_STORAGE env var for backwards compatibility
-    if (const char* storage = std::getenv("YAMS_STORAGE"); storage && *storage) {
+    if (const auto storage = getenv_copy("YAMS_STORAGE"); !storage.empty()) {
         return std::filesystem::path(storage);
     }
 #ifdef _WIN32
     // Windows: Use LOCALAPPDATA for local data (databases, indices)
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams";
     }
     // Fallback to USERPROFILE
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
+    if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
     }
 #else
     // Unix: Follow XDG Base Directory Specification
-    if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
+    if (const auto xdgData = getenv_copy("XDG_DATA_HOME"); !xdgData.empty()) {
         return std::filesystem::path(xdgData) / "yams";
     }
-    if (const char* home = std::getenv("HOME")) {
+    if (const auto home = getenv_copy("HOME"); !home.empty()) {
         return std::filesystem::path(home) / ".local" / "share" / "yams";
     }
 #endif
@@ -88,19 +106,19 @@ std::filesystem::path get_data_dir() {
 std::filesystem::path get_cache_dir() {
 #ifdef _WIN32
     // Windows: Use LOCALAPPDATA\yams\cache
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams" / "cache";
     }
     // Fallback to USERPROFILE
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
+    if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "cache";
     }
 #else
     // Unix: Follow XDG Base Directory Specification
-    if (const char* xdgCache = std::getenv("XDG_CACHE_HOME")) {
+    if (const auto xdgCache = getenv_copy("XDG_CACHE_HOME"); !xdgCache.empty()) {
         return std::filesystem::path(xdgCache) / "yams";
     }
-    if (const char* home = std::getenv("HOME")) {
+    if (const auto home = getenv_copy("HOME"); !home.empty()) {
         return std::filesystem::path(home) / ".cache" / "yams";
     }
 #endif
@@ -112,16 +130,16 @@ std::filesystem::path get_runtime_dir() {
 #ifdef _WIN32
     // Windows: Use LOCALAPPDATA for runtime (sockets, PIDs)
     // Note: Windows doesn't have XDG_RUNTIME_DIR equivalent, so we use LOCALAPPDATA
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams";
     }
     // Fallback to USERPROFILE
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
+    if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
     }
 #else
     // Unix: Use XDG_RUNTIME_DIR (typically /run/user/$UID)
-    if (const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR")) {
+    if (const auto xdgRuntime = getenv_copy("XDG_RUNTIME_DIR"); !xdgRuntime.empty()) {
         return std::filesystem::path(xdgRuntime) / "yams";
     }
     // Fallback to /tmp with user-specific subdirectory
@@ -134,25 +152,124 @@ std::filesystem::path get_runtime_dir() {
 
 std::filesystem::path get_state_dir() {
 #ifdef _WIN32
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams" / "state";
     }
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
+    if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" / "state";
     }
 #else
-    if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
+    if (const auto xdgState = getenv_copy("XDG_STATE_HOME"); !xdgState.empty()) {
         return std::filesystem::path(xdgState) / "yams";
     }
-    if (const char* home = std::getenv("HOME")) {
+    if (const auto home = getenv_copy("HOME"); !home.empty()) {
         return std::filesystem::path(home) / ".local" / "state" / "yams";
     }
 #endif
     return std::filesystem::temp_directory_path() / "yams-state";
 }
 
+namespace {
+
+bool can_write_to_directory(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(dir)) {
+        return false;
+    }
+#ifdef _WIN32
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    const auto testFile = dir / (".yams-test-" + std::to_string(pid));
+    std::ofstream test(testFile);
+    if (!test.good()) {
+        return false;
+    }
+    test.close();
+    std::error_code ec;
+    fs::remove(testFile, ec);
+    return true;
+}
+
+std::filesystem::path get_state_home_for_daemon_log() {
+    auto stateDir = get_state_dir();
+    if (stateDir.empty()) {
+        return {};
+    }
+#ifdef _WIN32
+    // get_state_dir() returns %LOCALAPPDATA%\yams\state. Return
+    // %LOCALAPPDATA% so callers can append /yams without doubling it.
+    return stateDir.parent_path().parent_path();
+#else
+    return stateDir.parent_path();
+#endif
+}
+
+} // namespace
+
+std::filesystem::path get_daemon_runtime_dir() {
+    auto runtimeDir = get_runtime_dir();
+    std::error_code ec;
+    yams::common::ensureDirectories(runtimeDir, ec);
+    return runtimeDir;
+}
+
+std::filesystem::path get_daemon_status_file() {
+    return get_daemon_runtime_dir() / "yams-daemon.status.json";
+}
+
+std::filesystem::path resolve_daemon_pid_file_path() {
+    if (auto configured = resolve_pid_file_from_config(); !configured.empty()) {
+        return configured;
+    }
+#ifdef _WIN32
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return std::filesystem::temp_directory_path() / "yams-daemon.pid";
+#else
+    if (geteuid() == 0) {
+        return std::filesystem::path("/var/run/yams-daemon.pid");
+    }
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return std::filesystem::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".pid");
+#endif
+}
+
+std::filesystem::path resolve_daemon_log_file_path() {
+#ifdef _WIN32
+    if (auto stateHome = get_state_home_for_daemon_log(); !stateHome.empty()) {
+        auto logDir = stateHome / "yams";
+        yams::common::ensureDirectories(logDir);
+        if (can_write_to_directory(logDir)) {
+            return logDir / "daemon.log";
+        }
+    }
+    return std::filesystem::temp_directory_path() / "yams-daemon.log";
+#else
+    if (geteuid() == 0 && can_write_to_directory("/var/log")) {
+        return std::filesystem::path("/var/log/yams-daemon.log");
+    }
+    if (auto stateHome = get_state_home_for_daemon_log(); !stateHome.empty()) {
+        auto logDir = stateHome / "yams";
+        yams::common::ensureDirectories(logDir);
+        if (can_write_to_directory(logDir)) {
+            return logDir / "daemon.log";
+        }
+    }
+    return std::filesystem::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".log");
+#endif
+}
+
 std::filesystem::path get_daemon_plugin_trust_file() {
-    if (const char* env = std::getenv("YAMS_PLUGIN_TRUST_FILE"); env && *env) {
+    if (const auto env = getenv_copy("YAMS_PLUGIN_TRUST_FILE"); !env.empty()) {
         return std::filesystem::path(env);
     }
 
@@ -229,7 +346,7 @@ std::filesystem::path get_config_path(const std::string& override_path) {
         return std::filesystem::path(override_path);
     }
     // Check YAMS_CONFIG environment variable first (used by test fixtures)
-    if (const char* configEnv = std::getenv("YAMS_CONFIG"); configEnv && *configEnv) {
+    if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
         return std::filesystem::path(configEnv);
     }
     // Use the platform-specific config directory helper
@@ -280,13 +397,13 @@ static std::filesystem::path parse_config_path_value(const std::filesystem::path
 
 std::filesystem::path resolve_socket_path_from_config() {
     // 1) YAMS_DAEMON_SOCKET env
-    if (const char* env = std::getenv("YAMS_DAEMON_SOCKET"); env && *env) {
+    if (const auto env = getenv_copy("YAMS_DAEMON_SOCKET"); !env.empty()) {
         return std::filesystem::path(env);
     }
 
     // 2) config.toml daemon.socket_path
     std::filesystem::path config_path;
-    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
         config_path = std::filesystem::path(cfg_env);
     } else {
         config_path = get_config_path();
@@ -305,7 +422,7 @@ std::filesystem::path resolve_socket_path_from_config() {
 
 std::filesystem::path resolve_pid_file_from_config() {
     std::filesystem::path config_path;
-    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
         config_path = std::filesystem::path(cfg_env);
     } else {
         config_path = get_config_path();
@@ -324,7 +441,7 @@ std::filesystem::path resolve_pid_file_from_config() {
 std::filesystem::path resolve_data_dir_from_config() {
     // 1) config.toml core.data_dir
     std::filesystem::path config_path;
-    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
         config_path = std::filesystem::path(cfg_env);
     } else {
         config_path = get_config_path();
@@ -338,10 +455,10 @@ std::filesystem::path resolve_data_dir_from_config() {
     }
 
     // 2) Environment overrides when config does not set a data dir.
-    if (const char* env = std::getenv("YAMS_STORAGE"); env && *env) {
+    if (const auto env = getenv_copy("YAMS_STORAGE"); !env.empty()) {
         return std::filesystem::path(env);
     }
-    if (const char* env = std::getenv("YAMS_DATA_DIR"); env && *env) {
+    if (const auto env = getenv_copy("YAMS_DATA_DIR"); !env.empty()) {
         return std::filesystem::path(env);
     }
 
@@ -350,7 +467,7 @@ std::filesystem::path resolve_data_dir_from_config() {
 }
 
 std::string resolve_daemon_mode_from_config() {
-    if (const char* env = std::getenv("YAMS_EMBEDDED"); env && *env) {
+    if (const auto env = getenv_copy("YAMS_EMBEDDED"); !env.empty()) {
         std::string value = env;
         trim(value);
         if (!value.empty()) {
@@ -359,7 +476,7 @@ std::string resolve_daemon_mode_from_config() {
     }
 
     std::filesystem::path config_path;
-    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
         config_path = std::filesystem::path(cfg_env);
     } else {
         config_path = get_config_path();

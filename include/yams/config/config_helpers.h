@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#include "yams/common/string_utils.h"
+#include <yams/common/string_utils.h>
 
 namespace yams::config {
 
@@ -125,11 +125,23 @@ std::filesystem::path get_daemon_plugin_trust_file();
 /// Default: <config_dir>/plugins_trust.txt
 std::filesystem::path get_legacy_plugin_trust_file();
 
-// Daemon-specific config resolution (env → config → defaults)
+// Daemon-specific config/path resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_pid_file_from_config();
 std::filesystem::path resolve_data_dir_from_config();
 std::string resolve_daemon_mode_from_config();
+
+/// Returns the daemon runtime directory, creating it when possible.
+std::filesystem::path get_daemon_runtime_dir();
+
+/// Returns the daemon status JSON path under the runtime directory.
+std::filesystem::path get_daemon_status_file();
+
+/// Returns the effective daemon PID file path, including platform defaults.
+std::filesystem::path resolve_daemon_pid_file_path();
+
+/// Returns the effective daemon log file path, including platform defaults.
+std::filesystem::path resolve_daemon_log_file_path();
 
 // ============================================================================
 // Full TOML config parsing and writing utilities
