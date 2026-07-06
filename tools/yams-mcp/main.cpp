@@ -49,7 +49,11 @@ int main(int argc, char* argv[]) {
             } else {
                 spdlog::critical("std::terminate called without active exception");
             }
+        } catch (const std::exception& e) {
+            std::cerr << "std::terminate: failed while logging exception: " << e.what()
+                      << std::endl;
         } catch (...) {
+            std::cerr << "std::terminate: failed while logging unknown exception" << std::endl;
         }
         std::_Exit(1);
     });
@@ -61,6 +65,7 @@ int main(int argc, char* argv[]) {
     std::string list_mode = "auto";
     std::string grep_mode = "auto";
     std::string retrieval_mode = "auto";
+    std::string daemon_socket;
 
     app.add_option("-l,--log-level", log_level, "Log level (trace, debug, info, warn, error)")
         ->default_val("info");
@@ -76,6 +81,8 @@ int main(int argc, char* argv[]) {
                    "Hot/cold mode for retrieval: hot_only|cold_only|auto")
         ->check(CLI::IsMember({"hot_only", "hot", "cold_only", "cold", "auto"}))
         ->default_val("auto");
+    app.add_option("--daemon-socket", daemon_socket, "Override daemon socket path")
+        ->envname("YAMS_DAEMON_SOCKET");
     CLI11_PARSE(app, argc, argv);
 
     try {
@@ -107,13 +114,14 @@ int main(int argc, char* argv[]) {
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
         // Apply hot/cold modes for list/grep/retrieval so MCP uses hot paths like CLI
         if (!list_mode.empty()) {
-            setenv("YAMS_LIST_MODE", list_mode.c_str(), 1);
+            setenv("YAMS_LIST_MODE", list_mode.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
         }
         if (!grep_mode.empty()) {
-            setenv("YAMS_GREP_MODE", grep_mode.c_str(), 1);
+            setenv("YAMS_GREP_MODE", grep_mode.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
         }
         if (!retrieval_mode.empty()) {
-            setenv("YAMS_RETRIEVAL_MODE", retrieval_mode.c_str(), 1);
+            setenv("YAMS_RETRIEVAL_MODE", retrieval_mode.c_str(),
+                   1); // NOLINT(concurrency-mt-unsafe)
         }
     } catch (const std::exception& e) {
         std::cerr << "Failed to setup logging: " << e.what() << std::endl;
@@ -136,9 +144,13 @@ int main(int argc, char* argv[]) {
 
         // MCPServer uses enable_shared_from_this and spawns detached coroutines that capture
         // shared_ptr<MCPServer>; it must be owned by a shared_ptr.
-        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport), &g_running);
+        auto server =
+            std::make_shared<yams::mcp::MCPServer>(std::move(transport), &g_running, daemon_socket);
 
-        std::thread server_thread([server]() { server->start(); });
+        std::thread server_thread([server]() {
+            server->start();
+            g_running = false;
+        });
 
         spdlog::info("MCP server started successfully");
         spdlog::info("Press Ctrl+C to stop");
