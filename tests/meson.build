@@ -1549,6 +1549,7 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
+      'unit/api/content_store_builder_compression_catch2_test.cpp',
       'unit/api/metadata_api_catch2_test.cpp',
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),

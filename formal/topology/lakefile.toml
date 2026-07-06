@@ -1,0 +1,7 @@
+name = "yams_topology"
+version = "0.1.0"
+defaultTargets = ["Yams.Topology"]
+
+[[lean_lib]]
+name = "Yams"
+roots = ["Yams"]

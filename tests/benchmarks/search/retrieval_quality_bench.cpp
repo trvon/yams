@@ -13,6 +13,10 @@
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
     YAMS_BENCH_DATASET=<name>         - Use synthetic, BEIR, or local-manifest dataset
     YAMS_BENCH_DATASET_PATH=...       - Path to BEIR directory or benchmark_manifest.json root
+    YAMS_BENCH_EMBED_BACKEND=simeon|onnx
+                                          Embedding backend (default: simeon)
+    YAMS_BENCH_ENABLE_GLINT=1         - Opt into Glint/GLiNER entity extraction on simeon runs
+    YAMS_BENCH_ENABLE_ONNX_RERANK=1   - Opt into ONNX reranker on simeon runs
     YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Enable opt-in topology weak-query routing
     YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
     YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
@@ -5349,6 +5353,16 @@ struct BenchFixture {
         addEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
         addEnvDefault("YAMS_POST_TITLE_CONCURRENT", "1");
 
+        // Retrieval-quality benchmark default: use Simeon's built-in embedding backend. This avoids
+        // loading ONNX Runtime on the common benchmark path; operators can still request the legacy
+        // ONNX/ORT path with YAMS_BENCH_EMBED_BACKEND=onnx or YAMS_EMBED_BACKEND=onnx.
+        if (const char* benchEmbedBackend = std::getenv("YAMS_BENCH_EMBED_BACKEND");
+            benchEmbedBackend && *benchEmbedBackend) {
+            benchmarkEnvOverrides.push_back({"YAMS_EMBED_BACKEND", std::string(benchEmbedBackend)});
+        } else {
+            addEnvDefault("YAMS_EMBED_BACKEND", "simeon");
+        }
+
         // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
         // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
         // Raise to 60s so the adaptive logic only shrinks on true stalls, not normal latency.
@@ -5549,7 +5563,14 @@ struct BenchFixture {
             // Select a plugin root that satisfies the plugins the benchmark enables.
             // Preferring the first ONNX-capable tree can silently disable entity extraction
             // when that tree lacks the Glint plugin.
-            std::string glinerModelPath = discoverGlinerModelPath();
+            const bool enableGlintPlugin =
+                !embedBackendSimeon || envTruthy(std::getenv("YAMS_BENCH_ENABLE_GLINT"));
+            std::string glinerModelPath;
+            if (enableGlintPlugin) {
+                glinerModelPath = discoverGlinerModelPath();
+            } else {
+                spdlog::info("Simeon benchmark path: Glint/GLiNER disabled by default");
+            }
             const bool needsGlintPlugin = !glinerModelPath.empty();
             const bool needsOnnxPlugin = !embedBackendSimeon;
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");

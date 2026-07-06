@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -57,6 +60,58 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     info.parentHash = derived.parentHash;
     info.pathDepth = derived.pathDepth;
     return info;
+}
+
+std::unordered_map<std::string, std::string>
+clusterByDocument(const TopologyArtifactBatch& batch) {
+    std::unordered_map<std::string, std::string> clusterOf;
+    for (const auto& membership : batch.memberships) {
+        clusterOf.emplace(membership.documentHash, membership.clusterId);
+    }
+    return clusterOf;
+}
+
+const ClusterArtifact* findClusterContaining(const TopologyArtifactBatch& batch,
+                                             const std::string& documentHash) {
+    const auto it = std::find_if(batch.clusters.begin(), batch.clusters.end(),
+                                 [&](const ClusterArtifact& cluster) {
+                                     return std::find(cluster.memberDocumentHashes.begin(),
+                                                      cluster.memberDocumentHashes.end(),
+                                                      documentHash) !=
+                                            cluster.memberDocumentHashes.end();
+                                 });
+    return it == batch.clusters.end() ? nullptr : &*it;
+}
+
+bool containsHash(const std::vector<std::string>& hashes, const std::string& hash) {
+    return std::find(hashes.begin(), hashes.end(), hash) != hashes.end();
+}
+
+void requireWellFormedBatch(const TopologyArtifactBatch& batch) {
+    std::unordered_set<std::string> clusterIds;
+    for (const auto& cluster : batch.clusters) {
+        CHECK((cluster.memberCount == cluster.memberDocumentHashes.size()));
+        CHECK(clusterIds.insert(cluster.clusterId).second);
+    }
+
+    std::unordered_set<std::string> membershipKeys;
+    for (const auto& membership : batch.memberships) {
+        CAPTURE(membership.documentHash, membership.clusterId);
+        CHECK(clusterIds.contains(membership.clusterId));
+        CHECK(membershipKeys.insert(membership.documentHash + "\x1F" + membership.clusterId).second);
+    }
+
+    for (const auto& cluster : batch.clusters) {
+        for (const auto& hash : cluster.memberDocumentHashes) {
+            CAPTURE(cluster.clusterId, hash);
+            const auto it = std::find_if(batch.memberships.begin(), batch.memberships.end(),
+                                         [&](const DocumentClusterMembership& membership) {
+                                             return membership.documentHash == hash &&
+                                                    membership.clusterId == cluster.clusterId;
+                                         });
+            CHECK((it != batch.memberships.end()));
+        }
+    }
 }
 
 struct TopologyFixture {
@@ -116,24 +171,24 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     REQUIRE(result.has_value());
 
     const auto& batch = result.value();
-    REQUIRE(batch.clusters.size() == 2);
-    REQUIRE(batch.memberships.size() == 3);
+    REQUIRE((batch.clusters.size() == 2));
+    REQUIRE((batch.memberships.size() == 3));
 
     const auto pairClusterIt =
         std::find_if(batch.clusters.begin(), batch.clusters.end(),
                      [](const ClusterArtifact& cluster) { return cluster.memberCount == 2; });
-    REQUIRE(pairClusterIt != batch.clusters.end());
+    REQUIRE((pairClusterIt != batch.clusters.end()));
     REQUIRE(pairClusterIt->medoid.has_value());
-    CHECK(pairClusterIt->medoid->documentHash == "aaa");
-    CHECK(pairClusterIt->persistenceScore == Catch::Approx(0.9));
+    CHECK((pairClusterIt->medoid->documentHash == "aaa"));
+    CHECK((pairClusterIt->persistenceScore == Catch::Approx(0.9)));
 
     const auto outlierMembershipIt =
         std::find_if(batch.memberships.begin(), batch.memberships.end(),
                      [](const DocumentClusterMembership& membership) {
                          return membership.documentHash == "ccc";
                      });
-    REQUIRE(outlierMembershipIt != batch.memberships.end());
-    CHECK(outlierMembershipIt->role == DocumentTopologyRole::Outlier);
+    REQUIRE((outlierMembershipIt != batch.memberships.end()));
+    CHECK((outlierMembershipIt->role == DocumentTopologyRole::Outlier));
 
     StableClusterTopologyRouter router;
     auto routes = router.route(TopologyRouteRequest{.queryText = "find b",
@@ -143,8 +198,154 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
                                                     .weakQueryOnly = true},
                                batch);
     REQUIRE(routes.has_value());
-    REQUIRE(routes.value().size() == 1);
-    CHECK(routes.value().front().clusterId == pairClusterIt->clusterId);
+    REQUIRE((routes.value().size() == 1));
+    CHECK((routes.value().front().clusterId == pairClusterIt->clusterId));
+}
+
+TEST_CASE("Topology baseline enforces Lean edge-filter contract",
+          "[unit][topology][baseline][contract]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "aaa",
+            .filePath = "/repo/a.md",
+            .neighbors = {
+                {.documentHash = "bbb", .score = 0.9F, .reciprocal = true},
+                {.documentHash = "ccc", .score = 0.49F, .reciprocal = true},
+                {.documentHash = "ddd", .score = 0.9F, .reciprocal = false},
+                {.documentHash = "missing", .score = 0.9F, .reciprocal = true},
+                {.documentHash = "aaa", .score = 1.0F, .reciprocal = true},
+                {.documentHash = "", .score = 1.0F, .reciprocal = true},
+            }},
+        TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md", .neighbors = {}},
+        TopologyDocumentInput{.documentHash = "ccc", .filePath = "/repo/c.md", .neighbors = {}},
+        TopologyDocumentInput{.documentHash = "ddd", .filePath = "/repo/d.md", .neighbors = {}},
+    };
+
+    auto result = engine.buildArtifacts(docs, config);
+    REQUIRE(result.has_value());
+    const auto& batch = result.value();
+    requireWellFormedBatch(batch);
+
+    const auto clusterOf = clusterByDocument(batch);
+    REQUIRE((clusterOf.size() == docs.size()));
+    CHECK((clusterOf.at("aaa") == clusterOf.at("bbb")));
+    CHECK((clusterOf.at("aaa") != clusterOf.at("ccc")));
+    CHECK((clusterOf.at("aaa") != clusterOf.at("ddd")));
+    CHECK((clusterOf.at("ccc") != clusterOf.at("ddd")));
+    CHECK((findClusterContaining(batch, "missing") == nullptr));
+}
+
+TEST_CASE("Topology baseline satisfies connected component and router contracts",
+          "[unit][topology][baseline][contract]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "aaa",
+            .filePath = "/repo/a.md",
+            .neighbors = {{.documentHash = "bbb", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ccc",
+            .filePath = "/repo/c.md",
+            .neighbors = {{.documentHash = "ddd", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ddd",
+            .filePath = "/repo/d.md",
+            .neighbors = {{.documentHash = "ccc", .score = 0.9F, .reciprocal = true}}},
+    };
+
+    auto result = engine.buildArtifacts(docs, config);
+    REQUIRE(result.has_value());
+    const auto& batch = result.value();
+    requireWellFormedBatch(batch);
+
+    const auto clusterOf = clusterByDocument(batch);
+    CHECK((clusterOf.at("aaa") == clusterOf.at("bbb")));
+    CHECK((clusterOf.at("ccc") == clusterOf.at("ddd")));
+    CHECK((clusterOf.at("aaa") != clusterOf.at("ccc")));
+
+    StableClusterTopologyRouter router;
+    TopologyRouteRequest request;
+    request.seedDocumentHashes = {"bbb", "missing"};
+    request.limit = 1;
+    auto routes = router.route(request, batch);
+    REQUIRE(routes.has_value());
+    REQUIRE((routes.value().size() <= request.limit));
+    for (const auto& route : routes.value()) {
+        CAPTURE(route.clusterId);
+        CHECK(std::any_of(batch.clusters.begin(), batch.clusters.end(),
+                          [&](const ClusterArtifact& cluster) {
+                              return cluster.clusterId == route.clusterId;
+                          }));
+    }
+}
+
+TEST_CASE("Topology baseline dirty regions contain seeds and respect rebuild budget contract",
+          "[unit][topology][baseline][contract]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+
+    std::vector<TopologyDocumentInput> existingDocs{
+        TopologyDocumentInput{
+            .documentHash = "aaa",
+            .filePath = "/repo/a.md",
+            .neighbors = {{.documentHash = "bbb", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ccc",
+            .filePath = "/repo/c.md",
+            .neighbors = {{.documentHash = "ddd", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ddd",
+            .filePath = "/repo/d.md",
+            .neighbors = {{.documentHash = "ccc", .score = 0.9F, .reciprocal = true}}},
+    };
+    auto existing = engine.buildArtifacts(existingDocs, config);
+    REQUIRE(existing.has_value());
+
+    std::vector<TopologyDocumentInput> changedDocs{
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .neighbors = {{.documentHash = "ccc", .score = 0.95F, .reciprocal = true}}},
+    };
+
+    auto region = engine.defineDirtyRegion(existing.value(), changedDocs, config);
+    REQUIRE(region.has_value());
+    CHECK(containsHash(region.value().seedDocumentHashes, "bbb"));
+    for (const auto& seed : region.value().seedDocumentHashes) {
+        CAPTURE(seed);
+        CHECK(containsHash(region.value().expandedDocumentHashes, seed));
+    }
+    CHECK(containsHash(region.value().expandedDocumentHashes, "aaa"));
+    CHECK(containsHash(region.value().expandedDocumentHashes, "ccc"));
+    CHECK(containsHash(region.value().expandedDocumentHashes, "ddd"));
+    CHECK_FALSE(region.value().requiresWiderRebuild);
+    CHECK((region.value().expandedDocumentHashes.size() <= config.maxDirtyRegionDocs));
+
+    auto tightConfig = config;
+    tightConfig.maxDirtyRegionDocs = 2;
+    auto tightRegion = engine.defineDirtyRegion(existing.value(), changedDocs, tightConfig);
+    REQUIRE(tightRegion.has_value());
+    CHECK(tightRegion.value().requiresWiderRebuild);
+    CHECK(tightRegion.value().exceededRegionBudget);
 }
 
 TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
@@ -179,9 +380,9 @@ TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
 
     auto result = engine.buildArtifacts(docs, config);
     REQUIRE(result.has_value());
-    REQUIRE(result.value().clusters.size() == 2U);
+    REQUIRE((result.value().clusters.size() == 2U));
     for (const auto& cluster : result.value().clusters) {
-        REQUIRE(cluster.centroidEmbedding.size() == 2U);
+        REQUIRE((cluster.centroidEmbedding.size() == 2U));
     }
 
     SparseGuidedClusterRouter router;
@@ -195,9 +396,9 @@ TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
                                                     .sparseDenseAlpha = 0.0F},
                                result.value());
     REQUIRE(routes.has_value());
-    REQUIRE(routes.value().size() == 1U);
+    REQUIRE((routes.value().size() == 1U));
     REQUIRE(routes.value().front().medoidDocumentHash.has_value());
-    CHECK(routes.value().front().medoidDocumentHash.value() == "ccc");
+    CHECK((routes.value().front().medoidDocumentHash.value() == "ccc"));
 }
 
 TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
@@ -229,29 +430,29 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     auto loadedBatchResult = store.loadLatest();
     REQUIRE(loadedBatchResult.has_value());
     REQUIRE(loadedBatchResult.value().has_value());
-    CHECK(loadedBatchResult.value()->snapshotId == batchResult.value().snapshotId);
-    CHECK(loadedBatchResult.value()->clusters.size() == batchResult.value().clusters.size());
+    CHECK((loadedBatchResult.value()->snapshotId == batchResult.value().snapshotId));
+    CHECK((loadedBatchResult.value()->clusters.size() == batchResult.value().clusters.size()));
 
     auto membershipsResult =
         store.loadMemberships(std::vector<std::string>{"aaa", "ccc", "missing"});
     REQUIRE(membershipsResult.has_value());
-    REQUIRE(membershipsResult.value().size() == 2);
+    REQUIRE((membershipsResult.value().size() == 2));
 
     const auto aaaIt =
         std::find_if(membershipsResult.value().begin(), membershipsResult.value().end(),
                      [](const DocumentClusterMembership& membership) {
                          return membership.documentHash == "aaa";
                      });
-    REQUIRE(aaaIt != membershipsResult.value().end());
-    CHECK(aaaIt->role == DocumentTopologyRole::Medoid);
+    REQUIRE((aaaIt != membershipsResult.value().end()));
+    CHECK((aaaIt->role == DocumentTopologyRole::Medoid));
 
     const auto cccIt =
         std::find_if(membershipsResult.value().begin(), membershipsResult.value().end(),
                      [](const DocumentClusterMembership& membership) {
                          return membership.documentHash == "ccc";
                      });
-    REQUIRE(cccIt != membershipsResult.value().end());
-    CHECK(cccIt->role == DocumentTopologyRole::Outlier);
+    REQUIRE((cccIt != membershipsResult.value().end()));
+    CHECK((cccIt->role == DocumentTopologyRole::Outlier));
 }
 
 TEST_CASE("Metadata KG topology store clears stale memberships on partial replacement",
@@ -286,7 +487,7 @@ TEST_CASE("Metadata KG topology store clears stale memberships on partial replac
 
     auto initialMemberships = store.loadMemberships(std::vector<std::string>{"aaa", "bbb", "ccc"});
     REQUIRE(initialMemberships.has_value());
-    REQUIRE(initialMemberships.value().size() == 3);
+    REQUIRE((initialMemberships.value().size() == 3));
 
     std::vector<TopologyDocumentInput> changedRegion{
         TopologyDocumentInput{
@@ -305,7 +506,7 @@ TEST_CASE("Metadata KG topology store clears stale memberships on partial replac
 
     auto updatedMemberships = store.loadMemberships(std::vector<std::string>{"aaa", "bbb", "ccc"});
     REQUIRE(updatedMemberships.has_value());
-    REQUIRE(updatedMemberships.value().size() == 2);
+    REQUIRE((updatedMemberships.value().size() == 2));
     CHECK(std::none_of(updatedMemberships.value().begin(), updatedMemberships.value().end(),
                        [](const DocumentClusterMembership& membership) {
                            return membership.documentHash == "aaa";
@@ -398,16 +599,16 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
                                                                  .requireGraphNode = true},
                                         &extractionStats);
     REQUIRE(extracted.has_value());
-    REQUIRE(extracted.value().size() == 3);
-    CHECK(extractionStats.documentsReturned == 3);
+    REQUIRE((extracted.value().size() == 3));
+    CHECK((extractionStats.documentsReturned == 3));
 
     const auto aExtracted = std::find_if(
         extracted.value().begin(), extracted.value().end(),
         [](const TopologyDocumentInput& input) { return input.documentHash == "aaa"; });
-    REQUIRE(aExtracted != extracted.value().end());
-    REQUIRE(aExtracted->embedding.size() == 4);
-    REQUIRE(aExtracted->neighbors.size() == 1);
-    CHECK(aExtracted->neighbors.front().documentHash == "bbb");
+    REQUIRE((aExtracted != extracted.value().end()));
+    REQUIRE((aExtracted->embedding.size() == 4));
+    REQUIRE((aExtracted->neighbors.size() == 1));
+    CHECK((aExtracted->neighbors.front().documentHash == "bbb"));
     CHECK(aExtracted->neighbors.front().reciprocal);
     CHECK(aExtracted->metadata.contains("mime_type"));
 
@@ -422,8 +623,8 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
                                  .requireGraphNode = true},
         TopologyBuildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true});
     REQUIRE(analysis.has_value());
-    CHECK(analysis.value().artifacts.clusters.size() == 2);
-    CHECK(analysis.value().extractionStats.documentsReturned == 3);
+    CHECK((analysis.value().artifacts.clusters.size() == 2));
+    CHECK((analysis.value().extractionStats.documentsReturned == 3));
 }
 
 TEST_CASE("Topology update replaces removed cluster memberships consistently",
@@ -448,7 +649,7 @@ TEST_CASE("Topology update replaces removed cluster memberships consistently",
     };
     auto existing = engine.buildArtifacts(existingDocs, TopologyBuildConfig{});
     REQUIRE(existing.has_value());
-    REQUIRE(existing.value().memberships.size() == 4);
+    REQUIRE((existing.value().memberships.size() == 4));
 
     std::vector<TopologyDocumentInput> changedRegion{
         TopologyDocumentInput{
@@ -468,9 +669,9 @@ TEST_CASE("Topology update replaces removed cluster memberships consistently",
     const auto aaaMembership =
         std::find_if(updated.value().memberships.begin(), updated.value().memberships.end(),
                      [](const auto& membership) { return membership.documentHash == "aaa"; });
-    CHECK(aaaMembership == updated.value().memberships.end());
-    CHECK(updated.value().memberships.size() == 3);
-    CHECK(stats.membershipsUpdated >= 3);
+    CHECK((aaaMembership == updated.value().memberships.end()));
+    CHECK((updated.value().memberships.size() == 3));
+    CHECK((stats.membershipsUpdated >= 3));
 }
 
 TEST_CASE("Topology update preserves cluster identity when old medoid survives",
@@ -494,9 +695,9 @@ TEST_CASE("Topology update preserves cluster identity when old medoid survives",
     };
     auto existing = engine.buildArtifacts(existingDocs, TopologyBuildConfig{});
     REQUIRE(existing.has_value());
-    REQUIRE(existing.value().clusters.size() == 1);
+    REQUIRE((existing.value().clusters.size() == 1));
     REQUIRE(existing.value().clusters.front().medoid.has_value());
-    CHECK(existing.value().clusters.front().medoid->documentHash == "bbb");
+    CHECK((existing.value().clusters.front().medoid->documentHash == "bbb"));
     const auto oldClusterId = existing.value().clusters.front().clusterId;
 
     std::vector<TopologyDocumentInput> changedRegion{
@@ -518,6 +719,6 @@ TEST_CASE("Topology update preserves cluster identity when old medoid survives",
                              cluster.memberDocumentHashes.end(),
                              "bbb") != cluster.memberDocumentHashes.end();
         });
-    REQUIRE(survivingCluster != updated.value().clusters.end());
-    CHECK(survivingCluster->clusterId == oldClusterId);
+    REQUIRE((survivingCluster != updated.value().clusters.end()));
+    CHECK((survivingCluster->clusterId == oldClusterId));
 }

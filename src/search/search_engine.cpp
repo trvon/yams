@@ -19,6 +19,7 @@
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
+#include <yams/search/search_observability.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
 #include <yams/search/simeon_lexical_backend.h>
@@ -322,6 +323,331 @@ size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue,
         }
     }
     return std::clamp(defaultValue, minValue, maxValue);
+}
+
+struct SearchRoutingPlan {
+    QueryRouteDecision routeDecision;
+    QueryIntent intent = QueryIntent::Mixed;
+    QueryRetrievalMode retrievalMode = QueryRetrievalMode::Hybrid;
+    SearchEngineConfig::NavigationZoomLevel effectiveZoomLevel =
+        SearchEngineConfig::NavigationZoomLevel::Auto;
+    bool zoomLevelInferredFromIntent = false;
+    std::optional<TuningState> communityOverride;
+    SearchEngineConfig config;
+};
+
+SearchRoutingPlan buildSearchRoutingPlan(std::string_view query, const SearchEngineConfig& config,
+                                         const TunedParams& baseParams,
+                                         const std::optional<TuningState>& baselineState,
+                                         bool semanticOnly) {
+    QueryPolicyResolution policy =
+        resolveQueryPolicy(query, config, baseParams, baselineState, semanticOnly);
+
+    SearchRoutingPlan plan;
+    plan.routeDecision = std::move(policy.routeDecision);
+    plan.intent = plan.routeDecision.intent.label;
+    plan.retrievalMode = plan.routeDecision.retrievalMode.label;
+    plan.effectiveZoomLevel = policy.effectiveZoomLevel;
+    plan.zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
+    plan.communityOverride = std::move(policy.communityOverride);
+    plan.config = std::move(policy.config);
+    return plan;
+}
+
+struct SearchSourceGate {
+    bool textConfigured = false;
+    bool textCandidateBudgeted = false;
+    bool kgConfigured = false;
+    bool kgCandidateBudgeted = false;
+    bool pathConfigured = false;
+    bool vectorConfigured = false;
+    bool entityVectorConfigured = false;
+    bool tagConfigured = false;
+    bool tagCandidateBudgeted = false;
+    bool metadataConfigured = false;
+    bool conceptsConfigured = false;
+    bool multiVectorConfigured = false;
+    bool graphRerankConfigured = false;
+    bool crossRerankConfigured = false;
+
+    [[nodiscard]] size_t estimatedCandidateCapacity(const SearchEngineConfig& config) const {
+        size_t estimated = 0;
+        if (textCandidateBudgeted) {
+            estimated += config.textMaxResults;
+        }
+        if (kgCandidateBudgeted) {
+            estimated += config.kgMaxResults;
+        }
+        if (pathConfigured) {
+            estimated += config.pathTreeMaxResults;
+        }
+        if (vectorConfigured) {
+            estimated += config.vectorMaxResults;
+        }
+        if (entityVectorConfigured) {
+            estimated += config.entityVectorMaxResults;
+        }
+        if (tagCandidateBudgeted) {
+            estimated += config.tagMaxResults;
+        }
+        if (metadataConfigured) {
+            estimated += config.metadataMaxResults;
+        }
+        return estimated;
+    }
+};
+
+SearchSourceGate buildSearchSourceGate(const SearchEngineConfig& config, const SearchParams& params,
+                                       bool kgAvailable, bool conceptExtractorAvailable,
+                                       bool kgScorerAvailable) {
+    SearchSourceGate gate;
+    gate.textConfigured = config.textWeight > 0.0f;
+    gate.textCandidateBudgeted = config.textWeight > 0.0f || config.simeonTextWeight > 0.0f;
+    gate.kgConfigured = config.kgWeight > 0.0f && kgAvailable;
+    gate.kgCandidateBudgeted = config.kgWeight > 0.0f;
+    gate.pathConfigured = config.pathTreeWeight > 0.0f;
+    gate.vectorConfigured = config.vectorWeight > 0.0f;
+    gate.entityVectorConfigured = config.entityVectorWeight > 0.0f;
+    gate.tagConfigured = config.tagWeight > 0.0f && !params.tags.empty();
+    gate.tagCandidateBudgeted = config.tagWeight > 0.0f;
+    gate.metadataConfigured = config.metadataWeight > 0.0f;
+    gate.conceptsConfigured = conceptExtractorAvailable;
+    gate.multiVectorConfigured = config.enableMultiVectorQuery || config.enableGraphQueryExpansion;
+    gate.graphRerankConfigured = config.enableGraphRerank && kgScorerAvailable;
+    gate.crossRerankConfigured = config.enableReranking && config.rerankTopK > 0;
+    return gate;
+}
+
+struct SearchCandidateFanout {
+    using Future = std::future<Result<std::vector<ComponentResult>>>;
+
+    Future text;
+    Future kg;
+    Future path;
+    Future vector;
+    Future entityVector;
+    Future tag;
+    Future metadata;
+};
+
+struct SearchRerankPipelinePlan {
+    bool graphEnabled = false;
+    bool crossEnabled = false;
+    size_t graphWindow = 0;
+    size_t crossWindow = 0;
+};
+
+SearchRerankPipelinePlan buildSearchRerankPipelinePlan(const SearchEngineConfig& config,
+                                                       size_t resultCount, bool kgScorerAvailable) {
+    SearchRerankPipelinePlan plan;
+    plan.graphEnabled = config.enableGraphRerank && kgScorerAvailable && resultCount > 0;
+    plan.graphWindow = plan.graphEnabled ? std::min(config.graphRerankTopN, resultCount) : 0;
+    plan.crossEnabled = config.enableReranking && config.rerankTopK > 0;
+    plan.crossWindow = plan.crossEnabled ? std::min(config.rerankTopK, resultCount) : 0;
+    return plan;
+}
+
+struct SearchTopKLimitOutcome {
+    std::vector<std::string> semanticRescuePromotedDocIds;
+    std::vector<std::string> semanticRescueDisplacedDocIds;
+    std::vector<std::string> buriedSemanticRescuePromotedDocIds;
+    std::vector<std::string> buriedSemanticRescueDisplacedDocIds;
+    std::vector<std::string> evidenceRescuePromotedDocIds;
+    std::vector<std::string> evidenceRescueDisplacedDocIds;
+};
+
+template <typename ResultLess, typename IsSemanticCandidate, typename SemanticBetter,
+          typename IsBuriedSemanticCandidate, typename BuriedSemanticBetter,
+          typename IsEvidenceCandidate, typename EvidenceBetter, typename EvidenceScore,
+          typename DocIdForResult>
+SearchTopKLimitOutcome
+applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfig& config,
+                     size_t userLimit, size_t buriedVectorRankThreshold, ResultLess resultLess,
+                     IsSemanticCandidate isSemanticCandidate, SemanticBetter semanticBetter,
+                     IsBuriedSemanticCandidate isBuriedSemanticCandidate,
+                     BuriedSemanticBetter buriedSemanticBetter,
+                     IsEvidenceCandidate isEvidenceCandidate, EvidenceBetter evidenceBetter,
+                     EvidenceScore evidenceScore, DocIdForResult docIdForResult) {
+    SearchTopKLimitOutcome outcome;
+
+    // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
+    if (results.size() <= userLimit) {
+        return outcome;
+    }
+
+    std::partial_sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(userLimit),
+                      results.end(), resultLess);
+
+    if (config.semanticRescueSlots > 0 && userLimit > 0) {
+        const size_t finalWindow = std::min(userLimit, results.size());
+        const size_t rescueTarget = std::min(config.semanticRescueSlots, finalWindow);
+        size_t rescuePresent = 0;
+        for (size_t i = 0; i < finalWindow; ++i) {
+            if (isSemanticCandidate(results[i])) {
+                rescuePresent++;
+            }
+        }
+
+        while (rescuePresent < rescueTarget) {
+            size_t bestTailIndex = results.size();
+            for (size_t i = finalWindow; i < results.size(); ++i) {
+                if (!isSemanticCandidate(results[i])) {
+                    continue;
+                }
+                if (bestTailIndex >= results.size() ||
+                    semanticBetter(results[i], results[bestTailIndex])) {
+                    bestTailIndex = i;
+                }
+            }
+            if (bestTailIndex >= results.size()) {
+                break;
+            }
+
+            size_t victimIndex = finalWindow;
+            for (size_t i = finalWindow; i > 0; --i) {
+                const size_t idx = i - 1;
+                if (!isSemanticCandidate(results[idx])) {
+                    victimIndex = idx;
+                    break;
+                }
+            }
+            if (victimIndex >= finalWindow) {
+                break;
+            }
+
+            const std::string promotedId = docIdForResult(results[bestTailIndex]);
+            const std::string displacedId = docIdForResult(results[victimIndex]);
+            if (!promotedId.empty()) {
+                outcome.semanticRescuePromotedDocIds.push_back(promotedId);
+            }
+            if (!displacedId.empty()) {
+                outcome.semanticRescueDisplacedDocIds.push_back(displacedId);
+            }
+
+            std::swap(results[victimIndex], results[bestTailIndex]);
+            rescuePresent++;
+        }
+
+        std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow),
+                  resultLess);
+
+        const size_t buriedRescueTarget =
+            buriedVectorRankThreshold != std::numeric_limits<size_t>::max() ? size_t(1) : size_t(0);
+        size_t buriedRescuePresent = 0;
+        for (size_t i = 0; i < finalWindow; ++i) {
+            if (isBuriedSemanticCandidate(results[i])) {
+                buriedRescuePresent++;
+            }
+        }
+
+        while (buriedRescuePresent < buriedRescueTarget) {
+            size_t bestTailIndex = results.size();
+            for (size_t i = finalWindow; i < results.size(); ++i) {
+                if (!isBuriedSemanticCandidate(results[i])) {
+                    continue;
+                }
+                if (bestTailIndex >= results.size() ||
+                    buriedSemanticBetter(results[i], results[bestTailIndex])) {
+                    bestTailIndex = i;
+                }
+            }
+            if (bestTailIndex >= results.size()) {
+                break;
+            }
+
+            size_t victimIndex = finalWindow;
+            for (size_t i = finalWindow; i > 0; --i) {
+                const size_t idx = i - 1;
+                if (!isBuriedSemanticCandidate(results[idx])) {
+                    victimIndex = idx;
+                    break;
+                }
+            }
+            if (victimIndex >= finalWindow) {
+                break;
+            }
+
+            const std::string promotedId = docIdForResult(results[bestTailIndex]);
+            const std::string displacedId = docIdForResult(results[victimIndex]);
+            if (!promotedId.empty()) {
+                outcome.buriedSemanticRescuePromotedDocIds.push_back(promotedId);
+            }
+            if (!displacedId.empty()) {
+                outcome.buriedSemanticRescueDisplacedDocIds.push_back(displacedId);
+            }
+
+            std::swap(results[victimIndex], results[bestTailIndex]);
+            buriedRescuePresent++;
+        }
+
+        if (buriedRescueTarget > 0) {
+            std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow),
+                      resultLess);
+        }
+    }
+
+    if (config.fusionEvidenceRescueSlots > 0 && userLimit > 0) {
+        const size_t finalWindow = std::min(userLimit, results.size());
+        const size_t rescueTarget = std::min(config.fusionEvidenceRescueSlots, finalWindow);
+        size_t rescuePresent = 0;
+        for (size_t i = 0; i < finalWindow; ++i) {
+            if (isEvidenceCandidate(results[i])) {
+                rescuePresent++;
+            }
+        }
+
+        while (rescuePresent < rescueTarget) {
+            size_t bestTailIndex = results.size();
+            for (size_t i = finalWindow; i < results.size(); ++i) {
+                if (!isEvidenceCandidate(results[i])) {
+                    continue;
+                }
+                if (bestTailIndex >= results.size() ||
+                    evidenceBetter(results[i], results[bestTailIndex])) {
+                    bestTailIndex = i;
+                }
+            }
+            if (bestTailIndex >= results.size()) {
+                break;
+            }
+
+            size_t victimIndex = finalWindow;
+            double victimEvidence = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < finalWindow; ++i) {
+                const double evidence = evidenceScore(results[i]);
+                if (evidence < victimEvidence) {
+                    victimEvidence = evidence;
+                    victimIndex = i;
+                }
+            }
+            if (victimIndex >= finalWindow) {
+                break;
+            }
+
+            const double bestTailEvidence = evidenceScore(results[bestTailIndex]);
+            if (bestTailEvidence <= victimEvidence) {
+                break;
+            }
+
+            const std::string promotedId = docIdForResult(results[bestTailIndex]);
+            const std::string displacedId = docIdForResult(results[victimIndex]);
+            if (!promotedId.empty()) {
+                outcome.evidenceRescuePromotedDocIds.push_back(promotedId);
+            }
+            if (!displacedId.empty()) {
+                outcome.evidenceRescueDisplacedDocIds.push_back(displacedId);
+            }
+
+            std::swap(results[victimIndex], results[bestTailIndex]);
+            rescuePresent++;
+        }
+
+        std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow),
+                  resultLess);
+    }
+
+    results.resize(userLimit);
+    return outcome;
 }
 
 struct PreFusionDocSignal {
@@ -646,6 +972,41 @@ bool containsFast(std::string_view haystack, std::string_view needle) {
     return yams::app::services::simdMemmem(haystack, needle) != yams::app::services::kMemmemNpos;
 }
 
+void appendRerankTextPart(std::string& out, const std::string& part) {
+    if (part.empty()) {
+        return;
+    }
+    if (!out.empty()) {
+        out.push_back('\n');
+    }
+    out += part;
+}
+
+std::string
+buildCrossRerankText(const SearchResult& result,
+                     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                     size_t textLimit) {
+    std::string text;
+    appendRerankTextPart(text, result.document.fileName);
+    appendRerankTextPart(text, result.document.filePath);
+    appendRerankTextPart(text, result.snippet);
+    if (metadataRepo && result.document.id > 0 && text.size() < textLimit) {
+        auto contentResult = metadataRepo->getContent(result.document.id);
+        if (contentResult && contentResult.value()) {
+            const auto& content = contentResult.value()->contentText;
+            if (!content.empty()) {
+                const size_t remaining =
+                    textLimit > text.size() ? textLimit - text.size() : size_t{0};
+                appendRerankTextPart(text, content.substr(0, remaining));
+            }
+        }
+    }
+    if (text.size() > textLimit) {
+        text.resize(textLimit);
+    }
+    return text;
+}
+
 } // namespace
 
 #if YAMS_HAS_RANGES
@@ -924,8 +1285,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     const auto routingStart = std::chrono::steady_clock::now();
-    QueryPolicyResolution policy =
-        resolveQueryPolicy(query, workingConfig, baseParams, baselineState, params.semanticOnly);
+    SearchRoutingPlan routingPlan = buildSearchRoutingPlan(query, workingConfig, baseParams,
+                                                           baselineState, params.semanticOnly);
     response.componentTimingMicros["query_routing"] =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                               routingStart)
@@ -935,12 +1296,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             response.componentTimingMicros.at("query_routing");
     }
 
-    const QueryRouteDecision routeDecision = std::move(policy.routeDecision);
-    const QueryIntent intent = routeDecision.intent.label;
-    const QueryRetrievalMode retrievalMode = routeDecision.retrievalMode.label;
-    const auto effectiveZoomLevel = policy.effectiveZoomLevel;
-    const bool zoomLevelInferredFromIntent = policy.zoomLevelInferredFromIntent;
-    workingConfig = std::move(policy.config);
+    const QueryRouteDecision routeDecision = std::move(routingPlan.routeDecision);
+    const QueryIntent intent = routingPlan.intent;
+    const QueryRetrievalMode retrievalMode = routingPlan.retrievalMode;
+    const auto effectiveZoomLevel = routingPlan.effectiveZoomLevel;
+    const bool zoomLevelInferredFromIntent = routingPlan.zoomLevelInferredFromIntent;
+    const std::optional<TuningState> communityOverride = std::move(routingPlan.communityOverride);
+    workingConfig = std::move(routingPlan.config);
 
     // Select a Simeon bandit arm after tuner/policy resolution so the arm is
     // request-local and cannot leak through shared config_ state.
@@ -989,12 +1351,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                        ? std::uint8_t{1}
                                        : std::uint8_t{0};
     tuningCtx.queryHasKgAnchors =
-        (routeDecision.community.has_value() || policy.communityOverride.has_value())
-            ? std::uint8_t{1}
-            : std::uint8_t{0};
+        (routeDecision.community.has_value() || communityOverride.has_value()) ? std::uint8_t{1}
+                                                                               : std::uint8_t{0};
 
-    if (policy.communityOverride.has_value() && baselineState.has_value()) {
-        const std::string overrideState = tuningStateToString(*policy.communityOverride);
+    if (communityOverride.has_value() && baselineState.has_value()) {
+        const std::string overrideState = tuningStateToString(*communityOverride);
         response.debugStats["community_override"] = overrideState;
         spdlog::debug("[Search] community override: global={} → {} (routing={}μs, query='{}')",
                       tuningStateToString(*baselineState), overrideState,
@@ -1223,24 +1584,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                             ? workingConfig.fusionCandidateLimit
                                             : autoFusionLimit;
 
+    const SearchSourceGate sourceGate =
+        buildSearchSourceGate(workingConfig, params, kgStore_ != nullptr,
+                              conceptExtractor_ != nullptr, kgScorer_ != nullptr);
+
     traceCollector.markStageConfigured("embedding", needsEmbedding && embeddingGen_ != nullptr);
-    traceCollector.markStageConfigured("concepts", conceptExtractor_ != nullptr);
+    traceCollector.markStageConfigured("concepts", sourceGate.conceptsConfigured);
 
     workingConfig.maxResults = fusionCandidateLimit;
-    traceCollector.markStageConfigured("text", workingConfig.textWeight > 0.0f);
-    traceCollector.markStageConfigured("kg", workingConfig.kgWeight > 0.0f && kgStore_ != nullptr);
-    traceCollector.markStageConfigured("path", workingConfig.pathTreeWeight > 0.0f);
-    traceCollector.markStageConfigured("vector", workingConfig.vectorWeight > 0.0f);
-    traceCollector.markStageConfigured("entity_vector", workingConfig.entityVectorWeight > 0.0f);
-    traceCollector.markStageConfigured("tag",
-                                       workingConfig.tagWeight > 0.0f && !params.tags.empty());
-    traceCollector.markStageConfigured("metadata", workingConfig.metadataWeight > 0.0f);
-    traceCollector.markStageConfigured("multi_vector", workingConfig.enableMultiVectorQuery ||
-                                                           workingConfig.enableGraphQueryExpansion);
-    traceCollector.markStageConfigured("graph_rerank",
-                                       workingConfig.enableGraphRerank && kgScorer_ != nullptr);
-    traceCollector.markStageConfigured("cross_rerank", workingConfig.enableReranking &&
-                                                           workingConfig.rerankTopK > 0);
+    traceCollector.markStageConfigured("text", sourceGate.textConfigured);
+    traceCollector.markStageConfigured("kg", sourceGate.kgConfigured);
+    traceCollector.markStageConfigured("path", sourceGate.pathConfigured);
+    traceCollector.markStageConfigured("vector", sourceGate.vectorConfigured);
+    traceCollector.markStageConfigured("entity_vector", sourceGate.entityVectorConfigured);
+    traceCollector.markStageConfigured("tag", sourceGate.tagConfigured);
+    traceCollector.markStageConfigured("metadata", sourceGate.metadataConfigured);
+    traceCollector.markStageConfigured("multi_vector", sourceGate.multiVectorConfigured);
+    traceCollector.markStageConfigured("graph_rerank", sourceGate.graphRerankConfigured);
+    traceCollector.markStageConfigured("cross_rerank", sourceGate.crossRerankConfigured);
 
     auto hasVectorTierDimMismatch = [&]() {
         if (!queryEmbedding.has_value() || !vectorDb_) {
@@ -1444,22 +1805,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t topologyWeakQueryRoutedClusters = 0;
     size_t topologyWeakQueryRoutedDocs = 0;
     size_t topologyWeakQueryAddedCandidates = 0;
-    size_t estimatedResults = 0;
-    if (workingConfig.textWeight > 0.0f || workingConfig.simeonTextWeight > 0.0f)
-        estimatedResults += workingConfig.textMaxResults;
-    if (workingConfig.kgWeight > 0.0f)
-        estimatedResults += workingConfig.kgMaxResults;
-    if (workingConfig.pathTreeWeight > 0.0f)
-        estimatedResults += workingConfig.pathTreeMaxResults;
-    if (workingConfig.vectorWeight > 0.0f)
-        estimatedResults += workingConfig.vectorMaxResults;
-    if (workingConfig.entityVectorWeight > 0.0f)
-        estimatedResults += workingConfig.entityVectorMaxResults;
-    if (workingConfig.tagWeight > 0.0f)
-        estimatedResults += workingConfig.tagMaxResults;
-    if (workingConfig.metadataWeight > 0.0f)
-        estimatedResults += workingConfig.metadataMaxResults;
-    allComponentResults.reserve(estimatedResults);
+    allComponentResults.reserve(sourceGate.estimatedCandidateCapacity(workingConfig));
 
     // Component result collection helper with timing
     enum class ComponentStatus : std::uint8_t { Success, Failed, TimedOut };
@@ -1539,13 +1885,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (workingConfig.enableParallelExecution) [[likely]] {
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
-        std::future<Result<std::vector<ComponentResult>>> textFuture;
-        std::future<Result<std::vector<ComponentResult>>> kgFuture;
-        std::future<Result<std::vector<ComponentResult>>> pathFuture;
-        std::future<Result<std::vector<ComponentResult>>> vectorFuture;
-        std::future<Result<std::vector<ComponentResult>>> entityVectorFuture;
-        std::future<Result<std::vector<ComponentResult>>> tagFuture;
-        std::future<Result<std::vector<ComponentResult>>> metaFuture;
+        SearchCandidateFanout fanout;
 
         auto schedule = [&]([[maybe_unused]] const char* name, [[maybe_unused]] float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
@@ -1570,7 +1910,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             YAMS_ZONE_SCOPED_N("search_engine::tiered_execution");
 
             // --- TIER 1: Text + Path (fast, high precision) ---
-            textFuture = schedule(
+            fanout.text = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
                 [this, &query, intent, &workingConfig, &textExpansionStats, &graphExpansionTerms,
                  &simeonRouteRecipe]() {
@@ -1580,23 +1920,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          &simeonRouteRecipe);
                 });
 
-            pathFuture = schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
-                                  stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
-                                      YAMS_ZONE_SCOPED_N("component::path");
-                                      return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                                  });
+            fanout.path =
+                schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
+                         stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
+                             YAMS_ZONE_SCOPED_N("component::path");
+                             return queryPathTree(query, workingConfig.pathTreeMaxResults);
+                         });
 
             // Tags and metadata are also fast, run in Tier 1
             if (!params.tags.empty()) {
-                tagFuture = schedule("tag", workingConfig.tagWeight, stats_.tagQueries,
-                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
-                                         YAMS_ZONE_SCOPED_N("component::tag");
-                                         return queryTags(params.tags, params.matchAllTags,
-                                                          workingConfig.tagMaxResults);
-                                     });
+                fanout.tag = schedule("tag", workingConfig.tagWeight, stats_.tagQueries,
+                                      stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
+                                          YAMS_ZONE_SCOPED_N("component::tag");
+                                          return queryTags(params.tags, params.matchAllTags,
+                                                           workingConfig.tagMaxResults);
+                                      });
             }
 
-            metaFuture =
+            fanout.metadata =
                 schedule("metadata", workingConfig.metadataWeight, stats_.metadataQueries,
                          stats_.avgMetadataTimeMicros, [this, &query, &params, &workingConfig]() {
                              YAMS_ZONE_SCOPED_N("component::metadata");
@@ -1604,10 +1945,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                          });
 
             // Collect Tier 1 results
-            collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
-            collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
-            collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
-            collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+            collectIf(fanout.text, "text", stats_.textQueries, stats_.avgTextTimeMicros);
+            collectIf(fanout.path, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+            collectIf(fanout.tag, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
+            collectIf(fanout.metadata, "metadata", stats_.metadataQueries,
+                      stats_.avgMetadataTimeMicros);
 
             const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch;
             std::unordered_set<std::string> tier1Candidates;
@@ -1804,7 +2146,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                vectorFuture = schedule(
+                fanout.vector = schedule(
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
                     [&queryEmbedding, &tier2Candidates, vectorSearchNarrowSet, shouldNarrow,
@@ -1821,7 +2163,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         }
                     });
 
-                entityVectorFuture = schedule(
+                fanout.entityVector = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
                     stats_.avgEntityVectorTimeMicros,
                     [this, &queryEmbedding, &workingConfig, effectiveEntityVectorMaxResults]() {
@@ -1837,7 +2179,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
                     materializeConcepts(true);
                 }
-                kgFuture = schedule(
+                fanout.kg = schedule(
                     "kg", workingConfig.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros,
                     [this, &query, &workingConfig, &concepts]() {
                         YAMS_ZONE_SCOPED_N("component::kg");
@@ -1846,14 +2188,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             // Collect Tier 2 results (always collect, never skip)
-            collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
-            collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+            collectIf(fanout.vector, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+            collectIf(fanout.entityVector, "entity_vector", stats_.entityVectorQueries,
                       stats_.avgEntityVectorTimeMicros);
-            collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
+            collectIf(fanout.kg, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
         } else {
             // === FLAT PARALLEL EXECUTION (original behavior) ===
             // All components run in parallel
-            textFuture = schedule(
+            fanout.text = schedule(
                 "text", workingConfig.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
                 [this, &query, intent, &workingConfig, &textExpansionStats, &graphExpansionTerms,
                  &simeonRouteRecipe]() {
@@ -1868,7 +2210,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 if (workingConfig.graphUseQueryConcepts && workingConfig.waitForConceptExtraction) {
                     materializeConcepts(true);
                 }
-                kgFuture = schedule(
+                fanout.kg = schedule(
                     "kg", workingConfig.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros,
                     [this, &query, &workingConfig, &concepts]() {
                         YAMS_ZONE_SCOPED_N("component::kg");
@@ -1876,35 +2218,37 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     });
             }
 
-            pathFuture = schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
-                                  stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
-                                      YAMS_ZONE_SCOPED_N("component::path");
-                                      return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                                  });
+            fanout.path =
+                schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
+                         stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
+                             YAMS_ZONE_SCOPED_N("component::path");
+                             return queryPathTree(query, workingConfig.pathTreeMaxResults);
+                         });
 
             // NOTE: Vector components scheduled below after embedding is ready
             // This allows text/kg/path to run in parallel with embedding generation
 
             if (!params.tags.empty()) {
-                tagFuture = schedule("tag", workingConfig.tagWeight, stats_.tagQueries,
-                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
-                                         YAMS_ZONE_SCOPED_N("component::tag");
-                                         return queryTags(params.tags, params.matchAllTags,
-                                                          workingConfig.tagMaxResults);
-                                     });
+                fanout.tag = schedule("tag", workingConfig.tagWeight, stats_.tagQueries,
+                                      stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
+                                          YAMS_ZONE_SCOPED_N("component::tag");
+                                          return queryTags(params.tags, params.matchAllTags,
+                                                           workingConfig.tagMaxResults);
+                                      });
             }
 
-            metaFuture =
+            fanout.metadata =
                 schedule("metadata", workingConfig.metadataWeight, stats_.metadataQueries,
                          stats_.avgMetadataTimeMicros, [this, &query, &params, &workingConfig]() {
                              YAMS_ZONE_SCOPED_N("component::metadata");
                              return queryMetadata(query, params, workingConfig.metadataMaxResults);
                          });
 
-            collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
-            collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
-            collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
-            collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
+            collectIf(fanout.text, "text", stats_.textQueries, stats_.avgTextTimeMicros);
+            collectIf(fanout.path, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+            collectIf(fanout.tag, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
+            collectIf(fanout.metadata, "metadata", stats_.metadataQueries,
+                      stats_.avgMetadataTimeMicros);
 
             const auto [budgetLexicalHits, budgetTopTextScore] =
                 deferSemanticStages ? recordSemanticBudgetLexicalEvidence(allComponentResults)
@@ -1923,13 +2267,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         workingConfig.waitForConceptExtraction) {
                         materializeConcepts(true);
                     }
-                    kgFuture = schedule("kg", workingConfig.kgWeight, stats_.kgQueries,
-                                        stats_.avgKgTimeMicros,
-                                        [this, &query, &workingConfig, &concepts]() {
-                                            YAMS_ZONE_SCOPED_N("component::kg");
-                                            return queryKnowledgeGraph(
-                                                query, workingConfig.kgMaxResults, &concepts);
-                                        });
+                    fanout.kg = schedule("kg", workingConfig.kgWeight, stats_.kgQueries,
+                                         stats_.avgKgTimeMicros,
+                                         [this, &query, &workingConfig, &concepts]() {
+                                             YAMS_ZONE_SCOPED_N("component::kg");
+                                             return queryKnowledgeGraph(
+                                                 query, workingConfig.kgMaxResults, &concepts);
+                                         });
                 }
 
                 // Await embedding (ran in parallel with early lexical stages unless budgeted)
@@ -1938,7 +2282,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                     effectiveVectorMaxResults = workingConfig.vectorMaxResults;
                     effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
-                    vectorFuture =
+                    fanout.vector =
                         schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                                  stats_.avgVectorTimeMicros,
                                  [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry]() {
@@ -1947,7 +2291,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          queryEmbedding.value(), workingConfig.vectorMaxResults);
                                  });
 
-                    entityVectorFuture = schedule(
+                    fanout.entityVector = schedule(
                         "entity_vector", workingConfig.entityVectorWeight,
                         stats_.entityVectorQueries, stats_.avgEntityVectorTimeMicros,
                         [this, &queryEmbedding, &workingConfig]() {
@@ -1960,9 +2304,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     markVectorTierDimMismatch();
                 }
 
-                collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
-                collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
-                collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+                collectIf(fanout.kg, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
+                collectIf(fanout.vector, "vector", stats_.vectorQueries,
+                          stats_.avgVectorTimeMicros);
+                collectIf(fanout.entityVector, "entity_vector", stats_.entityVectorQueries,
                           stats_.avgEntityVectorTimeMicros);
             }
         }
@@ -2754,6 +3099,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    const SearchRerankPipelinePlan rerankPlan =
+        buildSearchRerankPipelinePlan(workingConfig, response.results.size(), kgScorer_ != nullptr);
+
     // Diagnostic: log graph reranker gate status once per benchmark run.
     {
         static std::atomic<bool> gsLogged{false};
@@ -2785,7 +3133,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
-    if (workingConfig.enableGraphRerank && kgScorer_ && !response.results.empty()) {
+    if (rerankPlan.graphEnabled) {
         YAMS_ZONE_SCOPED_N("graph::rerank");
         const auto graphRerankStart = std::chrono::steady_clock::now();
 
@@ -2793,8 +3141,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             workingConfig.waitForConceptExtraction);
         graphQueryConceptCount = concepts.size();
 
-        const size_t rerankWindow =
-            std::min(workingConfig.graphRerankTopN, response.results.size());
+        const size_t rerankWindow = rerankPlan.graphWindow;
         if (rerankWindow > 0) {
             KGScoringConfig graphCfg = kgScorer_->getConfig();
             graphCfg.max_neighbors = workingConfig.graphMaxNeighbors;
@@ -3123,7 +3470,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         postGraphSnapshot = response.results;
     }
 
-    if (workingConfig.enableReranking && workingConfig.rerankTopK > 0) {
+    if (rerankPlan.crossEnabled) {
         const auto crossStart = std::chrono::steady_clock::now();
         auto finishCrossMicros = [&]() {
             return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3138,7 +3485,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             traceCollector.markStageSkipped("cross_rerank", std::move(reason));
         };
 
-        const size_t rerankWindow = std::min(workingConfig.rerankTopK, response.results.size());
+        const size_t rerankWindow = rerankPlan.crossWindow;
         response.debugStats["cross_rerank_configured"] = "1";
         response.debugStats["cross_rerank_available"] = crossReranker_ ? "1" : "0";
         response.debugStats["cross_rerank_window"] = std::to_string(rerankWindow);
@@ -3153,43 +3500,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             traceCollector.markStageAttempted("cross_rerank");
 
             const size_t textLimit = workingConfig.rerankSnippetMaxChars;
-            auto appendPart = [](std::string& out, const std::string& part) {
-                if (part.empty()) {
-                    return;
-                }
-                if (!out.empty()) {
-                    out.push_back('\n');
-                }
-                out += part;
-            };
-            auto buildRerankText = [&](const SearchResult& result) {
-                std::string text;
-                appendPart(text, result.document.fileName);
-                appendPart(text, result.document.filePath);
-                appendPart(text, result.snippet);
-                if (metadataRepo_ && result.document.id > 0 && text.size() < textLimit) {
-                    auto contentResult = metadataRepo_->getContent(result.document.id);
-                    if (contentResult && contentResult.value()) {
-                        const auto& content = contentResult.value()->contentText;
-                        if (!content.empty()) {
-                            const size_t remaining =
-                                textLimit > text.size() ? textLimit - text.size() : size_t{0};
-                            appendPart(text, content.substr(0, remaining));
-                        }
-                    }
-                }
-                if (text.size() > textLimit) {
-                    text.resize(textLimit);
-                }
-                return text;
-            };
 
             std::vector<std::string> rerankTexts;
             rerankTexts.reserve(rerankWindow);
             std::vector<double> originalScores;
             originalScores.reserve(rerankWindow);
             for (size_t i = 0; i < rerankWindow; ++i) {
-                rerankTexts.push_back(buildRerankText(response.results[i]));
+                rerankTexts.push_back(
+                    buildCrossRerankText(response.results[i], metadataRepo_, textLimit));
                 originalScores.push_back(response.results[i].score);
             }
 
@@ -3623,198 +3941,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return docIdForResult(a) < docIdForResult(b);
     };
 
-    std::vector<std::string> semanticRescuePromotedDocIds;
-    std::vector<std::string> semanticRescueDisplacedDocIds;
-    std::vector<std::string> buriedSemanticRescuePromotedDocIds;
-    std::vector<std::string> buriedSemanticRescueDisplacedDocIds;
-    std::vector<std::string> evidenceRescuePromotedDocIds;
-    std::vector<std::string> evidenceRescueDisplacedDocIds;
-
-    // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
-    if (response.results.size() > userLimit) {
-        std::partial_sort(response.results.begin(),
-                          response.results.begin() + static_cast<ptrdiff_t>(userLimit),
-                          response.results.end(), finalLexicalAwareLess);
-
-        if (workingConfig.semanticRescueSlots > 0 && userLimit > 0) {
-            const size_t finalWindow = std::min(userLimit, response.results.size());
-            const size_t rescueTarget = std::min(workingConfig.semanticRescueSlots, finalWindow);
-            size_t rescuePresent = 0;
-            for (size_t i = 0; i < finalWindow; ++i) {
-                if (isFinalSemanticRescueCandidate(response.results[i])) {
-                    rescuePresent++;
-                }
-            }
-
-            while (rescuePresent < rescueTarget) {
-                size_t bestTailIndex = response.results.size();
-                for (size_t i = finalWindow; i < response.results.size(); ++i) {
-                    if (!isFinalSemanticRescueCandidate(response.results[i])) {
-                        continue;
-                    }
-                    if (bestTailIndex >= response.results.size() ||
-                        finalSemanticRescueBetter(response.results[i],
-                                                  response.results[bestTailIndex])) {
-                        bestTailIndex = i;
-                    }
-                }
-                if (bestTailIndex >= response.results.size()) {
-                    break;
-                }
-
-                size_t victimIndex = finalWindow;
-                for (size_t i = finalWindow; i > 0; --i) {
-                    const size_t idx = i - 1;
-                    if (!isFinalSemanticRescueCandidate(response.results[idx])) {
-                        victimIndex = idx;
-                        break;
-                    }
-                }
-                if (victimIndex >= finalWindow) {
-                    break;
-                }
-
-                const std::string promotedId = docIdForResult(response.results[bestTailIndex]);
-                const std::string displacedId = docIdForResult(response.results[victimIndex]);
-                if (!promotedId.empty()) {
-                    semanticRescuePromotedDocIds.push_back(promotedId);
-                }
-                if (!displacedId.empty()) {
-                    semanticRescueDisplacedDocIds.push_back(displacedId);
-                }
-
-                std::swap(response.results[victimIndex], response.results[bestTailIndex]);
-                rescuePresent++;
-            }
-
-            std::sort(response.results.begin(),
-                      response.results.begin() + static_cast<ptrdiff_t>(finalWindow),
-                      finalLexicalAwareLess);
-
-            const size_t buriedRescueTarget =
-                buriedVectorRankThreshold != std::numeric_limits<size_t>::max() ? size_t(1)
-                                                                                : size_t(0);
-            size_t buriedRescuePresent = 0;
-            for (size_t i = 0; i < finalWindow; ++i) {
-                if (isBuriedFinalSemanticRescueCandidate(response.results[i])) {
-                    buriedRescuePresent++;
-                }
-            }
-
-            while (buriedRescuePresent < buriedRescueTarget) {
-                size_t bestTailIndex = response.results.size();
-                for (size_t i = finalWindow; i < response.results.size(); ++i) {
-                    if (!isBuriedFinalSemanticRescueCandidate(response.results[i])) {
-                        continue;
-                    }
-                    if (bestTailIndex >= response.results.size() ||
-                        buriedSemanticRescueBetter(response.results[i],
-                                                   response.results[bestTailIndex])) {
-                        bestTailIndex = i;
-                    }
-                }
-                if (bestTailIndex >= response.results.size()) {
-                    break;
-                }
-
-                size_t victimIndex = finalWindow;
-                for (size_t i = finalWindow; i > 0; --i) {
-                    const size_t idx = i - 1;
-                    if (!isBuriedFinalSemanticRescueCandidate(response.results[idx])) {
-                        victimIndex = idx;
-                        break;
-                    }
-                }
-                if (victimIndex >= finalWindow) {
-                    break;
-                }
-
-                const std::string promotedId = docIdForResult(response.results[bestTailIndex]);
-                const std::string displacedId = docIdForResult(response.results[victimIndex]);
-                if (!promotedId.empty()) {
-                    buriedSemanticRescuePromotedDocIds.push_back(promotedId);
-                }
-                if (!displacedId.empty()) {
-                    buriedSemanticRescueDisplacedDocIds.push_back(displacedId);
-                }
-
-                std::swap(response.results[victimIndex], response.results[bestTailIndex]);
-                buriedRescuePresent++;
-            }
-
-            if (buriedRescueTarget > 0) {
-                std::sort(response.results.begin(),
-                          response.results.begin() + static_cast<ptrdiff_t>(finalWindow),
-                          finalLexicalAwareLess);
-            }
-        }
-
-        if (workingConfig.fusionEvidenceRescueSlots > 0 && userLimit > 0) {
-            const size_t finalWindow = std::min(userLimit, response.results.size());
-            const size_t rescueTarget =
-                std::min(workingConfig.fusionEvidenceRescueSlots, finalWindow);
-            size_t rescuePresent = 0;
-            for (size_t i = 0; i < finalWindow; ++i) {
-                if (isFinalEvidenceRescueCandidate(response.results[i])) {
-                    rescuePresent++;
-                }
-            }
-
-            while (rescuePresent < rescueTarget) {
-                size_t bestTailIndex = response.results.size();
-                for (size_t i = finalWindow; i < response.results.size(); ++i) {
-                    if (!isFinalEvidenceRescueCandidate(response.results[i])) {
-                        continue;
-                    }
-                    if (bestTailIndex >= response.results.size() ||
-                        finalEvidenceRescueBetter(response.results[i],
-                                                  response.results[bestTailIndex])) {
-                        bestTailIndex = i;
-                    }
-                }
-                if (bestTailIndex >= response.results.size()) {
-                    break;
-                }
-
-                size_t victimIndex = finalWindow;
-                double victimEvidence = std::numeric_limits<double>::max();
-                for (size_t i = 0; i < finalWindow; ++i) {
-                    const double evidence = evidenceRescueScore(response.results[i]);
-                    if (evidence < victimEvidence) {
-                        victimEvidence = evidence;
-                        victimIndex = i;
-                    }
-                }
-                if (victimIndex >= finalWindow) {
-                    break;
-                }
-
-                const double bestTailEvidence =
-                    evidenceRescueScore(response.results[bestTailIndex]);
-                if (bestTailEvidence <= victimEvidence) {
-                    break;
-                }
-
-                const std::string promotedId = docIdForResult(response.results[bestTailIndex]);
-                const std::string displacedId = docIdForResult(response.results[victimIndex]);
-                if (!promotedId.empty()) {
-                    evidenceRescuePromotedDocIds.push_back(promotedId);
-                }
-                if (!displacedId.empty()) {
-                    evidenceRescueDisplacedDocIds.push_back(displacedId);
-                }
-
-                std::swap(response.results[victimIndex], response.results[bestTailIndex]);
-                rescuePresent++;
-            }
-
-            std::sort(response.results.begin(),
-                      response.results.begin() + static_cast<ptrdiff_t>(finalWindow),
-                      finalLexicalAwareLess);
-        }
-
-        response.results.resize(userLimit);
-    }
+    const SearchTopKLimitOutcome topKOutcome =
+        applySearchTopKLimit(response.results, workingConfig, userLimit, buriedVectorRankThreshold,
+                             finalLexicalAwareLess, isFinalSemanticRescueCandidate,
+                             finalSemanticRescueBetter, isBuriedFinalSemanticRescueCandidate,
+                             buriedSemanticRescueBetter, isFinalEvidenceRescueCandidate,
+                             finalEvidenceRescueBetter, evidenceRescueScore, docIdForResult);
+    const auto& semanticRescuePromotedDocIds = topKOutcome.semanticRescuePromotedDocIds;
+    const auto& semanticRescueDisplacedDocIds = topKOutcome.semanticRescueDisplacedDocIds;
+    const auto& buriedSemanticRescuePromotedDocIds = topKOutcome.buriedSemanticRescuePromotedDocIds;
+    const auto& buriedSemanticRescueDisplacedDocIds =
+        topKOutcome.buriedSemanticRescueDisplacedDocIds;
+    const auto& evidenceRescuePromotedDocIds = topKOutcome.evidenceRescuePromotedDocIds;
+    const auto& evidenceRescueDisplacedDocIds = topKOutcome.evidenceRescueDisplacedDocIds;
 
     size_t semanticRescueFinalCount = 0;
     std::vector<std::string> semanticRescueFinalDocIds;
@@ -4017,21 +4156,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.facets.push_back(std::move(facet));
     }
 
-    response.timedOutComponents = std::move(timedOut);
-    response.failedComponents = std::move(failed);
-    response.contributingComponents = std::move(contributing);
-    response.skippedComponents = std::move(skipped);
-    response.usedEarlyTermination = false;
-    if (workingConfig.includeComponentTiming) {
-        componentTiming.merge(response.componentTimingMicros);
-        response.componentTimingMicros = std::move(componentTiming);
-        if (simeonLexical_) {
-            response.componentTimingMicros[std::string(kSimeonLexicalScoreTimingKey)] =
-                static_cast<int64_t>(simeonLexical_->scoreMicrosTotal() - simeonScoreMicrosBefore);
-        }
-    }
-    response.isDegraded =
-        !response.timedOutComponents.empty() || !response.failedComponents.empty();
+    SearchObservability observability{
+        .timedOutComponents = std::move(timedOut),
+        .failedComponents = std::move(failed),
+        .contributingComponents = std::move(contributing),
+        .skippedComponents = std::move(skipped),
+        .componentTimingMicros = std::move(componentTiming),
+        .includeComponentTiming = workingConfig.includeComponentTiming,
+        .includeSimeonLexicalTiming = simeonLexical_ != nullptr,
+        .simeonLexicalScoreMicrosDelta =
+            simeonLexical_ != nullptr
+                ? static_cast<int64_t>(simeonLexical_->scoreMicrosTotal() -
+                                       simeonScoreMicrosBefore)
+                : int64_t{0},
+    };
+    observability.applyComponentStatus(response);
 
     const std::vector<std::string> postFusionAllDocIds =
         collectRankedResultDocIds(postFusionSnapshot);
@@ -4310,12 +4449,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             graphDisplacementSummary.dump();
     }
 
-    response.debugStats["trace_stage_summary_json"] = traceCollector.buildStageSummaryJson().dump();
-    response.debugStats["trace_fusion_source_summary_json"] =
-        traceCollector
-            .buildFusionSourceSummaryJson(allComponentResults, response.results,
-                                          std::max<size_t>(userLimit, size_t{25}))
-            .dump();
+    SearchObservability::publishTraceSummaryDebugStats(response, traceCollector,
+                                                       allComponentResults, userLimit);
 
     if (tuner_) {
         SearchTuner::RuntimeTelemetry telemetry;

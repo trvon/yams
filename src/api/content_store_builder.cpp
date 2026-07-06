@@ -93,12 +93,15 @@ struct ContentStoreBuilder::Impl {
             bool hasAlwaysCompressAbove = false;
             loadCompressionSettings(policyRules, hasNeverCompressBelow, hasAlwaysCompressAbove);
 
-            // Only apply eager compression defaults if config didn't specify thresholds
+            // Keep the default ingest path from spending CPU compressing very small objects.
+            // The ingestion hot-path ablation showed manifest/chunk storage dominates for
+            // ~1 KiB documents; compressing sub-KiB chunks/manifests adds latency while saving
+            // little space. Explicit config still wins when operators want eager compression.
             if (!hasNeverCompressBelow) {
-                policyRules.neverCompressBelow = 0;
+                policyRules.neverCompressBelow = 1024;
             }
             if (!hasAlwaysCompressAbove) {
-                policyRules.alwaysCompressAbove = 1;
+                policyRules.alwaysCompressAbove = 1024;
             }
             if (policyRules.preferZstdBelow == 0) {
                 policyRules.preferZstdBelow = std::numeric_limits<uint64_t>::max();
