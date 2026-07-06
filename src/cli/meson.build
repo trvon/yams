@@ -105,10 +105,6 @@ cli_deps = [
 
 # TUI framework dependencies removed - migrating to Flutter UI
 
-if get_option('build-mcp-server')
-  cli_deps += dependency('yams_mcp')
-endif
-
 cli_cppargs = []
 if get_option('build-mcp-server')
   cli_cppargs += ['-DYAMS_BUILD_MCP_SERVER=1']

@@ -46,10 +46,6 @@ if cli11_resolved_dep.found()
   yams_cli_exe_deps += cli11_resolved_dep
 endif
 
-if get_option('build-mcp-server')
-  yams_cli_exe_deps += dependency('yams_mcp')
-endif
-
 # Set platform-specific rpath
 # macOS uses @executable_path, Linux uses $ORIGIN
 if host_machine.system() == 'darwin'
