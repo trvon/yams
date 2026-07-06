@@ -92,6 +92,7 @@ cli_deps = [
   dependency('yams_config'),
   dependency('yams_daemon'),
   dependency('yams_daemon_client'),
+  dependency('yams_plugin_runtime'),
   dependency('yams_downloader'),
   dependency('yams_plugins_mgmt'),
   dependency('nlohmann_json'),
