@@ -185,14 +185,14 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     // Let in-process components (e.g., EmbeddingGenerator/HybridBackend) know they are running
     // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
 #ifndef _WIN32
-    ::setenv("YAMS_IN_DAEMON", "1", 1);
+    ::setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe)
 #else
     _putenv_s("YAMS_IN_DAEMON", "1");
 #endif
 
     if (!config_.dataDir.empty()) {
 #ifndef _WIN32
-        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1);
+        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
 #else
         _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
 #endif
@@ -201,7 +201,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     if (!config_.configFilePath.empty()) {
 #ifndef _WIN32
-        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1);
+        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
 #else
         _putenv_s("YAMS_CONFIG", config_.configFilePath.string().c_str());
 #endif
@@ -210,7 +210,8 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
-        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);
+        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(),
+                 1); // NOLINT(concurrency-mt-unsafe)
 #else
         _putenv_s("YAMS_DAEMON_SOCKET", config_.socketPath.string().c_str());
 #endif
@@ -722,12 +723,13 @@ void YamsDaemon::runLoop() {
                 }
                 if (snapshot.state == ServiceManagerState::Ready ||
                     snapshot.state == ServiceManagerState::Failed ||
+                    snapshot.state == ServiceManagerState::ShuttingDown ||
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::info("[InitWaiter] ServiceManager still initializing (state={}), "
-                             "continuing to wait",
-                             static_cast<int>(snapshot.state));
+                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
+                              "continuing to wait",
+                              static_cast<int>(snapshot.state));
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -773,6 +775,11 @@ void YamsDaemon::runLoop() {
             } else if (snapshot.state == ServiceManagerState::Failed) {
                 spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
                 lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
+            } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
+                       snapshot.state == ServiceManagerState::Stopped) {
+                spdlog::debug(
+                    "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
+                    static_cast<int>(snapshot.state));
             } else {
                 spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
                              static_cast<int>(snapshot.state));
@@ -1000,12 +1007,13 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                 }
                 if (snapshot.state == ServiceManagerState::Ready ||
                     snapshot.state == ServiceManagerState::Failed ||
+                    snapshot.state == ServiceManagerState::ShuttingDown ||
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::info("[InitWaiter] ServiceManager still initializing (state={}), "
-                             "continuing to wait",
-                             static_cast<int>(snapshot.state));
+                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
+                              "continuing to wait",
+                              static_cast<int>(snapshot.state));
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -1062,6 +1070,11 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
             } else if (snapshot.state == ServiceManagerState::Failed) {
                 spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
                 lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
+            } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
+                       snapshot.state == ServiceManagerState::Stopped) {
+                spdlog::debug(
+                    "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
+                    static_cast<int>(snapshot.state));
             } else {
                 spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
                              static_cast<int>(snapshot.state));
