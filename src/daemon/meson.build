@@ -268,6 +268,30 @@ yams_daemon_dep = declare_dependency(
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)
 
+# Optional embedded/in-process daemon client transport. Keep this out of
+# yams_daemon_client so CLI/MCP socket clients do not pull the full daemon.
+yams_daemon_client_embedded_lib = static_library('yams_daemon_client_embedded',
+  [
+    'client/in_process_transport.cpp',
+  ],
+  dependencies: [
+    yams_daemon_client_dep,
+    yams_daemon_dep,
+    boost_dep,
+    dependency('spdlog'),
+  ],
+  include_directories: [include_directories('../../include'), include_directories('.')],
+  install: false,
+)
+
+yams_daemon_client_embedded_dep = declare_dependency(
+  link_with: yams_daemon_client_embedded_lib,
+  include_directories: [include_directories('../../include'), include_directories('.')],
+  dependencies: [yams_daemon_client_dep, yams_daemon_dep],
+)
+
+meson.override_dependency('yams_daemon_client_embedded', yams_daemon_client_embedded_dep)
+
 # Set platform-specific rpath for daemon
 # macOS uses @executable_path, Linux uses $ORIGIN
 if host_machine.system() == 'darwin'

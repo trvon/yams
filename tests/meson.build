@@ -780,7 +780,8 @@ if catch2_dep.found()
   catch2_in_process_transport_exe = executable('catch2_in_process_transport',
     files('unit/daemon/in_process_transport_catch2_test.cpp'),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_daemon_client_embedded')]
+      + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
