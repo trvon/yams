@@ -2201,10 +2201,22 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     emitEvent(std::move(ev));
                 };
 
+                yams::repair::BeginBulkIngestCallback beginBulkIngest;
+                if (sm) {
+                    if (auto coord = sm->getVectorIndexCoordinator()) {
+                        beginBulkIngest = [coord]() -> yams::repair::BulkIngestLease {
+                            auto scope = std::make_shared<
+                                yams::daemon::VectorIndexCoordinator::BulkScope>(
+                                coord->beginBulkIngest(
+                                    yams::daemon::RebuildReason::EmbeddingBatch));
+                            return yams::repair::BulkIngestLease{
+                                [scope = std::move(scope)]() mutable { scope.reset(); }};
+                        };
+                    }
+                }
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, progress, contentExtractors,
-                    sm ? sm->getVectorIndexCoordinator().get() : nullptr);
+                    req.documentHashes, progress, contentExtractors, std::move(beginBulkIngest));
                 if (!stats) {
                     finishWithError(stats.error().code, stats.error().message);
                     return;

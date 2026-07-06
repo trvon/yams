@@ -6,6 +6,7 @@ protobuf_dep = dependency('protobuf')
 subdir('resource')
 yams_onnx_resource_dep = dependency('yams_onnx_resource')
 yams_plugin_runtime_dep = dependency('yams_plugin_runtime')
+yams_write_coordinator_dep = dependency('yams_write_coordinator')
 
 # Tracy profiling support (optional, controlled by -Denable-profiling=true)
 enable_profiling = get_option('enable-profiling')
@@ -170,11 +171,11 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/SearchEngineManager.cpp',
     'components/SearchComponent.cpp',
     'components/GraphComponent.cpp',
+    'components/metadata_graph_bridge.cpp',
     'components/PostIngestQueue.cpp',
     'components/embed_preparer.cpp',
     'components/IOCoordinator.cpp',
     'components/EmbeddingService.cpp',
-    'components/WriteCoordinator.cpp',
     'components/TuningManager.cpp',
     'components/TuneAdvisor.cpp',
     'components/GradientLimiter.cpp',
@@ -236,6 +237,7 @@ yams_daemon_lib = static_library('yams_daemon',
     yams_daemon_client_dep,
     yams_onnx_resource_dep,
     yams_plugin_runtime_dep,
+    yams_write_coordinator_dep,
     # Direct Boost dependency required because daemon sources
     # various IPC components) include boost/asio headers directly. Relying on the
     # daemon_client's transitive usage isn't sufficient for include paths at compile time.

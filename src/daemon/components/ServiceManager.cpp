@@ -244,8 +244,7 @@ std::optional<std::uintmax_t> sqliteLogicalFileSize(sqlite3* db) {
         if (sqlite3_prepare_v2(db, sql, -1, &rawStmt, nullptr) != SQLITE_OK) {
             return std::nullopt;
         }
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(rawStmt,
-                                                                        sqlite3_finalize);
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(rawStmt, sqlite3_finalize);
         if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
             return std::nullopt;
         }
@@ -3867,6 +3866,10 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
+    ctx.enqueuePostIngest = [self = const_cast<ServiceManager*>(this)](const std::string& hash,
+                                                                       const std::string& mime) {
+        self->enqueuePostIngest(hash, mime);
+    };
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;

@@ -100,6 +100,7 @@ class IGraphQueryService;
 
 struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
+    std::function<void(const std::string& hash, const std::string& mime)> enqueuePostIngest;
     boost::asio::any_io_executor workerExecutor;
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;

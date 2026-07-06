@@ -16,7 +16,6 @@
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/process_discovery.h>
-#include <yams/daemon/daemon.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/version.hpp>
 
@@ -1673,8 +1672,7 @@ private:
                         }
                         // Show slow components if available
                         try {
-                            auto rt =
-                                daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                            auto rt = config::get_daemon_status_file();
                             std::ifstream bf(rt);
                             if (bf) {
                                 json j;
@@ -1883,7 +1881,7 @@ private:
                 // status file that the daemon writes throughout initialization so the
                 // user sees useful progress instead of an opaque error.
                 try {
-                    auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                    auto rt = config::get_daemon_status_file();
                     json j;
                     bool haveBootstrap = false;
 
@@ -3499,7 +3497,7 @@ private:
         }
         // All retries exhausted — fall back to bootstrap status file before giving up
         try {
-            auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+            auto rt = config::get_daemon_status_file();
             std::ifstream bf(rt);
             if (bf) {
                 json j;

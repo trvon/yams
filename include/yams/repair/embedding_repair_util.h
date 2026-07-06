@@ -10,12 +10,12 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace yams {
 namespace daemon {
 class IModelProvider;
-class VectorIndexCoordinator;
 } // namespace daemon
 } // namespace yams
 
@@ -42,13 +42,46 @@ struct EmbeddingRepairConfig {
     std::atomic<bool>* cancelRequested = nullptr;
 };
 
+class BulkIngestLease {
+public:
+    BulkIngestLease() = default;
+    explicit BulkIngestLease(std::function<void()> release) : release_(std::move(release)) {}
+    BulkIngestLease(const BulkIngestLease&) = delete;
+    BulkIngestLease& operator=(const BulkIngestLease&) = delete;
+    BulkIngestLease(BulkIngestLease&& other) noexcept : release_(std::move(other.release_)) {
+        other.release_ = {};
+    }
+    BulkIngestLease& operator=(BulkIngestLease&& other) noexcept {
+        if (this != &other) {
+            reset();
+            release_ = std::move(other.release_);
+            other.release_ = {};
+        }
+        return *this;
+    }
+    ~BulkIngestLease() { reset(); }
+
+    void reset() {
+        if (release_) {
+            auto release = std::move(release_);
+            release_ = {};
+            release();
+        }
+    }
+
+private:
+    std::function<void()> release_;
+};
+
+using BeginBulkIngestCallback = std::function<BulkIngestLease()>;
+
 /**
  * Repair missing embeddings for all documents or specific document hashes.
  * Daemon version that uses IModelProvider directly.
  *
- * @param coord  Optional VectorIndexCoordinator (nullptr = CLI path, no bulk management).
- *               When provided, the entire repair runs inside a single BulkScope so that
- *               finalizeBulkLoad + buildIndex + persistIndex happen exactly once on return.
+ * @param beginBulkIngest Optional daemon-owned bulk-ingest lease factory. When provided,
+ *                        the entire repair holds the lease so finalize/build/persist work
+ *                        can happen exactly once on return without coupling repair to daemon.
  */
 Result<EmbeddingRepairStats>
 repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
@@ -58,7 +91,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         const std::vector<std::string>& documentHashes = {},
                         EmbeddingRepairProgressCallback progressCallback = nullptr,
                         const yams::extraction::ContentExtractorList& extractors = {},
-                        daemon::VectorIndexCoordinator* coord = nullptr);
+                        BeginBulkIngestCallback beginBulkIngest = nullptr);
 
 /**
  * Repair missing embeddings for all documents or specific document hashes.

@@ -90,7 +90,6 @@ cli_deps = [
   dependency('yams_metadata'),
   dependency('yams_detection'),
   dependency('yams_config'),
-  dependency('yams_daemon'),
   dependency('yams_daemon_client'),
   dependency('yams_plugin_runtime'),
   dependency('yams_downloader'),

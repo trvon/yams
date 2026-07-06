@@ -20,7 +20,6 @@ deps = [
 ]
 
 if not get_option('wasi')
-  deps += dependency('yams_daemon')
   deps += dependency('yams_daemon_client')
   deps += dependency('OpenSSL')
 endif

@@ -1,5 +1,4 @@
 #include <yams/core/assert.hpp>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WriteCoordinator.h>
@@ -238,9 +237,6 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
 
             std::size_t effectiveMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
-            if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-                effectiveMax = std::max<std::size_t>(1, effectiveMax / 2);
-            }
             std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
                 YAMS_ZONE_SCOPED_N("WriteCoordinator::dequeue");
@@ -914,11 +910,10 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                          AddDeferredEdgesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
-                          metadata::KGWriteBuffer* edgeBuffer) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddDeferredEdgesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
+                                       metadata::KGWriteBuffer* edgeBuffer) {
     if (op.edges.empty())
         return Result<void>();
     std::vector<metadata::KGEdge> resolved;
@@ -962,9 +957,9 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddAliasesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddAliasesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.aliases.empty())
         return Result<void>();
     std::vector<metadata::KGAlias> resolved;
@@ -1017,10 +1012,9 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                          AddDeferredDocEntitiesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddDeferredDocEntitiesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.entities.empty())
         return Result<void>();
     std::vector<metadata::DocEntity> resolved;
