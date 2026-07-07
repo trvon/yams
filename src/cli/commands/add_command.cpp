@@ -5,14 +5,10 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <random>
-#include <regex>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -276,7 +272,7 @@ std::string getActiveSessionId(YamsCLI* cli, bool bypass, bool initContext = tru
     if (bypass)
         return {};
     // Check environment variable first (fast path, no storage init needed)
-    if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT")) {
+    if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT")) { // NOLINT(concurrency-mt-unsafe)
         if (*envSession) {
             return std::string(envSession);
         }
@@ -748,6 +744,49 @@ public:
                             totalSkipped += result.value().documentsSkipped;
                             render(result.value(), std::filesystem::path("-"));
                             successfulRequests++;
+                        } else if (auto appContext = cli_->getAppContext()) {
+                            // Socket-only client builds cannot fall back to embedded daemon mode.
+                            // Stdin is already buffered here, so preserve `yams add -` usability by
+                            // storing through local services when daemon IPC is unavailable.
+                            app::services::StoreDocumentRequest req;
+                            req.content = aopts.content;
+                            req.name = aopts.name.empty() ? "stdin" : aopts.name;
+                            req.tags = tags_;
+                            req.noEmbeddings = noEmbeddings_;
+                            req.collection = collection_;
+                            req.snapshotId = snapshotId_;
+                            req.snapshotLabel = snapshotLabel_;
+                            req.sessionId = getActiveSessionId(cli_, bypassSession_);
+                            req.mimeType = mimeType_;
+                            req.disableAutoMime = disableAutoMime_;
+                            for (const auto& [key, value] : aopts.metadata) {
+                                req.metadata[key] = value;
+                            }
+
+                            auto documentService = app::services::makeDocumentService(*appContext);
+                            auto local = documentService ? documentService->store(req)
+                                                         : Result<app::services::StoreDocumentResponse>(
+                                                               Error{ErrorCode::NotInitialized,
+                                                                     "Failed to create document service"});
+                            if (local) {
+                                totalAdded++;
+                                if (cli_->getJsonOutput()) {
+                                    jsonResults.push_back(json{{"path", "-"},
+                                                               {"hash", local.value().hash},
+                                                               {"success", true}});
+                                } else {
+                                    std::cout << "Added document: "
+                                              << local.value().hash.substr(0, 16) << "..."
+                                              << std::endl;
+                                }
+                                successfulRequests++;
+                            } else {
+                                const auto err = local.error();
+                                daemonFailures.emplace_back(std::filesystem::path("-"), err);
+                                if (cli_->getJsonOutput()) {
+                                    recordJsonFailure(std::filesystem::path("-"), err);
+                                }
+                            }
                         } else {
                             const auto err = result.error();
                             const auto msg = scrubDaemonLoadMessage(err.message);
