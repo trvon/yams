@@ -36,6 +36,53 @@ std::string envOr(const char* name, std::string_view fallback) {
     return std::string{fallback};
 }
 
+double envDoubleOr(const char* name, double fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return std::stod(raw);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::size_t envSizeOr(const char* name, std::size_t fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return static_cast<std::size_t>(std::stoull(raw));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool envBoolOr(const char* name, bool fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    const std::string_view v{raw};
+    if (v == "0" || v == "false" || v == "False" || v == "no" || v == "off") {
+        return false;
+    }
+    if (v == "1" || v == "true" || v == "True" || v == "yes" || v == "on") {
+        return true;
+    }
+    return fallback;
+}
+
+void applyConstructionPurityDefaults(topology::TopologyBuildConfig& buildConfig) {
+    // Default above 0 — zero admits every reciprocal edge and collapses CC.
+    buildConfig.minEdgeScore = envDoubleOr("YAMS_TOPOLOGY_MIN_EDGE_SCORE", 0.25);
+    // Lean ConstructionGates default.
+    buildConfig.maxComponentDocs = envSizeOr("YAMS_TOPOLOGY_MAX_COMPONENT_DOCS", 64);
+    buildConfig.reciprocalOnly = envBoolOr("YAMS_TOPOLOGY_RECIPROCAL_ONLY", true);
+}
+
 std::string computeCellIdentity() {
     std::string identity;
     identity.reserve(128);
@@ -342,10 +389,15 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
             reason, stats.documentsProcessed, stats.documentsMissingEmbeddings,
             stats.documentsMissingGraphNodes, stats.issues.empty() ? 0 : stats.issues.size());
     } else {
-        spdlog::info("[TopologyManager] rebuild complete (reason={}, docs={}, clusters={}, "
-                     "memberships={}, stored={}, snapshot={})",
-                     reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
-                     stats.stored ? 1 : 0, stats.snapshotId);
+        spdlog::info("[TopologyManager] rebuild complete (reason={}, algorithm={}, docs={}, "
+                     "clusters={}, memberships={}, stored={}, snapshot={}, size_max={}, "
+                     "size_p50={}, size_p90={}, singletons={}, giant_ratio={:.4f}, "
+                     "gini={:.4f}, avg_intra_edge={:.4f})",
+                     reason, stats.algorithm, stats.documentsProcessed, stats.clustersBuilt,
+                     stats.membershipsBuilt, stats.stored ? 1 : 0, stats.snapshotId,
+                     stats.clusterSizeMax, stats.clusterSizeP50, stats.clusterSizeP90,
+                     stats.singletonCount, stats.giantClusterRatio, stats.clusterSizeGini,
+                     stats.avgIntraEdgeWeight);
     }
 
     {
@@ -527,6 +579,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.hdbscanMinPoints = hdbscanMinPoints_.load(std::memory_order_acquire);
     buildConfig.hdbscanMinClusterSize = hdbscanMinClusterSize_.load(std::memory_order_acquire);
     buildConfig.featureSmoothingHops = featureSmoothingHops_.load(std::memory_order_acquire);
+    applyConstructionPurityDefaults(buildConfig);
 
     topology::TopologyExtractionStats extractionStats;
     auto extracted = extractor->extract(extractionConfig, &extractionStats);

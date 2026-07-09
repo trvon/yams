@@ -722,3 +722,84 @@ TEST_CASE("Topology update preserves cluster identity when old medoid survives",
     REQUIRE((survivingCluster != updated.value().clusters.end()));
     CHECK((survivingCluster->clusterId == oldClusterId));
 }
+
+TEST_CASE("Topology baseline splits oversized CC components (anti-giant)",
+          "[unit][topology][baseline][construction]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+    config.maxComponentDocs = 2;
+
+    // Path a-b-c-d-e all reciprocal high-score edges → one giant without the cap.
+    auto makeEdge = [](const char* target) {
+        return TopologyNeighbor{.documentHash = target, .score = 0.9F, .reciprocal = true};
+    };
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{.documentHash = "a",
+                              .filePath = "/a",
+                              .neighbors = {makeEdge("b")}},
+        TopologyDocumentInput{.documentHash = "b",
+                              .filePath = "/b",
+                              .neighbors = {makeEdge("a"), makeEdge("c")}},
+        TopologyDocumentInput{.documentHash = "c",
+                              .filePath = "/c",
+                              .neighbors = {makeEdge("b"), makeEdge("d")}},
+        TopologyDocumentInput{.documentHash = "d",
+                              .filePath = "/d",
+                              .neighbors = {makeEdge("c"), makeEdge("e")}},
+        TopologyDocumentInput{.documentHash = "e",
+                              .filePath = "/e",
+                              .neighbors = {makeEdge("d")}},
+    };
+
+    auto uncapped = engine.buildArtifacts(docs, [&] {
+        TopologyBuildConfig c = config;
+        c.maxComponentDocs = 0;
+        return c;
+    }());
+    REQUIRE(uncapped.has_value());
+    REQUIRE((uncapped.value().clusters.size() == 1));
+    CHECK((uncapped.value().clusters.front().memberCount == 5));
+
+    auto capped = engine.buildArtifacts(docs, config);
+    REQUIRE(capped.has_value());
+    requireWellFormedBatch(capped.value());
+    REQUIRE((capped.value().memberships.size() == 5));
+    for (const auto& cluster : capped.value().clusters) {
+        CHECK((cluster.memberCount <= config.maxComponentDocs));
+    }
+    // Must produce more than one published cluster once the giant is split.
+    CHECK((capped.value().clusters.size() >= 2));
+}
+
+TEST_CASE("Topology baseline minEdgeScore filters weak links",
+          "[unit][topology][baseline][construction]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.8;
+    config.maxComponentDocs = 0;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "a",
+            .filePath = "/a",
+            .neighbors = {{.documentHash = "b", .score = 0.9F, .reciprocal = true},
+                          {.documentHash = "c", .score = 0.5F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "b",
+            .filePath = "/b",
+            .neighbors = {{.documentHash = "a", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "c",
+            .filePath = "/c",
+            .neighbors = {{.documentHash = "a", .score = 0.5F, .reciprocal = true}}},
+    };
+
+    auto result = engine.buildArtifacts(docs, config);
+    REQUIRE(result.has_value());
+    const auto byDoc = clusterByDocument(result.value());
+    CHECK((byDoc.at("a") == byDoc.at("b")));
+    CHECK((byDoc.at("a") != byDoc.at("c")));
+}

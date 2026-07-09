@@ -59,7 +59,7 @@
     "require_metric_status": ["ok"]
   },
   "summarize": {
-    "primary": ["ndcg_at_k", "recall_at_k", "mrr", "map", "cross_rerank_apply_rate"],
+    "primary": ["ndcg_at_k", "recall_at_k", "cross_rerank_apply_rate", "search_latency_ms_avg", "proc_cpu_sec", "proc_maxrss_mb"],
     "group_by": ["rerank_mode"]
   }
 }

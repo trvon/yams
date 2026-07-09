@@ -3,6 +3,7 @@
 
 #include <yams/search/search_result_fusion.h>
 
+#include <algorithm>
 #include <cmath>
 
 using yams::search::ComponentResult;
@@ -108,6 +109,40 @@ TEST_CASE("Weighted reciprocal favors lexical over pure vector at equal rank",
     REQUIRE((results.size() > 1U));
 
     CHECK((results[0].document.sha256Hash.compare("doc-text") == 0));
+}
+
+TEST_CASE("ResultFusion reserves bounded slots for topology sidecar candidates",
+          "[search][fusion][topology][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.maxResults = 2;
+    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
+    cfg.rrfK = 1.0f;
+    cfg.vectorOnlyThreshold = 0.0f;
+    cfg.vectorOnlyPenalty = 1.0f;
+    cfg.vectorWeight = 1.0f;
+    cfg.graphVectorWeight = 0.01f;
+
+    ComponentResult baseA = makeComponent("base-a", 1.0f, ComponentResult::Source::Vector, 0);
+    ComponentResult baseB = makeComponent("base-b", 0.99f, ComponentResult::Source::Vector, 1);
+    ComponentResult sidecarA =
+        makeComponent("sidecar-a", 0.30f, ComponentResult::Source::GraphVector, 2);
+    sidecarA.debugInfo["topology_sidecar"] = "1";
+    ComponentResult sidecarB =
+        makeComponent("sidecar-b", 0.20f, ComponentResult::Source::GraphVector, 3);
+    sidecarB.debugInfo["topology_sidecar"] = "1";
+
+    ResultFusion baselineFusion(cfg);
+    auto baseline = baselineFusion.fuse({baseA, baseB, sidecarA, sidecarB});
+    REQUIRE((baseline.size() == 2U));
+    CHECK(std::none_of(baseline.begin(), baseline.end(),
+                       [](const auto& result) { return result.topologySidecar; }));
+
+    cfg.topologySidecarFusionRescueSlots = 1;
+    ResultFusion rescueFusion(cfg);
+    auto rescued = rescueFusion.fuse({baseA, baseB, sidecarA, sidecarB});
+    REQUIRE((rescued.size() == 2U));
+    CHECK((std::count_if(rescued.begin(), rescued.end(),
+                         [](const auto& result) { return result.topologySidecar; }) == 1));
 }
 
 TEST_CASE("ResultFusion default strategy honors component weights", "[search][fusion][catch2]") {

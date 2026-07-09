@@ -1,33 +1,37 @@
 #include <yams/search/search_engine.h>
 
+#include "../../include/yams/search/classic_search_pipeline.h"
 #include <yams/search/bandit_reward.h>
 
 #include <spdlog/spdlog.h>
+#include "concept_boost_internal.h"
+#include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/concept_resolver.h>
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
 #include <yams/search/lexical_scoring.h>
-#include <yams/search/meta_path_router.h>
 #include <yams/search/query_expansion.h>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_observability.h>
+#include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
 #include <yams/search/simeon_lexical_backend.h>
+#include <yams/search/topology_routing_session.h>
 #include <yams/search/tuner_mab.h>
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
 #include <yams/topology/topology_baseline.h>
-#include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -88,22 +92,7 @@ namespace {
 
 using json = nlohmann::json;
 
-template <typename Work>
-auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
-    -> std::future<decltype(work())> {
-    using ResultType = decltype(work());
-    std::packaged_task<ResultType()> task(std::move(work));
-    auto future = task.get_future();
-    if (executor) {
-        boost::asio::post(*executor, [task = std::move(task)]() mutable { task(); });
-    } else {
-        // No executor available - run synchronously on current thread.
-        // NOTE: std::async futures block in destructor, so discarding one
-        // would actually block anyway. Better to be explicit about sync execution.
-        task();
-    }
-    return future;
-}
+using detail::postWork;
 
 std::optional<std::int64_t>
 resolveGraphCandidateDocumentId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
@@ -418,17 +407,7 @@ SearchSourceGate buildSearchSourceGate(const SearchEngineConfig& config, const S
     return gate;
 }
 
-struct SearchCandidateFanout {
-    using Future = std::future<Result<std::vector<ComponentResult>>>;
-
-    Future text;
-    Future kg;
-    Future path;
-    Future vector;
-    Future entityVector;
-    Future tag;
-    Future metadata;
-};
+using detail::SearchCandidateFanout;
 
 struct SearchRerankPipelinePlan {
     bool graphEnabled = false;
@@ -962,16 +941,6 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
     return (pos == yams::app::services::kMemmemNpos) ? std::string_view::npos : pos;
 }
 
-bool containsFast(std::string_view haystack, std::string_view needle) {
-    if (needle.empty()) {
-        return true;
-    }
-    if (needle.size() > haystack.size()) {
-        return false;
-    }
-    return yams::app::services::simdMemmem(haystack, needle) != yams::app::services::kMemmemNpos;
-}
-
 void appendRerankTextPart(std::string& out, const std::string& part) {
     if (part.empty()) {
         return;
@@ -1119,6 +1088,7 @@ public:
     }
 
 private:
+    SearchPipelineContext makeSearchPipelineContext();
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
     Result<std::vector<ComponentResult>>
@@ -1169,16 +1139,42 @@ private:
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
                                                              const SearchParams& params) {
-    auto response = searchInternal(query, params);
+    auto response = searchWithResponse(query, params);
     if (!response) {
         return Error{response.error().code, response.error().message};
     }
     return response.value().results;
 }
 
+SearchPipelineContext SearchEngine::Impl::makeSearchPipelineContext() {
+    SearchPipelineContext context;
+    context.metadataRepo = metadataRepo_;
+    context.vectorDb = vectorDb_;
+    context.embeddingGen = embeddingGen_;
+    context.kgStore = kgStore_;
+    context.kgScorer = kgScorer_;
+    context.executor = executor_.has_value() ? &executor_.value() : nullptr;
+    context.statistics = &stats_;
+    context.tuner = tuner_.get();
+    context.simeonLexical = simeonLexical_.get();
+    context.crossReranker = &crossReranker_;
+    return context;
+}
+
 Result<SearchResponse> SearchEngine::Impl::searchWithResponse(const std::string& query,
                                                               const SearchParams& params) {
-    return searchInternal(query, params);
+    auto context = makeSearchPipelineContext();
+    ClassicSearchPipeline classicPipeline(
+        [this](const std::string& pipelineQuery, const SearchParams& pipelineParams) {
+            return searchInternal(pipelineQuery, pipelineParams);
+        });
+    auto response = classicPipeline.execute(query, params, config_, context);
+    if (response) {
+        setDebug(response.value().debugStats, metrics::kSearchPipelineInterface, "1");
+        setDebug(response.value().debugStats, metrics::kSearchPipelineName,
+                 std::string(classicPipeline.name()));
+    }
+    return response;
 }
 
 Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& query,
@@ -1218,8 +1214,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     bool graphRerankApplied = false;
     bool crossRerankApplied = false;
     double rerankGuardScoreGap = 0.0;
-    bool rerankGuardCompetitiveAnchoredEvidence = false;
-    std::vector<std::string> rerankGuardAnchoredDocIds;
     size_t graphWindowGuardReplacementCount = 0;
     size_t graphWindowCapReplacementCount = 0;
     size_t graphRerankGuardReplacementCount = 0;
@@ -1387,12 +1381,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(freshness.lexicalDeltaPublishedEpoch);
     response.debugStats["lexical_delta_published_docs"] =
         std::to_string(freshness.lexicalDeltaPublishedDocs);
-    response.debugStats["search_engine_ready"] = freshness.lexicalReady ? "1" : "0";
+    recordIndexReadinessDebug(response.debugStats, freshness);
     response.debugStats["search_engine_awaiting_drain"] = freshness.awaitingDrain ? "1" : "0";
-    response.debugStats["vector_ready"] = freshness.vectorReady ? "1" : "0";
-    response.debugStats["kg_ready"] = freshness.kgReady ? "1" : "0";
-    response.debugStats["topology_ready"] = freshness.topologyReady ? "1" : "0";
-    response.debugStats["topology_epoch"] = std::to_string(freshness.topologyEpoch);
+    setDebug(response.debugStats, metrics::kSearchEngineVariant, "classic");
+    setDebug(response.debugStats, metrics::kSearchPipelineVariant, "classic");
+    response.debugStats["topology_rebuild_running"] = freshness.topologyRebuildRunning ? "1" : "0";
+    response.debugStats["topology_dirty_documents"] =
+        std::to_string(freshness.topologyDirtyDocuments);
     response.debugStats["topology_overlay_hashes"] = std::to_string(topologyOverlayHashes.size());
     response.debugStats["semantic_budget_delay_embedding"] = delayEmbeddingUntilTier1 ? "1" : "0";
     if (shortQueryBudgeted) {
@@ -1799,108 +1794,38 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                   workingConfig.vectorMaxResults);
 
     std::vector<ComponentResult> allComponentResults;
+    const auto topologyRoutingMode = resolveTopologyRoutingMode(workingConfig);
+    const bool topologyRoutingEnabled =
+        topologyRoutingMode != SearchEngineConfig::TopologyRoutingMode::Disabled;
     std::unordered_set<std::string> topologyMedoidHashes;
     bool topologyWeakQueryRoutingApplied = false;
     bool topologyWeakQueryNarrowApplied = false;
+    bool topologyLoadSucceeded = false;
+    std::string topologySkipReason;
     size_t topologyWeakQueryRoutedClusters = 0;
-    size_t topologyWeakQueryRoutedDocs = 0;
-    size_t topologyWeakQueryAddedCandidates = 0;
+    std::vector<std::string> topologyWeakQueryAddedCandidateHashes;
     allComponentResults.reserve(sourceGate.estimatedCandidateCapacity(workingConfig));
 
-    // Component result collection helper with timing
-    enum class ComponentStatus : std::uint8_t { Success, Failed, TimedOut };
-
-    auto collectResults = [&](auto& future, const char* name, std::atomic<uint64_t>& queryCount,
-                              std::atomic<uint64_t>& avgTime) -> ComponentStatus {
-        if (!future.valid())
-            return ComponentStatus::Success;
-
-        traceCollector.markStageAttempted(name);
-
-        auto waitStart = std::chrono::steady_clock::now();
-
-        // componentTimeout of 0 means no timeout (wait indefinitely)
-        std::future_status status;
-        if (workingConfig.componentTimeout.count() == 0) {
-            future.wait(); // Wait indefinitely
-            status = std::future_status::ready;
-        } else {
-            status = future.wait_for(workingConfig.componentTimeout);
-        }
-
-        if (status == std::future_status::ready) {
-            try {
-                auto results = future.get();
-                auto waitEnd = std::chrono::steady_clock::now();
-                auto duration =
-                    std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart)
-                        .count();
-
-                componentTiming[name] = duration;
-
-                if (results) {
-                    traceCollector.markStageResult(name, results.value(), duration,
-                                                   !results.value().empty());
-                    if (!results.value().empty()) {
-                        allComponentResults.insert(allComponentResults.end(),
-                                                   results.value().begin(), results.value().end());
-                        contributing.push_back(name);
-                    }
-                    queryCount.fetch_add(1, std::memory_order_relaxed);
-                    avgTime.store(duration, std::memory_order_relaxed);
-                    return ComponentStatus::Success;
-                } else {
-                    spdlog::debug("Parallel {} query returned error: {}", name,
-                                  results.error().message);
-                    traceCollector.markStageFailure(name, duration);
-                    return ComponentStatus::Failed;
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Parallel {} query failed: {}", name, e.what());
-                auto waitEnd = std::chrono::steady_clock::now();
-                traceCollector.markStageFailure(
-                    name, std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart)
-                              .count());
-                return ComponentStatus::Failed;
-            }
-        } else {
-            spdlog::warn("Parallel {} query timed out after {} ms", name,
-                         workingConfig.componentTimeout.count());
-            stats_.timedOutQueries.fetch_add(1, std::memory_order_relaxed);
-            auto waitEnd = std::chrono::steady_clock::now();
-            traceCollector.markStageTimeout(
-                name,
-                std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count());
-            return ComponentStatus::TimedOut;
-        }
-    };
-
-    auto handleStatus = [&](ComponentStatus status, const char* name) {
-        if (status == ComponentStatus::Failed) {
-            failed.push_back(name);
-        } else if (status == ComponentStatus::TimedOut) {
-            timedOut.push_back(name);
-        }
-    };
+    detail::ComponentFanoutCollector fanoutCollector(
+        workingConfig, traceCollector,
+        detail::ComponentFanoutSinks{allComponentResults, componentTiming, contributing, failed,
+                                     timedOut, stats_.timedOutQueries});
 
     if (workingConfig.enableParallelExecution) [[likely]] {
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
         SearchCandidateFanout fanout;
 
-        auto schedule = [&]([[maybe_unused]] const char* name, [[maybe_unused]] float weight,
+        auto schedule = [&]([[maybe_unused]] const char* name, float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
                             [[maybe_unused]] std::atomic<uint64_t>& avgTime,
                             auto&& fn) -> std::future<Result<std::vector<ComponentResult>>> {
-            if (weight <= 0.0f) {
-                return {};
-            }
-            return postWork(std::forward<decltype(fn)>(fn), executor_);
+            return detail::scheduleComponent(weight, executor_, std::forward<decltype(fn)>(fn));
         };
 
         auto collectIf = [&](std::future<Result<std::vector<ComponentResult>>>& future,
                              const char* name, std::atomic<uint64_t>& queryCount,
                              std::atomic<uint64_t>& avgTime) {
-            handleStatus(collectResults(future, name, queryCount, avgTime), name);
+            fanoutCollector.collectAndRecord(future, name, queryCount, avgTime);
         };
 
         if (workingConfig.enableTieredExecution) {
@@ -1969,6 +1894,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             std::unordered_set<std::string> tier2Candidates = tier1Candidates;
+            const std::unordered_set<std::string> baselineTier2Candidates = tier2Candidates;
 
             // --- TIER 2: Vector search is a peer retriever; always run when the embedding
             // leg is available. Narrowing to Tier 1 candidates is still an opt-in knob.
@@ -2033,99 +1959,104 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // post-fusion steps are not blocked by adaptive lexical skipping.
             awaitEmbedding();
 
-            if (workingConfig.enableTopologyWeakQueryRouting && weakTier1Query &&
-                freshness.topologyReady && metadataRepo_ && kgStore_) {
-                auto routeStart = std::chrono::steady_clock::now();
-                yams::topology::MetadataKgTopologyArtifactStore topologyStore(metadataRepo_,
-                                                                              kgStore_);
-                auto latestTopology = topologyStore.loadLatest();
-                if (latestTopology && latestTopology.value().has_value()) {
-                    std::vector<std::string> seedHashes;
-                    seedHashes.reserve(tier1Candidates.size());
-                    for (const auto& hash : tier1Candidates) {
-                        seedHashes.push_back(hash);
-                    }
+            TopologyRoutingSessionRequest topologyRequest;
+            topologyRequest.query = query;
+            topologyRequest.seedDocumentHashes.reserve(tier1Candidates.size());
+            for (const auto& hash : tier1Candidates) {
+                topologyRequest.seedDocumentHashes.push_back(hash);
+            }
+            topologyRequest.existingCandidateHashes = tier2Candidates;
+            if (queryEmbedding.has_value()) {
+                topologyRequest.queryEmbedding = queryEmbedding.value();
+            }
+            topologyRequest.routingMode = topologyRoutingMode;
+            topologyRequest.routeScoringMode = workingConfig.topologyRouteScoringMode;
+            topologyRequest.expansionSource = workingConfig.topologyExpansionSource;
+            topologyRequest.weakTier1Query = weakTier1Query;
+            topologyRequest.maxClusters = workingConfig.topologyMaxClusters;
+            topologyRequest.maxDocs = workingConfig.topologyMaxDocs;
+            topologyRequest.perClusterLimit = workingConfig.topologyMaxDocsPerCluster;
+            topologyRequest.sparseDenseAlpha = workingConfig.topologySparseDenseAlpha;
+            topologyRequest.minRouteScore = workingConfig.topologyMinRouteScore;
+            topologyRequest.medoidOnlyExpansion = workingConfig.topologyMedoidOnlyExpansion;
+            topologyRequest.graphNeighborMinScore = workingConfig.topologyGraphNeighborMinScore;
+            topologyRequest.graphNeighborReciprocalOnly =
+                workingConfig.topologyGraphNeighborReciprocalOnly;
 
-                    yams::topology::TopologyRouteRequest routeRequest;
-                    routeRequest.queryText = query;
-                    routeRequest.seedDocumentHashes = std::move(seedHashes);
-                    routeRequest.limit = workingConfig.topologyMaxClusters;
-                    routeRequest.weakQueryOnly = true;
-                    routeRequest.scoringMode = yams::topology::RouteScoringMode::Current;
-                    routeRequest.sparseDenseAlpha = 0.5F;
-                    if (queryEmbedding.has_value()) {
-                        routeRequest.queryEmbedding = queryEmbedding.value();
+            TopologyMemberReranker topologyMemberReranker;
+            if (workingConfig.topologyMaxDocsPerCluster > 0 && queryEmbedding.has_value() &&
+                vectorDb_) {
+                topologyMemberReranker = [&](const std::vector<std::string>& members,
+                                             std::size_t limit) -> std::vector<std::string> {
+                    std::unordered_set<std::string> candidateSet(members.begin(), members.end());
+                    auto scored = detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_,
+                                                                   queryEmbedding.value(),
+                                                                   workingConfig, limit,
+                                                                   candidateSet);
+                    std::vector<std::string> out;
+                    if (!scored) {
+                        return out;
                     }
-
-                    yams::topology::SparseGuidedClusterRouter router;
-                    auto routes = router.route(routeRequest, latestTopology.value().value());
-                    if (routes) {
-                        topologyWeakQueryRoutedClusters = routes.value().size();
-                        for (const auto& route : routes.value()) {
-                            if (route.medoidDocumentHash.has_value()) {
-                                topologyMedoidHashes.insert(route.medoidDocumentHash.value());
-                            }
-                            const auto clusterIt = std::find_if(
-                                latestTopology.value()->clusters.begin(),
-                                latestTopology.value()->clusters.end(),
-                                [&route](const yams::topology::ClusterArtifact& cluster) {
-                                    return cluster.clusterId == route.clusterId;
-                                });
-                            if (clusterIt == latestTopology.value()->clusters.end()) {
-                                continue;
-                            }
-                            for (const auto& hash : clusterIt->memberDocumentHashes) {
-                                if (topologyWeakQueryRoutedDocs >= workingConfig.topologyMaxDocs) {
-                                    break;
-                                }
-                                ++topologyWeakQueryRoutedDocs;
-                                if (tier2Candidates.insert(hash).second) {
-                                    ++topologyWeakQueryAddedCandidates;
-                                }
-                            }
-                            if (topologyWeakQueryRoutedDocs >= workingConfig.topologyMaxDocs) {
-                                break;
-                            }
+                    out.reserve(std::min(limit, scored.value().size()));
+                    for (const auto& hit : scored.value()) {
+                        if (hit.documentHash.empty()) {
+                            continue;
                         }
-                        topologyWeakQueryRoutingApplied = topologyWeakQueryRoutedClusters > 0;
-                        topologyWeakQueryNarrowApplied = topologyWeakQueryAddedCandidates > 0;
-                    } else {
-                        spdlog::debug("Topology weak-query routing failed: {}",
-                                      routes.error().message);
+                        out.push_back(hit.documentHash);
+                        if (out.size() >= limit) {
+                            break;
+                        }
                     }
-                } else if (!latestTopology) {
-                    spdlog::debug("Topology weak-query snapshot load failed: {}",
-                                  latestTopology.error().message);
-                }
-                response.componentTimingMicros["topology_weak_query"] =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - routeStart)
-                        .count();
+                    return out;
+                };
             }
 
+            const auto topologySession = runTopologyRoutingSession(
+                topologyRequest, metadataRepo_, kgStore_, topologyMemberReranker);
+            topologyLoadSucceeded = topologySession.loadSucceeded;
+            topologySkipReason = topologySession.skipReason;
+            topologyWeakQueryRoutedClusters = topologySession.routedClusters;
+            topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
+            topologyMedoidHashes = topologySession.medoidHashes;
+            topologyWeakQueryNarrowApplied = topologySession.narrowApplied;
+            topologyWeakQueryRoutingApplied = topologySession.applied;
+            for (const auto& hash : topologyWeakQueryAddedCandidateHashes) {
+                tier2Candidates.insert(hash);
+            }
             const std::unordered_set<std::string>* vectorSearchNarrowSet =
                 topologyWeakQueryNarrowApplied ? &tier2Candidates : nullptr;
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
-            const bool shouldNarrow = (vectorSearchNarrowSet != nullptr) ||
-                                      (workingConfig.tieredNarrowVectorSearch &&
-                                       tier2Candidates.size() >= workingConfig.tieredMinCandidates);
+            const bool shouldNarrow =
+                (vectorSearchNarrowSet != nullptr) ||
+                (workingConfig.tieredNarrowVectorSearch &&
+                 baselineTier2Candidates.size() >= workingConfig.tieredMinCandidates);
 
-            response.debugStats["topology_weak_query_total_candidates"] =
-                std::to_string(tier2Candidates.size());
-            response.debugStats["topology_weak_query_enabled"] =
-                workingConfig.enableTopologyWeakQueryRouting ? "1" : "0";
-            response.debugStats["topology_weak_query_applied"] =
-                topologyWeakQueryRoutingApplied ? "1" : "0";
-            response.debugStats["topology_weak_query_narrow_applied"] =
-                topologyWeakQueryNarrowApplied ? "1" : "0";
-            response.debugStats["topology_weak_query_routed_clusters"] =
-                std::to_string(topologyWeakQueryRoutedClusters);
-            response.debugStats["topology_weak_query_routed_docs"] =
-                std::to_string(topologyWeakQueryRoutedDocs);
-            response.debugStats["topology_weak_query_added_candidates"] =
-                std::to_string(topologyWeakQueryAddedCandidates);
+            if (topologySkipReason.empty()) {
+                if (!topologyRoutingEnabled) {
+                    topologySkipReason = "disabled";
+                } else if (topologyRoutingMode ==
+                               SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly &&
+                           !weakTier1Query) {
+                    topologySkipReason = "strong_tier1_query";
+                } else if (!metadataRepo_ || !kgStore_) {
+                    topologySkipReason = "missing_store";
+                } else if (!topologyWeakQueryRoutingApplied) {
+                    if (topologyRoutingMode ==
+                        SearchEngineConfig::TopologyRoutingMode::RerankOnly) {
+                        topologySkipReason =
+                            topologyLoadSucceeded ? "rerank_only_no_expansion" : "not_loaded";
+                    } else if (topologyLoadSucceeded && topologyWeakQueryRoutedClusters > 0) {
+                        topologySkipReason = "no_added_candidates";
+                    } else {
+                        topologySkipReason = topologyLoadSucceeded ? "no_routes" : "not_loaded";
+                    }
+                }
+            }
+            recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
+                                       topologySession, topologySkipReason,
+                                       tier2Candidates.size());
 
             traceCollector.recordStageCounter("vector", "budget_guard_skip", 0);
             traceCollector.recordStageCounter("vector", "budget_guard_cap_applied",
@@ -2146,15 +2077,22 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
+                const std::unordered_set<std::string> topologySidecarCandidates(
+                    topologyWeakQueryAddedCandidateHashes.begin(),
+                    topologyWeakQueryAddedCandidateHashes.end());
+                response.debugStats["topology_sidecar_vector_candidates"] =
+                    std::to_string(topologySidecarCandidates.size());
+
                 fanout.vector = schedule(
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
-                    [&queryEmbedding, &tier2Candidates, vectorSearchNarrowSet, shouldNarrow,
+                    [&queryEmbedding, &baselineTier2Candidates, vectorSearchNarrowSet, shouldNarrow,
                      effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         if (shouldNarrow) {
-                            const auto* narrowSet =
-                                vectorSearchNarrowSet ? vectorSearchNarrowSet : &tier2Candidates;
+                            const auto* narrowSet = vectorSearchNarrowSet
+                                                        ? vectorSearchNarrowSet
+                                                        : &baselineTier2Candidates;
                             return queryVectorWithRelaxedRetry(
                                 queryEmbedding.value(), effectiveVectorMaxResults, narrowSet);
                         } else {
@@ -2162,6 +2100,30 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                                effectiveVectorMaxResults);
                         }
                     });
+
+                if (!topologySidecarCandidates.empty()) {
+                    const size_t topologySidecarLimit = std::max<size_t>(
+                        1, std::min(effectiveVectorMaxResults, topologySidecarCandidates.size()));
+                    fanout.topologyVector =
+                        schedule("topology_vector", workingConfig.graphVectorWeight,
+                                 stats_.vectorQueries, stats_.avgVectorTimeMicros,
+                                 [topologySidecarCandidates, topologySidecarLimit, &queryEmbedding,
+                                  &queryVectorWithRelaxedRetry]() {
+                                     YAMS_ZONE_SCOPED_N("component::topology_vector");
+                                     auto results = queryVectorWithRelaxedRetry(
+                                         queryEmbedding.value(), topologySidecarLimit,
+                                         &topologySidecarCandidates);
+                                     if (results) {
+                                         for (auto& result : results.value()) {
+                                             result.source = ComponentResult::Source::GraphVector;
+                                             result.debugInfo["topology_sidecar"] = "1";
+                                         }
+                                     }
+                                     return results;
+                                 });
+                } else {
+                    response.debugStats["topology_sidecar_vector_candidates"] = "0";
+                }
 
                 fanout.entityVector = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
@@ -2189,6 +2151,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             // Collect Tier 2 results (always collect, never skip)
             collectIf(fanout.vector, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+            collectIf(fanout.topologyVector, "topology_vector", stats_.vectorQueries,
+                      stats_.avgVectorTimeMicros);
             collectIf(fanout.entityVector, "entity_vector", stats_.entityVectorQueries,
                       stats_.avgEntityVectorTimeMicros);
             collectIf(fanout.kg, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
@@ -2783,6 +2747,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     preFusionSignals = buildPreFusionSignalMap(allComponentResults);
+    const std::vector<std::string> topologySidecarCandidateDocIds =
+        collectTopologySidecarCandidateDocIds(allComponentResults);
+    response.debugStats["topology_sidecar_vector_doc_ids"] =
+        joinWithTab(topologySidecarCandidateDocIds);
+    response.debugStats["topology_weak_query_added_candidate_doc_ids"] =
+        joinWithTab(topologySidecarCandidateDocIds);
 
     // P7: adaptive convex-fusion switch. Once the SearchTuner reports convergence
     // and the user has opted in via enableAdaptiveFusion, override the configured
@@ -2908,47 +2878,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
         response.debugStats["topology_medoid_boosted"] = std::to_string(boostedMedoids);
     }
-    // Phase Y: multi-meta-path post-fusion boost (PathSim-style fixed weights).
-    // Each enabled meta-path scores candidates independently; sum contributes a
-    // continuous boost on top of the result list. Off by default → no-op.
-    if (workingConfig.enableMetaPathRouting && !response.results.empty() &&
-        queryEmbedding.has_value() && !queryEmbedding->empty()) {
-        try {
-            auto mp =
-                computeMetaPathBoosts(queryEmbedding.value(), vectorDb_, kgStore_, workingConfig);
-            if (!mp.docBoost.empty()) {
-                bool needsSort = false;
-                std::size_t boostedCount = 0;
-                for (auto& r : response.results) {
-                    auto it = mp.docBoost.find(r.document.sha256Hash);
-                    if (it == mp.docBoost.end()) {
-                        continue;
-                    }
-                    const float factor = 1.0f + workingConfig.metaPathBoostAlpha * it->second;
-                    if (factor != 1.0f) {
-                        r.score *= factor;
-                        needsSort = true;
-                        ++boostedCount;
-                    }
-                }
-                if (needsSort) {
-                    std::stable_sort(
-                        response.results.begin(), response.results.end(),
-                        [](const auto& a, const auto& b) { return a.score > b.score; });
-                }
-                response.debugStats["meta_path_seed_count"] = std::to_string(mp.seedDocCount);
-                response.debugStats["meta_path_boosted_count"] = std::to_string(boostedCount);
-                response.debugStats["meta_path_sem_hits"] = std::to_string(mp.semHits);
-                response.debugStats["meta_path_call_hits"] = std::to_string(mp.callHits);
-                response.debugStats["meta_path_def_hits"] = std::to_string(mp.defHits);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("[search] meta-path routing threw: {}", e.what());
-        } catch (...) {
-            // Swallow — Phase Y is opt-in; never crash search.
-        }
-    }
-
     const bool hasGraphSources =
         std::any_of(allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
             return comp.source == ComponentResult::Source::GraphText ||
@@ -3647,112 +3576,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["query_embedding_dim"] = std::to_string(queryEmbeddingDim);
     response.debugStats["vector_tier_skip_reason"] = vectorTierSkipReason;
 
-    if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
-        workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {
+    {
         YAMS_ZONE_SCOPED_N("concepts::boost");
-        std::vector<std::string> conceptTerms;
-        conceptTerms.reserve(concepts.size());
-        for (const auto& conceptItem : concepts) {
-            if (conceptItem.text.empty()) {
-                continue;
-            }
-            std::string lowered = conceptItem.text;
-            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            conceptTerms.push_back(std::move(lowered));
-        }
-        if (!conceptTerms.empty()) {
-            std::sort(conceptTerms.begin(), conceptTerms.end());
-            conceptTerms.erase(std::unique(conceptTerms.begin(), conceptTerms.end()),
-                               conceptTerms.end());
-        }
-
-        if (!conceptTerms.empty()) {
-            const size_t totalResults = response.results.size();
-            const size_t scanLimit = std::min(workingConfig.conceptMaxScanResults, totalResults);
-            if (scanLimit > 0) {
-                std::vector<uint32_t> matchCounts(scanLimit, 0);
-                const size_t minChunkSize =
-                    std::max<size_t>(1, workingConfig.minChunkSizeForParallel);
-                const size_t maxThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
-                const size_t chunkTarget = (scanLimit + minChunkSize - 1) / minChunkSize;
-                const size_t numThreads = std::min(maxThreads, std::max<size_t>(1, chunkTarget));
-                const bool useParallelBoost = numThreads > 1;
-
-                auto computeMatches = [&](size_t start, size_t end) {
-                    std::vector<uint32_t> matches;
-                    matches.reserve(end - start);
-                    for (size_t idx = start; idx < end; ++idx) {
-                        const auto& result = response.results[idx];
-                        uint32_t count = 0;
-                        for (const auto& term : conceptTerms) {
-                            if (!term.empty() && (containsFast(result.snippet, term) ||
-                                                  containsFast(result.document.fileName, term))) {
-                                count++;
-                            }
-                        }
-                        matches.push_back(count);
-                    }
-                    return matches;
-                };
-
-                if (useParallelBoost) {
-                    const size_t chunkSize = (scanLimit + numThreads - 1) / numThreads;
-                    std::vector<std::future<std::vector<uint32_t>>> futures;
-                    futures.reserve(numThreads);
-                    for (size_t i = 0; i < numThreads; ++i) {
-                        const size_t start = i * chunkSize;
-                        const size_t end = std::min(start + chunkSize, scanLimit);
-                        if (start >= end) {
-                            break;
-                        }
-                        futures.push_back(
-                            std::async(std::launch::async, [start, end, &computeMatches]() {
-                                return computeMatches(start, end);
-                            }));
-                    }
-
-                    size_t offset = 0;
-                    for (auto& future : futures) {
-                        auto matches = future.get();
-                        for (size_t i = 0; i < matches.size(); ++i) {
-                            matchCounts[offset + i] = matches[i];
-                        }
-                        offset += matches.size();
-                    }
-                } else {
-                    auto matches = computeMatches(0, scanLimit);
-                    for (size_t i = 0; i < matches.size(); ++i) {
-                        matchCounts[i] = matches[i];
-                    }
-                }
-
-                bool boosted = false;
-                float boostBudget = workingConfig.conceptMaxBoost;
-                for (size_t i = 0; i < scanLimit; ++i) {
-                    if (boostBudget <= 0.0f) {
-                        break;
-                    }
-                    const uint32_t matchCount = matchCounts[i];
-                    if (matchCount == 0) {
-                        continue;
-                    }
-                    const float desiredBoost =
-                        workingConfig.conceptBoostWeight * static_cast<float>(matchCount);
-                    const float appliedBoost = std::min(desiredBoost, boostBudget);
-                    response.results[i].score *= (1.0f + appliedBoost);
-                    boostBudget -= appliedBoost;
-                    boosted = true;
-                }
-
-                if (boosted) {
-                    std::sort(response.results.begin(), response.results.end(),
-                              [](const SearchResult& a, const SearchResult& b) {
-                                  return a.score > b.score;
-                              });
-                }
-            }
-        }
+        detail::applyConceptBoost(response.results, concepts, workingConfig);
     }
 
     const auto lexicalAnchorScore = [](const SearchResult& r) {
@@ -3996,6 +3822,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(workingConfig.fusionEvidenceRescueSlots);
     response.debugStats["evidence_rescue_min_score"] =
         fmt::format("{:.4f}", workingConfig.fusionEvidenceRescueMinScore);
+    response.debugStats["topology_sidecar_fusion_rescue_slots"] =
+        std::to_string(workingConfig.topologySidecarFusionRescueSlots);
+    response.debugStats["topology_sidecar_fusion_rescue_min_score"] =
+        fmt::format("{:.4f}", workingConfig.topologySidecarFusionRescueMinScore);
     response.debugStats["evidence_rescue_promoted_doc_ids"] =
         joinWithTab(evidenceRescuePromotedDocIds);
     response.debugStats["evidence_rescue_displaced_doc_ids"] =
@@ -4166,8 +3996,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         .includeSimeonLexicalTiming = simeonLexical_ != nullptr,
         .simeonLexicalScoreMicrosDelta =
             simeonLexical_ != nullptr
-                ? static_cast<int64_t>(simeonLexical_->scoreMicrosTotal() -
-                                       simeonScoreMicrosBefore)
+                ? static_cast<int64_t>(simeonLexical_->scoreMicrosTotal() - simeonScoreMicrosBefore)
                 : int64_t{0},
     };
     observability.applyComponentStatus(response);
@@ -4227,11 +4056,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             total == 0 ? 0.0 : static_cast<double>(part) / static_cast<double>(total);
         return fmt::format("{:.6f}", rate);
     };
+    const TopologySidecarSurvival topologySidecarSurvival = analyzeTopologySidecarSurvival(
+        allComponentResults, postFusionSnapshot,
+        graphlessPostFusionSnapshot.empty() ? postFusionSnapshot : graphlessPostFusionSnapshot,
+        response.results);
+
     response.debugStats["fusion_pre_fusion_unique_count"] = std::to_string(preFusionDocIds.size());
     response.debugStats["fusion_post_fusion_count"] = std::to_string(postFusionAllDocIds.size());
     response.debugStats["fusion_dropped_count"] = std::to_string(fusionDroppedDocCount);
     response.debugStats["fusion_dropped_rate"] =
         rateString(fusionDroppedDocCount, preFusionDocIds.size());
+    setDebug(response.debugStats, metrics::kTopologyAddedCandidatePostFusionCount,
+             std::to_string(topologySidecarSurvival.postFusionDocIds.size()));
+    setDebug(response.debugStats, metrics::kTopologyAddedCandidateFusionDroppedCount,
+             std::to_string(topologySidecarSurvival.fusionDroppedDocIds.size()));
+    recordTopologySidecarSurvivalDebug(response.debugStats, topologySidecarSurvival);
+    setDebug(response.debugStats, metrics::kTopologyFusionDroppedDocIds,
+             joinWithTab(topologySidecarSurvival.fusionDroppedDocIds));
     response.debugStats["anchored_pre_fusion_count"] = std::to_string(anchoredPreFusionDocCount);
     response.debugStats["anchored_fusion_dropped_count"] =
         std::to_string(anchoredFusionDroppedDocCount);
@@ -4349,6 +4190,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             {"graph_added_post_fusion_doc_ids", graphAddedPostFusionDocIds},
             {"graph_displaced_post_fusion_doc_ids", graphDisplacedPostFusionDocIds},
         };
+        const json topologySidecarTrace = buildTopologySidecarTraceJson(
+            allComponentResults, postFusionSnapshot,
+            postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot, response.results);
         const json preFusionSignalSummary = {
             {"vector_only_docs", vectorOnlyDocs},
             {"vector_only_below_threshold", vectorOnlyBelowThreshold},
@@ -4407,10 +4251,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_turboquant_rerank_applied"] = "0";
         response.debugStats["trace_rerank_guard_score_gap"] =
             fmt::format("{:.6f}", rerankGuardScoreGap);
-        response.debugStats["trace_rerank_guard_has_competitive_anchored_evidence"] =
-            rerankGuardCompetitiveAnchoredEvidence ? "1" : "0";
-        response.debugStats["trace_rerank_guard_anchored_doc_ids"] =
-            joinWithTab(rerankGuardAnchoredDocIds);
 
         response.debugStats["trace_pre_fusion_unique_count"] =
             std::to_string(preFusionDocIds.size());
@@ -4441,6 +4281,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         response.debugStats["trace_component_hits_json"] = componentSummary.dump();
         response.debugStats["trace_prefusion_signal_summary_json"] = preFusionSignalSummary.dump();
+        response.debugStats["trace_topology_sidecar_candidates_json"] = topologySidecarTrace.dump();
         response.debugStats["trace_fusion_top_json"] = fusionTopSummary.dump();
         response.debugStats["trace_graphless_fusion_top_json"] = graphlessFusionTopSummary.dump();
         response.debugStats["trace_post_graph_top_json"] = graphTopSummary.dump();

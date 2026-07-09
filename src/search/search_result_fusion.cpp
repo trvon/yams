@@ -133,6 +133,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         double graphTextScore = 0.0;
         double vectorScore = 0.0;
         double graphVectorScore = 0.0;
+        bool topologySidecar = false;
         std::string documentHash;
         std::string filePath;
         std::string snippet;
@@ -172,6 +173,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             acc.maxVectorRaw =
                 std::max(acc.maxVectorRaw, std::clamp(static_cast<double>(comp.score), 0.0, 1.0));
             acc.bestVectorRank = std::min(acc.bestVectorRank, comp.rank);
+        }
+        if (comp.debugInfo.contains("topology_sidecar")) {
+            acc.topologySidecar = true;
         }
 
         float weight = getComponentWeight(comp.source);
@@ -255,6 +259,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         if (entry.second.graphVectorScore > 0.0) {
             r.graphVectorScore = entry.second.graphVectorScore;
         }
+        r.topologySidecar = entry.second.topologySidecar;
 
         if (config_.lexicalFloorBoost > 0.0f &&
             entry.second.bestTextRank != std::numeric_limits<size_t>::max()) {
@@ -463,6 +468,7 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
                           fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
                           fusedResults.end(), lexicalAwareLess);
         applySemanticRescueWindow();
+        applyTopologySidecarFusionRescue(fusedResults, config_, lexicalAwareLess);
 
         fusedResults.resize(config_.maxResults);
     } else {
@@ -550,6 +556,9 @@ ResultFusion::fuseWeightedLinearZScore(const std::vector<ComponentResult>& resul
             acc.hasSem = true;
         }
         accumulateComponentScore(acc.result, comp.source, s);
+        if (comp.debugInfo.contains("topology_sidecar")) {
+            acc.result.topologySidecar = true;
+        }
     }
 
     std::vector<std::string> poolKeys;

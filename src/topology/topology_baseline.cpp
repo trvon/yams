@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <queue>
+#include <ranges>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,6 +17,7 @@ namespace yams::topology {
 namespace {
 
 using PairKey = std::pair<std::size_t, std::size_t>;
+using Adjacency = std::vector<std::vector<std::pair<std::size_t, float>>>;
 
 struct PairKeyHash {
     std::size_t operator()(const PairKey& k) const noexcept {
@@ -63,6 +66,193 @@ std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> document
         v /= static_cast<float>(count);
     }
     return centroid;
+}
+
+void sortComponentByHash(std::vector<std::size_t>& component,
+                         std::span<const TopologyDocumentInput> documents) {
+    std::ranges::sort(component, [&](std::size_t lhs, std::size_t rhs) {
+        return documents[lhs].documentHash < documents[rhs].documentHash;
+    });
+}
+
+/// Lean ConstructionGates anti-giant: peel greedy high-degree pieces of size ≤ cap.
+/// maxComponentDocs == 0 keeps legacy unlimited CC behavior.
+std::vector<std::vector<std::size_t>>
+splitOversizedComponent(std::vector<std::size_t> component, std::size_t maxComponentDocs,
+                        const Adjacency& adjacency,
+                        std::span<const TopologyDocumentInput> documents) {
+    if (maxComponentDocs == 0 || component.size() <= maxComponentDocs) {
+        return {std::move(component)};
+    }
+
+    std::unordered_set<std::size_t> remaining(component.begin(), component.end());
+    std::vector<std::vector<std::size_t>> pieces;
+    pieces.reserve((component.size() + maxComponentDocs - 1) / maxComponentDocs);
+
+    auto degreeInRemaining = [&](std::size_t idx) {
+        double deg = 0.0;
+        for (const auto& [nbr, weight] : adjacency[idx]) {
+            if (remaining.contains(nbr)) {
+                deg += weight;
+            }
+        }
+        return deg;
+    };
+
+    while (!remaining.empty()) {
+        const auto seedIt = std::ranges::max_element(
+            remaining, [&](std::size_t a, std::size_t b) {
+                const double da = degreeInRemaining(a);
+                const double db = degreeInRemaining(b);
+                if (std::abs(da - db) > 1e-9) {
+                    return da < db;
+                }
+                return documents[a].documentHash > documents[b].documentHash;
+            });
+        const std::size_t seed = *seedIt;
+
+        std::vector<std::size_t> piece;
+        piece.reserve(std::min(maxComponentDocs, remaining.size()));
+        std::unordered_set<std::size_t> inPiece;
+        using EdgeCand = std::pair<float, std::size_t>;
+        auto edgeCmp = [&](const EdgeCand& a, const EdgeCand& b) {
+            if (a.first != b.first) {
+                return a.first < b.first;
+            }
+            return documents[a.second].documentHash > documents[b.second].documentHash;
+        };
+        std::priority_queue<EdgeCand, std::vector<EdgeCand>, decltype(edgeCmp)> frontier(edgeCmp);
+
+        auto addNode = [&](std::size_t idx) {
+            if (!remaining.contains(idx) || inPiece.contains(idx) ||
+                piece.size() >= maxComponentDocs) {
+                return;
+            }
+            remaining.erase(idx);
+            inPiece.insert(idx);
+            piece.push_back(idx);
+            for (const auto& [nbr, weight] : adjacency[idx]) {
+                if (remaining.contains(nbr) && !inPiece.contains(nbr)) {
+                    frontier.push({weight, nbr});
+                }
+            }
+        };
+
+        addNode(seed);
+        while (!frontier.empty() && piece.size() < maxComponentDocs) {
+            const auto [w, nbr] = frontier.top();
+            frontier.pop();
+            (void)w;
+            if (remaining.contains(nbr) && !inPiece.contains(nbr)) {
+                addNode(nbr);
+            }
+        }
+        if (piece.empty()) {
+            piece.push_back(seed);
+            remaining.erase(seed);
+        }
+        sortComponentByHash(piece, documents);
+        pieces.push_back(std::move(piece));
+    }
+    return pieces;
+}
+
+void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>& component,
+                   const Adjacency& adjacency,
+                   std::span<const TopologyDocumentInput> documents) {
+    if (component.empty()) {
+        return;
+    }
+
+    const std::string clusterId = makeClusterId(documents[component.front()].documentHash);
+    const std::unordered_set<std::size_t> componentSet(component.begin(), component.end());
+
+    double cohesion = 0.0;
+    double persistence = 0.0;
+    std::size_t internalEdgeCount = 0;
+    std::unordered_map<std::size_t, double> weightedDegree;
+    weightedDegree.reserve(component.size());
+    std::size_t bridgeCount = 0;
+
+    for (std::size_t idx : component) {
+        std::size_t degree = 0;
+        for (const auto& [neighborIdx, weight] : adjacency[idx]) {
+            if (!componentSet.contains(neighborIdx)) {
+                continue;
+            }
+            weightedDegree[idx] += weight;
+            ++degree;
+            if (idx < neighborIdx) {
+                cohesion += weight;
+                persistence =
+                    internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
+                ++internalEdgeCount;
+            }
+        }
+        if (component.size() > 2 && degree >= 2) {
+            ++bridgeCount;
+        }
+    }
+
+    if (internalEdgeCount > 0) {
+        cohesion /= static_cast<double>(internalEdgeCount);
+    } else {
+        persistence = 0.0;
+    }
+
+    const auto medoidIt = std::ranges::max_element(component, [&](std::size_t a, std::size_t b) {
+        const double da = weightedDegree[a];
+        const double db = weightedDegree[b];
+        if (std::abs(da - db) > 1e-9) {
+            return da < db;
+        }
+        return documents[a].documentHash > documents[b].documentHash;
+    });
+    const std::size_t medoidIdx = *medoidIt;
+    const double medoidScore = weightedDegree[medoidIdx];
+
+    ClusterArtifact cluster;
+    cluster.clusterId = clusterId;
+    cluster.level = 0;
+    cluster.memberCount = component.size();
+    cluster.persistenceScore = persistence;
+    cluster.cohesionScore = cohesion;
+    cluster.bridgeMass =
+        static_cast<double>(bridgeCount) / static_cast<double>(component.size());
+    cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
+                                           .documentHash = documents[medoidIdx].documentHash,
+                                           .filePath = documents[medoidIdx].filePath,
+                                           .representativeScore = std::max(0.0, medoidScore)};
+    cluster.centroidEmbedding = meanEmbedding(documents, component);
+    cluster.memberDocumentHashes.reserve(component.size());
+    std::ranges::transform(component, std::back_inserter(cluster.memberDocumentHashes),
+                           [&](std::size_t idx) { return documents[idx].documentHash; });
+    batch.clusters.push_back(std::move(cluster));
+
+    const std::size_t maxDegree = component.size() > 1 ? component.size() - 1 : 0;
+    for (std::size_t idx : component) {
+        const double bridgeScore =
+            maxDegree == 0 ? 0.0 : weightedDegree[idx] / static_cast<double>(maxDegree);
+        DocumentTopologyRole role = DocumentTopologyRole::Core;
+        if (component.size() == 1) {
+            role = DocumentTopologyRole::Outlier;
+        } else if (idx == medoidIdx) {
+            role = DocumentTopologyRole::Medoid;
+        } else if (component.size() > 2 && weightedDegree[idx] >= 2.0) {
+            role = DocumentTopologyRole::Bridge;
+        }
+        batch.memberships.push_back(DocumentClusterMembership{
+            .documentHash = documents[idx].documentHash,
+            .clusterId = clusterId,
+            .parentClusterId = std::nullopt,
+            .clusterLevel = 0,
+            .persistenceScore = persistence,
+            .cohesionScore = cohesion,
+            .bridgeScore = bridgeScore,
+            .role = role,
+            .overlapClusterIds = {},
+        });
+    }
 }
 
 } // namespace
@@ -122,20 +312,20 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    std::vector<std::vector<std::pair<std::size_t, float>>> adjacency(documents.size());
+    Adjacency adjacency(documents.size());
     for (const auto& [key, weight] : pairWeights) {
         adjacency[key.first].push_back({key.second, weight});
         adjacency[key.second].push_back({key.first, weight});
     }
 
+    // BFS connected components over the filtered undirected graph.
     std::vector<bool> visited(documents.size(), false);
-    batch.memberships.reserve(documents.size());
-
+    std::vector<std::vector<std::size_t>> components;
+    components.reserve(documents.size());
     for (std::size_t root = 0; root < documents.size(); ++root) {
         if (visited[root]) {
             continue;
         }
-
         std::queue<std::size_t> q;
         q.push(root);
         visited[root] = true;
@@ -151,116 +341,21 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                 }
             }
         }
-
-        std::sort(component.begin(), component.end(),
-                  [&documents](std::size_t lhs, std::size_t rhs) {
-                      return documents[lhs].documentHash < documents[rhs].documentHash;
-                  });
-
-        const std::string clusterId = makeClusterId(documents[component.front()].documentHash);
-        std::unordered_set<std::size_t> componentSet(component.begin(), component.end());
-
-        double cohesion = 0.0;
-        double persistence = 0.0;
-        std::size_t internalEdgeCount = 0;
-        std::unordered_map<std::size_t, double> weightedDegree;
-        weightedDegree.reserve(component.size());
-        std::size_t bridgeCount = 0;
-
-        for (std::size_t idx : component) {
-            std::size_t degree = 0;
-            for (const auto& [neighborIdx, weight] : adjacency[idx]) {
-                if (!componentSet.contains(neighborIdx)) {
-                    continue;
-                }
-                weightedDegree[idx] += weight;
-                ++degree;
-                // Each undirected edge is stored twice in adjacency (u->v and
-                // v->u). Count it once for cohesion/persistence by only
-                // accumulating on the ordered half.
-                if (idx < neighborIdx) {
-                    cohesion += weight;
-                    persistence =
-                        internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
-                    ++internalEdgeCount;
-                }
-            }
-            if (component.size() > 2 && degree >= 2) {
-                ++bridgeCount;
-            }
-        }
-
-        if (internalEdgeCount > 0) {
-            cohesion /= static_cast<double>(internalEdgeCount);
-        } else {
-            persistence = 0.0;
-        }
-
-        std::size_t medoidIdx = component.front();
-        double medoidScore = -1.0;
-        for (std::size_t idx : component) {
-            const double candidate = weightedDegree[idx];
-            if (candidate > medoidScore ||
-                (std::abs(candidate - medoidScore) < 1e-9 &&
-                 documents[idx].documentHash < documents[medoidIdx].documentHash)) {
-                medoidIdx = idx;
-                medoidScore = candidate;
-            }
-        }
-
-        ClusterArtifact cluster;
-        cluster.clusterId = clusterId;
-        cluster.level = 0;
-        cluster.memberCount = component.size();
-        cluster.persistenceScore = persistence;
-        cluster.cohesionScore = cohesion;
-        cluster.bridgeMass =
-            component.empty() ? 0.0 : static_cast<double>(bridgeCount) / component.size();
-        cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
-                                               .documentHash = documents[medoidIdx].documentHash,
-                                               .filePath = documents[medoidIdx].filePath,
-                                               .representativeScore = std::max(0.0, medoidScore)};
-        cluster.centroidEmbedding = meanEmbedding(documents, component);
-        cluster.memberDocumentHashes.reserve(component.size());
-        for (std::size_t idx : component) {
-            cluster.memberDocumentHashes.push_back(documents[idx].documentHash);
-        }
-        batch.clusters.push_back(std::move(cluster));
-
-        for (std::size_t idx : component) {
-            const std::size_t maxDegree = component.size() > 1 ? component.size() - 1 : 0;
-            const double bridgeScore = maxDegree == 0 ? 0.0 : weightedDegree[idx] / maxDegree;
-            DocumentTopologyRole role = DocumentTopologyRole::Core;
-            if (component.size() == 1) {
-                role = DocumentTopologyRole::Outlier;
-            } else if (idx == medoidIdx) {
-                role = DocumentTopologyRole::Medoid;
-            } else if (component.size() > 2 && weightedDegree[idx] >= 2.0) {
-                role = DocumentTopologyRole::Bridge;
-            }
-
-            batch.memberships.push_back(DocumentClusterMembership{
-                .documentHash = documents[idx].documentHash,
-                .clusterId = clusterId,
-                .parentClusterId = std::nullopt,
-                .clusterLevel = 0,
-                .persistenceScore = persistence,
-                .cohesionScore = cohesion,
-                .bridgeScore = bridgeScore,
-                .role = role,
-                .overlapClusterIds = {},
-            });
+        sortComponentByHash(component, documents);
+        for (auto& piece :
+             splitOversizedComponent(std::move(component), config.maxComponentDocs, adjacency,
+                                     documents)) {
+            components.push_back(std::move(piece));
         }
     }
 
-    std::sort(batch.clusters.begin(), batch.clusters.end(),
-              [](const ClusterArtifact& lhs, const ClusterArtifact& rhs) {
-                  return lhs.clusterId < rhs.clusterId;
-              });
-    std::sort(batch.memberships.begin(), batch.memberships.end(),
-              [](const DocumentClusterMembership& lhs, const DocumentClusterMembership& rhs) {
-                  return lhs.documentHash < rhs.documentHash;
-              });
+    batch.memberships.reserve(documents.size());
+    for (const auto& component : components) {
+        emitComponent(batch, component, adjacency, documents);
+    }
+
+    std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
+    std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
 
     return batch;
 }
@@ -707,8 +802,25 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
         const float dense = signals.second;
         const float sparseNorm =
             (maxBm25Mass > 0) ? static_cast<float>(mass) / static_cast<float>(maxBm25Mass) : 0.0F;
-        const double routeScore = static_cast<double>(alpha * sparseNorm + (1.0F - alpha) * dense) +
-                                  (cluster->persistenceScore * 0.05);
+        const double blended = static_cast<double>(alpha * sparseNorm + (1.0F - alpha) * dense);
+        double routeScore = blended + (cluster->persistenceScore * 0.05);
+        switch (request.scoringMode) {
+            case RouteScoringMode::SizeWeighted: {
+                const double cohesion = std::clamp(cluster->cohesionScore, 0.0, 1.0);
+                const double stability = std::clamp(cluster->persistenceScore, 0.0, 1.0);
+                const double sizeDamp =
+                    1.0 / (1.0 + std::log1p(static_cast<double>(cluster->memberCount)));
+                routeScore = (blended + (0.05 * stability) + (0.05 * cohesion)) * sizeDamp;
+                break;
+            }
+            case RouteScoringMode::SeedCoverage:
+                routeScore = static_cast<double>(sparseNorm) + (0.10 * dense) +
+                             (cluster->persistenceScore * 0.05);
+                break;
+            case RouteScoringMode::Current:
+            default:
+                break;
+        }
         routes.push_back(ClusterRoute{
             .clusterId = cluster->clusterId,
             .medoidDocumentHash = cluster->medoid.has_value()

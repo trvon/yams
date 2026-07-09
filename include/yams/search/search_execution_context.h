@@ -20,10 +20,13 @@ struct IndexFreshnessSnapshot {
     std::uint64_t lexicalDeltaPublishedDocs{0};
     std::uint32_t lexicalDeltaRecentDocs{0};
     std::uint64_t topologyEpoch{0};
+    std::uint32_t topologyDirtyDocuments{0};
     bool lexicalReady{false};
     bool vectorReady{false};
     bool kgReady{false};
     bool topologyReady{false};
+    bool topologyArtifactsFresh{false};
+    bool topologyRebuildRunning{false};
     bool awaitingDrain{false};
     bool simeonLexicalConfigured{false};
     bool simeonLexicalReady{false};

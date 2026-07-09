@@ -19,6 +19,8 @@
     YAMS_BENCH_ENABLE_ONNX_RERANK=1   - Opt into ONNX reranker on simeon runs
     YAMS_BENCH_TOPOLOGY_MODE=disabled|weak_query_only|hybrid_assist|rerank_only
                                           Write typed topology routing mode into isolated config
+    YAMS_BENCH_TOPOLOGY_EXPANSION=clusters|graph_neighbors
+                                          Cluster partition vs pure semantic_neighbor expansion
     YAMS_BENCH_TOPOLOGY_ENGINE=connected|hdbscan|louvain
                                           Write topology engine into isolated config
     YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS=N
@@ -6248,7 +6250,9 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) ||
-                (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr);
+                (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
+                (std::getenv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE") != nullptr);
 
             // Select a plugin root that satisfies the plugins the benchmark enables.
             // Preferring the first ONNX-capable tree can silently disable entity extraction
@@ -6527,6 +6531,21 @@ struct BenchFixture {
                                               "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION"))
                                               ? "true"
                                               : "false")
+                                      << "\n";
+                        }
+                        if (const char* exp = std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION");
+                            exp && *exp) {
+                            configOut << "expansion_source = \"" << exp << "\"\n";
+                        } else if (const char* exp =
+                                       std::getenv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE");
+                                   exp && *exp) {
+                            configOut << "expansion_source = \"" << exp << "\"\n";
+                        }
+                        if (std::getenv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE") !=
+                            nullptr) {
+                            configOut << "graph_neighbor_min_score = "
+                                      << parseFloatEnvOrDefault(
+                                             "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE", 0.25F)
                                       << "\n";
                         }
                         if (std::getenv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS") !=

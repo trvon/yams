@@ -10,13 +10,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import resource
 import statistics
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from artifacts import write_json
 from workers.ablation import apply_ablation
 from workers.base import WorkerContext, WorkerResult
+from workers.beir_data import (
+    cache_dir as _beir_cache_dir,
+    corpus_present as _beir_corpus_present,
+    ensure_beir_dataset,
+    is_beir_dataset,
+)
 from workers.util import maybe_meson_compile, resolve_binary, run_captured
 
 _METRIC_RE = re.compile(
@@ -60,24 +69,6 @@ EXPANSION_PRESETS: dict[str, dict[str, str]] = {
 _NON_VECTOR_SOURCES = frozenset(
     {"fts5", "keyphrase", "segment_keyphrase", "kg", "gliner", "header", "theme"}
 )
-
-# Mirrors bench SUPPORTED_BEIR_DATASETS (retrieval_quality_bench.cpp).
-_BEIR_DATASETS = frozenset(
-    {"scifact", "nfcorpus", "fiqa", "arguana", "scidocs", "trec-covid", "nq", "hotpotqa"}
-)
-
-
-def _beir_cache_dir(dataset: str) -> Path:
-    return Path.home() / ".cache" / "yams" / "benchmarks" / dataset
-
-
-def _beir_corpus_present(root: Path) -> bool:
-    """A BEIR corpus needs corpus + queries + qrels. Accept common BEIR layouts."""
-    corpus = (root / "corpus.jsonl").exists() or (root / "corpus.jsonl.gz").exists()
-    queries = (root / "queries.jsonl").exists() or (root / "queries.jsonl.gz").exists()
-    qrels = (root / "qrels" / "test.tsv").exists() or (root / "qrels" / "test.tsv.gz").exists()
-    return corpus and queries and qrels
-
 
 def _truthy(val: Any) -> bool:
     return str(val).lower() in {"1", "true", "yes", "on"}
@@ -176,6 +167,7 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     rerank_blend_weights: list[float] = []
     fusion_source_mass: dict[str, float] = {}
     fusion_source_docs: dict[str, float] = {}
+    latency_vals: list[float] = []
 
     int_keys = {
         "added": "topology_weak_query_added_candidates",
@@ -225,6 +217,13 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         stats = obj.get("search_stats") or {}
         if not isinstance(stats, dict):
             continue
+
+        try:
+            lat = stats.get("latency_ms")
+            if lat is not None and str(lat) != "":
+                latency_vals.append(float(lat))
+        except (TypeError, ValueError):
+            pass
 
         if _truthy(stats.get("cross_rerank_configured")):
             rerank_configured += 1
@@ -334,6 +333,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["cross_rerank_apply_rate"] = float(rerank_applied) / float(rerank_configured)
     if rerank_blend_weights:
         metrics["cross_rerank_blend_weight"] = float(statistics.mean(rerank_blend_weights))
+    if latency_vals:
+        metrics["search_latency_ms_avg"] = float(statistics.mean(latency_vals))
+        metrics["search_latency_ms_p50"] = float(statistics.median(latency_vals))
     for sname, mass in fusion_source_mass.items():
         metrics[f"fusion_mass_{sname}"] = float(mass)
     for sname, docs in fusion_source_docs.items():
@@ -503,7 +505,16 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "medoid_only_expansion": "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION",
         "max_docs": "YAMS_SEARCH_TOPOLOGY_MAX_DOCS",
         "max_clusters": "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS",
+        "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
+        "min_edge_score": "YAMS_TOPOLOGY_MIN_EDGE_SCORE",
+        "expansion_source": "YAMS_BENCH_TOPOLOGY_EXPANSION",
         "seed_semantic_neighbors": "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
+        "seed_semantic_topk": "YAMS_BENCH_SEED_SEMANTIC_TOPK",
+        "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
+        "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
+        "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
+        "hdbscan_min_points": "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS",
+        "hdbscan_min_cluster_size": "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE",
         "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
         "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
         "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
@@ -516,6 +527,15 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     for pkey, ekey in param_env.items():
         if pkey in ctx.params and ekey not in env:
             env[ekey] = str(ctx.params[pkey])
+
+    # Construction purity: mirror bench cert cap into TopologyManager build env.
+    if "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS" in env and "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS" not in env:
+        env["YAMS_TOPOLOGY_MAX_COMPONENT_DOCS"] = env["YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS"]
+    if "YAMS_BENCH_TOPOLOGY_MIN_EDGE_SCORE" in env and "YAMS_TOPOLOGY_MIN_EDGE_SCORE" not in env:
+        env["YAMS_TOPOLOGY_MIN_EDGE_SCORE"] = env["YAMS_BENCH_TOPOLOGY_MIN_EDGE_SCORE"]
+    # Search expansion_source also as typed SearchEngine overlay.
+    if "YAMS_BENCH_TOPOLOGY_EXPANSION" in env and "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE" not in env:
+        env["YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE"] = env["YAMS_BENCH_TOPOLOGY_EXPANSION"]
 
     # Factors often carry topology_source / expansion_arm.
     if "topology_source" in arm_factors and "YAMS_BENCH_TOPOLOGY_SOURCE" not in env:
@@ -538,19 +558,38 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 ),
             )
 
-    env.setdefault("YAMS_BENCH_DATASET", str(ctx.params.get("dataset", "synthetic")))
-    env.setdefault("YAMS_BENCH_CORPUS_SIZE", str(ctx.params.get("corpus_size", 50)))
-    env.setdefault("YAMS_BENCH_NUM_QUERIES", str(ctx.params.get("num_queries", 10)))
+    # Quality plans default to BEIR scifact. Opt into synthetic only when explicitly set.
+    env.setdefault("YAMS_BENCH_DATASET", str(ctx.params.get("dataset", "scifact")))
+    env.setdefault("YAMS_BENCH_CORPUS_SIZE", str(ctx.params.get("corpus_size", 2000)))
+    env.setdefault("YAMS_BENCH_NUM_QUERIES", str(ctx.params.get("num_queries", 50)))
     env.setdefault("YAMS_BENCH_TOPK", str(ctx.params.get("topk", 10)))
     env.setdefault("YAMS_BENCH_TOPOLOGY_ENGINE", str(ctx.params.get("topology_engine", "connected")))
     env.setdefault("YAMS_BENCH_TOPOLOGY_SOURCE", str(ctx.params.get("topology_source", "vector")))
     env["YAMS_BENCH_DEBUG_FILE"] = str(debug_path)
 
-    # BEIR first-class: auto-resolve + verify the cached corpus; fail fast, don't hang.
-    dataset_name = env.get("YAMS_BENCH_DATASET", "synthetic").lower()
-    is_beir = dataset_name in _BEIR_DATASETS
+    # BEIR first-class: resolve cache path; auto-download when missing.
+    dataset_name = env.get("YAMS_BENCH_DATASET", "scifact").lower()
+    is_beir = is_beir_dataset(dataset_name)
     if is_beir and not env.get("YAMS_BENCH_DATASET_PATH"):
-        cache = _beir_cache_dir(dataset_name)
+        auto = str(ctx.params.get("download_beir", "1")).lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        try:
+            cache = ensure_beir_dataset(dataset_name, download=auto)
+        except Exception as exc:  # noqa: BLE001
+            return WorkerResult(
+                status="failed",
+                exit_code=2,
+                metrics={},
+                attributes={
+                    "dataset": dataset_name,
+                    "expected_path": str(_beir_cache_dir(dataset_name)),
+                },
+                message=str(exc),
+            )
         if not _beir_corpus_present(cache):
             return WorkerResult(
                 status="failed",
@@ -558,8 +597,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 metrics={},
                 attributes={"dataset": dataset_name, "expected_path": str(cache)},
                 message=(
-                    f"BEIR dataset {dataset_name!r} not found at {cache} "
-                    "(need corpus.jsonl + queries.jsonl + qrels/test.tsv); download it first"
+                    f"BEIR dataset {dataset_name!r} incomplete at {cache} "
+                    "(need corpus.jsonl + queries.jsonl + qrels/test.tsv)"
                 ),
             )
         env["YAMS_BENCH_DATASET_PATH"] = str(cache)
@@ -585,6 +624,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # Let the bench's own ingest-stall logic (PROGRESS_TIMEOUT) fire before we kill the process.
     progress_timeout = int(env.get("YAMS_BENCH_PROGRESS_TIMEOUT", "0") or "0")
     timeout = max(timeout, progress_timeout + 120)
+    ru_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    wall_start = time.monotonic()
     try:
         proc = run_captured(
             cmd,
@@ -601,6 +642,15 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             metrics={},
             message=f"retrieval_quality timed out: {exc}",
         )
+    wall_sec = time.monotonic() - wall_start
+    ru_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    # CPU time (utime+stime) is additive across children → reliable per-arm delta.
+    proc_cpu_sec = (ru_after.ru_utime + ru_after.ru_stime) - (
+        ru_before.ru_utime + ru_before.ru_stime
+    )
+    # ru_maxrss is a high-water mark (bytes on macOS, KiB on Linux); whole-process, coarse.
+    rss_scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024
+    proc_maxrss_mb = float(ru_after.ru_maxrss) * rss_scale
 
     (ctx.arm_dir / "exit_code").write_text(str(proc.returncode) + "\n", encoding="utf-8")
     combined = (stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else "")
@@ -618,6 +668,9 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     }
     metrics.update(quality)
     metrics.update(dbg.get("metrics") or {})
+    metrics["proc_cpu_sec"] = float(proc_cpu_sec)
+    metrics["proc_wall_sec"] = float(wall_sec)
+    metrics["proc_maxrss_mb"] = float(proc_maxrss_mb)
 
     seed_enabled = _truthy(env.get("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "0"))
     cert_err = require_topology_certificate(

@@ -1,7 +1,8 @@
 # Benchmarks
 
-Daemon KPI measurements via **xplan**. Tables below are the latest organized snapshot;
-per-run detail lives next to each artifact (`REPORT.md`, `ablation.md`, `metrics.csv`).
+Daemon KPI measurements via **xplan**. Tables below are the latest snapshot of the
+**default system** (no experiment matrices). Per-run detail:
+`build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
 
 | | |
 |--|--|
@@ -12,20 +13,27 @@ per-run detail lives next to each artifact (`REPORT.md`, `ablation.md`, `metrics
 
 ```bash
 python3 tests/benchmarks/xplan/runner.py list-plans
+python3 tests/benchmarks/xplan/runner.py download-beir          # scifact + nfcorpus
 python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
-# Open ARTIFACT/REPORT.md and ARTIFACT/ablation.md
 python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
 ```
+
+**Corpora:** quality plans use **BEIR scifact** (`dataset=scifact`, 2000 docs × 50
+queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
+`dataset=synthetic` is only for ingest/load/ops throughput — not ranking.
+
+**Topology construction defaults (when topology rebuild runs):**
+`min_edge_score=0.25`, `max_component_docs=64`, engine `connected`.
 
 ---
 
 ## Latest snapshot
 
-**Stamp:** `kpi-20260709T003228Z`  
+**Stamp:** `kpi-20260709T031007Z` (search quality) · `kpi-20260709T003228Z` (ingest / load / repair / ops)  
 **Host:** local macOS  
 **Builds:** `build/release` (ingest, repair, quality); `build/prepush-macos` (load, ops — Catch2)
 
-### Ingest — `ingest_pipeline` (80 docs × 1 KB)
+### Ingest — `ingest_pipeline` (80 docs × 1 KB, synthetic throughput)
 
 | Arm | docs/s | wall_ms | complete |
 |-----|------:|--------:|----------|
@@ -47,18 +55,19 @@ Artifacts: `build/benchmarks/ingest_pipeline/kpi-20260709T003228Z-ingest/`
 
 Artifacts: `build/benchmarks/retrieval_load/kpi-20260709T003228Z-load/`
 
-### Search component ablation — `search_component_ablation` (40 docs, 8 queries)
+### Search quality — BEIR scifact (default hybrid)
 
-| Arm | MRR | nDCG | MAP |
-|-----|----:|-----:|----:|
-| baseline | 1.0 | 1.0 | 1.0 |
-| no_vector | 1.0 | 1.0 | 1.0 |
-| no_kg | 1.0 | 1.0 | 1.0 |
-| no_topology | 1.0 | 1.0 | 1.0 |
+2000 docs · 50 queries · topk=10 · topology routing **off** (product default)
 
-Synthetic corpus is too easy for ranking fanout sources — use BEIR/scifact before optimizing.
+| Metric | Value |
+|--------|------:|
+| MRR | 0.613 |
+| nDCG | 0.634 |
+| MAP | 0.608 |
+| recall@10 | 0.713 |
+| precision@10 | 0.076 |
 
-Artifacts: `build/benchmarks/search_component_ablation/kpi-20260709T003228Z-search/`
+Artifacts: `build/benchmarks/topology_optimize_v2/kpi-20260709T031007Z-topo-optv2b/` (`topo_off` arm)
 
 ### Repair — `repair_ability` (20 faults)
 
@@ -89,18 +98,15 @@ Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
 | Topic | Link |
 |-------|------|
 | xplan harness | [tests/benchmarks/xplan/README.md](../../tests/benchmarks/xplan/README.md) |
-| Ingest hot path | [docs/architecture/ingestion-hot-path-20260705.md](../architecture/ingestion-hot-path-20260705.md) |
-| Ingest ablation notes | [docs/architecture/ingestion-pipeline-ablation-20260705.md](../architecture/ingestion-pipeline-ablation-20260705.md) |
 | Extraction / repair | [docs/architecture/extraction-repair-pipeline.md](../architecture/extraction-repair-pipeline.md) |
 | System architecture | [docs/architecture/system_architecture.md](../architecture/system_architecture.md) |
-| Agent retrieval handoff | [docs/prompts/PROMPT-yams-retrieval-benchmark-handoff.md](../prompts/PROMPT-yams-retrieval-benchmark-handoff.md) |
 | Testing policy | [docs/developer/testing.md](../developer/testing.md) |
 
 ---
 
 ## Refresh
 
-1. Run plans under a common stamp prefix (see harness README).  
-2. Replace tables above from each `summary.md` / `REPORT.md`.  
-3. Update the stamp line.  
-4. Optional: `runner.py compare <old> <new>` for deltas.  
+1. `download-beir` (or let quality worker auto-fetch).  
+2. Run the default plans under a common stamp.  
+3. Replace tables above from each `summary.md` / `REPORT.md` (default arms only).  
+4. Update the stamp line.  

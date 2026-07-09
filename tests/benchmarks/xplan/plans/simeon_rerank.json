@@ -1,6 +1,6 @@
 {
   "name": "simeon_rerank",
-  "description": "Simeon cross-rerank mode A/B (off / replace / blend) over synthetic smoke corpus. BEIR-breadth magnitude is tracked in docs; this plan smoke-tests that each mode runs and applies.",
+  "description": "Simeon cross-rerank mode A/B (off / replace / blend) on BEIR scifact. Synthetic is not the default; set dataset=synthetic only for wiring smoke.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 3600,
@@ -17,9 +17,9 @@
       "YAMS_SEARCH_WAIT_FOR_CONCEPTS": "1"
     },
     "params": {
-      "dataset": "synthetic",
-      "corpus_size": 50,
-      "num_queries": 10,
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
       "topk": 10,
       "embed_backend": "simeon",
       "rerank_topk": 10
@@ -28,12 +28,18 @@
   "arms": [
     {
       "name": "rerank_off",
-      "factors": { "rerank_mode": "off" },
-      "env": { "YAMS_SEARCH_ENABLE_RERANKING": "0" }
+      "factors": {
+        "rerank_mode": "off"
+      },
+      "env": {
+        "YAMS_SEARCH_ENABLE_RERANKING": "0"
+      }
     },
     {
       "name": "rerank_replace",
-      "factors": { "rerank_mode": "replace" },
+      "factors": {
+        "rerank_mode": "replace"
+      },
       "env": {
         "YAMS_SEARCH_ENABLE_RERANKING": "1",
         "YAMS_SEARCH_RERANK_REPLACE_SCORES": "1"
@@ -41,7 +47,9 @@
     },
     {
       "name": "rerank_blend",
-      "factors": { "rerank_mode": "blend" },
+      "factors": {
+        "rerank_mode": "blend"
+      },
       "env": {
         "YAMS_SEARCH_ENABLE_RERANKING": "1",
         "YAMS_SEARCH_RERANK_REPLACE_SCORES": "0",
@@ -52,16 +60,32 @@
   "steps": [
     {
       "worker": "retrieval_quality",
-      "metrics": ["mrr", "ndcg_at_k"]
+      "metrics": [
+        "mrr",
+        "ndcg_at_k"
+      ]
     }
   ],
   "validate": {
-    "require_files": ["metrics.json"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
-    "primary": ["mrr", "ndcg_at_k", "map", "recall_at_k"],
-    "group_by": ["rerank_mode"]
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "recall_at_k"
+    ],
+    "group_by": [
+      "rerank_mode"
+    ]
   }
 }

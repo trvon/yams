@@ -116,10 +116,14 @@ Daemon KPI / ablation work uses **xplan**. Organized numbers:
 ```bash
 python3 tests/benchmarks/xplan/runner.py self-test
 python3 tests/benchmarks/xplan/runner.py list-plans
+python3 tests/benchmarks/xplan/runner.py download-beir   # scifact + nfcorpus → ~/.cache/yams/benchmarks/
 python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
 python3 tests/benchmarks/xplan/runner.py report build/benchmarks/<plan>/<stamp>
 python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
 ```
+
+Quality/topology plans default to **BEIR scifact** (auto-download on run). Do not
+rank search levers on `dataset=synthetic` — that is for ingest/load smoke only.
 
 | Surface | Path |
 |---------|------|

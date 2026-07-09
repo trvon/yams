@@ -63,8 +63,13 @@ struct TopologyBuildConfig {
     std::size_t rollingWindowDocuments{0};
     std::size_t fullRebuildDocThreshold{4096};
     Duration coalesceWindow{Duration{250}};
+    // Floor for undirected edge admission when building pairWeights / CC / SGC.
+    // 0.0 keeps every reciprocal edge (legacy; often creates giant components).
     double minEdgeScore{0.0};
     double minClusterPersistence{0.0};
+    // Lean ConstructionGates anti-giant cap. 0 = unlimited (legacy). Production
+    // TopologyManager defaults this to 64 so oversized CC components are split.
+    std::size_t maxComponentDocs{0};
     bool reciprocalOnly{true};
     bool allowOverlap{true};
     bool emitBridgeAnnotations{true};

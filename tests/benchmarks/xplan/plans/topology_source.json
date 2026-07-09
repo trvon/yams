@@ -1,6 +1,6 @@
 {
   "name": "topology_source",
-  "description": "Topology artifact source × expansion-arm matrix (vector/fts5/kg × cap2/medoid64/rerank_only). Uses retrieval_quality with construction-certificate checks for non-vector sources.",
+  "description": "Topology artifact source \u00d7 expansion-arm matrix on BEIR scifact (vector/fts5/kg \u00d7 cap2/medoid64/rerank_only).",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -18,28 +18,46 @@
       "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2"
     },
     "params": {
-      "dataset": "synthetic",
-      "corpus_size": 50,
-      "num_queries": 10,
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
       "topk": 10,
       "topology_engine": "connected",
       "seed_semantic_neighbors": "1"
     }
   },
   "factors": {
-    "topology_source": ["vector", "fts5", "kg"],
-    "expansion_arm": ["cap2", "medoid64", "rerank_only"]
+    "topology_source": [
+      "vector",
+      "fts5",
+      "kg"
+    ],
+    "expansion_arm": [
+      "cap2",
+      "medoid64",
+      "rerank_only"
+    ]
   },
   "steps": [
     {
       "worker": "retrieval_quality",
-      "metrics": ["mrr", "ndcg_at_k"]
+      "metrics": [
+        "mrr",
+        "ndcg_at_k"
+      ]
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [
@@ -50,6 +68,9 @@
       "topology_cert_ok",
       "hybrid_queries"
     ],
-    "group_by": ["topology_source", "expansion_arm"]
+    "group_by": [
+      "topology_source",
+      "expansion_arm"
+    ]
   }
 }

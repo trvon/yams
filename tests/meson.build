@@ -1188,7 +1188,6 @@ if catch2_dep.found()
       'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
-      'unit/search/meta_path_router_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
       'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
       'unit/search/search_engine_topology_catch2_test.cpp',
@@ -1203,6 +1202,8 @@ if catch2_dep.found()
       'unit/search/result_ranker_catch2_test.cpp',
       'unit/search/search_engine_config_catch2_test.cpp',
       'unit/search/search_tracing_catch2_test.cpp',
+      'unit/search/component_fanout_catch2_test.cpp',
+      'unit/search/concept_boost_catch2_test.cpp',
       'unit/search/search_smoke_catch2_test.cpp',
       'unit/search/query_literal_extractor_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
@@ -1841,6 +1842,15 @@ if catch2_dep.found()
 
   catch2_topology_factory_exe = executable('catch2_topology_factory',
     files('unit/topology/topology_factory_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_kmeans_exe = executable('catch2_topology_kmeans',
+    files('unit/topology/kmeans_engine_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

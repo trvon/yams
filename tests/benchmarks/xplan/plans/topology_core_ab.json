@@ -1,6 +1,6 @@
 {
   "name": "topology_core_ab",
-  "description": "Classic vs topology_core search engine variant A/B on a fixed expansion arm (cap2) and topology source.",
+  "description": "Classic vs topology_core search engine variant A/B on BEIR scifact (fixed expansion arm cap2 and topology source).",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 3600,
@@ -15,9 +15,9 @@
       "YAMS_BENCH_TOPOLOGY_ENGINE": "connected"
     },
     "params": {
-      "dataset": "synthetic",
-      "corpus_size": 50,
-      "num_queries": 10,
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
       "topk": 10,
       "topology_source": "segment_keyphrase",
       "expansion_arm": "cap2",
@@ -25,18 +25,31 @@
     }
   },
   "factors": {
-    "search_engine_variant": ["classic", "topology_core"]
+    "search_engine_variant": [
+      "classic",
+      "topology_core"
+    ]
   },
   "steps": [
     {
       "worker": "retrieval_quality",
-      "metrics": ["mrr", "ndcg_at_k"]
+      "metrics": [
+        "mrr",
+        "ndcg_at_k"
+      ]
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [
@@ -47,6 +60,8 @@
       "topology_admitted",
       "hybrid_queries"
     ],
-    "group_by": ["search_engine_variant"]
+    "group_by": [
+      "search_engine_variant"
+    ]
   }
 }

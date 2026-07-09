@@ -132,29 +132,81 @@ struct SearchEngineConfig {
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;
     float weakQueryEntityVectorFanoutMultiplier = 1.5f;
+
+    enum class TopologyRoutingMode {
+        Disabled,
+        WeakQueryOnly,
+        HybridAssist,
+        RerankOnly,
+    } topologyRoutingMode = TopologyRoutingMode::Disabled;
+
+    [[nodiscard]] static constexpr const char*
+    topologyRoutingModeToString(TopologyRoutingMode mode) noexcept {
+        switch (mode) {
+            case TopologyRoutingMode::Disabled:
+                return "disabled";
+            case TopologyRoutingMode::WeakQueryOnly:
+                return "weak_query_only";
+            case TopologyRoutingMode::HybridAssist:
+                return "hybrid_assist";
+            case TopologyRoutingMode::RerankOnly:
+                return "rerank_only";
+        }
+        return "disabled";
+    }
+
+    enum class TopologyRouteScoringMode {
+        Current,
+        SizeWeighted,
+        SeedCoverage,
+    } topologyRouteScoringMode = TopologyRouteScoringMode::Current;
+
+    [[nodiscard]] static constexpr const char*
+    topologyRouteScoringModeToString(TopologyRouteScoringMode mode) noexcept {
+        switch (mode) {
+            case TopologyRouteScoringMode::Current:
+                return "current";
+            case TopologyRouteScoringMode::SizeWeighted:
+                return "size_weighted";
+            case TopologyRouteScoringMode::SeedCoverage:
+                return "seed_coverage";
+        }
+        return "current";
+    }
+
+    // Legacy compatibility switch. Prefer topologyRoutingMode for new code.
     bool enableTopologyWeakQueryRouting = false;
     size_t topologyMaxClusters = 2;
     size_t topologyMaxDocs = 64;
+    size_t topologyMaxDocsPerCluster = 0;
     float topologyMedoidBoost = 0.05f;
-    // Phase Y: multi-meta-path scoring (PathSim-style fixed weights, post-fusion boost).
-    // Each enabled meta-path independently scores candidate docs reachable from query
-    // seeds; total boost = Σ_m (w_m × pathScore_m). Phase P is the special case
-    // {only M_sem, w_sem=1, binary boost}. Default off → V0 matches existing Phase P.
-    bool enableMetaPathRouting{false};
-    std::size_t metaPathSeedK{8};     // seeds drawn via vectorDb.search(q, k)
-    std::size_t metaPathHopLimit{16}; // per-edge-type hop budget per seed
-    float metaPathBoostAlpha{0.3f};   // multiplier on the combined boost
-    float metaPathWeightSem{1.0f};    // doc — semantic_neighbor — doc
-    float metaPathWeightCall{
-        0.5f}; // doc — contains — function — calls — function — defined_in — doc
-    float metaPathWeightDef{0.5f};         // doc — contains — symbol — defined_in — doc
-    float metaPathWeightEntity{0.3f};      // doc — kg_doc_entities — node — kg_doc_entities — doc
-    float metaPathWeightBlob{0.2f};        // doc — blob — doc (dedup)
-    bool metaPathUseEdgeWeights{false};    // weight hits by edge.weight * seed similarity
-    float metaPathMinSeedSimilarity{0.0f}; // skip boost when best seed sim is below this
-    bool metaPathReciprocalOnly{false};    // keep only dst docs with a reverse edge to a seed
-    float metaPathSeedSimilarity{0.7f};    // seed-search cosine floor; must match the embedding
-                                           // backend's cosine scale or no seeds survive
+    float topologySparseDenseAlpha = 0.5f;
+    float topologyMinRouteScore = 0.0f;
+    bool topologyMedoidOnlyExpansion = false;
+
+    /// Where topology candidates come from at search time.
+    /// Clusters: seed → cluster router → member expansion (legacy).
+    /// GraphNeighbors: seed → semantic_neighbor edges (no partition required).
+    enum class TopologyExpansionSource {
+        Clusters,
+        GraphNeighbors,
+    } topologyExpansionSource = TopologyExpansionSource::Clusters;
+
+    [[nodiscard]] static constexpr const char*
+    topologyExpansionSourceToString(TopologyExpansionSource source) noexcept {
+        switch (source) {
+            case TopologyExpansionSource::Clusters:
+                return "clusters";
+            case TopologyExpansionSource::GraphNeighbors:
+                return "graph_neighbors";
+        }
+        return "clusters";
+    }
+
+    /// Min edge weight for graph_neighbors expansion (search path).
+    float topologyGraphNeighborMinScore = 0.25f;
+    /// Prefer reciprocal semantic_neighbor edges when expanding graph neighbors.
+    bool topologyGraphNeighborReciprocalOnly = true;
 
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
@@ -198,6 +250,8 @@ struct SearchEngineConfig {
     float semanticRescueMinVectorScore = 0.0f;
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
+    size_t topologySidecarFusionRescueSlots = 0;
+    float topologySidecarFusionRescueMinScore = 0.0f;
 
     bool enableMultiVectorQuery = false;
     size_t multiVectorMaxPhrases = 3;
@@ -264,8 +318,8 @@ struct SearchEngineConfig {
     bool enableReranking = true;
     size_t rerankTopK = 5;
     float rerankAnchoredMinRelativeScore = 0.0f;
-    bool rerankReplaceScores = true;
-    float rerankBlendWeight = 0.60f;
+    bool rerankReplaceScores = false;
+    float rerankBlendWeight = 0.30f;
     float rerankScoreGapThreshold = 0.0f;
     size_t rerankSnippetMaxChars = 256;
     size_t fusionCandidateLimit = 0;

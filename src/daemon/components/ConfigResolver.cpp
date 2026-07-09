@@ -805,6 +805,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                     return std::nullopt;
                 }
             };
+            if (auto it = kv.find("search.topology.mode"); it != kv.end()) {
+                policy.mode = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
@@ -814,8 +817,40 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.max_docs_per_cluster"); it != kv.end()) {
+                policy.maxDocsPerCluster = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_scoring"); it != kv.end()) {
+                policy.routeScoring = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.sparse_dense_alpha"); it != kv.end()) {
+                policy.sparseDenseAlpha = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.min_route_score"); it != kv.end()) {
+                policy.minRouteScore = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.medoid_only_expansion"); it != kv.end()) {
+                policy.medoidOnlyExpansion = parseBoolValue(it->second);
+            }
+            if (auto it = kv.find("search.topology.expansion_source"); it != kv.end()) {
+                policy.expansionSource = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.graph_neighbor_min_score"); it != kv.end()) {
+                policy.graphNeighborMinScore = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_neighbor_reciprocal_only");
+                it != kv.end()) {
+                policy.graphNeighborReciprocalOnly = parseBoolValue(it->second);
+            }
+            if (auto it = kv.find("search.topology.sidecar_fusion_rescue_slots"); it != kv.end()) {
+                policy.topologySidecarFusionRescueSlots = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.sidecar_fusion_rescue_min_score");
+                it != kv.end()) {
+                policy.topologySidecarFusionRescueMinScore = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
@@ -848,64 +883,61 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
         }
     }
-
-    return policy;
-}
-
-ConfigResolver::MetaPathRoutingPolicy ConfigResolver::resolveMetaPathRoutingPolicy() {
-    MetaPathRoutingPolicy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
-            return policy;
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
+        if (*env) {
+            policy.routeScoring = std::string(trimView(env));
         }
-        const auto kv = parseSimpleTomlFlat(cfgPath);
-        const auto lookup = [&kv](std::string_view key) -> const std::string* {
-            auto it = kv.find(std::string(key));
-            return it != kv.end() ? &it->second : nullptr;
-        };
-
-        if (const auto* raw = lookup("search.meta_path.enable")) {
-            policy.enable = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA")) {
+        try {
+            policy.sparseDenseAlpha = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA float");
         }
-        if (const auto* raw = lookup("search.meta_path.use_edge_weights")) {
-            policy.useEdgeWeights = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE")) {
+        try {
+            policy.minRouteScore = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE float");
         }
-        if (const auto* raw = lookup("search.meta_path.reciprocal_only")) {
-            policy.reciprocalOnly = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MEDOID_ONLY_EXPANSION")) {
+        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
+            policy.medoidOnlyExpansion = *parsed;
         }
-
-        const std::pair<std::string_view, std::optional<std::size_t>*> sizeKeys[] = {
-            {"search.meta_path.seed_k", &policy.seedK},
-            {"search.meta_path.hop_limit", &policy.hopLimit},
-        };
-        for (const auto& [key, slot] : sizeKeys) {
-            if (const auto* raw = lookup(key)) {
-                *slot = parseSize(*raw);
-            }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
+        if (*env) {
+            policy.expansionSource = std::string(trimView(env));
         }
-
-        const std::pair<std::string_view, std::optional<float>*> floatKeys[] = {
-            {"search.meta_path.boost_alpha", &policy.boostAlpha},
-            {"search.meta_path.weight_sem", &policy.weightSem},
-            {"search.meta_path.weight_call", &policy.weightCall},
-            {"search.meta_path.weight_def", &policy.weightDef},
-            {"search.meta_path.weight_entity", &policy.weightEntity},
-            {"search.meta_path.min_seed_similarity", &policy.minSeedSimilarity},
-            {"search.meta_path.seed_similarity", &policy.seedSimilarity},
-        };
-        for (const auto& [key, slot] : floatKeys) {
-            if (const auto* raw = lookup(key)) {
-                try {
-                    *slot = std::stof(*raw);
-                } catch (const std::exception&) {
-                }
-            }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE")) {
+        try {
+            policy.graphNeighborMinScore = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug(
+                "config: failed to parse YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE float");
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for meta-path routing policy: {}", e.what());
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")) {
+        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
+            policy.graphNeighborReciprocalOnly = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS")) {
+        if (auto parsed = parseSize(env); parsed.has_value()) {
+            policy.topologySidecarFusionRescueSlots = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE")) {
+        try {
+            policy.topologySidecarFusionRescueMinScore = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug(
+                "config: failed to parse YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE "
+                "float");
+        }
     }
 
     return policy;

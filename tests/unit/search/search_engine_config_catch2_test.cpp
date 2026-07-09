@@ -341,7 +341,8 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.symbolRank == true);
     CHECK(cfg.enableReranking == true);
     CHECK(cfg.rerankTopK == 5);
-    CHECK(cfg.rerankReplaceScores == true);
+    CHECK(cfg.rerankReplaceScores == false);
+    CHECK(cfg.rerankBlendWeight == Approx(0.30f));
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

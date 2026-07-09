@@ -124,6 +124,78 @@ inline double effectiveVectorOnlyPenalty(const SearchEngineConfig& config, doubl
     return basePenalty + (reliefPenalty - basePenalty) * t;
 }
 
+inline double topologySidecarRescueScore(const SearchResult& result) {
+    return result.graphVectorScore.value_or(0.0);
+}
+
+template <typename ResultLess>
+void applyTopologySidecarFusionRescue(std::vector<SearchResult>& results,
+                                      const SearchEngineConfig& config, ResultLess&& resultLess) {
+    if (config.topologySidecarFusionRescueSlots == 0 || results.empty()) {
+        return;
+    }
+
+    const size_t finalWindow = std::min(config.maxResults, results.size());
+    if (finalWindow == 0 || finalWindow >= results.size()) {
+        return;
+    }
+
+    const double minScore =
+        std::max(0.0, static_cast<double>(config.topologySidecarFusionRescueMinScore));
+    const auto eligible = [minScore](const SearchResult& result) {
+        return result.topologySidecar && topologySidecarRescueScore(result) >= minScore;
+    };
+    const auto betterTopology = [&resultLess](const SearchResult& a, const SearchResult& b) {
+        const double scoreA = topologySidecarRescueScore(a);
+        const double scoreB = topologySidecarRescueScore(b);
+        if (scoreA != scoreB) {
+            return scoreA > scoreB;
+        }
+        return resultLess(a, b);
+    };
+
+    const size_t rescueTarget = std::min(config.topologySidecarFusionRescueSlots, finalWindow);
+    size_t rescuePresent = 0;
+    for (size_t i = 0; i < finalWindow; ++i) {
+        if (eligible(results[i])) {
+            ++rescuePresent;
+        }
+    }
+
+    while (rescuePresent < rescueTarget) {
+        size_t bestTailIndex = results.size();
+        for (size_t i = finalWindow; i < results.size(); ++i) {
+            if (!eligible(results[i])) {
+                continue;
+            }
+            if (bestTailIndex >= results.size() ||
+                betterTopology(results[i], results[bestTailIndex])) {
+                bestTailIndex = i;
+            }
+        }
+        if (bestTailIndex >= results.size()) {
+            break;
+        }
+
+        size_t victimIndex = finalWindow;
+        for (size_t i = finalWindow; i > 0; --i) {
+            const size_t idx = i - 1;
+            if (!eligible(results[idx])) {
+                victimIndex = idx;
+                break;
+            }
+        }
+        if (victimIndex >= finalWindow) {
+            break;
+        }
+
+        std::swap(results[victimIndex], results[bestTailIndex]);
+        ++rescuePresent;
+    }
+
+    std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow), resultLess);
+}
+
 inline size_t semanticRescueWindowLimit(const SearchEngineConfig& config) {
     if (config.enableReranking && config.rerankTopK > 0) {
         return std::min(config.maxResults, config.rerankTopK);
@@ -160,6 +232,9 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         const double contribution = scoreFunc(comp);
         r.score += contribution;
         accumulateComponentScore(r, comp.source, contribution);
+        if (comp.debugInfo.contains("topology_sidecar")) {
+            r.topologySidecar = true;
+        }
 
         if (comp.source == ComponentResult::Source::Text ||
             comp.source == ComponentResult::Source::SimeonText) {
@@ -427,6 +502,7 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
                           fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
                           fusedResults.end(), lexicalAwareLess);
         applySemanticRescueWindow();
+        applyTopologySidecarFusionRescue(fusedResults, config_, lexicalAwareLess);
 
         if (config_.fusionEvidenceRescueSlots > 0) {
             const size_t topK = config_.maxResults;

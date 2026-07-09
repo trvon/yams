@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/search_engine.h>
+#include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
 
 using yams::search::ComponentResult;
@@ -115,4 +116,163 @@ TEST_CASE("SearchTraceCollector emits empty counters object when none recorded",
     REQUIRE(summary.at("embedding").contains("counters"));
     CHECK(summary.at("embedding").at("counters").is_object());
     CHECK(summary.at("embedding").at("counters").empty());
+}
+
+TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
+          "[search][tracing][topology][catch2]") {
+    SearchEngineConfig config;
+    config.topologyRouteScoringMode = SearchEngineConfig::TopologyRouteScoringMode::SizeWeighted;
+    config.topologySparseDenseAlpha = 0.25f;
+    config.topologyMinRouteScore = 0.5f;
+    config.topologyMedoidOnlyExpansion = true;
+
+    yams::search::TopologyRoutingSessionResult session;
+    session.loadAttempted = true;
+    session.loadSucceeded = true;
+    session.artifactAdmitted = true;
+    session.applied = true;
+    session.narrowApplied = false;
+    session.artifactsFresh = true;
+    session.topologyEpoch = 7;
+    session.routedClusters = 2;
+    session.routedDocs = 5;
+    session.routesRejected = 1;
+    session.addedCandidates = 4;
+    session.duplicateCandidates = 3;
+    session.staleCandidates = 1;
+    session.addedCandidateHashes = {"hash-a", "hash-b"};
+    session.timings.totalMicros = 100;
+    session.timings.loadMicros = 10;
+    session.timings.validateMicros = 20;
+    session.timings.requestPrepMicros = 30;
+    session.timings.routeMicros = 40;
+    session.timings.clusterLookupMicros = 50;
+    session.timings.docLookupMicros = 60;
+    session.timings.candidateInsertMicros = 70;
+
+    yams::search::SearchResponse response;
+    yams::search::recordTopologyRoutingDebug(
+        response, config, SearchEngineConfig::TopologyRoutingMode::HybridAssist, session,
+        "skip-reason", 42);
+
+    const auto& debug = response.debugStats;
+    CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
+    CHECK(debug.at("topology_route_scoring_mode") == "size_weighted");
+    CHECK(debug.at("topology_sparse_dense_alpha") == std::to_string(0.25f));
+    CHECK(debug.at("topology_min_route_score") == std::to_string(0.5f));
+    CHECK(debug.at("topology_medoid_only_expansion") == "1");
+    CHECK(debug.at("topology_weak_query_enabled") == "1");
+    CHECK(debug.at("topology_weak_query_load_attempted") == "1");
+    CHECK(debug.at("topology_weak_query_load_succeeded") == "1");
+    CHECK(debug.at("topology_artifact_admitted") == "1");
+    CHECK(debug.at("topology_weak_query_applied") == "1");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "skip-reason");
+    CHECK(debug.at("topology_weak_query_routes_rejected") == "1");
+    CHECK(debug.at("topology_weak_query_routed_clusters") == "2");
+    CHECK(debug.at("topology_weak_query_routed_docs") == "5");
+    CHECK(debug.at("topology_weak_query_added_candidates") == "4");
+    CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
+    CHECK(debug.at("topology_weak_query_stale_candidates") == "1");
+    CHECK(debug.at("topology_weak_query_added_candidate_hashes") == "hash-a\thash-b");
+    CHECK(debug.at("topology_weak_query_total_candidates") == "42");
+    CHECK(debug.at("topology_ready") == "1");
+    CHECK(debug.at("topology_artifacts_fresh") == "1");
+    CHECK(debug.at("topology_epoch") == "7");
+
+    const auto& timing = response.componentTimingMicros;
+    CHECK(timing.at("topology_weak_query") == 100);
+    CHECK(timing.at("topology_load") == 10);
+    CHECK(timing.at("topology_validate") == 20);
+    CHECK(timing.at("topology_request_prep") == 30);
+    CHECK(timing.at("topology_route") == 40);
+    CHECK(timing.at("topology_cluster_lookup") == 50);
+    CHECK(timing.at("topology_doc_lookup") == 60);
+    CHECK(timing.at("topology_candidate_insert") == 70);
+}
+
+TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not attempted",
+          "[search][tracing][topology][catch2]") {
+    SearchEngineConfig config;
+    yams::search::TopologyRoutingSessionResult session;
+
+    yams::search::SearchResponse response;
+    yams::search::recordTopologyRoutingDebug(
+        response, config, SearchEngineConfig::TopologyRoutingMode::Disabled, session, "disabled",
+        0);
+
+    const auto& debug = response.debugStats;
+    CHECK(debug.at("topology_weak_query_enabled") == "0");
+    CHECK(debug.at("topology_weak_query_load_attempted") == "0");
+    CHECK(debug.at("topology_artifact_admitted") == "0");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "disabled");
+    CHECK_FALSE(debug.contains("topology_ready"));
+    CHECK_FALSE(debug.contains("topology_epoch"));
+    CHECK(response.componentTimingMicros.empty());
+}
+
+TEST_CASE("recordTopologySidecarSurvivalDebug matches legacy sidecar keys",
+          "[search][tracing][topology][catch2]") {
+    yams::search::TopologySidecarSurvival survival;
+    survival.postFusionDocIds = {"a", "b"};
+    survival.finalDocIds = {"a"};
+    survival.newPostFusionDocIds = {"b"};
+    survival.duplicatePostFusionDocIds = {"a"};
+
+    std::unordered_map<std::string, std::string> debug;
+    yams::search::recordTopologySidecarSurvivalDebug(debug, survival);
+
+    CHECK(debug.at("topology_sidecar_post_fusion_count") == "2");
+    CHECK(debug.at("topology_sidecar_final_count") == "1");
+    CHECK(debug.at("topology_new_post_fusion_count") == "1");
+    CHECK(debug.at("topology_duplicate_post_fusion_count") == "1");
+    CHECK(debug.at("topology_sidecar_post_fusion_doc_ids") == "a\tb");
+    CHECK(debug.at("topology_sidecar_final_doc_ids") == "a");
+    CHECK(debug.at("topology_new_post_fusion_doc_ids") == "b");
+    CHECK(debug.at("topology_duplicate_post_fusion_doc_ids") == "a");
+    CHECK(debug.size() == 8);
+}
+
+TEST_CASE("recordIndexReadinessDebug emits readiness flags for both pipelines",
+          "[search][tracing][catch2]") {
+    yams::search::IndexFreshnessSnapshot freshness;
+    freshness.lexicalReady = true;
+    freshness.vectorReady = false;
+    freshness.kgReady = true;
+    freshness.topologyReady = false;
+    freshness.topologyArtifactsFresh = true;
+    freshness.topologyEpoch = 12;
+
+    std::unordered_map<std::string, std::string> debug;
+    yams::search::recordIndexReadinessDebug(debug, freshness);
+
+    CHECK(debug.at("search_engine_ready") == "1");
+    CHECK(debug.at("vector_ready") == "0");
+    CHECK(debug.at("kg_ready") == "1");
+    CHECK(debug.at("topology_ready") == "0");
+    CHECK(debug.at("topology_artifacts_fresh") == "1");
+    CHECK(debug.at("topology_epoch") == "12");
+    CHECK(debug.size() == 6);
+}
+
+TEST_CASE("metric key constants are stable strings", "[search][tracing][catch2]") {
+    namespace metrics = yams::search::metrics;
+    CHECK(metrics::kSearchEngineVariant == "search_engine_variant");
+    CHECK(metrics::kSearchPipelineVariant == "search_pipeline_variant");
+    CHECK(metrics::kSearchPipelineInterface == "search_pipeline_interface");
+    CHECK(metrics::kSearchPipelineName == "search_pipeline_name");
+    CHECK(metrics::kTopologyArtifactAdmitted == "topology_artifact_admitted");
+    CHECK(metrics::kTopologyWeakQueryApplied == "topology_weak_query_applied");
+    CHECK(metrics::kTopologyWeakQueryAddedCandidates == "topology_weak_query_added_candidates");
+    CHECK(metrics::kTopologyWeakQueryDuplicateCandidates ==
+          "topology_weak_query_duplicate_candidates");
+    CHECK(metrics::kTopologySidecarVectorCandidates == "topology_sidecar_vector_candidates");
+    CHECK(metrics::kTopologySidecarFinalCount == "topology_sidecar_final_count");
+    CHECK(metrics::kTopologyNewPostFusionCount == "topology_new_post_fusion_count");
+    CHECK(metrics::kTopologyDuplicatePostFusionCount == "topology_duplicate_post_fusion_count");
+    CHECK(metrics::kTopologyRouteBestScore == "topology_route_best_score");
+    CHECK(metrics::kTopologyRouteMeanAcceptedScore == "topology_route_mean_accepted_score");
+    CHECK(metrics::kTopologyRouteAcceptedCount == "topology_route_accepted_count");
+    CHECK(metrics::kTopologySeedCount == "topology_seed_count");
+    CHECK(metrics::kTopologySeedCoverageCount == "topology_seed_coverage_count");
 }

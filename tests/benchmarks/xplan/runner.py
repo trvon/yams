@@ -146,6 +146,28 @@ def cmd_list_plans(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_download_beir(args: argparse.Namespace) -> int:
+    """Download BEIR datasets into ~/.cache/yams/benchmarks/<name>."""
+    from workers.beir_data import BEIR_DATASETS, ensure_beir_dataset
+
+    names = [n.strip().lower() for n in (args.datasets or []) if n.strip()]
+    if not names:
+        names = ["scifact", "nfcorpus"]
+    if args.list:
+        for n in sorted(BEIR_DATASETS):
+            print(n)
+        return 0
+    rc = 0
+    for name in names:
+        try:
+            path = ensure_beir_dataset(name, download=True, force=bool(args.force))
+            print(f"ok  {name} -> {path}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"fail {name}: {exc}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def cmd_self_test(_: argparse.Namespace) -> int:
     """Expand a built-in mini plan without executing heavy workers."""
     repo_root = repo_root_from()
@@ -576,6 +598,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     lp = sub.add_parser("list-plans", help="List plan files under plans/")
     lp.set_defaults(func=cmd_list_plans)
+
+    db = sub.add_parser(
+        "download-beir",
+        help="Download BEIR corpora into ~/.cache/yams/benchmarks/ (default: scifact nfcorpus)",
+    )
+    db.add_argument(
+        "datasets",
+        nargs="*",
+        help="Dataset names (default: scifact nfcorpus). Use --list for known names.",
+    )
+    db.add_argument("--list", action="store_true", help="Print known BEIR dataset names")
+    db.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if corpus already present",
+    )
+    db.set_defaults(func=cmd_download_beir)
 
     st = sub.add_parser("self-test", help="Run runner self-checks (dry-run)")
     st.set_defaults(func=cmd_self_test)

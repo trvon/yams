@@ -25,9 +25,9 @@ Harness: `tests/benchmarks/xplan/README.md`. Numbers: `docs/benchmarks/README.md
 | `retrieval_opt_loop.sh` | **kept** | single-path opt loop |
 | `benchmark_mode_manifest.sh` | **kept** | still used by profilers above |
 | `cli_overhead_smoke.py` | **kept** | CLI overhead smoke |
-| `clusterability_diagnostic.py` | **kept** | diagnostic |
 
-**Removed**: `topology_expansion_wrapper.sh` (redundant alias).
+**Removed**: `topology_expansion_wrapper.sh` (redundant alias);
+`clusterability_diagnostic.py` (one-off lab dump, not on the docs path).
 
 **Rule:** do not add new multi-arm ablation shell scripts. Expansion presets and
 component ablations live in xplan workers (`ablation.py`, `retrieval_quality.py`).
