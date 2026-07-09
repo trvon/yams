@@ -86,11 +86,12 @@ public:
                 bool enableSimeonLexicalBuild = true);
 
     /**
-     * Get cached engine pointer for non-blocking reads.
-     * Returns nullptr if no engine is available or engine is building.
+     * Get cached engine for non-blocking diagnostic reads.
+     * Returns a shared_ptr so the engine stays alive for the caller's use
+     * (raw-pointer caching raced with rebuild destruction under metrics polling).
      * Thread-safe via snapshot mutex (does NOT block on build operations).
      */
-    yams::search::SearchEngine* getCachedEngine() const;
+    std::shared_ptr<yams::search::SearchEngine> getCachedEngine() const;
 
     /**
      * Get current FSM snapshot (state, build reason, vector enabled, etc.)
@@ -99,8 +100,8 @@ public:
     SearchEngineSnapshot getSnapshot() const;
 
     /**
-     * Get shared pointer to current engine (may block if build in progress).
-     * Prefer getCachedEngine() for status/diagnostic reads.
+     * Get shared pointer to current engine (short shared_lock on engineMutex_).
+     * Prefer getCachedEngine() for high-frequency status/diagnostic reads.
      */
     std::shared_ptr<yams::search::SearchEngine> getEngine() const;
 
@@ -111,7 +112,7 @@ public:
     void setEngine(const std::shared_ptr<yams::search::SearchEngine>& engine, bool vectorEnabled);
 
     /**
-     * Clear any owned engine and cached raw pointer during shutdown.
+     * Clear any owned engine and cached snapshot during shutdown.
      */
     void clearEngine();
 
@@ -179,9 +180,10 @@ private:
     std::shared_ptr<yams::search::SearchEngine> engine_;
     mutable std::shared_mutex engineMutex_;
 
-    // Cached snapshot for non-blocking reads (guarded by snapshotMutex_)
+    // Cached snapshot for non-blocking reads (guarded by snapshotMutex_).
+    // Must be shared_ptr: raw pointer UAF when rebuild drops the last owner.
     mutable std::shared_mutex snapshotMutex_;
-    yams::search::SearchEngine* cachedEngine_{nullptr};
+    std::shared_ptr<yams::search::SearchEngine> cachedEngine_;
 
     std::atomic<std::uint64_t> lexicalDeltaQueuedEpoch_{0};
     std::atomic<std::uint64_t> lexicalDeltaPublishedEpoch_{0};

@@ -231,7 +231,7 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
     if (!sm)
         return d;
     try {
-        // Phase 2.2: Use non-blocking cached snapshot instead of getSearchEngineSnapshot()
+        // Non-blocking shared_ptr snapshot (keeps engine alive for this read).
         auto cachedEngine = sm->getCachedSearchEngine();
         auto provider = sm->getModelProvider();
         if (provider) {

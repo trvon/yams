@@ -294,7 +294,7 @@ public:
         snapshot.kgReady = snapshot.lexicalReady && snapshot.postIngestQueued == 0 &&
                            snapshot.postIngestInFlight == 0;
         snapshot.topologyReady = isTopologyRoutingReady(snapshot);
-        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+        if (auto engine = searchEngineManager_.getCachedEngine()) {
             const auto lexical = engine->getSimeonLexicalStatus();
             snapshot.simeonLexicalConfigured = lexical.configured;
             snapshot.simeonLexicalReady = lexical.ready;
@@ -312,7 +312,7 @@ public:
     std::vector<std::string> getTopologyOverlayHashes(std::size_t limit = 64) const {
         return topologyManager_.getOverlayHashes(limit);
     }
-    yams::search::SearchEngine* getCachedSearchEngine() const {
+    std::shared_ptr<yams::search::SearchEngine> getCachedSearchEngine() const {
         return searchEngineManager_.getCachedEngine();
     }
 

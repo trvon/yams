@@ -314,7 +314,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager search engine snapshot d
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager cached search engine access doesn't crash",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
-    auto* engine = sm.getCachedSearchEngine();
+    auto engine = sm.getCachedSearchEngine();
     (void)engine; // May be null, that's OK
     SUCCEED();
 }

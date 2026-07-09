@@ -78,7 +78,7 @@ parseTopologyRouteScoringMode(std::string raw) {
 }
 } // namespace
 
-yams::search::SearchEngine* SearchEngineManager::getCachedEngine() const {
+std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getCachedEngine() const {
     std::shared_lock lock(snapshotMutex_);
     return cachedEngine_;
 }
@@ -204,8 +204,10 @@ void SearchEngineManager::refreshSnapshot() {
         eng = engine_;
     }
 
+    // Publish a shared_ptr snapshot so concurrent diagnostics (metrics polling)
+    // cannot observe a raw dangling engine during rebuild/replace.
     std::unique_lock snapLock(snapshotMutex_);
-    cachedEngine_ = eng.get();
+    cachedEngine_ = std::move(eng);
 }
 
 boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>

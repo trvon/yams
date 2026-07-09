@@ -124,7 +124,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                     bool should_rebuild = !was_loaded;
                     if (!should_rebuild) {
                         try {
-                            if (auto* eng = serviceManager_->getCachedSearchEngine(); eng) {
+                            if (auto eng = serviceManager_->getCachedSearchEngine(); eng) {
                                 auto hc = eng->healthCheck();
                                 if (!hc) {
                                     // Heuristic: if the engine complains about missing embedding

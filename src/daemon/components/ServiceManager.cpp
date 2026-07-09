@@ -3853,7 +3853,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                     if (countRes) {
                         const uint64_t totalDocs = static_cast<uint64_t>(countRes.value());
                         uint64_t recordedDocs = totalDocs;
-                        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+                        if (auto engine = searchEngineManager_.getCachedEngine()) {
                             const auto lexical = engine->getSimeonLexicalStatus();
                             if (lexical.configured && lexical.docCount == 0 && totalDocs > 0) {
                                 spdlog::info(
