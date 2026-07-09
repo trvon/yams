@@ -96,6 +96,7 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/extraction/extraction_util.h>
@@ -3576,9 +3577,48 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
     }
 
+    std::string rerankerBackend = "auto";
+    if (auto policy = ConfigResolver::resolveRerankerBackendPolicy(config_); policy.backend) {
+        rerankerBackend = *policy.backend;
+    }
+    if (const char* env = std::getenv("YAMS_SEARCH_RERANKER_BACKEND"); env && *env) {
+        rerankerBackend = env;
+        std::transform(rerankerBackend.begin(), rerankerBackend.end(), rerankerBackend.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    }
+
     auto modelProvider = loadModelProvider();
-    if (modelProvider && modelProvider->isAvailable()) {
-        std::weak_ptr<IModelProvider> weakProvider = modelProvider;
+    const bool storedAvailable = modelProvider && modelProvider->isAvailable();
+
+    std::shared_ptr<IModelProvider> reranker;
+    if (rerankerBackend == "none" || rerankerBackend == "off") {
+        reranker = nullptr;
+    } else if (rerankerBackend == "onnx") {
+        if (storedAvailable) {
+            reranker = modelProvider;
+        }
+    } else if (rerankerBackend == "simeon") {
+        if (!simeonRerankerProvider_) {
+            simeonRerankerProvider_ = makeSimeonModelProvider();
+        }
+        if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
+            reranker = simeonRerankerProvider_;
+        }
+    } else {
+        if (storedAvailable) {
+            reranker = modelProvider;
+        } else {
+            if (!simeonRerankerProvider_) {
+                simeonRerankerProvider_ = makeSimeonModelProvider();
+            }
+            if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
+                reranker = simeonRerankerProvider_;
+            }
+        }
+    }
+
+    if (reranker) {
+        std::weak_ptr<IModelProvider> weakProvider = reranker;
         engine->setCrossReranker(
             [weakProvider](const std::string& query, const std::vector<std::string>& documents)
                 -> Result<std::vector<float>> {
@@ -3588,10 +3628,11 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
                 }
                 return provider->scoreDocuments(query, documents);
             });
-        spdlog::debug("[{}] model-provider reranker wired to search engine", contextLabel);
+        spdlog::debug("[{}] reranker wired to search engine (backend={})", contextLabel,
+                      rerankerBackend);
     } else {
         engine->setCrossReranker({});
-        spdlog::debug("[{}] model-provider reranker unavailable", contextLabel);
+        spdlog::debug("[{}] reranker unavailable (backend={})", contextLabel, rerankerBackend);
     }
 }
 

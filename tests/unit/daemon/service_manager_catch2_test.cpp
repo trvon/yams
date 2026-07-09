@@ -16,6 +16,7 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
@@ -221,6 +222,40 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     const auto& cfg = sm.getConfig();
     REQUIRE((cfg.dataDir == config_.dataDir));
     REQUIRE((cfg.socketPath == config_.socketPath));
+}
+
+TEST_CASE("ServiceManager topology readiness follows artifact freshness",
+          "[daemon][service_manager][topology]") {
+    yams::search::IndexFreshnessSnapshot snapshot;
+    snapshot.topologyEpoch = 42;
+    snapshot.topologyArtifactsFresh = true;
+
+    CHECK(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyEpoch = 0;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyEpoch = 42;
+    snapshot.topologyArtifactsFresh = false;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyArtifactsFresh = true;
+    snapshot.topologyRebuildRunning = true;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyRebuildRunning = false;
+    snapshot.postIngestQueued = 1;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.postIngestQueued = 0;
+    snapshot.topologyDirtyDocuments = 1;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyDirtyDocuments = 0;
+    snapshot.awaitingDrain = true;
+    snapshot.lexicalReady = false;
+    snapshot.kgReady = false;
+    CHECK(ServiceManager::isTopologyRoutingReady(snapshot));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor before init",
@@ -736,5 +771,6 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK(walSidecarCleared(dbPath));
     }
 }
+
 
 } // namespace yams::daemon::test

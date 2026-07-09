@@ -1070,6 +1070,12 @@ public:
                 searchExecutionContext.freshness.kgReady ? "true" : "false";
             resp.searchStats["topology_ready"] =
                 searchExecutionContext.freshness.topologyReady ? "true" : "false";
+            resp.searchStats["topology_artifacts_fresh"] =
+                searchExecutionContext.freshness.topologyArtifactsFresh ? "true" : "false";
+            resp.searchStats["topology_rebuild_running"] =
+                searchExecutionContext.freshness.topologyRebuildRunning ? "true" : "false";
+            resp.searchStats["topology_dirty_documents"] =
+                std::to_string(searchExecutionContext.freshness.topologyDirtyDocuments);
             resp.searchStats["corpus_warming"] =
                 searchExecutionContext.freshness.corpusWarming() ? "true" : "false";
             resp.searchStats["query_intent"] =

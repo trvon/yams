@@ -253,6 +253,13 @@ public:
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }
+    static bool
+    isTopologyRoutingReady(const yams::search::IndexFreshnessSnapshot& snapshot) noexcept {
+        return snapshot.topologyEpoch > 0 && snapshot.topologyArtifactsFresh &&
+               !snapshot.topologyRebuildRunning && snapshot.topologyDirtyDocuments == 0 &&
+               snapshot.postIngestQueued == 0 && snapshot.postIngestInFlight == 0;
+    }
+
     yams::search::IndexFreshnessSnapshot getIndexFreshnessSnapshot() const {
         yams::search::IndexFreshnessSnapshot snapshot;
         const auto ingest = getIngestMetricsSnapshot();
@@ -274,14 +281,19 @@ public:
         snapshot.lexicalDeltaPublishedDocs = lexicalDelta.publishedDocs;
         snapshot.lexicalDeltaRecentDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             lexicalDelta.recentDocs, std::numeric_limits<std::uint32_t>::max()));
+        const auto topology = topologyManager_.getTelemetrySnapshot();
         snapshot.topologyEpoch = topologyManager_.publishedEpoch();
+        snapshot.topologyArtifactsFresh = topology.artifactsFresh;
+        snapshot.topologyRebuildRunning = topology.rebuildRunning;
+        snapshot.topologyDirtyDocuments = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            topology.dirtyDocumentCount, std::numeric_limits<std::uint32_t>::max()));
         const auto searchSnapshot = searchEngineManager_.getSnapshot();
         snapshot.awaitingDrain = searchSnapshot.state == SearchEngineState::AwaitingDrain;
         snapshot.lexicalReady = searchSnapshot.state == SearchEngineState::Ready;
         snapshot.vectorReady = searchSnapshot.vectorEnabled && snapshot.lexicalReady;
         snapshot.kgReady = snapshot.lexicalReady && snapshot.postIngestQueued == 0 &&
                            snapshot.postIngestInFlight == 0;
-        snapshot.topologyReady = snapshot.kgReady && !snapshot.awaitingDrain;
+        snapshot.topologyReady = isTopologyRoutingReady(snapshot);
         if (auto* engine = searchEngineManager_.getCachedEngine()) {
             const auto lexical = engine->getSimeonLexicalStatus();
             snapshot.simeonLexicalConfigured = lexical.configured;
@@ -712,6 +724,7 @@ private:
     std::shared_ptr<GraphComponent> graphComponent_;
     std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
     std::shared_ptr<IModelProvider> modelProvider_;
+    std::shared_ptr<IModelProvider> simeonRerankerProvider_;
 
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;
