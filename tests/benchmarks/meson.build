@@ -181,6 +181,7 @@ if benchmark_dep.found()
     dependency('yams_search'),
     dependency('yams_vector'),
     dependency('yams_daemon'),
+    dependency('yams_app_services'),
     dependency('spdlog')
   ] + tracy_deps + [benchmark_dep]
 
@@ -234,19 +235,6 @@ if benchmark_dep.found()
 
   alias_target('bench_fusion_experiment', fusion_experiment)
 
-  # Meta-path routing A/B: floor vs Phase P vs edge-weight/seed-sim/reciprocal knobs
-  metapath_ab_bench = executable('metapath_ab_bench',
-    files(
-      'search/metapath_ab_bench.cpp',
-      'search/retrieval_benchmark_support.cpp',
-    ),
-    include_directories: incs,
-    dependencies: retrieval_quality_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
-
-  alias_target('bench_metapath_ab', metapath_ab_bench)
 
   entity_extraction_bench = executable('entity_extraction_bench',
     files('entity_extraction_bench.cpp'),
@@ -312,6 +300,20 @@ if benchmark_dep.found()
 else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif
+
+# KPI 4: repair ability (standalone main, no Google Benchmark dependency)
+repair_ability_bench = executable('repair_ability_bench',
+  files('repair_ability_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    test_deps,
+    dependency('nlohmann_json'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+alias_target('bench_repair_ability', repair_ability_bench)
 
 ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_throughput_bench.cpp'),
   include_directories: incs,

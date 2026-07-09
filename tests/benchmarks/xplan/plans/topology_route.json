@@ -1,0 +1,95 @@
+{
+  "name": "topology_route",
+  "description": "Topology route-scoring ablation (scoring mode / sparse-dense alpha / min route score).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
+      "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist"
+    },
+    "params": {
+      "dataset": "synthetic",
+      "corpus_size": 50,
+      "num_queries": 10,
+      "topk": 10,
+      "topology_mode": "hybrid_assist",
+      "topology_engine": "hdbscan"
+    }
+  },
+  "arms": [
+    {
+      "name": "current_a0.5_m0",
+      "factors": { "route_scoring": "current", "sparse_dense_alpha": 0.5, "min_route_score": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "current",
+        "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "0.5",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0"
+      }
+    },
+    {
+      "name": "seed_a1.0_m0",
+      "factors": { "route_scoring": "seed_coverage", "sparse_dense_alpha": 1.0, "min_route_score": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "seed_coverage",
+        "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "1.0",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0"
+      }
+    },
+    {
+      "name": "dense_a0.0_m0",
+      "factors": { "route_scoring": "current", "sparse_dense_alpha": 0.0, "min_route_score": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "current",
+        "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "0.0",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0"
+      }
+    },
+    {
+      "name": "size_a0.5_m0",
+      "factors": { "route_scoring": "size_weighted", "sparse_dense_alpha": 0.5, "min_route_score": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "size_weighted",
+        "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "0.5",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0"
+      }
+    },
+    {
+      "name": "current_a0.5_m0.25",
+      "factors": { "route_scoring": "current", "sparse_dense_alpha": 0.5, "min_route_score": 0.25 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "current",
+        "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "0.5",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0.25"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": ["mrr", "ndcg_at_k"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "topology_applied",
+      "topology_added_avg",
+      "hybrid_queries"
+    ],
+    "group_by": ["route_scoring"]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "name": "daemon_ops_core",
+  "description": "Combined KPIs 2–5: ingest + retrieval load + repair ability + ops timeline.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 1800,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_DISABLE_VECTORS": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "corpus_size": 30,
+      "doc_size": 512,
+      "poll_interval_ms": 100,
+      "docs_per_client": 15,
+      "search_clients": 2,
+      "fault_docs": 15,
+      "fault_kind": "embed",
+      "load_docs": 20
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline",
+      "factors": { "kg": "on", "vectors": "off" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "ingestion_e2e",
+      "metrics": ["total_duration_ms", "docs_per_s"]
+    },
+    {
+      "worker": "retrieval_load",
+      "metrics": ["search_p50_ms", "qps"]
+    },
+    {
+      "worker": "repair_ability",
+      "metrics": ["faults_injected", "faults_repaired"]
+    },
+    {
+      "worker": "ops_timeline",
+      "metrics": ["idle_fraction", "sample_count"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "docs_per_s",
+      "total_duration_ms",
+      "search_p50_ms",
+      "qps",
+      "faults_repaired",
+      "idle_fraction"
+    ]
+  }
+}

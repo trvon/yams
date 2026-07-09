@@ -17,7 +17,27 @@
                                           Embedding backend (default: simeon)
     YAMS_BENCH_ENABLE_GLINT=1         - Opt into Glint/GLiNER entity extraction on simeon runs
     YAMS_BENCH_ENABLE_ONNX_RERANK=1   - Opt into ONNX reranker on simeon runs
-    YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Enable opt-in topology weak-query routing
+    YAMS_BENCH_TOPOLOGY_MODE=disabled|weak_query_only|hybrid_assist|rerank_only
+                                          Write typed topology routing mode into isolated config
+    YAMS_BENCH_TOPOLOGY_ENGINE=connected|hdbscan|louvain
+                                          Write topology engine into isolated config
+    YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS=N
+                                          SGC smoothing hops before embedding clustering
+    YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS=N
+                                          HDBSCAN min points
+    YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE=N
+                                          HDBSCAN min cluster size
+    YAMS_BENCH_TOPOLOGY_ROUTE_SCORING=current|size_weighted|seed_coverage
+                                          Topology route scoring policy
+    YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA=0..1
+                                          Sparse seed overlap vs dense centroid blend
+    YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE=N.N
+                                          Reject routed clusters below score
+    YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION=1
+                                          Expand only route medoids, not full clusters
+    YAMS_BENCH_TOPOLOGY_SOURCE=vector|fts5|keyphrase|segment_keyphrase|kg|gliner|header|theme
+                                          Benchmark semantic_neighbor seeding source for topology
+    YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Legacy opt-in topology weak-query routing
     YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
     YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
 
@@ -438,7 +458,7 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
         if (std::getline(iss, queryId, '\t') && std::getline(iss, docId, '\t') &&
             std::getline(iss, scoreStr, '\t')) {
             int score = std::stoi(scoreStr);
-            dataset.qrels.emplace(queryId, std::make_pair(docId, score));
+            dataset.qrels.emplace(queryId, yams::bench::BEIRQrel{.docId = docId, .score = score});
         }
     }
     qrelsIn.close();
@@ -485,7 +505,7 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
     std::set<std::string> qrelDocIds;
     for (const auto& [queryId, docScore] : fullDataset.qrels) {
         (void)queryId;
-        qrelDocIds.insert(docScore.first);
+        qrelDocIds.insert(docScore.docId);
     }
     spdlog::info("BEIR dataset has {} documents referenced by qrels", qrelDocIds.size());
 
@@ -519,7 +539,7 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
         auto range = fullDataset.qrels.equal_range(qid);
         bool hasRelevantDoc = false;
         for (auto it = range.first; it != range.second; ++it) {
-            if (includedDocIds.count(it->second.first) > 0) {
+            if (includedDocIds.count(it->second.docId) > 0) {
                 hasRelevantDoc = true;
                 break;
             }
@@ -530,17 +550,24 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
 
         dataset.queries[qid] = query;
         for (auto it = range.first; it != range.second; ++it) {
-            if (includedDocIds.count(it->second.first) > 0) {
+            if (includedDocIds.count(it->second.docId) > 0) {
                 dataset.qrels.emplace(qid, it->second);
             }
         }
         queryCount++;
     }
 
+    for (const auto& entity : fullDataset.kgEntities) {
+        if (includedDocIds.contains(entity.docId)) {
+            dataset.kgEntities.push_back(entity);
+        }
+    }
+
     spdlog::debug(
-        "Limited BEIR dataset to {} docs, {} queries, {} qrels (from {} docs, {} queries)",
+        "Limited BEIR dataset to {} docs, {} queries, {} qrels, {} kg entities (from {} docs, {} "
+        "queries)",
         dataset.documents.size(), dataset.queries.size(), dataset.qrels.size(),
-        fullDataset.documents.size(), fullDataset.queries.size());
+        dataset.kgEntities.size(), fullDataset.documents.size(), fullDataset.queries.size());
 
     return dataset;
 }
@@ -558,6 +585,12 @@ struct QueryDiagnosticsSummary {
     std::uint64_t queryWithRelevantInFinalWindowCount = 0;
     std::uint64_t queryWithGraphAddedRelevantPostFusionCount = 0;
     std::uint64_t queryWithGraphDisplacedRelevantPostFusionCount = 0;
+    std::uint64_t queryWithTopologyAddedRelevantPostFusionCount = 0;
+    std::uint64_t queryWithTopologyAddedRelevantFusionDroppedCount = 0;
+    std::uint64_t queryWithTopologySidecarRelevantPostFusionCount = 0;
+    std::uint64_t queryWithTopologySidecarRelevantFinalCount = 0;
+    std::uint64_t queryWithTopologyNewRelevantPostFusionCount = 0;
+    std::uint64_t queryWithTopologyDuplicateRelevantPostFusionCount = 0;
     std::uint64_t queryWithTopKDuplicateCount = 0;
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
@@ -600,6 +633,21 @@ struct QueryDiagnosticsSummary {
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
     std::vector<double> graphAddedPostFusionSamples;
     std::vector<double> graphDisplacedPostFusionSamples;
+    std::vector<double> topologyRoutedDocsSamples;
+    std::vector<double> topologyRouteBestScoreSamples;
+    std::vector<double> topologyRouteMeanAcceptedScoreSamples;
+    std::vector<double> topologyRouteAcceptedCountSamples;
+    std::vector<double> topologySeedCountSamples;
+    std::vector<double> topologySeedCoverageCountSamples;
+    std::vector<double> topologyCoreCandidateCoverageSamples;
+    std::vector<double> topologyAddedCandidatesSamples;
+    std::vector<double> topologyDuplicateCandidatesSamples;
+    std::vector<double> topologyStaleCandidatesSamples;
+    std::vector<double> topologyAddedPostFusionSamples;
+    std::vector<double> topologyAddedFusionDroppedSamples;
+    std::vector<double> topologySidecarFinalSamples;
+    std::vector<double> topologyNewPostFusionSamples;
+    std::vector<double> topologyDuplicatePostFusionSamples;
     std::vector<double> graphCommunitySupportedDocsSamples;
     std::vector<double> graphCommunityEdgeCountSamples;
     std::vector<double> graphCommunityLargestSizeSamples;
@@ -636,8 +684,26 @@ struct QueryDiagnosticsSummary {
 
 static const std::vector<std::string>& trackedTimingKeys() {
     static const std::vector<std::string> kKeys = {
-        "latency", "embedding", "concepts", "text",     "vector",       "entity_vector",
-        "kg",      "path",      "tag",      "metadata", "multi_vector", "graph_rerank",
+        "latency",
+        "embedding",
+        "concepts",
+        "text",
+        "vector",
+        "entity_vector",
+        "kg",
+        "path",
+        "tag",
+        "metadata",
+        "multi_vector",
+        "graph_rerank",
+        "topology_weak_query",
+        "topology_load",
+        "topology_validate",
+        "topology_request_prep",
+        "topology_route",
+        "topology_cluster_lookup",
+        "topology_doc_lookup",
+        "topology_candidate_insert",
     };
     return kKeys;
 }
@@ -740,6 +806,28 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
                         : "");
     const auto finalWindowSet = splitTabSet(
         searchStats.contains("trace_final_doc_ids") ? searchStats.at("trace_final_doc_ids") : "");
+    const auto topologyAddedSet =
+        splitTabSet(searchStats.contains("topology_weak_query_added_candidate_doc_ids")
+                        ? searchStats.at("topology_weak_query_added_candidate_doc_ids")
+                        : (searchStats.contains("topology_weak_query_added_candidate_hashes")
+                               ? searchStats.at("topology_weak_query_added_candidate_hashes")
+                               : ""));
+    const auto topologySidecarPostFusionSet =
+        splitTabSet(searchStats.contains("topology_sidecar_post_fusion_doc_ids")
+                        ? searchStats.at("topology_sidecar_post_fusion_doc_ids")
+                        : "");
+    const auto topologySidecarFinalSet =
+        splitTabSet(searchStats.contains("topology_sidecar_final_doc_ids")
+                        ? searchStats.at("topology_sidecar_final_doc_ids")
+                        : "");
+    const auto topologyNewPostFusionSet =
+        splitTabSet(searchStats.contains("topology_new_post_fusion_doc_ids")
+                        ? searchStats.at("topology_new_post_fusion_doc_ids")
+                        : "");
+    const auto topologyDuplicatePostFusionSet =
+        splitTabSet(searchStats.contains("topology_duplicate_post_fusion_doc_ids")
+                        ? searchStats.at("topology_duplicate_post_fusion_doc_ids")
+                        : "");
     const std::unordered_set<std::string> returnedTopKSet(returnedDocIds.begin(),
                                                           returnedDocIds.end());
 
@@ -768,6 +856,14 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     if (auto it = searchStats.find("trace_stage_summary_json"); it != searchStats.end()) {
         try {
             stageSummary = json::parse(it->second);
+        } catch (...) {
+        }
+    }
+    json topologySidecarTrace = json::array();
+    if (auto it = searchStats.find("trace_topology_sidecar_candidates_json");
+        it != searchStats.end()) {
+        try {
+            topologySidecarTrace = json::parse(it->second);
         } catch (...) {
         }
     }
@@ -813,6 +909,24 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     };
 
     json relevant = json::array();
+    json topologySidecarCandidates = json::array();
+    if (topologySidecarTrace.is_array()) {
+        for (auto candidate : topologySidecarTrace) {
+            if (!candidate.is_object()) {
+                continue;
+            }
+            const std::string docId = candidate.value("doc_id", "");
+            const bool isRelevant = std::find(relevantDocIds.begin(), relevantDocIds.end(),
+                                              docId) != relevantDocIds.end();
+            candidate["is_relevant"] = isRelevant;
+            candidate["in_pre_fusion"] = preSet.contains(docId);
+            candidate["in_post_fusion"] = postSet.contains(docId);
+            candidate["in_graphless_post_fusion"] = graphlessPostSet.contains(docId);
+            candidate["in_final_window"] = finalWindowSet.contains(docId);
+            candidate["in_returned_topk"] = returnedTopKSet.contains(docId);
+            topologySidecarCandidates.push_back(candidate);
+        }
+    }
     bool anyPre = false;
     bool anyPost = false;
     bool anyGraphlessPost = false;
@@ -820,6 +934,12 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     bool anyReturnedTopK = false;
     json graphAddedRelevant = json::array();
     json graphDisplacedRelevant = json::array();
+    json topologyAddedRelevantPostFusion = json::array();
+    json topologyAddedRelevantDroppedByFusion = json::array();
+    json topologySidecarRelevantPostFusion = json::array();
+    json topologySidecarRelevantFinal = json::array();
+    json topologyNewRelevantPostFusion = json::array();
+    json topologyDuplicateRelevantPostFusion = json::array();
     json stageRelevantPresence = json::object();
 
     if (stageSummary.is_object()) {
@@ -871,6 +991,25 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         if (inGraphlessPost && !inPost) {
             graphDisplacedRelevant.push_back(docId);
         }
+        const bool topologyAddedCandidate = topologyAddedSet.contains(docId);
+        if (topologyAddedCandidate && inPost) {
+            topologyAddedRelevantPostFusion.push_back(docId);
+        }
+        if (topologyAddedCandidate && !inPost) {
+            topologyAddedRelevantDroppedByFusion.push_back(docId);
+        }
+        if (topologySidecarPostFusionSet.contains(docId)) {
+            topologySidecarRelevantPostFusion.push_back(docId);
+        }
+        if (topologySidecarFinalSet.contains(docId)) {
+            topologySidecarRelevantFinal.push_back(docId);
+        }
+        if (topologyNewPostFusionSet.contains(docId)) {
+            topologyNewRelevantPostFusion.push_back(docId);
+        }
+        if (topologyDuplicatePostFusionSet.contains(docId)) {
+            topologyDuplicateRelevantPostFusion.push_back(docId);
+        }
 
         json componentSources = json::array();
         if (componentHits.is_object()) {
@@ -898,6 +1037,7 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             {"in_graphless_post_fusion", inGraphlessPost},
             {"in_final_window", inFinalWindow},
             {"in_returned_topk", inReturnedTopK},
+            {"topology_added_candidate", topologyAddedCandidate},
             {"component_top_hits", componentSources},
             {"component_top_hit_details", findComponentHit(componentHits, docId)},
         };
@@ -954,6 +1094,21 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         {"graph_displaced_relevant_post_fusion_count", graphDisplacedRelevant.size()},
         {"graph_added_relevant_post_fusion_doc_ids", graphAddedRelevant},
         {"graph_displaced_relevant_post_fusion_doc_ids", graphDisplacedRelevant},
+        {"topology_added_relevant_post_fusion_count", topologyAddedRelevantPostFusion.size()},
+        {"topology_added_relevant_fusion_dropped_count",
+         topologyAddedRelevantDroppedByFusion.size()},
+        {"topology_added_relevant_post_fusion_doc_ids", topologyAddedRelevantPostFusion},
+        {"topology_added_relevant_fusion_dropped_doc_ids", topologyAddedRelevantDroppedByFusion},
+        {"topology_sidecar_relevant_post_fusion_count", topologySidecarRelevantPostFusion.size()},
+        {"topology_sidecar_relevant_final_count", topologySidecarRelevantFinal.size()},
+        {"topology_new_relevant_post_fusion_count", topologyNewRelevantPostFusion.size()},
+        {"topology_duplicate_relevant_post_fusion_count",
+         topologyDuplicateRelevantPostFusion.size()},
+        {"topology_sidecar_relevant_post_fusion_doc_ids", topologySidecarRelevantPostFusion},
+        {"topology_sidecar_relevant_final_doc_ids", topologySidecarRelevantFinal},
+        {"topology_new_relevant_post_fusion_doc_ids", topologyNewRelevantPostFusion},
+        {"topology_duplicate_relevant_post_fusion_doc_ids", topologyDuplicateRelevantPostFusion},
+        {"topology_sidecar_candidates", topologySidecarCandidates},
         {"stage_relevant_presence", stageRelevantPresence},
         {"miss_stage", missStage},
         {"relevant_docs", relevant},
@@ -1124,6 +1279,24 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         if (relevantDecisionTrace.value("graph_displaced_relevant_post_fusion_count", 0) > 0) {
             summary.queryWithGraphDisplacedRelevantPostFusionCount++;
         }
+        if (relevantDecisionTrace.value("topology_added_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithTopologyAddedRelevantPostFusionCount++;
+        }
+        if (relevantDecisionTrace.value("topology_added_relevant_fusion_dropped_count", 0) > 0) {
+            summary.queryWithTopologyAddedRelevantFusionDroppedCount++;
+        }
+        if (relevantDecisionTrace.value("topology_sidecar_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithTopologySidecarRelevantPostFusionCount++;
+        }
+        if (relevantDecisionTrace.value("topology_sidecar_relevant_final_count", 0) > 0) {
+            summary.queryWithTopologySidecarRelevantFinalCount++;
+        }
+        if (relevantDecisionTrace.value("topology_new_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithTopologyNewRelevantPostFusionCount++;
+        }
+        if (relevantDecisionTrace.value("topology_duplicate_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithTopologyDuplicateRelevantPostFusionCount++;
+        }
         if (firstRelevantRank < 0) {
             const std::string missStage = relevantDecisionTrace.value("miss_stage", "unknown");
             if (missStage == "missing_pre_fusion") {
@@ -1233,6 +1406,51 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     }
     if (auto v = parseDoubleStat(searchStats, "fusion_dropped_rate")) {
         summary.fusionDroppedRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_weak_query_routed_docs")) {
+        summary.topologyRoutedDocsSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_route_best_score")) {
+        summary.topologyRouteBestScoreSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_route_mean_accepted_score")) {
+        summary.topologyRouteMeanAcceptedScoreSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_route_accepted_count")) {
+        summary.topologyRouteAcceptedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_seed_count")) {
+        summary.topologySeedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_seed_coverage_count")) {
+        summary.topologySeedCoverageCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_core_candidate_coverage")) {
+        summary.topologyCoreCandidateCoverageSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_weak_query_added_candidates")) {
+        summary.topologyAddedCandidatesSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_weak_query_duplicate_candidates")) {
+        summary.topologyDuplicateCandidatesSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_weak_query_stale_candidates")) {
+        summary.topologyStaleCandidatesSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_added_candidate_post_fusion_count")) {
+        summary.topologyAddedPostFusionSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_added_candidate_fusion_dropped_count")) {
+        summary.topologyAddedFusionDroppedSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_sidecar_final_count")) {
+        summary.topologySidecarFinalSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_new_post_fusion_count")) {
+        summary.topologyNewPostFusionSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "topology_duplicate_post_fusion_count")) {
+        summary.topologyDuplicatePostFusionSamples.push_back(*v);
     }
     if (auto v = parseDoubleStat(searchStats, "anchored_pre_fusion_count")) {
         summary.anchoredPreFusionCountSamples.push_back(*v);
@@ -1548,6 +1766,18 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          summary.queryWithGraphAddedRelevantPostFusionCount},
         {"query_with_graph_displaced_relevant_post_fusion_count",
          summary.queryWithGraphDisplacedRelevantPostFusionCount},
+        {"query_with_topology_added_relevant_post_fusion_count",
+         summary.queryWithTopologyAddedRelevantPostFusionCount},
+        {"query_with_topology_added_relevant_fusion_dropped_count",
+         summary.queryWithTopologyAddedRelevantFusionDroppedCount},
+        {"query_with_topology_sidecar_relevant_post_fusion_count",
+         summary.queryWithTopologySidecarRelevantPostFusionCount},
+        {"query_with_topology_sidecar_relevant_final_count",
+         summary.queryWithTopologySidecarRelevantFinalCount},
+        {"query_with_topology_new_relevant_post_fusion_count",
+         summary.queryWithTopologyNewRelevantPostFusionCount},
+        {"query_with_topology_duplicate_relevant_post_fusion_count",
+         summary.queryWithTopologyDuplicateRelevantPostFusionCount},
         {"query_with_topk_duplicate_count", summary.queryWithTopKDuplicateCount},
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
@@ -1577,6 +1807,20 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.queryWithGraphAddedRelevantPostFusionCount) / queryCount},
         {"query_with_graph_displaced_relevant_post_fusion_rate",
          static_cast<double>(summary.queryWithGraphDisplacedRelevantPostFusionCount) / queryCount},
+        {"query_with_topology_added_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithTopologyAddedRelevantPostFusionCount) / queryCount},
+        {"query_with_topology_added_relevant_fusion_dropped_rate",
+         static_cast<double>(summary.queryWithTopologyAddedRelevantFusionDroppedCount) /
+             queryCount},
+        {"query_with_topology_sidecar_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithTopologySidecarRelevantPostFusionCount) / queryCount},
+        {"query_with_topology_sidecar_relevant_final_rate",
+         static_cast<double>(summary.queryWithTopologySidecarRelevantFinalCount) / queryCount},
+        {"query_with_topology_new_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithTopologyNewRelevantPostFusionCount) / queryCount},
+        {"query_with_topology_duplicate_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithTopologyDuplicateRelevantPostFusionCount) /
+             queryCount},
         {"query_with_topk_duplicate_rate",
          static_cast<double>(summary.queryWithTopKDuplicateCount) / queryCount},
         {"degraded_query_rate", static_cast<double>(summary.degradedQueryCount) / queryCount},
@@ -1641,6 +1885,31 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"graph_added_post_fusion_count", summarizeSamples(summary.graphAddedPostFusionSamples)},
         {"graph_displaced_post_fusion_count",
          summarizeSamples(summary.graphDisplacedPostFusionSamples)},
+        {"topology_weak_query_routed_docs", summarizeSamples(summary.topologyRoutedDocsSamples)},
+        {"topology_route_best_score", summarizeSamples(summary.topologyRouteBestScoreSamples)},
+        {"topology_route_mean_accepted_score",
+         summarizeSamples(summary.topologyRouteMeanAcceptedScoreSamples)},
+        {"topology_route_accepted_count",
+         summarizeSamples(summary.topologyRouteAcceptedCountSamples)},
+        {"topology_seed_count", summarizeSamples(summary.topologySeedCountSamples)},
+        {"topology_seed_coverage_count",
+         summarizeSamples(summary.topologySeedCoverageCountSamples)},
+        {"topology_core_candidate_coverage",
+         summarizeSamples(summary.topologyCoreCandidateCoverageSamples)},
+        {"topology_weak_query_added_candidates",
+         summarizeSamples(summary.topologyAddedCandidatesSamples)},
+        {"topology_weak_query_duplicate_candidates",
+         summarizeSamples(summary.topologyDuplicateCandidatesSamples)},
+        {"topology_weak_query_stale_candidates",
+         summarizeSamples(summary.topologyStaleCandidatesSamples)},
+        {"topology_added_candidate_post_fusion_count",
+         summarizeSamples(summary.topologyAddedPostFusionSamples)},
+        {"topology_added_candidate_fusion_dropped_count",
+         summarizeSamples(summary.topologyAddedFusionDroppedSamples)},
+        {"topology_sidecar_final_count", summarizeSamples(summary.topologySidecarFinalSamples)},
+        {"topology_new_post_fusion_count", summarizeSamples(summary.topologyNewPostFusionSamples)},
+        {"topology_duplicate_post_fusion_count",
+         summarizeSamples(summary.topologyDuplicatePostFusionSamples)},
         {"graph_community_supported_docs",
          summarizeSamples(summary.graphCommunitySupportedDocsSamples)},
         {"graph_community_edge_count", summarizeSamples(summary.graphCommunityEdgeCountSamples)},
@@ -1997,6 +2266,30 @@ static int parseIntEnvOrDefault(const char* key, int defaultValue, int minValue,
         return std::clamp(std::stoi(raw), minValue, maxValue);
     } catch (...) {
         return clampedDefault;
+    }
+}
+
+static std::size_t parseSizeEnvOrDefault(const char* key, std::size_t defaultValue) {
+    const char* raw = std::getenv(key);
+    if (!(raw && *raw)) {
+        return defaultValue;
+    }
+    try {
+        return static_cast<std::size_t>(std::max<long long>(0, std::stoll(raw)));
+    } catch (...) {
+        return defaultValue;
+    }
+}
+
+static float parseFloatEnvOrDefault(const char* key, float defaultValue) {
+    const char* raw = std::getenv(key);
+    if (!(raw && *raw)) {
+        return defaultValue;
+    }
+    try {
+        return std::stof(raw);
+    } catch (...) {
+        return defaultValue;
     }
 }
 
@@ -4850,9 +5143,9 @@ struct BenchFixture {
         spdlog::info("Seeded synthetic community KG edges for {} documents", docNames.size());
     }
 
-    void seedBenchmarkSemanticNeighbors() {
+    bool seedBenchmarkSemanticNeighbors() {
         if (!benchmarkSemanticNeighborSeedingEnabled()) {
-            return;
+            return false;
         }
 
         auto* daemon = harness ? harness->daemon() : nullptr;
@@ -4860,9 +5153,8 @@ struct BenchFixture {
         auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
         auto kgStore = metadataRepo ? metadataRepo->getKnowledgeGraphStore() : nullptr;
         auto vectorDb = serviceManager ? serviceManager->getVectorDatabase() : nullptr;
-        if (!metadataRepo || !kgStore || !vectorDb) {
-            throw std::runtime_error(
-                "Semantic benchmark seeding requires metadata, KG, and vector stores");
+        if (!metadataRepo || !kgStore) {
+            throw std::runtime_error("Semantic benchmark seeding requires metadata and KG stores");
         }
 
         auto parseSizeEnv = [](const char* primary, const char* fallback,
@@ -4907,6 +5199,35 @@ struct BenchFixture {
             return defaultValue;
         };
 
+        std::string topologySource = "vector";
+        if (const char* raw = std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE"); raw && *raw) {
+            topologySource = raw;
+            std::transform(topologySource.begin(), topologySource.end(), topologySource.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        }
+        if (topologySource == "lexical" || topologySource == "bm25") {
+            topologySource = "fts5";
+        }
+        if (topologySource == "graph") {
+            topologySource = "kg";
+        }
+        if (topologySource == "title" || topologySource == "heading") {
+            topologySource = "header";
+        }
+        if (topologySource == "segment-keyphrase" || topologySource == "segmentkeyphrase") {
+            topologySource = "segment_keyphrase";
+        }
+        if (topologySource != "vector" && topologySource != "fts5" &&
+            topologySource != "keyphrase" && topologySource != "segment_keyphrase" &&
+            topologySource != "kg" && topologySource != "gliner" && topologySource != "header" &&
+            topologySource != "theme") {
+            throw std::runtime_error("YAMS_BENCH_TOPOLOGY_SOURCE must be vector, fts5, "
+                                     "keyphrase, segment_keyphrase, kg, gliner, header, or theme");
+        }
+        if (topologySource == "vector" && !vectorDb) {
+            throw std::runtime_error("Vector topology-source seeding requires vector store");
+        }
+
         const std::size_t semanticTopK =
             parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", "YAMS_GRAPH_SEMANTIC_TOPK", 6);
         const float semanticThreshold = parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
@@ -4916,6 +5237,51 @@ struct BenchFixture {
         const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&
                                          useBEIR && static_cast<bool>(beirCorpus);
         const std::size_t qrelTopK = parseSizeEnv("YAMS_BENCH_SEED_QREL_TOPK", nullptr, 4);
+        const std::size_t kgFeatureLimit =
+            parseSizeEnv("YAMS_BENCH_SEED_KG_FEATURE_LIMIT", nullptr, 512);
+        const std::size_t keyphraseFeatureLimit =
+            parseSizeEnv("YAMS_BENCH_KEYPHRASE_FEATURE_LIMIT", nullptr, 16);
+        const std::size_t keyphraseMaxDocumentFrequency =
+            parseSizeEnv("YAMS_BENCH_KEYPHRASE_MAX_DF", nullptr, 64);
+        const std::size_t segmentTokenBudget =
+            parseSizeEnv("YAMS_BENCH_SEGMENT_TOKENS", nullptr, 192);
+        const std::size_t segmentTokenOverlap =
+            parseSizeEnv("YAMS_BENCH_SEGMENT_OVERLAP", nullptr, 32);
+        const std::size_t segmentFeatureLimit =
+            parseSizeEnv("YAMS_BENCH_SEGMENT_FEATURE_LIMIT", nullptr, 12);
+        const std::size_t segmentMaxDocumentFrequency =
+            parseSizeEnv("YAMS_BENCH_SEGMENT_MAX_DF", nullptr, keyphraseMaxDocumentFrequency);
+        const std::size_t segmentMaxEdgesPerFeature =
+            parseSizeEnv("YAMS_BENCH_SEGMENT_FEATURE_EDGE_BUDGET", nullptr, 64);
+        const std::size_t topologyMaxComponentDocs =
+            parseSizeEnv("YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS", nullptr, 64);
+
+        auto validateAndLogTopologyCertificate =
+            [&](const yams::bench::BenchmarkTopologyConstructionCertificate& cert) {
+                auto checkedCert = cert;
+                checkedCert.gates.maxComponentDocs = topologyMaxComponentDocs;
+                const auto validation =
+                    yams::bench::validateTopologyConstructionCertificate(checkedCert);
+                if (g_debugOut) {
+                    DebugLogEntry certificateEntry;
+                    certificateEntry.searchType = "benchmark_setup";
+                    certificateEntry.extraFields = {
+                        {"event", "topology_construction_certificate"},
+                        {"topology_source", topologySource},
+                        {"certificate", yams::bench::topologyConstructionCertificateToJson(
+                                            checkedCert, validation)},
+                    };
+                    debugLogWriteJsonLine(certificateEntry);
+                }
+                if (!validation.ok) {
+                    const std::string firstError =
+                        validation.errors.empty()
+                            ? "unknown topology construction certificate error"
+                            : validation.errors.front();
+                    throw std::runtime_error(
+                        "Benchmark topology construction certificate failed: " + firstError);
+                }
+            };
 
         std::vector<std::string> documentPaths;
         if (useBEIR && beirCorpus) {
@@ -4933,12 +5299,56 @@ struct BenchFixture {
         struct DocSeedInfo {
             std::string hash;
             std::string benchmarkDocId;
+            std::string text;
+            std::string headerText;
+            std::string themeText;
             std::vector<float> embedding;
+            std::int64_t documentId = 0;
             std::int64_t nodeId = 0;
         };
 
         std::vector<DocSeedInfo> docs;
         docs.reserve(documentPaths.size());
+
+        auto trimCopy = [](std::string value) {
+            const auto first = std::find_if_not(
+                value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch) != 0; });
+            const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) {
+                                  return std::isspace(ch) != 0;
+                              }).base();
+            if (first >= last) {
+                return std::string{};
+            }
+            return std::string(first, last);
+        };
+        auto deriveHeaderText = [&](std::string_view benchmarkDocId, std::string_view body,
+                                    std::string_view fallbackName) {
+            if (useBEIR && beirCorpus && !benchmarkDocId.empty()) {
+                if (auto it = beirCorpus->dataset.documents.find(std::string(benchmarkDocId));
+                    it != beirCorpus->dataset.documents.end()) {
+                    auto title = trimCopy(it->second.title);
+                    if (!title.empty()) {
+                        return title;
+                    }
+                }
+            }
+            std::istringstream lines{std::string(body)};
+            std::string line;
+            while (std::getline(lines, line)) {
+                line = trimCopy(line);
+                if (line.empty()) {
+                    continue;
+                }
+                while (!line.empty() && line.front() == '#') {
+                    line.erase(line.begin());
+                }
+                line = trimCopy(line);
+                if (!line.empty()) {
+                    return line;
+                }
+            }
+            return trimCopy(std::string(fallbackName));
+        };
 
         for (const auto& docPath : documentPaths) {
             auto docResult = metadataRepo->findDocumentByExactPath(docPath);
@@ -4951,25 +5361,68 @@ struct BenchFixture {
             }
 
             const auto& doc = *docResult.value();
-            const auto vectors = vectorDb->getVectorsByDocument(doc.sha256Hash);
-            if (vectors.empty()) {
-                continue;
+            std::vector<float> embedding;
+            if (topologySource == "vector") {
+                const auto vectors = vectorDb->getVectorsByDocument(doc.sha256Hash);
+                if (vectors.empty()) {
+                    continue;
+                }
+
+                const auto documentLevel = std::find_if(
+                    vectors.begin(), vectors.end(), [](const yams::vector::VectorRecord& record) {
+                        return record.level == yams::vector::EmbeddingLevel::DOCUMENT &&
+                               !record.embedding.empty();
+                    });
+                const auto chosen =
+                    (documentLevel != vectors.end() && !documentLevel->embedding.empty())
+                        ? documentLevel
+                        : std::find_if(vectors.begin(), vectors.end(),
+                                       [](const yams::vector::VectorRecord& record) {
+                                           return !record.embedding.empty();
+                                       });
+                if (chosen == vectors.end() || chosen->embedding.empty()) {
+                    continue;
+                }
+                embedding = chosen->embedding;
             }
 
-            const auto documentLevel = std::find_if(
-                vectors.begin(), vectors.end(), [](const yams::vector::VectorRecord& record) {
-                    return record.level == yams::vector::EmbeddingLevel::DOCUMENT &&
-                           !record.embedding.empty();
-                });
-            const auto chosen =
-                (documentLevel != vectors.end() && !documentLevel->embedding.empty())
-                    ? documentLevel
-                    : std::find_if(vectors.begin(), vectors.end(),
-                                   [](const yams::vector::VectorRecord& record) {
-                                       return !record.embedding.empty();
-                                   });
-            if (chosen == vectors.end() || chosen->embedding.empty()) {
-                continue;
+            std::string text;
+            std::string headerText;
+            std::string themeText;
+            if (topologySource == "fts5" || topologySource == "keyphrase" ||
+                topologySource == "segment_keyphrase" || topologySource == "header" ||
+                topologySource == "theme") {
+                auto contentResult = metadataRepo->getContent(doc.id);
+                if (contentResult && contentResult.value().has_value()) {
+                    text = contentResult.value()->contentText;
+                }
+                if (text.empty()) {
+                    std::ifstream in(docPath, std::ios::binary);
+                    if (in) {
+                        std::ostringstream buffer;
+                        buffer << in.rdbuf();
+                        text = buffer.str();
+                    }
+                }
+                if (text.empty()) {
+                    continue;
+                }
+                headerText =
+                    deriveHeaderText(fs::path(docPath).stem().string(), text, doc.fileName);
+                themeText = headerText;
+                const std::size_t snippetSize = std::min<std::size_t>(text.size(), 512);
+                if (snippetSize > 0) {
+                    if (!themeText.empty()) {
+                        themeText.push_back('\n');
+                    }
+                    themeText.append(text.data(), snippetSize);
+                }
+                if (topologySource == "header" && headerText.empty()) {
+                    continue;
+                }
+                if (topologySource == "theme" && themeText.empty()) {
+                    continue;
+                }
             }
 
             auto nodeIdResult = kgStore->ensureDocumentNode(doc.sha256Hash, doc.fileName);
@@ -4977,43 +5430,254 @@ struct BenchFixture {
                 throw std::runtime_error("Failed to ensure benchmark semantic KG node: " +
                                          nodeIdResult.error().message);
             }
-            docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), chosen->embedding,
-                            nodeIdResult.value()});
+            docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), text, headerText,
+                            themeText, embedding, doc.id, nodeIdResult.value()});
         }
 
         if (docs.size() < 2) {
-            spdlog::warn("Skipping semantic benchmark seeding: only {} documents had embeddings",
-                         docs.size());
-            return;
+            spdlog::warn("Skipping {} topology-source benchmark seeding: only {} usable documents",
+                         topologySource, docs.size());
+            return false;
+        }
+
+        if ((topologySource == "kg" || topologySource == "gliner") && useBEIR && beirCorpus &&
+            !beirCorpus->dataset.kgEntities.empty()) {
+            std::unordered_map<std::string, const DocSeedInfo*> docByBenchmarkId;
+            docByBenchmarkId.reserve(docs.size());
+            for (const auto& doc : docs) {
+                if (!doc.benchmarkDocId.empty()) {
+                    docByBenchmarkId.emplace(doc.benchmarkDocId, &doc);
+                }
+            }
+
+            std::vector<metadata::DocEntity> docEntities;
+            std::vector<metadata::KGEdge> manifestEdges;
+            std::size_t manifestEntitiesSeeded = 0;
+            for (const auto& entity : beirCorpus->dataset.kgEntities) {
+                const auto docIt = docByBenchmarkId.find(entity.docId);
+                if (docIt == docByBenchmarkId.end()) {
+                    continue;
+                }
+                const auto* doc = docIt->second;
+                metadata::KGNode entityNode;
+                entityNode.nodeKey = "bench:entity:" + entity.entityKey;
+                entityNode.label = entity.label.empty() ? entity.entityKey : entity.label;
+                entityNode.type = entity.type.empty() ? "benchmark_entity" : entity.type;
+                entityNode.properties = json{
+                    {"source", "benchmark_manifest"},
+                    {"doc_id", entity.docId},
+                    {"entity_key",
+                     entity.entityKey}}.dump();
+                auto entityNodeResult = kgStore->upsertNode(entityNode);
+                if (!entityNodeResult) {
+                    throw std::runtime_error(
+                        "Failed to seed benchmark KG entity node for topology source: " +
+                        entityNodeResult.error().message);
+                }
+
+                const float weight = std::clamp(entity.weight, 0.05F, 1.0F);
+                metadata::DocEntity docEntity;
+                docEntity.documentId = doc->documentId;
+                docEntity.entityText = entity.label.empty() ? entity.entityKey : entity.label;
+                docEntity.nodeId = entityNodeResult.value();
+                docEntity.confidence = weight;
+                docEntity.extractor =
+                    entity.extractor.empty() ? "benchmark_manifest" : entity.extractor;
+                docEntities.push_back(docEntity);
+
+                metadata::KGEdge edge;
+                edge.srcNodeId = entityNodeResult.value();
+                edge.dstNodeId = doc->nodeId;
+                edge.relation = entity.relation.empty() || entity.relation == "semantic_neighbor"
+                                    ? "manifest_entity_of"
+                                    : entity.relation;
+                edge.weight = weight;
+                edge.properties = json{{"source", "benchmark_manifest"},
+                                       {"doc_id", entity.docId},
+                                       {"entity_key", entity.entityKey}}
+                                      .dump();
+                manifestEdges.push_back(edge);
+                ++manifestEntitiesSeeded;
+            }
+
+            if (!docEntities.empty()) {
+                auto addDocEntitiesResult = kgStore->addDocEntities(docEntities);
+                if (!addDocEntitiesResult) {
+                    throw std::runtime_error(
+                        "Failed to seed benchmark KG doc entities for topology source: " +
+                        addDocEntitiesResult.error().message);
+                }
+            }
+            if (!manifestEdges.empty()) {
+                auto addEdgesResult = kgStore->addEdgesUnique(manifestEdges);
+                if (!addEdgesResult) {
+                    throw std::runtime_error(
+                        "Failed to seed benchmark KG relation edges for topology source: " +
+                        addEdgesResult.error().message);
+                }
+            }
+            spdlog::info("Seeded {} manifest KG entity annotations and {} relation edges for "
+                         "topology-source graph features",
+                         manifestEntitiesSeeded, manifestEdges.size());
         }
 
         std::unordered_map<std::string, std::unordered_map<std::string, float>> neighborScores;
         neighborScores.reserve(docs.size());
 
-        yams::vector::VectorSearchParams params;
-        params.k = semanticTopK + 4;
-        params.similarity_threshold = semanticThreshold;
+        if (topologySource == "vector") {
+            yams::vector::VectorSearchParams params;
+            params.k = semanticTopK + 4;
+            params.similarity_threshold = semanticThreshold;
 
-        for (const auto& doc : docs) {
-            const auto neighbors = vectorDb->searchSimilar(doc.embedding, params);
-            auto& scores = neighborScores[doc.hash];
-            for (const auto& rec : neighbors) {
-                if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT) {
-                    continue;
+            for (const auto& doc : docs) {
+                const auto neighbors = vectorDb->searchSimilar(doc.embedding, params);
+                auto& scores = neighborScores[doc.hash];
+                for (const auto& rec : neighbors) {
+                    if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT) {
+                        continue;
+                    }
+                    if (rec.document_hash.empty() || rec.document_hash == doc.hash) {
+                        continue;
+                    }
+                    if (rec.relevance_score < semanticThreshold) {
+                        continue;
+                    }
+                    auto [it, inserted] = scores.emplace(rec.document_hash, rec.relevance_score);
+                    if (!inserted) {
+                        it->second = std::max(it->second, rec.relevance_score);
+                    }
+                    if (scores.size() >= semanticTopK) {
+                        break;
+                    }
                 }
-                if (rec.document_hash.empty() || rec.document_hash == doc.hash) {
-                    continue;
+            }
+        } else if (topologySource == "keyphrase" || topologySource == "segment_keyphrase") {
+            std::vector<yams::bench::KeyphraseTopologyDocument> keyphraseDocs;
+            keyphraseDocs.reserve(docs.size());
+            for (const auto& doc : docs) {
+                keyphraseDocs.push_back({.documentHash = doc.hash, .text = doc.text});
+            }
+            yams::bench::BenchmarkTopologyConstructionCertificate certificate;
+            std::vector<yams::bench::LexicalTopologyNeighbor> keyphraseNeighbors;
+            if (topologySource == "segment_keyphrase") {
+                keyphraseNeighbors = yams::bench::buildSegmentKeyphraseTopologyNeighbors(
+                    keyphraseDocs, semanticTopK, semanticThreshold, segmentTokenBudget,
+                    segmentTokenOverlap, segmentFeatureLimit, segmentMaxDocumentFrequency,
+                    topologyMaxComponentDocs, segmentMaxEdgesPerFeature, true, &certificate);
+            } else {
+                keyphraseNeighbors = yams::bench::buildKeyphraseTopologyNeighbors(
+                    keyphraseDocs, semanticTopK, semanticThreshold, keyphraseFeatureLimit,
+                    keyphraseMaxDocumentFrequency, true, &certificate);
+            }
+            validateAndLogTopologyCertificate(certificate);
+            for (const auto& neighbor : keyphraseNeighbors) {
+                neighborScores[neighbor.sourceHash][neighbor.targetHash] = neighbor.score;
+            }
+        } else if (topologySource == "fts5" || topologySource == "header" ||
+                   topologySource == "theme") {
+            std::vector<yams::bench::LexicalTopologyDocument> lexicalDocs;
+            lexicalDocs.reserve(docs.size());
+            for (const auto& doc : docs) {
+                std::string_view sourceText = doc.text;
+                if (topologySource == "header") {
+                    sourceText = doc.headerText;
+                } else if (topologySource == "theme") {
+                    sourceText = doc.themeText;
                 }
-                if (rec.relevance_score < semanticThreshold) {
-                    continue;
+                lexicalDocs.push_back({.documentHash = doc.hash, .text = std::string(sourceText)});
+            }
+            yams::bench::BenchmarkTopologyConstructionCertificate certificate;
+            const auto lexicalNeighbors = yams::bench::buildLexicalTopologyNeighbors(
+                lexicalDocs, semanticTopK, semanticThreshold, true, &certificate);
+            validateAndLogTopologyCertificate(certificate);
+            for (const auto& neighbor : lexicalNeighbors) {
+                neighborScores[neighbor.sourceHash][neighbor.targetHash] = neighbor.score;
+            }
+        } else {
+            const bool glinerOnly = topologySource == "gliner";
+            std::vector<yams::bench::GraphTopologyDocument> graphDocs;
+            graphDocs.reserve(docs.size());
+            std::size_t docsWithGraphFeatures = 0;
+            std::size_t docEntitiesScanned = 0;
+            std::size_t graphEdgesScanned = 0;
+            for (const auto& doc : docs) {
+                std::unordered_map<std::int64_t, float> featureByNode;
+
+                auto entityResult =
+                    kgStore->getDocEntitiesForDocument(doc.documentId, kgFeatureLimit, 0);
+                if (!entityResult) {
+                    throw std::runtime_error(
+                        "Failed to read KG doc entities for topology source: " +
+                        entityResult.error().message);
                 }
-                auto [it, inserted] = scores.emplace(rec.document_hash, rec.relevance_score);
-                if (!inserted) {
-                    it->second = std::max(it->second, rec.relevance_score);
+                docEntitiesScanned += entityResult.value().size();
+                for (const auto& entity : entityResult.value()) {
+                    if (glinerOnly) {
+                        const auto extractor = entity.extractor.value_or(std::string{});
+                        if (extractor.find("gliner") == std::string::npos &&
+                            extractor.find("title_nl") == std::string::npos) {
+                            continue;
+                        }
+                    }
+                    if (!entity.nodeId.has_value() || entity.nodeId.value() <= 0 ||
+                        entity.nodeId.value() == doc.nodeId) {
+                        continue;
+                    }
+                    const float weight = std::clamp(entity.confidence.value_or(1.0F), 0.05F, 1.0F);
+                    auto [it, inserted] = featureByNode.emplace(entity.nodeId.value(), weight);
+                    if (!inserted) {
+                        it->second = std::max(it->second, weight);
+                    }
                 }
-                if (scores.size() >= semanticTopK) {
-                    break;
+
+                auto edgeResult =
+                    kgStore->getEdgesBidirectional(doc.nodeId, std::nullopt, kgFeatureLimit);
+                if (!edgeResult) {
+                    throw std::runtime_error("Failed to read KG edges for topology source: " +
+                                             edgeResult.error().message);
                 }
+                graphEdgesScanned += edgeResult.value().size();
+                for (const auto& edge : edgeResult.value()) {
+                    if (glinerOnly && edge.relation != "title_mentions" &&
+                        edge.relation != "primary_topic_of" && edge.relation != "mentioned_in") {
+                        continue;
+                    }
+                    if (edge.relation == "semantic_neighbor") {
+                        continue;
+                    }
+                    const std::int64_t otherNodeId =
+                        edge.srcNodeId == doc.nodeId ? edge.dstNodeId : edge.srcNodeId;
+                    if (otherNodeId <= 0 || otherNodeId == doc.nodeId) {
+                        continue;
+                    }
+                    const float weight = std::clamp(edge.weight, 0.05F, 1.0F);
+                    auto [it, inserted] = featureByNode.emplace(otherNodeId, weight);
+                    if (!inserted) {
+                        it->second = std::max(it->second, weight);
+                    }
+                }
+
+                yams::bench::GraphTopologyDocument graphDoc;
+                graphDoc.documentHash = doc.hash;
+                graphDoc.relatedNodes.reserve(featureByNode.size());
+                for (const auto& [nodeId, weight] : featureByNode) {
+                    graphDoc.relatedNodes.push_back({.nodeId = nodeId, .weight = weight});
+                }
+                if (!graphDoc.relatedNodes.empty()) {
+                    ++docsWithGraphFeatures;
+                }
+                graphDocs.push_back(graphDoc);
+            }
+            spdlog::info("{} topology-source scanned {} doc-entity rows and {} doc-adjacent KG "
+                         "edges; {} / {} documents had graph features",
+                         topologySource, docEntitiesScanned, graphEdgesScanned,
+                         docsWithGraphFeatures, graphDocs.size());
+            yams::bench::BenchmarkTopologyConstructionCertificate certificate;
+            const auto graphNeighbors = yams::bench::buildGraphTopologyNeighbors(
+                graphDocs, semanticTopK, semanticThreshold, true, &certificate);
+            validateAndLogTopologyCertificate(certificate);
+            for (const auto& neighbor : graphNeighbors) {
+                neighborScores[neighbor.sourceHash][neighbor.targetHash] = neighbor.score;
             }
         }
 
@@ -5076,11 +5740,10 @@ struct BenchFixture {
                 const auto queryId = it->first;
                 std::vector<std::string> docsForQuery;
                 for (; it != beirCorpus->dataset.qrels.end() && it->first == queryId; ++it) {
-                    const auto& [docId, score] = it->second;
-                    if (score <= 0 || !hashByBenchmarkDocId.contains(docId)) {
+                    if (it->second.score <= 0 || !hashByBenchmarkDocId.contains(it->second.docId)) {
                         continue;
                     }
-                    docsForQuery.push_back(docId);
+                    docsForQuery.push_back(it->second.docId);
                 }
 
                 std::sort(docsForQuery.begin(), docsForQuery.end());
@@ -5153,10 +5816,16 @@ struct BenchFixture {
         }
 
         if (edges.empty()) {
-            spdlog::warn("Semantic benchmark seeding produced no reciprocal neighbors (docs={}, "
-                         "topk={}, threshold={:.3f})",
-                         docs.size(), semanticTopK, semanticThreshold);
-            return;
+            spdlog::warn("{} topology-source benchmark seeding produced no reciprocal neighbors "
+                         "(docs={}, topk={}, threshold={:.3f})",
+                         topologySource, docs.size(), semanticTopK, semanticThreshold);
+            return false;
+        }
+
+        auto deleteExistingResult = kgStore->deleteEdgesByRelation("semantic_neighbor");
+        if (!deleteExistingResult) {
+            throw std::runtime_error("Failed to clear pre-existing benchmark semantic KG edges: " +
+                                     deleteExistingResult.error().message);
         }
 
         auto addEdgesResult = kgStore->addEdgesUnique(edges);
@@ -5165,9 +5834,11 @@ struct BenchFixture {
                                      addEdgesResult.error().message);
         }
 
-        spdlog::info("Seeded {} embedding-neighbor pairs and {} qrel-neighbor pairs ({} directed "
-                     "edges) for benchmark corpus",
-                     reciprocalPairs, qrelPairs, edges.size());
+        spdlog::info("Seeded {} {} topology-source neighbor pairs and {} qrel-neighbor pairs ({} "
+                     "directed edges) for benchmark corpus after clearing {} prior semantic edges",
+                     reciprocalPairs, topologySource, qrelPairs, edges.size(),
+                     deleteExistingResult.value());
+        return true;
     }
 
     void setup() {
@@ -5184,6 +5855,13 @@ struct BenchFixture {
                 startEntry.extraFields = {
                     {"event", "setup"},
                     {"debug_file", env_debug_file},
+                    {"topology_source", std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
+                                            ? std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
+                                            : "vector"},
+                    {"seed_semantic_neighbors",
+                     std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
+                         ? std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
+                         : "0"},
                 };
                 debugLogWriteJsonLine(startEntry);
             } else {
@@ -5559,6 +6237,18 @@ struct BenchFixture {
         if (!vectorsDisabled && !forceMockEmbeddings) {
             bool resetPluginTrustFile = harnessOptions.dataDir.has_value();
             bool useIsolatedBenchmarkConfig = true;
+            const char* topologyModeEnv = std::getenv("YAMS_BENCH_TOPOLOGY_MODE");
+            const char* topologyEngineEnv = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE");
+            const bool writeTopologyEngineConfig =
+                (topologyEngineEnv && *topologyEngineEnv) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE") != nullptr);
+            const bool writeTopologyRouteConfig =
+                (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr);
 
             // Select a plugin root that satisfies the plugins the benchmark enables.
             // Preferring the first ONNX-capable tree can silently disable entity extraction
@@ -5799,6 +6489,86 @@ struct BenchFixture {
                         configOut << "embedding_dim = 768\n\n";
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    }
+                    if ((topologyModeEnv && *topologyModeEnv) || writeTopologyRouteConfig) {
+                        configOut << "\n[search.topology]\n";
+                        if (topologyModeEnv && *topologyModeEnv) {
+                            configOut << "mode = \"" << topologyModeEnv << "\"\n";
+                        }
+                        configOut << "max_clusters = "
+                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", 2)
+                                  << "\n";
+                        configOut << "max_docs = "
+                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
+                                  << "\n";
+                        configOut << "max_docs_per_cluster = "
+                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
+                                                           0)
+                                  << "\n";
+                        if (const char* scoring = std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING");
+                            scoring && *scoring) {
+                            configOut << "route_scoring = \"" << scoring << "\"\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) {
+                            configOut << "sparse_dense_alpha = "
+                                      << parseFloatEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA", 0.5F)
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) {
+                            configOut << "min_route_score = "
+                                      << parseFloatEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE", 0.0F)
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) {
+                            configOut << "medoid_only_expansion = "
+                                      << (envTruthy(std::getenv(
+                                              "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION"))
+                                              ? "true"
+                                              : "false")
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS") !=
+                            nullptr) {
+                            configOut << "sidecar_fusion_rescue_slots = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS", 0)
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE") !=
+                            nullptr) {
+                            configOut
+                                << "sidecar_fusion_rescue_min_score = "
+                                << parseFloatEnvOrDefault(
+                                       "YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE", 0.0F)
+                                << "\n";
+                        }
+                    }
+                    if (writeTopologyEngineConfig) {
+                        configOut << "\n[topology]\n";
+                        if (topologyEngineEnv && *topologyEngineEnv) {
+                            configOut << "engine = \"" << topologyEngineEnv << "\"\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS") != nullptr) {
+                            configOut << "hdbscan_min_points = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS", 0)
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE") !=
+                            nullptr) {
+                            configOut << "hdbscan_min_cluster_size = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE", 0)
+                                      << "\n";
+                        }
+                        if (std::getenv("YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS") != nullptr) {
+                            configOut << "feature_smoothing_hops = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS", 0)
+                                      << "\n";
+                        }
                     }
                     configOut.close();
                     harnessOptions.configPath = configPath;
@@ -6063,6 +6833,12 @@ struct BenchFixture {
                 if (const char* env = std::getenv("YAMS_BENCH_PROGRESS_TIMEOUT")) {
                     progressTimeoutSec = std::chrono::seconds(std::stoi(env));
                 }
+                double ingestMinFraction = 1.0;
+                if (const char* env = std::getenv("YAMS_BENCH_INGEST_MIN_FRACTION")) {
+                    ingestMinFraction = std::clamp(std::stod(env), 0.0, 1.0);
+                }
+                const auto ingestTargetDocs = static_cast<uint64_t>(
+                    std::ceil(static_cast<double>(corpusSize) * ingestMinFraction));
                 spdlog::info("Waiting for ingestion to complete (expecting {} documents, "
                              "progress timeout {}s)...",
                              corpusSize, progressTimeoutSec.count());
@@ -6093,16 +6869,15 @@ struct BenchFixture {
                 uint64_t lastExtractionInFlight = 0;
 
                 auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
-                    const bool targetReached =
-                        (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
-                        (lastDocCount >= static_cast<uint64_t>(corpusSize));
+                    const bool targetReached = (lastIndexedDocCount >= ingestTargetDocs) ||
+                                               (lastDocCount >= ingestTargetDocs);
                     const bool allQueuesDrained =
                         (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
                          lastSymbolInFlight == 0 && lastEntityInFlight == 0 &&
                          lastEmbedQueued == 0 && lastEmbedInFlight == 0);
                     const bool extractionOrPostDone =
-                        (lastContentExtracted >= static_cast<uint64_t>(corpusSize)) ||
-                        (lastPostProcessed >= static_cast<uint64_t>(corpusSize));
+                        (lastContentExtracted >= ingestTargetDocs) ||
+                        (lastPostProcessed >= ingestTargetDocs);
                     return targetReached && allQueuesDrained && extractionOrPostDone;
                 };
 
@@ -6153,16 +6928,14 @@ struct BenchFixture {
                             const uint64_t embedQueued = get("embed_svc_queued");
                             const uint64_t embedInFlight = get("embed_in_flight");
 
-                            const bool targetReached =
-                                (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
-                                (docsTotal >= static_cast<uint64_t>(corpusSize));
+                            const bool targetReached = (docsIndexed >= ingestTargetDocs) ||
+                                                       (docsTotal >= ingestTargetDocs);
                             const bool allQueuesDrained =
                                 (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
                                  kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
                                  embedQueued == 0 && embedInFlight == 0);
                             const bool extractionOrPostDone =
-                                (extracted >= static_cast<uint64_t>(corpusSize)) ||
-                                (postProcessed >= static_cast<uint64_t>(corpusSize));
+                                (extracted >= ingestTargetDocs) || (postProcessed >= ingestTargetDocs);
 
                             if (targetReached && allQueuesDrained && extractionOrPostDone) {
                                 spdlog::warn(
@@ -7363,7 +8136,41 @@ struct BenchFixture {
         }
 
         seedSyntheticCommunityEdges();
-        seedBenchmarkSemanticNeighbors();
+        const bool seededBenchmarkTopology = seedBenchmarkSemanticNeighbors();
+
+        if (benchmarkSemanticNeighborSeedingEnabled()) {
+            if (!seededBenchmarkTopology) {
+                throw std::runtime_error(
+                    "Benchmark topology source seeding did not produce semantic_neighbor edges");
+            }
+            auto* daemon = harness ? harness->daemon() : nullptr;
+            auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+            if (!serviceManager) {
+                throw std::runtime_error("Topology source benchmark requires ServiceManager");
+            }
+            std::string topologyEngine = "connected";
+            if (const char* raw = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE"); raw && *raw) {
+                topologyEngine = raw;
+            }
+            auto rebuildResult = serviceManager->getTopologyManager().rebuildArtifacts(
+                "benchmark_topology_source_seed", false, {}, topologyEngine);
+            if (!rebuildResult) {
+                throw std::runtime_error("Failed to rebuild topology after benchmark source "
+                                         "seeding: " +
+                                         rebuildResult.error().message);
+            }
+            if (rebuildResult.value().skipped || !rebuildResult.value().stored) {
+                throw std::runtime_error(
+                    "Topology source benchmark rebuild did not publish a stored snapshot");
+            }
+            spdlog::info("Rebuilt topology after source seeding: source={} clusters={} "
+                         "memberships={} snapshot={}",
+                         std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
+                             ? std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
+                             : "vector",
+                         rebuildResult.value().clustersBuilt,
+                         rebuildResult.value().membershipsBuilt, rebuildResult.value().snapshotId);
+        }
 
         // Post-ingest status/stats snapshot + sanity searches.
         // Goal: distinguish "no docs" vs "docs but query returns empty".

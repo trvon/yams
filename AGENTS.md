@@ -103,6 +103,104 @@ contract in the prompt; the graph here is rich: function-level nodes with
 - DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
 - See `docs/developer/testing.md` for the full suite-shaping policy.
 
+## Benchmarks & Experiments (xplan)
+
+Daemon KPI / ablation work uses **xplan**. Organized numbers:
+`docs/benchmarks/README.md`. Per-run detail: gitignored
+`build/benchmarks/<plan>/<stamp>/REPORT.md` (+ `ablation.md`, `metrics.csv`).
+
+**Do not add new multi-arm ablation shell scripts.**
+
+### Entry points
+
+```bash
+python3 tests/benchmarks/xplan/runner.py self-test
+python3 tests/benchmarks/xplan/runner.py list-plans
+python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
+python3 tests/benchmarks/xplan/runner.py report build/benchmarks/<plan>/<stamp>
+python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
+```
+
+| Surface | Path |
+|---------|------|
+| Numbers + refs | `docs/benchmarks/README.md` |
+| Harness | `tests/benchmarks/xplan/README.md` |
+| Plans / workers | `tests/benchmarks/xplan/plans/`, `…/workers/` |
+| Run artifacts | `build/benchmarks/**` (gitignored) |
+| Retrieval handoff | `docs/prompts/PROMPT-yams-retrieval-benchmark-handoff.md` |
+
+### Workers
+
+| Worker | Measures |
+|--------|----------|
+| `ingestion_e2e` | KPI 2 ingest pipeline (`ingestion_e2e_bench`) |
+| `retrieval_load` | KPI 3 concurrent search (multi_client `[mixed]`) |
+| `repair_ability` | KPI 4 repair (`repair_ability_bench`) |
+| `ops_timeline` | KPI 5 idle/drain (multi_client baseline + idle probe) |
+| `retrieval_quality` | Quality + topology (wraps `retrieval_quality_bench`) |
+| `external_script` | Escape hatch only; prefer first-class workers |
+
+**Ablation is first-class** (`workers/ablation.py`): plan factors → env. Search
+components use `YAMS_SEARCH_*_WEIGHT=0` (+ `YAMS_ENABLE_ENV_OVERRIDES=1`) so
+fanout skips zero-weight sources. Ingest: `YAMS_BENCH_DISABLE_KG` /
+`YAMS_DISABLE_VECTORS` / GLiNER. Also: topology mode, rerank, expansion presets.
+
+`retrieval_quality` expansion presets: `full64`, `medoid64`, `cap8`, `cap2`,
+`rerank_only`. Non-vector sources with seeding need a valid
+`topology_construction_certificate` in `debug.jsonl`.
+
+### Core plans
+
+| Plan | Role |
+|------|------|
+| `search_component_ablation` | KPI 1: hybrid component one-factor-off |
+| `subsystem_overhead` | KPI 1 compact quality ablation set |
+| `ingest_pipeline` | KPI 2: kg/vectors/gliner (+ `minimal`) |
+| `retrieval_load` | KPI 3: load + search_type/vectors ablation |
+| `repair_ability` | KPI 4: fault_kind ablation |
+| `ops_timeline` | KPI 5: idle map + vectors/load-size |
+| `daemon_ops_core` | Combined 2–5 chain |
+| `topology_cluster` | Clustering engines |
+| `topology_route` | Route scoring |
+| `topology_expansion` | Expansion/fusion arms |
+| `topology_source` | Source × expansion + certs |
+| `topology_core_ab` | classic vs topology_core |
+| `simeon_rerank` | Rerank off / replace / blend |
+
+### Search / topology benchmarking rules
+
+- Prefer **xplan plans** over `tests/benchmarks/scripts/*` for matrices.
+- Scripts under `tests/benchmarks/scripts/` are **wrappers or profilers** only
+  (see that directory’s README). Heavy expansion logic is **not** in shell.
+- Prefer release quality binary: `build/release/tests/benchmarks/retrieval_quality_bench`
+  (`meson compile -C build/release -j4 retrieval_quality_bench` / alias
+  `bench_retrieval_quality`).
+- Multi-client workers need a Catch2-enabled build (some release configs skip it).
+- Harness-only knobs: `YAMS_BENCH_*` overlays OK. Do **not** grow product
+  `YAMS_*` tunables for matrix axes.
+- Topology claims require `debug.jsonl` markers (admitted/applied/certificate);
+  do not claim wins without counters.
+- Artifact contract: `metrics.json`, `summary.md`, per-arm `validation.json`,
+  and for quality runs `stdout.log` / `debug.jsonl`.
+
+### Example topology A/B (pass this to other agents)
+
+```bash
+# Classic vs topology_core (smoke)
+python3 tests/benchmarks/xplan/runner.py run topology_core_ab --build-dir build/release
+
+# Expansion arms only
+python3 tests/benchmarks/xplan/runner.py run topology_expansion --build-dir build/release
+
+# Source × expansion (certs enforced for fts5/kg when seed=1)
+python3 tests/benchmarks/xplan/runner.py run topology_source --build-dir build/release
+```
+
+Legacy wrappers still work but only delegate to xplan:
+`topology_expansion_fusion_ablation.sh`, `topology_source_ablation.sh`,
+`topology_cluster_ablation.sh`, `topology_route_scoring_ablation.sh`,
+`ingestion_pipeline_ablation.sh`.
+
 ## Patterns To Reuse (High Signal)
 
 - `TuneAdvisor`: static inline atomics, relaxed reads for advisory knobs.

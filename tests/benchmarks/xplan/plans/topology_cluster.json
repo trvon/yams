@@ -1,0 +1,80 @@
+{
+  "name": "topology_cluster",
+  "description": "Topology clustering engine ablation via retrieval_quality_bench (connected/HDBSCAN/Louvain).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1"
+    },
+    "params": {
+      "dataset": "synthetic",
+      "corpus_size": 50,
+      "num_queries": 10,
+      "topk": 10,
+      "topology_mode": "hybrid_assist"
+    }
+  },
+  "arms": [
+    {
+      "name": "connected",
+      "factors": { "topology_engine": "connected", "feature_smoothing_hops": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
+      }
+    },
+    {
+      "name": "hdbscan",
+      "factors": { "topology_engine": "hdbscan", "feature_smoothing_hops": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
+        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
+      }
+    },
+    {
+      "name": "hdbscan_sgc1",
+      "factors": { "topology_engine": "hdbscan", "feature_smoothing_hops": 1 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
+        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "1"
+      }
+    },
+    {
+      "name": "louvain",
+      "factors": { "topology_engine": "louvain", "feature_smoothing_hops": 0 },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "louvain",
+        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": ["mrr", "ndcg_at_k", "map"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "recall_at_k",
+      "precision_at_k",
+      "topology_applied",
+      "topology_added_avg",
+      "hybrid_queries"
+    ],
+    "group_by": ["topology_engine"]
+  }
+}

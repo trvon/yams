@@ -2,6 +2,7 @@
 
 #include "tests/benchmarks/beir_loader.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -41,6 +42,129 @@ struct CorpusGenerator {
     void generateDocuments(int count);
     std::vector<TestQuery> generateQueries(int numQueries);
 };
+
+struct LexicalTopologyDocument {
+    std::string documentHash;
+    std::string text;
+};
+
+struct LexicalTopologyNeighbor {
+    std::string sourceHash;
+    std::string targetHash;
+    float score{0.0F};
+};
+
+struct GraphTopologyFeature {
+    std::int64_t nodeId = 0;
+    float weight = 0.0F;
+};
+
+struct GraphTopologyDocument {
+    std::string documentHash;
+    std::vector<GraphTopologyFeature> relatedNodes;
+};
+
+struct KeyphraseTopologyDocument {
+    std::string documentHash;
+    std::string text;
+};
+
+enum class BenchmarkTopologySignalKind {
+    LexicalCohesion,
+    LexicalDisruption,
+    Keyphrase,
+    Entity,
+    Ontology,
+    Structure,
+    Embedding,
+};
+
+std::string topologySignalKindName(BenchmarkTopologySignalKind kind);
+
+struct BenchmarkTopologyGateConfig {
+    float minSignalWeight = 1.0F;
+    std::size_t maxSignalDocumentFrequency = 64;
+    float minNeighborScore = 0.0F;
+    std::size_t maxComponentDocs = 64;
+};
+
+struct BenchmarkTopologySignal {
+    std::string documentHash;
+    std::string featureId;
+    BenchmarkTopologySignalKind kind = BenchmarkTopologySignalKind::LexicalCohesion;
+    float weight = 0.0F;
+    std::size_t documentFrequency = 0;
+};
+
+struct BenchmarkTopologyNeighborObservation {
+    std::string sourceHash;
+    std::string targetHash;
+    std::string sourceSegmentId;
+    std::string targetSegmentId;
+    float score = 0.0F;
+};
+
+struct BenchmarkTopologyEdgeWitness {
+    std::string sourceHash;
+    std::string targetHash;
+    std::string sourceSegmentId;
+    std::string targetSegmentId;
+    float score = 0.0F;
+    std::string featureId;
+    BenchmarkTopologySignalKind kind = BenchmarkTopologySignalKind::LexicalCohesion;
+    float sourceWeight = 0.0F;
+    float targetWeight = 0.0F;
+    std::size_t documentFrequency = 0;
+    bool reciprocal = false;
+    bool signalGatePassed = false;
+};
+
+struct BenchmarkTopologyComponentSummary {
+    std::string rootHash;
+    std::vector<std::string> memberHashes;
+};
+
+struct BenchmarkTopologyConstructionCertificate {
+    std::string sourceName;
+    BenchmarkTopologyGateConfig gates;
+    std::vector<BenchmarkTopologySignal> signals;
+    std::vector<BenchmarkTopologyNeighborObservation> observations;
+    std::vector<BenchmarkTopologyEdgeWitness> edgeWitnesses;
+    std::vector<BenchmarkTopologyComponentSummary> components;
+};
+
+struct BenchmarkTopologyValidationResult {
+    bool ok = true;
+    std::vector<std::string> errors;
+};
+
+BenchmarkTopologyValidationResult validateTopologyConstructionCertificate(
+    const BenchmarkTopologyConstructionCertificate& certificate);
+nlohmann::json
+topologyConstructionCertificateToJson(const BenchmarkTopologyConstructionCertificate& certificate,
+                                      const BenchmarkTopologyValidationResult& validation = {});
+
+std::vector<LexicalTopologyNeighbor>
+buildLexicalTopologyNeighbors(const std::vector<LexicalTopologyDocument>& documents,
+                              std::size_t topK, float minScore, bool reciprocalOnly = true,
+                              BenchmarkTopologyConstructionCertificate* certificate = nullptr);
+
+std::vector<LexicalTopologyNeighbor>
+buildGraphTopologyNeighbors(const std::vector<GraphTopologyDocument>& documents, std::size_t topK,
+                            float minScore, bool reciprocalOnly = true,
+                            BenchmarkTopologyConstructionCertificate* certificate = nullptr);
+
+std::vector<LexicalTopologyNeighbor> buildKeyphraseTopologyNeighbors(
+    const std::vector<KeyphraseTopologyDocument>& documents, std::size_t topK, float minScore,
+    std::size_t maxFeaturesPerDocument = 16, std::size_t maxFeatureDocumentFrequency = 64,
+    bool reciprocalOnly = true, BenchmarkTopologyConstructionCertificate* certificate = nullptr);
+
+std::vector<LexicalTopologyNeighbor> buildSegmentKeyphraseTopologyNeighbors(
+    const std::vector<KeyphraseTopologyDocument>& documents, std::size_t topK, float minScore,
+    std::size_t segmentTokenBudget = 192, std::size_t segmentTokenOverlap = 32,
+    std::size_t maxFeaturesPerSegment = 12, std::size_t maxFeatureDocumentFrequency = 64,
+    std::size_t maxComponentDocs = 64, std::size_t maxEdgesPerFeature = 64,
+    bool reciprocalOnly = true, BenchmarkTopologyConstructionCertificate* certificate = nullptr);
 
 struct BEIRCorpusLoader {
     BEIRDataset dataset;

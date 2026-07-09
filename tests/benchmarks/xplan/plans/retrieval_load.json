@@ -1,0 +1,67 @@
+{
+  "name": "retrieval_load",
+  "description": "Concurrent search load with ablation arms: search_type and vectors on/off (one-factor-off for optimization).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 900,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "docs_per_client": 20,
+      "doc_size": 1024,
+      "warmup_docs": 16,
+      "search_ratio": 0.7,
+      "mixed_reader_ops": 40,
+      "search_clients": 4
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline_hybrid",
+      "factors": { "search_type": "hybrid", "vectors": "off", "search_clients": 4 }
+    },
+    {
+      "name": "keyword_only",
+      "factors": { "search_type": "keyword", "vectors": "off", "search_clients": 4 }
+    },
+    {
+      "name": "semantic_only",
+      "factors": { "search_type": "semantic", "vectors": "on", "search_clients": 4 }
+    },
+    {
+      "name": "hybrid_with_vectors",
+      "factors": { "search_type": "hybrid", "vectors": "on", "search_clients": 4 }
+    },
+    {
+      "name": "clients_1_hybrid",
+      "factors": { "search_type": "hybrid", "vectors": "off", "search_clients": 1 }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_load",
+      "metrics": ["search_p50_ms", "search_p95_ms", "search_rejected", "qps"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["search_p50_ms", "qps"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "search_p50_ms",
+      "search_p95_ms",
+      "search_rejected",
+      "qps",
+      "total_searches",
+      "total_failures"
+    ],
+    "group_by": ["search_type", "vectors"]
+  }
+}
