@@ -165,7 +165,7 @@ struct TunedParams {
     // anchored evidence" and override the score-gap guard. 0.0 = any doc counts (default).
     float rerankAnchoredMinRelativeScore = 0.0f;
     bool enableReranking = true;
-    bool rerankReplaceScores = true;
+    bool rerankReplaceScores = false;
     size_t fusionCandidateLimit = 0;
     bool enableMultiVectorQuery = false;
     size_t multiVectorMaxPhrases = 3;
@@ -228,15 +228,6 @@ struct TunedParams {
     size_t graphMaxHops = 1;
     size_t graphMaxPaths = 32;
     float graphHopDecay = 0.90f;
-    bool enableMetaPathRouting = false;
-    size_t metaPathSeedK = 8;
-    size_t metaPathHopLimit = 16;
-    float metaPathBoostAlpha = 0.3f;
-    float metaPathWeightSem = 1.0f;
-    float metaPathWeightCall = 0.5f;
-    float metaPathWeightDef = 0.5f;
-    float metaPathWeightEntity = 0.3f;
-    float metaPathWeightBlob = 0.2f;
 
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
@@ -293,15 +284,6 @@ struct TunedParams {
         config.graphMaxHops = graphMaxHops;
         config.graphMaxPaths = graphMaxPaths;
         config.graphHopDecay = graphHopDecay;
-        config.enableMetaPathRouting = enableMetaPathRouting;
-        config.metaPathSeedK = metaPathSeedK;
-        config.metaPathHopLimit = metaPathHopLimit;
-        config.metaPathBoostAlpha = metaPathBoostAlpha;
-        config.metaPathWeightSem = metaPathWeightSem;
-        config.metaPathWeightCall = metaPathWeightCall;
-        config.metaPathWeightDef = metaPathWeightDef;
-        config.metaPathWeightEntity = metaPathWeightEntity;
-        config.metaPathWeightBlob = metaPathWeightBlob;
         config.vectorMaxResults = vectorMaxResults;
         config.bm25NormDivisor = bm25NormDivisor;
         config.textMaxResults = textMaxResults;

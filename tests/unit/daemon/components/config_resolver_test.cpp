@@ -233,58 +233,6 @@ preserve_sentences = 0
     CHECK_FALSE(policy.config.preserve_sentences);
 }
 
-TEST_CASE("ConfigResolver::resolveMetaPathRoutingPolicy reads [search.meta_path]",
-          "[daemon][components][config][metapath][catch2]") {
-    ConfigResolverFixture fx;
-
-    SECTION("defaults when section absent") {
-        auto configPath = fx.writeToml("config.toml", "[search]\n");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-
-        auto policy = ConfigResolver::resolveMetaPathRoutingPolicy();
-        CHECK_FALSE(policy.enable.has_value());
-        CHECK_FALSE(policy.seedK.has_value());
-        CHECK_FALSE(policy.boostAlpha.has_value());
-    }
-
-    SECTION("reads all keys") {
-        auto configPath = fx.writeToml("config.toml",
-                                       R"TOML(
-[search.meta_path]
-enable = true
-seed_k = 16
-hop_limit = 32
-boost_alpha = 0.25
-weight_sem = 0.9
-weight_call = 0.6
-weight_def = 0.4
-weight_entity = 0.2
-use_edge_weights = true
-min_seed_similarity = 0.35
-reciprocal_only = true
-seed_similarity = 0.05
-)TOML");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-
-        auto policy = ConfigResolver::resolveMetaPathRoutingPolicy();
-        REQUIRE(policy.enable.has_value());
-        CHECK(*policy.enable);
-        CHECK(policy.seedK == std::size_t{16});
-        CHECK(policy.hopLimit == std::size_t{32});
-        CHECK(policy.boostAlpha == Catch::Approx(0.25f));
-        CHECK(policy.weightSem == Catch::Approx(0.9f));
-        CHECK(policy.weightCall == Catch::Approx(0.6f));
-        CHECK(policy.weightDef == Catch::Approx(0.4f));
-        CHECK(policy.weightEntity == Catch::Approx(0.2f));
-        REQUIRE(policy.useEdgeWeights.has_value());
-        CHECK(*policy.useEdgeWeights);
-        CHECK(policy.minSeedSimilarity == Catch::Approx(0.35f));
-        REQUIRE(policy.reciprocalOnly.has_value());
-        CHECK(*policy.reciprocalOnly);
-        CHECK(policy.seedSimilarity == Catch::Approx(0.05f));
-    }
-}
-
 TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
           "[daemon][components][config][catch2]") {
     SECTION("truthy values") {
