@@ -451,6 +451,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.graphNeighborReciprocalOnly) {
             opts.config.topologyGraphNeighborReciprocalOnly = *tp.graphNeighborReciprocalOnly;
         }
+        if (tp.graphVectorSeedProbe) {
+            opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;
+        }
         if (tp.topologySidecarFusionRescueSlots) {
             opts.config.topologySidecarFusionRescueSlots = *tp.topologySidecarFusionRescueSlots;
         }

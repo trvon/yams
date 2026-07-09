@@ -42,6 +42,8 @@
     YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Legacy opt-in topology weak-query routing
     YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
     YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
+    YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE=N
+                                          GraphNeighbors seed ANN k (0=off/product default; opt-in e.g. 16)
 
   Tuning for faster ingestion (recommended for large corpora):
     YAMS_POST_EMBED_CONCURRENT=12     - Parallel embedding workers (default: 4-8)

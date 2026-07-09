@@ -207,6 +207,8 @@ struct SearchEngineConfig {
     float topologyGraphNeighborMinScore = 0.25f;
     /// Prefer reciprocal semantic_neighbor edges when expanding graph neighbors.
     bool topologyGraphNeighborReciprocalOnly = true;
+    /// GraphNeighbors seed ANN k. 0 = off (product default); opt-in for experiments.
+    size_t topologyGraphVectorSeedProbe = 0;
 
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;

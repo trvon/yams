@@ -17,6 +17,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
+#include <yams/search/search_topology_stage.h>
 #include <yams/search/topology_routing_session.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_metadata_store.h>
@@ -751,6 +752,44 @@ TEST_CASE("Topology routing without a reranker keeps flat expansion at perCluste
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     REQUIRE(session.artifactAdmitted);
     CHECK((session.addedCandidates >= session.acceptedRoutes));
+}
+
+TEST_CASE("mergeTopologySeedHashes keeps Tier-1 first and caps vector seeds",
+          "[unit][search][topology][graph_neighbors]") {
+    const auto merged =
+        mergeTopologySeedHashes({"t1", "t2", "t1"}, {"v1", "t2", "v2", "v3"}, /*maxVectorSeeds=*/2);
+    REQUIRE(merged.size() == 4);
+    CHECK(merged[0] == "t1");
+    CHECK(merged[1] == "t2");
+    CHECK(merged[2] == "v1");
+    CHECK(merged[3] == "v2");
+
+    const auto none =
+        mergeTopologySeedHashes({"t1", "t2"}, {"v1", "v2"}, /*maxVectorSeeds=*/0);
+    REQUIRE(none.size() == 2);
+    CHECK(none[0] == "t1");
+    CHECK(none[1] == "t2");
+
+    const auto emptyVec =
+        mergeTopologySeedHashes({"t1"}, {}, /*maxVectorSeeds=*/16);
+    REQUIRE(emptyVec.size() == 1);
+    CHECK(emptyVec[0] == "t1");
+}
+
+TEST_CASE("fillTopologySkipReason preserves session reason and fills product defaults",
+          "[unit][search][topology]") {
+    using Mode = SearchEngineConfig::TopologyRoutingMode;
+    std::string reason = "graph_medoid_neighbors";
+    fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 0);
+    CHECK(reason == "graph_medoid_neighbors");
+
+    reason.clear();
+    fillTopologySkipReason(reason, Mode::Disabled, false, false, true, false, false, 0);
+    CHECK(reason == "disabled");
+
+    reason.clear();
+    fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 2);
+    CHECK(reason == "no_added_candidates");
 }
 
 TEST_CASE("rankGraphNeighborCandidates ranks multi-seed hits and filters score/reciprocal",

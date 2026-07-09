@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 #include "concept_boost_internal.h"
+#include "cross_rerank_internal.h"
 #include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -25,6 +26,7 @@
 #include <yams/search/search_observability.h>
 #include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
+#include <yams/search/search_topology_stage.h>
 #include <yams/search/search_tuner.h>
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/topology_routing_session.h>
@@ -941,40 +943,6 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
     return (pos == yams::app::services::kMemmemNpos) ? std::string_view::npos : pos;
 }
 
-void appendRerankTextPart(std::string& out, const std::string& part) {
-    if (part.empty()) {
-        return;
-    }
-    if (!out.empty()) {
-        out.push_back('\n');
-    }
-    out += part;
-}
-
-std::string
-buildCrossRerankText(const SearchResult& result,
-                     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-                     size_t textLimit) {
-    std::string text;
-    appendRerankTextPart(text, result.document.fileName);
-    appendRerankTextPart(text, result.document.filePath);
-    appendRerankTextPart(text, result.snippet);
-    if (metadataRepo && result.document.id > 0 && text.size() < textLimit) {
-        auto contentResult = metadataRepo->getContent(result.document.id);
-        if (contentResult && contentResult.value()) {
-            const auto& content = contentResult.value()->contentText;
-            if (!content.empty()) {
-                const size_t remaining =
-                    textLimit > text.size() ? textLimit - text.size() : size_t{0};
-                appendRerankTextPart(text, content.substr(0, remaining));
-            }
-        }
-    }
-    if (text.size() > textLimit) {
-        text.resize(textLimit);
-    }
-    return text;
-}
 
 } // namespace
 
@@ -1795,8 +1763,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     std::vector<ComponentResult> allComponentResults;
     const auto topologyRoutingMode = resolveTopologyRoutingMode(workingConfig);
-    const bool topologyRoutingEnabled =
-        topologyRoutingMode != SearchEngineConfig::TopologyRoutingMode::Disabled;
     std::unordered_set<std::string> topologyMedoidHashes;
     bool topologyWeakQueryRoutingApplied = false;
     bool topologyWeakQueryNarrowApplied = false;
@@ -1959,30 +1925,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // post-fusion steps are not blocked by adaptive lexical skipping.
             awaitEmbedding();
 
-            TopologyRoutingSessionRequest topologyRequest;
-            topologyRequest.query = query;
-            topologyRequest.seedDocumentHashes.reserve(tier1Candidates.size());
-            for (const auto& hash : tier1Candidates) {
-                topologyRequest.seedDocumentHashes.push_back(hash);
-            }
-            topologyRequest.existingCandidateHashes = tier2Candidates;
-            if (queryEmbedding.has_value()) {
-                topologyRequest.queryEmbedding = queryEmbedding.value();
-            }
-            topologyRequest.routingMode = topologyRoutingMode;
-            topologyRequest.routeScoringMode = workingConfig.topologyRouteScoringMode;
-            topologyRequest.expansionSource = workingConfig.topologyExpansionSource;
-            topologyRequest.weakTier1Query = weakTier1Query;
-            topologyRequest.maxClusters = workingConfig.topologyMaxClusters;
-            topologyRequest.maxDocs = workingConfig.topologyMaxDocs;
-            topologyRequest.perClusterLimit = workingConfig.topologyMaxDocsPerCluster;
-            topologyRequest.sparseDenseAlpha = workingConfig.topologySparseDenseAlpha;
-            topologyRequest.minRouteScore = workingConfig.topologyMinRouteScore;
-            topologyRequest.medoidOnlyExpansion = workingConfig.topologyMedoidOnlyExpansion;
-            topologyRequest.graphNeighborMinScore = workingConfig.topologyGraphNeighborMinScore;
-            topologyRequest.graphNeighborReciprocalOnly =
-                workingConfig.topologyGraphNeighborReciprocalOnly;
-
             TopologyMemberReranker topologyMemberReranker;
             if (workingConfig.topologyMaxDocsPerCluster > 0 && queryEmbedding.has_value() &&
                 vectorDb_) {
@@ -2011,15 +1953,60 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 };
             }
 
-            const auto topologySession = runTopologyRoutingSession(
-                topologyRequest, metadataRepo_, kgStore_, topologyMemberReranker);
+            // Optional GraphNeighbors seed ANN (config topologyGraphVectorSeedProbe).
+            // Product default is 0; k>0 is opt-in / ablation only.
+            std::vector<std::string> vectorSeedHashes;
+            const std::size_t graphVectorSeedProbe = workingConfig.topologyGraphVectorSeedProbe;
+            const bool mayExpandTopology =
+                topologyRoutingMayExpand(topologyRoutingMode, weakTier1Query);
+            if (mayExpandTopology &&
+                workingConfig.topologyExpansionSource ==
+                    SearchEngineConfig::TopologyExpansionSource::GraphNeighbors &&
+                graphVectorSeedProbe > 0 && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
+                auto probe = detail::queryVectorIndexPipeline(
+                    metadataRepo_, vectorDb_, queryEmbedding.value(), workingConfig,
+                    graphVectorSeedProbe);
+                if (probe) {
+                    vectorSeedHashes.reserve(probe.value().size());
+                    for (const auto& hit : probe.value()) {
+                        if (!hit.documentHash.empty()) {
+                            vectorSeedHashes.push_back(hit.documentHash);
+                        }
+                    }
+                }
+            }
+
+            TopologyAssistStageRequest topologyAssistReq;
+            topologyAssistReq.query = query;
+            topologyAssistReq.config = workingConfig;
+            topologyAssistReq.routingMode = topologyRoutingMode;
+            topologyAssistReq.weakTier1Query = weakTier1Query;
+            topologyAssistReq.tier1SeedHashes.assign(tier1Candidates.begin(),
+                                                     tier1Candidates.end());
+            topologyAssistReq.existingCandidateHashes = tier2Candidates;
+            topologyAssistReq.queryEmbedding = queryEmbedding;
+            topologyAssistReq.metadataRepo = metadataRepo_;
+            topologyAssistReq.kgStore = kgStore_;
+            topologyAssistReq.memberReranker = topologyMemberReranker;
+            topologyAssistReq.vectorSeedHashes = std::move(vectorSeedHashes);
+            topologyAssistReq.maxVectorSeeds = graphVectorSeedProbe;
+
+            const auto topologyAssist = runTopologyAssistStage(topologyAssistReq);
+            const auto& topologySession = topologyAssist.session;
             topologyLoadSucceeded = topologySession.loadSucceeded;
-            topologySkipReason = topologySession.skipReason;
+            topologySkipReason = topologyAssist.skipReason;
             topologyWeakQueryRoutedClusters = topologySession.routedClusters;
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
             topologyMedoidHashes = topologySession.medoidHashes;
             topologyWeakQueryNarrowApplied = topologySession.narrowApplied;
             topologyWeakQueryRoutingApplied = topologySession.applied;
+            response.debugStats["topology_vector_seed_probe"] =
+                std::to_string(graphVectorSeedProbe);
+            if (topologyAssist.vectorSeedsAdded > 0) {
+                response.debugStats["topology_vector_seeds_added"] =
+                    std::to_string(topologyAssist.vectorSeedsAdded);
+            }
             for (const auto& hash : topologyWeakQueryAddedCandidateHashes) {
                 tier2Candidates.insert(hash);
             }
@@ -2033,27 +2020,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 (workingConfig.tieredNarrowVectorSearch &&
                  baselineTier2Candidates.size() >= workingConfig.tieredMinCandidates);
 
-            if (topologySkipReason.empty()) {
-                if (!topologyRoutingEnabled) {
-                    topologySkipReason = "disabled";
-                } else if (topologyRoutingMode ==
-                               SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly &&
-                           !weakTier1Query) {
-                    topologySkipReason = "strong_tier1_query";
-                } else if (!metadataRepo_ || !kgStore_) {
-                    topologySkipReason = "missing_store";
-                } else if (!topologyWeakQueryRoutingApplied) {
-                    if (topologyRoutingMode ==
-                        SearchEngineConfig::TopologyRoutingMode::RerankOnly) {
-                        topologySkipReason =
-                            topologyLoadSucceeded ? "rerank_only_no_expansion" : "not_loaded";
-                    } else if (topologyLoadSucceeded && topologyWeakQueryRoutedClusters > 0) {
-                        topologySkipReason = "no_added_candidates";
-                    } else {
-                        topologySkipReason = topologyLoadSucceeded ? "no_routes" : "not_loaded";
-                    }
-                }
-            }
             recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
                                        topologySession, topologySkipReason,
                                        tier2Candidates.size());
@@ -3400,20 +3366,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     if (rerankPlan.crossEnabled) {
-        const auto crossStart = std::chrono::steady_clock::now();
-        auto finishCrossMicros = [&]() {
-            return std::chrono::duration_cast<std::chrono::microseconds>(
-                       std::chrono::steady_clock::now() - crossStart)
-                .count();
-        };
-        auto skipCrossRerank = [&](std::string reason) {
-            const auto duration = finishCrossMicros();
-            componentTiming["cross_rerank"] = duration;
-            response.debugStats["cross_rerank_skip_reason"] = reason;
-            skipped.push_back("cross_rerank");
-            traceCollector.markStageSkipped("cross_rerank", std::move(reason));
-        };
-
         const size_t rerankWindow = rerankPlan.crossWindow;
         response.debugStats["cross_rerank_configured"] = "1";
         response.debugStats["cross_rerank_available"] = crossReranker_ ? "1" : "0";
@@ -3421,130 +3373,53 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["cross_rerank_snippet_max_chars"] =
             std::to_string(workingConfig.rerankSnippetMaxChars);
 
-        if (rerankWindow == 0) {
-            skipCrossRerank("no_candidates");
-        } else if (!crossReranker_) {
-            skipCrossRerank("reranker_unavailable");
-        } else {
+        const auto crossStart = std::chrono::steady_clock::now();
+        auto outcome = detail::applyCrossRerank(response.results, query, workingConfig, rerankWindow,
+                                                crossReranker_, metadataRepo_);
+        const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - crossStart)
+                                  .count();
+        componentTiming["cross_rerank"] = duration;
+        rerankGuardScoreGap = outcome.scoreGap;
+
+        if (outcome.attempted) {
             traceCollector.markStageAttempted("cross_rerank");
+        }
+        if (!outcome.errorMessage.empty()) {
+            response.debugStats["cross_rerank_error"] = outcome.errorMessage;
+        }
+        for (const auto& docTrace : outcome.docTraces) {
+            rerankWindowTrace.push_back({
+                {"doc_id", documentIdForTrace(docTrace.filePath, docTrace.documentHash)},
+                {"original_score", docTrace.originalScore},
+                {"rerank_score", docTrace.rerankScore},
+                {"rerank_norm", docTrace.rerankNorm},
+                {"final_score", docTrace.finalScore},
+            });
+        }
 
-            const size_t textLimit = workingConfig.rerankSnippetMaxChars;
-
-            std::vector<std::string> rerankTexts;
-            rerankTexts.reserve(rerankWindow);
-            std::vector<double> originalScores;
-            originalScores.reserve(rerankWindow);
-            for (size_t i = 0; i < rerankWindow; ++i) {
-                rerankTexts.push_back(
-                    buildCrossRerankText(response.results[i], metadataRepo_, textLimit));
-                originalScores.push_back(response.results[i].score);
-            }
-
-            auto scoreResult = crossReranker_(query, rerankTexts);
-            const auto duration = finishCrossMicros();
-            componentTiming["cross_rerank"] = duration;
-
-            if (!scoreResult) {
-                response.debugStats["cross_rerank_error"] = scoreResult.error().message;
-                if (scoreResult.error().code == ErrorCode::NotImplemented ||
-                    scoreResult.error().code == ErrorCode::NotInitialized) {
-                    skipCrossRerank("reranker_unavailable");
-                } else {
-                    failed.push_back("cross_rerank");
-                    traceCollector.markStageFailure("cross_rerank", duration);
-                }
-            } else if (scoreResult.value().size() != rerankWindow) {
+        switch (outcome.status) {
+            case detail::CrossRerankOutcome::Status::Skipped:
+                response.debugStats["cross_rerank_skip_reason"] = outcome.skipReason;
+                skipped.push_back("cross_rerank");
+                traceCollector.markStageSkipped("cross_rerank", outcome.skipReason);
+                break;
+            case detail::CrossRerankOutcome::Status::Failed:
                 failed.push_back("cross_rerank");
-                response.debugStats["cross_rerank_error"] = "score_size_mismatch";
                 traceCollector.markStageFailure("cross_rerank", duration);
-            } else {
-                const auto& scores = scoreResult.value();
-                auto [minIt, maxIt] = std::minmax_element(scores.begin(), scores.end());
-                const float minScore =
-                    minIt != scores.end() && std::isfinite(*minIt) ? *minIt : 0.0f;
-                const float maxScore =
-                    maxIt != scores.end() && std::isfinite(*maxIt) ? *maxIt : 0.0f;
-                float secondScore = 0.0f;
-                for (float score : scores) {
-                    if (!std::isfinite(score) || score >= maxScore) {
-                        continue;
-                    }
-                    secondScore = std::max(secondScore, score);
-                }
-                rerankGuardScoreGap = static_cast<double>(maxScore - secondScore);
-
-                if (!(maxScore > minScore)) {
-                    skipCrossRerank("no_score_variance");
-                } else if (rerankGuardScoreGap <
-                           static_cast<double>(
-                               std::max(0.0f, workingConfig.rerankScoreGapThreshold))) {
-                    skipCrossRerank("score_gap_below_threshold");
-                } else {
-                    auto [origMinIt, origMaxIt] =
-                        std::minmax_element(originalScores.begin(), originalScores.end());
-                    const double origMin = origMinIt != originalScores.end() ? *origMinIt : 0.0;
-                    const double origMax = origMaxIt != originalScores.end() ? *origMaxIt : 0.0;
-                    const double rerankRange = static_cast<double>(maxScore - minScore);
-                    const double originalRange = origMax - origMin;
-                    const double blend =
-                        std::clamp(static_cast<double>(workingConfig.rerankBlendWeight), 0.0, 1.0);
-
-                    std::vector<ComponentResult> rerankComponents;
-                    rerankComponents.reserve(rerankWindow);
-                    for (size_t i = 0; i < rerankWindow; ++i) {
-                        const double rerankNorm = std::clamp(
-                            (static_cast<double>(scores[i]) - minScore) / rerankRange, 0.0, 1.0);
-                        const double originalNorm =
-                            originalRange > 0.0
-                                ? std::clamp((originalScores[i] - origMin) / originalRange, 0.0,
-                                             1.0)
-                                : 1.0;
-                        const double finalScore =
-                            workingConfig.rerankReplaceScores
-                                ? rerankNorm
-                                : blend * rerankNorm + (1.0 - blend) * originalNorm;
-
-                        rerankWindowTrace.push_back({
-                            {"doc_id", documentIdForTrace(response.results[i].document.filePath,
-                                                          response.results[i].document.sha256Hash)},
-                            {"original_score", originalScores[i]},
-                            {"rerank_score", scores[i]},
-                            {"rerank_norm", rerankNorm},
-                            {"final_score", finalScore},
-                        });
-                        response.results[i].score = finalScore;
-
-                        rerankComponents.push_back(ComponentResult{
-                            .documentHash = response.results[i].document.sha256Hash,
-                            .filePath = response.results[i].document.filePath,
-                            .score = static_cast<float>(rerankNorm),
-                            .source = ComponentResult::Source::Unknown,
-                            .rank = i,
-                            .snippet =
-                                response.results[i].snippet.empty()
-                                    ? std::nullopt
-                                    : std::optional<std::string>(response.results[i].snippet),
-                        });
-                    }
-
-                    std::stable_sort(response.results.begin(),
-                                     response.results.begin() +
-                                         static_cast<std::ptrdiff_t>(rerankWindow),
-                                     [](const SearchResult& a, const SearchResult& b) {
-                                         return a.score > b.score;
-                                     });
-                    crossRerankApplied = true;
-                    contributing.push_back("cross_rerank");
-                    response.debugStats["cross_rerank_skip_reason"] = "";
-                    response.debugStats["cross_rerank_blend_weight"] = fmt::format("{:.3f}", blend);
-                    response.debugStats["cross_rerank_replace_scores"] =
-                        workingConfig.rerankReplaceScores ? "1" : "0";
-                    response.debugStats["cross_rerank_score_gap"] =
-                        fmt::format("{:.6f}", rerankGuardScoreGap);
-                    traceCollector.markStageResult("cross_rerank", rerankComponents, duration,
-                                                   true);
-                }
-            }
+                break;
+            case detail::CrossRerankOutcome::Status::Applied:
+                crossRerankApplied = true;
+                contributing.push_back("cross_rerank");
+                response.debugStats["cross_rerank_skip_reason"] = "";
+                response.debugStats["cross_rerank_blend_weight"] =
+                    fmt::format("{:.3f}", outcome.blendWeight);
+                response.debugStats["cross_rerank_replace_scores"] =
+                    outcome.replaceScores ? "1" : "0";
+                response.debugStats["cross_rerank_score_gap"] =
+                    fmt::format("{:.6f}", outcome.scoreGap);
+                traceCollector.markStageResult("cross_rerank", outcome.components, duration, true);
+                break;
         }
     } else {
         response.debugStats["cross_rerank_configured"] = "0";

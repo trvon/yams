@@ -845,6 +845,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                 it != kv.end()) {
                 policy.graphNeighborReciprocalOnly = parseBoolValue(it->second);
             }
+            if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
+                policy.graphVectorSeedProbe = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.sidecar_fusion_rescue_slots"); it != kv.end()) {
                 policy.topologySidecarFusionRescueSlots = parseSize(it->second);
             }
@@ -923,6 +926,11 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
     if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")) {
         if (auto parsed = parseBoolValue(env); parsed.has_value()) {
             policy.graphNeighborReciprocalOnly = *parsed;
+        }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE")) {
+        if (auto parsed = parseSize(env); parsed.has_value()) {
+            policy.graphVectorSeedProbe = *parsed;
         }
     }
     if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS")) {

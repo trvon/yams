@@ -85,6 +85,8 @@ public:
         std::optional<std::string> expansionSource;
         std::optional<float> graphNeighborMinScore;
         std::optional<bool> graphNeighborReciprocalOnly;
+        /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
+        std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<std::size_t> topologySidecarFusionRescueSlots;
         std::optional<float> topologySidecarFusionRescueMinScore;
         std::optional<float> rrfK;
