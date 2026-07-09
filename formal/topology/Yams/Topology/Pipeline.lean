@@ -1,3 +1,4 @@
+import Yams.Core
 import Yams.Topology.Artifacts
 
 namespace Yams.Pipeline
@@ -15,6 +16,7 @@ structure PipelineConfig where
   deriving Repr, BEq
 
 structure DocumentState where
+  documentId : Yams.Core.DocumentId := ""
   stored : Bool := false
   extracted : Bool := false
   contentIndexed : Bool := false
@@ -36,6 +38,7 @@ def postIngestPass (cfg : PipelineConfig) (s : DocumentState) : DocumentState :=
   let embedded := extracted && cfg.embeddings
   let semanticEdges := kgDocumentNode && embedded && cfg.semanticNeighborGraph
   { s with
+    documentId := s.documentId
     extracted := extracted
     contentIndexed := contentIndexed
     kgDocumentNode := kgDocumentNode
@@ -58,7 +61,8 @@ def graphRerankAvailable (cfg : PipelineConfig) (s : DocumentState) : Bool :=
   cfg.graphRerank && s.kgDocumentNode && (s.symbolsIndexed || s.nlEntitiesIndexed || s.semanticEdges)
 
 def withoutKg (s : DocumentState) : DocumentState :=
-  { stored := s.stored,
+  { documentId := s.documentId,
+    stored := s.stored,
     extracted := s.extracted,
     contentIndexed := s.contentIndexed,
     kgDocumentNode := false,

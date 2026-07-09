@@ -1,3 +1,4 @@
+import Yams.Core
 import Yams.Topology.SearchImpact
 
 namespace Yams.SearchEngine
@@ -37,17 +38,17 @@ structure SearchConfig where
   graphRerankEnabled : Bool := true
   deriving Repr, BEq
 
-/-- One component candidate before fusion. -/
+/-- One component candidate before fusion. Uses DocumentId for identity. -/
 structure ComponentCandidate where
-  doc : String
+  doc : Yams.Core.DocumentId
   source : SearchSource
   rank : Nat := 0
   score : Nat := 0
   deriving Repr, BEq
 
-/-- One fused or reranked result. -/
+/-- One fused or reranked result. Uses DocumentId for identity. -/
 structure SearchResult where
-  doc : String
+  doc : Yams.Core.DocumentId
   score : Nat := 0
   sources : List SearchSource := []
   deriving Repr, BEq

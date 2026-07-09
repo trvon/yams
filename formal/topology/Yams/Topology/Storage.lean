@@ -1,9 +1,11 @@
+import Yams.Core
 import Yams.Topology.Contracts
 
 namespace Yams.Storage
 
-/-- Abstract content hash used by the storage/manifest/reference model. -/
-abbrev ContentHash := String
+/-- Abstract content hash used by the storage/manifest/reference model.
+Uses Yams.Core.ContentHash for unification with other document identifiers. -/
+abbrev ContentHash := Yams.Core.ContentHash
 
 /-- Minimal document-level store input for the ingestion hot-path proof.
 
@@ -28,6 +30,14 @@ structure StoreState where
 
 /-- Hashes touched by a batch of store operations, preserving caller order. -/
 def hashes (docs : List StoreDoc) : List ContentHash :=
+  docs.map (fun doc => doc.contentHash)
+
+/-- Conversion: ContentHash is a DocumentId, so we can view metadataVisible as DocumentIds. -/
+def metadataVisibleAsDocumentIds (s : StoreState) : List Yams.Core.DocumentId :=
+  s.metadataVisible
+
+/-- Conversion: hashes as DocumentIds. -/
+def hashesAsDocumentIds (docs : List StoreDoc) : List Yams.Core.DocumentId :=
   docs.map (fun doc => doc.contentHash)
 
 /-- Public metadata is safe when every visible hash already has a durable manifest

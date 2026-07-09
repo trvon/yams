@@ -4,7 +4,12 @@ A small Lean 4 model of the YAMS ingestion -> search pipeline.
 Purpose: make the dependency seams explicit before optimizing the implementation.
 This is not a performance model; benchmark output should instantiate the cost
 fields outside Lean or be connected later through generated facts.
+
+This file is now superseded by the formal/topology/Yams/Topology/ modules which
+include more comprehensive models with unified types and end-to-end contracts.
 -/
+
+import Yams.Core
 
 namespace Yams.Pipeline
 
@@ -21,8 +26,10 @@ structure PipelineConfig where
   graphRerank : Bool := true
   deriving Repr, BEq
 
-/-- Abstract document state after zero or more pipeline stages. -/
+/-- Abstract document state after zero or more pipeline stages.
+Uses Yams.Core.DocumentId for unification with other models. -/
 structure DocumentState where
+  documentId : Yams.Core.DocumentId := ""
   stored : Bool := false
   extracted : Bool := false
   contentIndexed : Bool := false
@@ -45,6 +52,7 @@ def postIngestPass (cfg : PipelineConfig) (s : DocumentState) : DocumentState :=
   let embedded := extracted && cfg.embeddings
   let semanticEdges := kgDocumentNode && embedded && cfg.semanticNeighborGraph
   { s with
+    documentId := s.documentId
     extracted := extracted
     contentIndexed := contentIndexed
     kgDocumentNode := kgDocumentNode

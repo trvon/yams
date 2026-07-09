@@ -1,4 +1,5 @@
 import Std
+import Yams.Core
 
 namespace Yams.Topology
 
@@ -31,9 +32,13 @@ inductive DocumentTopologyRole where
   | outlier
   deriving Repr, BEq, DecidableEq
 
-abbrev DocumentHash := String
-abbrev FilePath := String
-abbrev ClusterId := String
+/-- Document hash used in topology. Uses Yams.Core.DocumentHash for unification. -/
+abbrev DocumentHash := Yams.Core.DocumentHash
+/-- File path. Uses Yams.Core.FilePath for unification. -/
+abbrev FilePath := Yams.Core.FilePath
+/-- Cluster identifier. Uses Yams.Core.ClusterId for unification. -/
+abbrev ClusterId := Yams.Core.ClusterId
+/-- Embedding vector. Uses Rat for now; consider transitioning to Yams.Core.EmbeddingVector (ℚ). -/
 abbrev Embedding := List Rat
 
 structure TopologyNeighbor where
