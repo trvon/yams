@@ -16,7 +16,7 @@
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
-#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/in_process_transport.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/embedded_service_host.h>
@@ -393,19 +393,23 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     yams::test::ScopedEnvVar embeddedMode("YAMS_EMBEDDED", std::string("auto"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
 
-    ClientConfig cfg;
-    cfg.dataDir = dataDir;
-    cfg.socketPath = dataDir / "missing" / "daemon.sock";
-    cfg.transportMode = ClientTransportMode::Auto;
-    cfg.autoStart = false;
-    cfg.connectTimeout = 3s;
-    cfg.headerTimeout = 10s;
-    cfg.bodyTimeout = 10s;
-    cfg.requestTimeout = 10s;
-
-    DaemonClient client(cfg);
-    auto connectRes = yams::cli::run_sync(client.connect(), 5s);
-    REQUIRE(connectRes.has_value());
+    InProcessTransport transport(host);
+    auto callEmbed =
+        [&](const EmbedDocumentsRequest& request) -> yams::Result<EmbedDocumentsResponse> {
+        auto response = yams::cli::run_sync(
+            transport.send_request(Request{std::in_place_type<EmbedDocumentsRequest>, request}),
+            10s);
+        if (!response) {
+            return response.error();
+        }
+        if (const auto* error = std::get_if<ErrorResponse>(&response.value())) {
+            return yams::Error{error->code, error->message};
+        }
+        if (const auto* embed = std::get_if<EmbedDocumentsResponse>(&response.value())) {
+            return *embed;
+        }
+        return yams::Error{yams::ErrorCode::InvalidData, "Unexpected response type"};
+    };
 
     EmbedDocumentsRequest missingModelReq;
     missingModelReq.documentHashes.clear();
@@ -414,9 +418,10 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     missingModelReq.batchSize = 8;
     missingModelReq.skipExisting = false;
 
-    auto missingModelRes = yams::cli::run_sync(client.call(missingModelReq), 10s);
+    auto missingModelRes = callEmbed(missingModelReq);
     REQUIRE(missingModelRes.has_value());
-    CHECK(missingModelRes.value().failed == 0);
+    const bool missingModelSucceeded = missingModelRes.value().failed == 0;
+    CHECK(missingModelSucceeded);
 
     EmbedDocumentsRequest missingHashReq;
     missingHashReq.documentHashes = {std::string(64, 'a')};
@@ -425,11 +430,13 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     missingHashReq.batchSize = 8;
     missingHashReq.skipExisting = false;
 
-    auto missingHashRes = yams::cli::run_sync(client.call(missingHashReq), 10s);
+    auto missingHashRes = callEmbed(missingHashReq);
     REQUIRE_FALSE(missingHashRes.has_value());
-    CHECK(missingHashRes.error().message.find(
-              "No requested documents were found in the daemon metadata repository") !=
-          std::string::npos);
+    const bool missingHashReported =
+        missingHashRes.error().message.find(
+            "No requested documents were found in the daemon metadata repository") !=
+        std::string::npos;
+    CHECK(missingHashReported);
 
     EmbedDocumentsRequest requestModelReq;
     requestModelReq.documentHashes.clear();
@@ -438,9 +445,10 @@ TEST_CASE("EmbedDocuments request model handling via in-process client transport
     requestModelReq.batchSize = 8;
     requestModelReq.skipExisting = false;
 
-    auto requestModelRes = yams::cli::run_sync(client.call(requestModelReq), 10s);
+    auto requestModelRes = callEmbed(requestModelReq);
     REQUIRE(requestModelRes.has_value());
-    CHECK(requestModelRes.value().failed == 0);
+    const bool requestModelSucceeded = requestModelRes.value().failed == 0;
+    CHECK(requestModelSucceeded);
 
     auto shutdownRes = host->shutdown();
     REQUIRE(shutdownRes.has_value());

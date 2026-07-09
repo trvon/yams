@@ -472,11 +472,13 @@ public:
                     }
                 }
 
-                // In sandboxed/embedded environments (Codex, CI, restricted IPC), the daemon
-                // plan may intentionally resolve to InProcess. Keep the daemon request path in
-                // that case instead of falling back to local services: the service path performs
-                // full CLI storage initialization (including KG integrity checks) and can take
-                // tens of seconds on large stores before a single-file add even reaches ingestion.
+                // Socket-only CLI builds cannot service an InProcess daemon plan. If the
+                // socket probe selected in-process fallback, preserve add usability by using
+                // repo-local services instead of retrying an unreachable socket path.
+                if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                    daemonSpinner.pause();
+                    co_return executeWithServices();
+                }
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)

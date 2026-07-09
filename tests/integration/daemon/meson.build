@@ -438,7 +438,8 @@ else
     codex_sandbox_embedding_regression_exe = executable('yams_codex_sandbox_embedding_regression_tests_catch2',
       codex_sandbox_embedding_regression_srcs,
       include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      dependencies: [catch2_dep, catch2_main_dep, test_deps,
+                     dependency('yams_daemon_client_embedded'), catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
     )

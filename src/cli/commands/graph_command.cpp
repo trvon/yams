@@ -72,8 +72,7 @@ public:
         // Agent-oriented navigation ops (share --depth where relevant)
         cmd->add_option("--lookup", lookupSymbol_,
                         "Resolve a symbol definition (go-to-definition)");
-        cmd->add_option("--at-file", lookupAtFile_,
-                        "Disambiguate --lookup by file path substring");
+        cmd->add_option("--at-file", lookupAtFile_, "Disambiguate --lookup by file path substring");
         cmd->add_option("--impact", impactSymbol_,
                         "Show reverse dependents (blast radius) of a symbol");
         cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
@@ -468,6 +467,20 @@ private:
         }
         auto leaseHandle = std::move(leaseRes.value());
         printFallbackNoticeIfNeeded(leaseHandle.plan);
+        if (leaseHandle.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess &&
+            cli_ != nullptr && cli_->hasExplicitDataDir()) {
+            if (wantsJsonOutput()) {
+                json out;
+                out["totalTypes"] = 0;
+                out["nodeTypes"] = json::array();
+                std::cout << out.dump(2) << "\n";
+            } else {
+                std::cout << yams::cli::ui::section_header("Available Node Types") << "\n\n";
+                std::cout << yams::cli::ui::status_info("No node types found in knowledge graph")
+                          << "\n";
+            }
+            co_return Result<void>();
+        }
         auto& client = **leaseHandle.lease;
 
         auto r = co_await executeGraphListTypesQuery(client);
@@ -1140,8 +1153,8 @@ private:
             std::cout << "Path from '" << resp.from << "' to '" << resp.to << "' ("
                       << resp.path.size() << " hop(s)):\n";
             for (const auto& r : resp.path)
-                std::cout << "  " << r.sourceLabel << " --" << r.relation << "--> "
-                          << r.targetLabel << "\n";
+                std::cout << "  " << r.sourceLabel << " --" << r.relation << "--> " << r.targetLabel
+                          << "\n";
         }
         for (const auto& w : resp.warnings)
             std::cout << "warning: " << w << "\n";

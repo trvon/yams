@@ -310,6 +310,20 @@ case "${PROFILE}" in
 linux-ci)
 	GUEST_SCRIPT_CONTENT="$(linux_ci_guest_script)"
 	VOLUME_SPEC="${REPO_ROOT}:/workspace"
+	if [ "${YAMS_SMOLVM_CLEAN_BUILD:-1}" != "0" ]; then
+		HOST_BUILD_DIR="${YAMS_SMOLVM_BUILD_DIR:-build/smolvm-linux}"
+		case "${HOST_BUILD_DIR}" in
+		build/* | ./build/*)
+			HOST_CLEAN_PATH="${REPO_ROOT}/${HOST_BUILD_DIR#./}"
+			log "host cleaning smolvm build dir: ${HOST_BUILD_DIR}"
+			rm -rf -- "${HOST_CLEAN_PATH:?}"
+			;;
+		*)
+			fail "refusing to host-clean non-build YAMS_SMOLVM_BUILD_DIR=${HOST_BUILD_DIR}"
+			exit 2
+			;;
+		esac
+	fi
 	;;
 *)
 	GUEST_SCRIPT_CONTENT="$(static_guest_script)"
