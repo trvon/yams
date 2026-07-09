@@ -146,6 +146,9 @@ driven by this loop, not intuition alone.
    | Question | Plan |
    |----------|------|
    | Which hybrid component carries quality? | `search_component_ablation` |
+   | Product-default path (topology off) | `search_product_component_ablation` (`repeats=3`) |
+   | Vector fusion weight | `search_vector_weight_ablation` (`repeats=3`) |
+   | Tiered execution on/off | `search_tiered_ablation` (`repeats=3`) |
    | Compact engine overhead set | `subsystem_overhead` |
    | Pipeline / leg stages | `leg_stage_ablation` (`repeats=3`) |
    | Rerank off vs replace vs blend | `simeon_rerank` / `simeon_rerank_beir` |

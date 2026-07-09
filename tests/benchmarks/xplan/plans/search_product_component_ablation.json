@@ -1,0 +1,102 @@
+{
+  "name": "search_product_component_ablation",
+  "description": "Product-default hybrid (topology routing disabled) one-factor-off on BEIR scifact. Identifies which engine components carry quality vs noise for the path users actually hit.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "baseline",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline",
+      "factors": {
+        "text": "on",
+        "vector": "on",
+        "kg_weight": "on",
+        "graph_text": "on",
+        "graph_vector": "on",
+        "graph_rerank": "on",
+        "rerank": "on",
+        "topology": "off",
+        "parallel_tiered": "on"
+      }
+    },
+    {
+      "name": "no_vector",
+      "factors": { "vector": "off" }
+    },
+    {
+      "name": "no_kg",
+      "factors": { "kg_weight": "off" }
+    },
+    {
+      "name": "no_graph_text",
+      "factors": { "graph_text": "off" }
+    },
+    {
+      "name": "no_graph_vector",
+      "factors": { "graph_vector": "off" }
+    },
+    {
+      "name": "no_graph_rerank",
+      "factors": { "graph_rerank": "off" }
+    },
+    {
+      "name": "no_rerank",
+      "factors": { "rerank": "off" }
+    },
+    {
+      "name": "no_tiered",
+      "factors": { "parallel_tiered": "off" }
+    },
+    {
+      "name": "no_text",
+      "factors": { "text": "off" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "topology_applied"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95",
+      "topology_applied"
+    ]
+  }
+}
