@@ -326,6 +326,180 @@ double cosineDistance(std::span<const float> a, std::span<const float> b) {
     return 1.0 - std::clamp(cos, -1.0, 1.0);
 }
 
+std::vector<float> normalized(std::vector<float> v) {
+    double norm = 0.0;
+    for (float x : v) {
+        norm += static_cast<double>(x) * static_cast<double>(x);
+    }
+    if (norm > 0.0) {
+        const float inv = static_cast<float>(1.0 / std::sqrt(norm));
+        for (auto& x : v) {
+            x *= inv;
+        }
+    }
+    return v;
+}
+
+std::size_t nearestCentroid(const std::vector<float>& emb,
+                            const std::vector<std::vector<float>>& centroids) {
+    std::size_t best = 0;
+    double bestDist = std::numeric_limits<double>::max();
+    for (std::size_t c = 0; c < centroids.size(); ++c) {
+        if (centroids[c].empty()) {
+            continue;
+        }
+        const double d = cosineDistance(emb, centroids[c]);
+        if (d < bestDist) {
+            bestDist = d;
+            best = c;
+        }
+    }
+    return best;
+}
+
+// Spherical k-means over document embeddings. Deterministic (farthest-first / Gonzalez init, no RNG)
+// so topology snapshots reproduce across rebuilds. Returns a per-document cluster assignment; documents
+// without a usable embedding become their own singleton clusters.
+std::vector<std::int64_t> runKMeans(std::span<const TopologyDocumentInput> documents,
+                                    std::size_t requestedK, std::size_t maxIterations) {
+    const std::size_t n = documents.size();
+    std::vector<std::int64_t> assignment(n, -1);
+    if (n == 0) {
+        return assignment;
+    }
+
+    std::vector<std::size_t> usable;
+    usable.reserve(n);
+    std::size_t embeddingDim = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!documents[i].embedding.empty()) {
+            if (embeddingDim == 0) {
+                embeddingDim = documents[i].embedding.size();
+            }
+            if (documents[i].embedding.size() == embeddingDim) {
+                usable.push_back(i);
+            }
+        }
+    }
+    if (usable.size() < 2 || embeddingDim == 0) {
+        std::iota(assignment.begin(), assignment.end(), 0);
+        return assignment;
+    }
+
+    std::size_t k = requestedK;
+    if (k == 0) {
+        k = static_cast<std::size_t>(
+            std::round(std::sqrt(static_cast<double>(usable.size()))));
+    }
+    k = std::clamp<std::size_t>(k, 2, usable.size());
+
+    std::vector<std::vector<float>> centroids;
+    centroids.reserve(k);
+    std::vector<bool> selected(usable.size(), false);
+    centroids.push_back(normalized(documents[usable.front()].embedding));
+    selected[0] = true;
+    std::vector<double> minDist(usable.size(), std::numeric_limits<double>::max());
+    while (centroids.size() < k) {
+        std::size_t farthest = usable.size();
+        double farthestDist = -1.0;
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            if (selected[u]) {
+                continue;
+            }
+            const double d = cosineDistance(documents[usable[u]].embedding, centroids.back());
+            if (d < minDist[u]) {
+                minDist[u] = d;
+            }
+            if (minDist[u] > farthestDist) {
+                farthestDist = minDist[u];
+                farthest = u;
+            }
+        }
+        if (farthest == usable.size()) {
+            break;
+        }
+        selected[farthest] = true;
+        centroids.push_back(normalized(documents[usable[farthest]].embedding));
+    }
+    k = centroids.size();
+
+    const auto centroidOf = [&](const std::vector<std::size_t>& memberUsable) {
+        std::vector<std::size_t> docIdx;
+        docIdx.reserve(memberUsable.size());
+        for (std::size_t u : memberUsable) {
+            docIdx.push_back(usable[u]);
+        }
+        return normalized(meanEmbedding(documents, docIdx));
+    };
+
+    std::vector<std::size_t> membership(usable.size(), 0);
+    const std::size_t iterations = maxIterations == 0 ? 10 : maxIterations;
+    for (std::size_t iter = 0; iter < iterations; ++iter) {
+        bool changed = false;
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            const std::size_t c = nearestCentroid(documents[usable[u]].embedding, centroids);
+            if (c != membership[u]) {
+                membership[u] = c;
+                changed = true;
+            }
+        }
+
+        std::vector<std::vector<std::size_t>> members(k);
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            members[membership[u]].push_back(u);
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+            if (!members[c].empty()) {
+                centroids[c] = centroidOf(members[c]);
+            }
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+            if (!members[c].empty()) {
+                continue;
+            }
+            std::size_t worstU = usable.size();
+            std::size_t donor = k;
+            double worstDist = -1.0;
+            for (std::size_t u = 0; u < usable.size(); ++u) {
+                const std::size_t mc = membership[u];
+                if (members[mc].size() <= 1) {
+                    continue;
+                }
+                const double d = cosineDistance(documents[usable[u]].embedding, centroids[mc]);
+                if (d > worstDist) {
+                    worstDist = d;
+                    worstU = u;
+                    donor = mc;
+                }
+            }
+            if (worstU == usable.size()) {
+                continue;
+            }
+            auto& donorMembers = members[donor];
+            donorMembers.erase(std::find(donorMembers.begin(), donorMembers.end(), worstU));
+            membership[worstU] = c;
+            members[c].push_back(worstU);
+            centroids[c] = normalized(documents[usable[worstU]].embedding);
+            centroids[donor] = centroidOf(donorMembers);
+            changed = true;
+        }
+        if (!changed) {
+            break;
+        }
+    }
+
+    for (std::size_t u = 0; u < usable.size(); ++u) {
+        assignment[usable[u]] = static_cast<std::int64_t>(membership[u]);
+    }
+    std::int64_t singleton = static_cast<std::int64_t>(k);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (assignment[i] < 0) {
+            assignment[i] = singleton++;
+        }
+    }
+    return assignment;
+}
+
 std::vector<std::int64_t> runHDBSCAN(std::span<const TopologyDocumentInput> documents,
                                      std::size_t requestedMinPoints,
                                      std::size_t requestedMinClusterSize) {
@@ -643,6 +817,53 @@ LouvainTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
 }
 
 Result<TopologyArtifactBatch> LouvainTopologyEngine::updateArtifacts(
+    const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
+    const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
+    if (stats != nullptr) {
+        stats->fallbackFullRebuilds = 1;
+    }
+    return buildArtifacts(changedDocuments, config);
+}
+
+// ============================================================================
+// KMeansTopologyEngine — IVF-style balanced coarse quantizer
+// ============================================================================
+
+Result<TopologyArtifactBatch>
+KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
+                                     const TopologyBuildConfig& config) {
+    const auto ts = nowStamps();
+    if (documents.empty()) {
+        TopologyArtifactBatch batch;
+        batch.snapshotId = makeSnapshotId(ts.unixMillis);
+        batch.algorithm = "kmeans_v1";
+        batch.inputKind = config.inputKind;
+        batch.generatedAtUnixSeconds = ts.unixSeconds;
+        return batch;
+    }
+
+    std::unordered_map<std::string, std::size_t> indexByHash;
+    indexByHash.reserve(documents.size());
+    for (std::size_t i = 0; i < documents.size(); ++i) {
+        if (!documents[i].documentHash.empty()) {
+            indexByHash[documents[i].documentHash] = i;
+        }
+    }
+    auto pairWeights = buildPairWeights(documents, indexByHash, config);
+    auto assignment = runKMeans(documents, config.kmeansK, config.kmeansMaxIterations);
+    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "kmeans_v1", ts);
+    batch.inputKind = config.inputKind;
+    return batch;
+}
+
+Result<TopologyDirtyRegion>
+KMeansTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
+                                        std::span<const TopologyDocumentInput> changedDocuments,
+                                        const TopologyBuildConfig&) const {
+    return defaultDirtyRegion(changedDocuments);
+}
+
+Result<TopologyArtifactBatch> KMeansTopologyEngine::updateArtifacts(
     const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
     const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
     if (stats != nullptr) {

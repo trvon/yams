@@ -1,5 +1,7 @@
 #include <yams/topology/topology_sgc.h>
 
+#include <yams/core/assert.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -25,6 +27,17 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
     }
 
     const std::size_t n = documents.size();
+    std::vector<std::string> originalHashes;
+    std::vector<std::size_t> originalEmbeddingSizes;
+    if constexpr (yams::core::detail::kDcheckEnabled) {
+        originalHashes.reserve(n);
+        originalEmbeddingSizes.reserve(n);
+        for (const auto& doc : documents) {
+            originalHashes.push_back(doc.documentHash);
+            originalEmbeddingSizes.push_back(doc.embedding.size());
+        }
+    }
+
     std::size_t dim = 0;
     for (const auto& doc : documents) {
         if (!doc.embedding.empty()) {
@@ -151,6 +164,16 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
         if (documents[i].embedding.size() == dim) {
             const float* row = features.data() + i * dim;
             std::copy(row, row + dim, documents[i].embedding.begin());
+        }
+    }
+
+    if constexpr (yams::core::detail::kDcheckEnabled) {
+        YAMS_DCHECK(documents.size() == n, "SGC smoothing must preserve document count");
+        for (std::size_t i = 0; i < n; ++i) {
+            YAMS_DCHECK(documents[i].documentHash == originalHashes[i],
+                        "SGC smoothing must preserve document hash identity");
+            YAMS_DCHECK(documents[i].embedding.size() == originalEmbeddingSizes[i],
+                        "SGC smoothing must preserve embedding dimensionality");
         }
     }
 }

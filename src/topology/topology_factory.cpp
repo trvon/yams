@@ -15,8 +15,10 @@ namespace {
 constexpr std::string_view kConnectedKey = "connected";
 constexpr std::string_view kHdbscanKey = "hdbscan";
 constexpr std::string_view kLouvainKey = "louvain";
+constexpr std::string_view kKmeansKey = "kmeans";
 
-constexpr std::array<std::string_view, 3> kKnownAlgorithms{kConnectedKey, kHdbscanKey, kLouvainKey};
+constexpr std::array<std::string_view, 4> kKnownAlgorithms{kConnectedKey, kHdbscanKey, kLouvainKey,
+                                                           kKmeansKey};
 
 } // namespace
 
@@ -30,6 +32,9 @@ std::shared_ptr<ITopologyEngine> makeEngine(std::string_view algorithm) {
     }
     if (key == kLouvainKey) {
         return std::make_shared<LouvainTopologyEngine>();
+    }
+    if (key == kKmeansKey) {
+        return std::make_shared<KMeansTopologyEngine>();
     }
     spdlog::warn("[topology] unknown algorithm '{}'; falling back to connected", algorithm);
     return std::make_shared<ConnectedComponentTopologyEngine>();

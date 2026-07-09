@@ -58,6 +58,18 @@ TEST_CASE("topology::resolveFactoryKey normalizes unknown inputs",
     CHECK(resolveFactoryKey("not_registered") == std::string_view{"connected"});
 }
 
+TEST_CASE("topology::makeEngine resolves the kmeans key to the k-means engine",
+          "[topology][factory][kmeans][catch2]") {
+    CHECK(resolveFactoryKey("kmeans") == std::string_view{"kmeans"});
+    auto engine = makeEngine("kmeans");
+    REQUIRE(engine != nullptr);
+    yams::topology::TopologyBuildConfig cfg;
+    std::vector<yams::topology::TopologyDocumentInput> empty;
+    auto result = engine->buildArtifacts(empty, cfg);
+    REQUIRE(result);
+    CHECK(result.value().algorithm == "kmeans_v1");
+}
+
 TEST_CASE("topology::listAlgorithms includes the default key",
           "[topology][factory][p3_1][catch2]") {
     const auto algos = listAlgorithms();
@@ -140,6 +152,70 @@ TEST_CASE("topology::applySGCSmoothing hops=0 is a no-op", "[topology][sgc][catc
         for (std::size_t d = 0; d < docs[i].embedding.size(); ++d) {
             CHECK(docs[i].embedding[d] == before[i].embedding[d]);
         }
+    }
+}
+
+TEST_CASE("topology::applySGCSmoothing preserves topology document identity",
+          "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        docs[i].filePath = "fixture/" + docs[i].documentHash + ".txt";
+        docs[i].metadata.emplace("ordinal", std::to_string(i));
+    }
+    const auto before = docs;
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+
+    yams::topology::applySGCSmoothing(docs, cfg, 1);
+
+    REQUIRE(docs.size() == before.size());
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        CAPTURE(i);
+        CHECK(docs[i].documentHash == before[i].documentHash);
+        CHECK(docs[i].filePath == before[i].filePath);
+        CHECK(docs[i].metadata == before[i].metadata);
+        REQUIRE(docs[i].neighbors.size() == before[i].neighbors.size());
+        for (std::size_t j = 0; j < docs[i].neighbors.size(); ++j) {
+            CHECK(docs[i].neighbors[j].documentHash == before[i].neighbors[j].documentHash);
+            CHECK(docs[i].neighbors[j].score == before[i].neighbors[j].score);
+            CHECK(docs[i].neighbors[j].reciprocal == before[i].neighbors[j].reciprocal);
+        }
+        CHECK(docs[i].embedding.size() == before[i].embedding.size());
+    }
+}
+
+TEST_CASE("topology::applySGCSmoothing preserves identity for ragged inputs",
+          "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    docs[0].metadata.emplace("kind", "reference");
+    docs[1].embedding.clear();
+    docs[2].embedding = {0.9F, 0.1F};
+    docs[3].neighbors.push_back({.documentHash = "missing", .score = 0.95F, .reciprocal = true});
+    docs.push_back(yams::topology::TopologyDocumentInput{.documentHash = "",
+                                                         .filePath = "/repo/unhashed.txt",
+                                                         .embedding = {42.0F},
+                                                         .neighbors = {},
+                                                         .metadata = {{"kind", "unhashed"}}});
+
+    const auto before = docs;
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+
+    yams::topology::applySGCSmoothing(docs, cfg, 3);
+
+    REQUIRE((docs.size() == before.size()));
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        CAPTURE(i);
+        CHECK((docs[i].documentHash == before[i].documentHash));
+        CHECK((docs[i].filePath == before[i].filePath));
+        CHECK((docs[i].metadata == before[i].metadata));
+        REQUIRE((docs[i].neighbors.size() == before[i].neighbors.size()));
+        for (std::size_t j = 0; j < docs[i].neighbors.size(); ++j) {
+            CHECK((docs[i].neighbors[j].documentHash == before[i].neighbors[j].documentHash));
+            CHECK((docs[i].neighbors[j].score == before[i].neighbors[j].score));
+            CHECK((docs[i].neighbors[j].reciprocal == before[i].neighbors[j].reciprocal));
+        }
+        CHECK((docs[i].embedding.size() == before[i].embedding.size()));
     }
 }
 
