@@ -353,6 +353,10 @@ void EmbeddingService::updateSemanticNeighborGraph(
         return;
     }
 
+    // Product default was 4 and left most docs as degree-0, so graph expansion
+    // at search time almost always fell back to medoid anchors. 8 keeps the
+    // graph sparse enough for CC purity while covering more query seeds.
+    constexpr std::size_t kDefaultSemanticNeighborTopK = 8;
     const auto semanticTopK = []() {
         if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_TOPK")) {
             try {
@@ -360,7 +364,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
             } catch (...) {
             }
         }
-        return static_cast<size_t>(4);
+        return kDefaultSemanticNeighborTopK;
     }();
     const auto explicitSemanticThreshold = []() -> std::optional<float> {
         if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_THRESHOLD")) {
