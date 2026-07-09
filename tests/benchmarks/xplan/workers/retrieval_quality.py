@@ -8,6 +8,7 @@ Internalizes topology expansion-arm presets formerly encoded only in
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import resource
@@ -168,6 +169,11 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     fusion_source_mass: dict[str, float] = {}
     fusion_source_docs: dict[str, float] = {}
     latency_vals: list[float] = []
+    # Mechanism counters (GraphNeighbors seed ANN / path labels).
+    vector_seeds_added_vals: list[float] = []
+    vector_seed_probe_vals: list[float] = []
+    path_medoid = 0
+    path_seed_neighbors = 0
 
     int_keys = {
         "added": "topology_weak_query_added_candidates",
@@ -280,6 +286,29 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
 
         reason = str(stats.get("topology_weak_query_skip_reason", "") or "")
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        # Path labels are emitted as skip_reason even when expansion applied.
+        if reason in ("graph_medoid_neighbors", "graph_medoid_anchor"):
+            path_medoid += 1
+        elif reason in ("graph_seed_neighbors", "graph_neighbors"):
+            path_seed_neighbors += 1
+        elif "medoid" in reason:
+            path_medoid += 1
+        elif "seed" in reason and "neighbor" in reason:
+            path_seed_neighbors += 1
+
+        try:
+            vsa = stats.get("topology_vector_seeds_added")
+            if vsa is not None and str(vsa) != "":
+                vector_seeds_added_vals.append(float(vsa))
+        except (TypeError, ValueError):
+            pass
+        try:
+            vsp = stats.get("topology_vector_seed_probe")
+            if vsp is not None and str(vsp) != "":
+                vector_seed_probe_vals.append(float(vsp))
+        except (TypeError, ValueError):
+            pass
+
         mode = str(stats.get("topology_route_scoring_mode", "") or "")
         if mode:
             scoring_modes[mode] = scoring_modes.get(mode, 0) + 1
@@ -336,6 +365,10 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     if latency_vals:
         metrics["search_latency_ms_avg"] = float(statistics.mean(latency_vals))
         metrics["search_latency_ms_p50"] = float(statistics.median(latency_vals))
+        sorted_lat = sorted(latency_vals)
+        # Nearest-rank p95: ceil(0.95 * n)th sample (1-indexed).
+        p95_idx = min(len(sorted_lat) - 1, max(0, math.ceil(0.95 * len(sorted_lat)) - 1))
+        metrics["search_latency_ms_p95"] = float(sorted_lat[p95_idx])
     for sname, mass in fusion_source_mass.items():
         metrics[f"fusion_mass_{sname}"] = float(mass)
     for sname, docs in fusion_source_docs.items():
@@ -349,6 +382,22 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["topology_routed_clusters_avg"] = float(statistics.mean(routed_clusters))
     if sidecar_vals:
         metrics["topology_sidecar_avg"] = float(statistics.mean(sidecar_vals))
+
+    # Path / seed-ANN mechanism rates (for quality×cost loops).
+    if hybrid > 0:
+        metrics["topology_path_medoid_rate"] = float(path_medoid) / float(hybrid)
+        metrics["topology_path_seed_neighbors_rate"] = float(path_seed_neighbors) / float(hybrid)
+    if vector_seeds_added_vals:
+        metrics["topology_vector_seeds_added_avg"] = float(
+            statistics.mean(vector_seeds_added_vals)
+        )
+        metrics["topology_vector_seeds_added_max"] = float(max(vector_seeds_added_vals))
+        metrics["topology_vector_seeds_nonzero_rate"] = float(
+            sum(1 for v in vector_seeds_added_vals if v > 0)
+        ) / float(len(vector_seeds_added_vals))
+    if vector_seed_probe_vals:
+        metrics["topology_vector_seed_probe_avg"] = float(statistics.mean(vector_seed_probe_vals))
+        metrics["topology_vector_seed_probe_max"] = float(max(vector_seed_probe_vals))
 
     return {
         "metrics": metrics,
@@ -445,6 +494,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         stdout_path.write_text("# dry-run\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         debug_path.write_text("", encoding="utf-8")
+        # Zero-fill KPIs listed in plan step.metrics so dry-run validation passes.
         return WorkerResult(
             status="ok",
             exit_code=0,
@@ -455,8 +505,19 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "ndcg_at_k": 0.0,
                 "map": 0.0,
                 "hybrid_queries": 0.0,
+                "search_latency_ms_avg": 0.0,
+                "search_latency_ms_p50": 0.0,
+                "search_latency_ms_p95": 0.0,
                 "topology_applied": 0.0,
+                "topology_added_avg": 0.0,
+                "topology_routed_docs_avg": 0.0,
+                "topology_routed_clusters_avg": 0.0,
                 "topology_cert_seen": 0.0,
+                "topology_path_medoid_rate": 0.0,
+                "topology_path_seed_neighbors_rate": 0.0,
+                "topology_vector_seeds_added_avg": 0.0,
+                "topology_vector_seeds_nonzero_rate": 0.0,
+                "topology_vector_seed_probe_avg": 0.0,
             },
             attributes={
                 "dry_run": True,

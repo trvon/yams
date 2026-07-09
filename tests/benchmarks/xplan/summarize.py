@@ -228,6 +228,12 @@ def write_summary(
             "`*` = delta exceeds pooled run-to-run stdev (real); `~` = within noise; "
             "no mark = single-run (n=1), variance unknown.",
         ]
+        if plan.repeats <= 1:
+            lines += [
+                "- **Decision caution:** `repeats=1` — do not promote/kill a lever from bare Δ; "
+                "re-run with `repeats>=3` (see `topology_optimize_v2`, "
+                "`topology_vector_seed_ablation`, `topology_purity_validate`).",
+            ]
     lines += [""]
     (run_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 

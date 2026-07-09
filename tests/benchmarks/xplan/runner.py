@@ -206,12 +206,10 @@ def cmd_self_test(_: argparse.Namespace) -> int:
         "repair_ability",
         "ops_timeline",
         "daemon_ops_core",
-        "topology_cluster",
-        "topology_route",
+        "topology_optimize_v2",
+        "topology_vector_seed_ablation",
+        "topology_purity_validate",
         "simeon_rerank",
-        "topology_source",
-        "topology_expansion",
-        "topology_core_ab",
         "search_component_ablation",
         "subsystem_overhead",
     ):
@@ -404,6 +402,26 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             write_json(arm_dir / "metrics.json", metrics_doc)
             (arm_dir / "exit_code").write_text(str(overall_exit) + "\n", encoding="utf-8")
+
+            # Multi-rep workers write under repNN/; promote logs to arm root so
+            # plan.validate.require_files (stdout.log, …) still resolve.
+            if repeats > 1:
+                for name in ("stdout.log", "stderr.log", "debug.jsonl"):
+                    dest = arm_dir / name
+                    if dest.exists():
+                        continue
+                    for rep in range(repeats):
+                        src = arm_dir / f"rep{rep:02d}" / name
+                        if src.is_file():
+                            dest.write_text(src.read_text(encoding="utf-8", errors="replace"),
+                                            encoding="utf-8")
+                            break
+                    else:
+                        if name == "stdout.log":
+                            dest.write_text(
+                                f"# multi-rep arm ({repeats} reps); see repNN/{name}\n",
+                                encoding="utf-8",
+                            )
 
             # Validation: allow stub status when any step allows stubs or dry-run.
             allow_stub = args.dry_run or any(s.allow_stub for s in plan.steps)

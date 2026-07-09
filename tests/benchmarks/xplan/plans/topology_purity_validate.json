@@ -82,7 +82,14 @@
     "require_metric_status": ["ok"]
   },
   "summarize": {
-    "primary": ["mrr", "ndcg_at_k", "recall_at_k", "topology_applied", "topology_added_avg"],
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "topology_applied",
+      "topology_added_avg"
+    ],
     "group_by": ["topology_engine"]
   }
 }

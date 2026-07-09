@@ -65,15 +65,14 @@ tests/benchmarks/xplan/
 
 | Plan | Focus |
 |------|--------|
-| `search_component_ablation` / `subsystem_overhead` | Search subsystem one-factor-off (BEIR scifact) |
-| `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic docs — throughput, not ranking) |
-| `retrieval_load` | Concurrent load, search_type |
-| `repair_ability` | Fault-kind repair |
-| `ops_timeline` | Idle / drain |
-| `topology_*` / `simeon_rerank` / `topology_core_ab` / `leg_stage_ablation` | Quality / topology on BEIR scifact |
-| `topology_construction_purity` | Construction/routing purity vs quality (cert + MRR) |
-| `topology_optimize_v2` | Focused CC/graph follow-up on purity winners |
-| `daemon_ops_core` | Multi-step chain |
+| `search_component_ablation` / `subsystem_overhead` | Search engine component one-factor-off (BEIR scifact) |
+| `leg_stage_ablation` / `simeon_rerank*` | Search pipeline / rerank arms |
+| `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
+| `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
+| `topology_purity_validate` / `topology_optimize_v2` / `topology_vector_seed_ablation` | Topology assist (repeats=3) |
+| `plans/archive/*` | Superseded plans (historical only) |
+
+Agent measurement loop and plan selection: repo `AGENTS.md` (Benchmarks & Experiments).
 
 ## Corpora
 
@@ -89,7 +88,7 @@ Default quality params: `dataset=scifact`, `corpus_size=2000`, `num_queries=50`.
 
 - **No new multi-arm shell scripts.** Wrappers under `scripts/` only.
 - Prefer typed config for product knobs; `YAMS_BENCH_*` is harness-only.
-- **Do not rank search/topology levers on synthetic** — BEIR only (or another labeled hard corpus).
+- **Do not rank search levers on synthetic** — BEIR only (or another labeled hard corpus).
 - Topology claims need `debug.jsonl` counters / certificates.
 - Multi-client plans need a Catch2-enabled builddir.
-- Published numbers: `docs/benchmarks/README.md` (refresh after runs).
+- Published numbers: `docs/benchmarks/README.md` (default system only).

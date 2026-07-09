@@ -105,105 +105,84 @@ contract in the prompt; the graph here is rich: function-level nodes with
 
 ## Benchmarks & Experiments (xplan)
 
-Daemon KPI / ablation work uses **xplan**. Organized numbers:
-`docs/benchmarks/README.md`. Per-run detail: gitignored
-`build/benchmarks/<plan>/<stamp>/REPORT.md` (+ `ablation.md`, `metrics.csv`).
-
-**Do not add new multi-arm ablation shell scripts.**
+Daemon KPI and **search-engine** quality/latency ablations use **xplan**. Use the
+harness; do not invent parallel multi-arm shell matrices. Organized default-system
+numbers: `docs/benchmarks/README.md`. Per-run detail (gitignored):
+`build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
 
 ### Entry points
 
 ```bash
 python3 tests/benchmarks/xplan/runner.py self-test
 python3 tests/benchmarks/xplan/runner.py list-plans
-python3 tests/benchmarks/xplan/runner.py download-beir   # scifact + nfcorpus → ~/.cache/yams/benchmarks/
+python3 tests/benchmarks/xplan/runner.py download-beir   # scifact + nfcorpus
 python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
 python3 tests/benchmarks/xplan/runner.py report build/benchmarks/<plan>/<stamp>
 python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
 ```
 
-Quality/topology plans default to **BEIR scifact** (auto-download on run). Do not
-rank search levers on `dataset=synthetic` — that is for ingest/load smoke only.
-
 | Surface | Path |
 |---------|------|
-| Numbers + refs | `docs/benchmarks/README.md` |
-| Harness | `tests/benchmarks/xplan/README.md` |
+| Default-system numbers | `docs/benchmarks/README.md` |
+| Harness (how it works) | `tests/benchmarks/xplan/README.md` |
 | Plans / workers | `tests/benchmarks/xplan/plans/`, `…/workers/` |
-| Run artifacts | `build/benchmarks/**` (gitignored) |
-| Retrieval handoff | `docs/prompts/PROMPT-yams-retrieval-benchmark-handoff.md` |
+| Artifacts | `build/benchmarks/**` (gitignored) |
 
-### Workers
+Quality plans default to **BEIR scifact**. Do not rank search levers on
+`dataset=synthetic` (ingest/load throughput only). Prefer
+`build/release/tests/benchmarks/retrieval_quality_bench` for quality runs.
 
-| Worker | Measures |
-|--------|----------|
-| `ingestion_e2e` | KPI 2 ingest pipeline (`ingestion_e2e_bench`) |
-| `retrieval_load` | KPI 3 concurrent search (multi_client `[mixed]`) |
-| `repair_ability` | KPI 4 repair (`repair_ability_bench`) |
-| `ops_timeline` | KPI 5 idle/drain (multi_client baseline + idle probe) |
-| `retrieval_quality` | Quality + topology (wraps `retrieval_quality_bench`) |
-| `external_script` | Escape hatch only; prefer first-class workers |
+### Search engine measurement loop
 
-**Ablation is first-class** (`workers/ablation.py`): plan factors → env. Search
-components use `YAMS_SEARCH_*_WEIGHT=0` (+ `YAMS_ENABLE_ENV_OVERRIDES=1`) so
-fanout skips zero-weight sources. Ingest: `YAMS_BENCH_DISABLE_KG` /
-`YAMS_DISABLE_VECTORS` / GLiNER. Also: topology mode, rerank, expansion presets.
+The primary optimization surface is **`src/search/`** (`SearchEngine`, fanout,
+fusion, rerank, topology assist). Topology is one optional assist path — not the
+whole loop. Engine expansion (new stages, seams, fusion/rerank knobs) must be
+driven by this loop, not intuition alone.
 
-`retrieval_quality` expansion presets: `full64`, `medoid64`, `cap8`, `cap2`,
-`rerank_only`. Non-vector sources with seeding need a valid
-`topology_construction_certificate` in `debug.jsonl`.
+1. **Name the lever** — one typed `SearchEngineConfig` / topology field (or a
+   tested seam extract). No new product `YAMS_*` env tunables.
+2. **Pick a plan by question:**
 
-### Core plans
+   | Question | Plan |
+   |----------|------|
+   | Which hybrid component carries quality? | `search_component_ablation` |
+   | Compact engine overhead set | `subsystem_overhead` |
+   | Pipeline / leg stages | `leg_stage_ablation` (`repeats=3`) |
+   | Rerank off vs replace vs blend | `simeon_rerank` / `simeon_rerank_beir` |
+   | Topology assist vs product default off | `topology_optimize_v2` (`repeats=3`) |
+   | Topology construction purity | `topology_purity_validate` (`repeats=3`) |
+   | GraphNeighbors seed-ANN mechanism | `topology_vector_seed_ablation` (`repeats=3`) |
+   | Ingest / load / repair / ops KPIs | `ingest_pipeline`, `retrieval_load`, … |
 
-| Plan | Role |
-|------|------|
-| `search_component_ablation` | KPI 1: hybrid component one-factor-off |
-| `subsystem_overhead` | KPI 1 compact quality ablation set |
-| `ingest_pipeline` | KPI 2: kg/vectors/gliner (+ `minimal`) |
-| `retrieval_load` | KPI 3: load + search_type/vectors ablation |
-| `repair_ability` | KPI 4: fault_kind ablation |
-| `ops_timeline` | KPI 5: idle map + vectors/load-size |
-| `daemon_ops_core` | Combined 2–5 chain |
-| `topology_cluster` | Clustering engines |
-| `topology_route` | Route scoring |
-| `topology_expansion` | Expansion/fusion arms |
-| `topology_source` | Source × expansion + certs |
-| `topology_core_ab` | classic vs topology_core |
-| `simeon_rerank` | Rerank off / replace / blend |
+3. **Decision-grade runs use `repeats>=3`.** Bare Δ with `repeats=1` is exploratory.
+   Summary marks: `*` clears pooled stdev, `~` within noise, unmarked = n=1.
+4. **Read quality × cost** — primary columns include MRR (and friends) **and**
+   `search_latency_ms_p50` (plus expansion/path rates when topology is on).
+   Mechanism rates from `debug.jsonl` (e.g. medoid vs seed-neighbor path,
+   `topology_vector_seeds_added_*`) land in metrics via `retrieval_quality`.
+5. **Compare stamps** with `runner.py compare` before claiming a win. Do not
+   rebuild `build/release` mid-run (poisons arms).
+6. **Product default** for topology routing stays **disabled**. Experimental
+   engine paths must beat that default hybrid on quality without a large
+   latency regression, or stay opt-in / parked.
+7. **Catch2 first** for seams and unit behavior (`tests/unit/search/`); xplan
+   is for multi-arm KPI and default-system ranking — not a substitute for TDD.
 
-### Search / topology benchmarking rules
+### Workers (short)
 
-- Prefer **xplan plans** over `tests/benchmarks/scripts/*` for matrices.
-- Scripts under `tests/benchmarks/scripts/` are **wrappers or profilers** only
-  (see that directory’s README). Heavy expansion logic is **not** in shell.
-- Prefer release quality binary: `build/release/tests/benchmarks/retrieval_quality_bench`
-  (`meson compile -C build/release -j4 retrieval_quality_bench` / alias
-  `bench_retrieval_quality`).
-- Multi-client workers need a Catch2-enabled build (some release configs skip it).
-- Harness-only knobs: `YAMS_BENCH_*` overlays OK. Do **not** grow product
-  `YAMS_*` tunables for matrix axes.
-- Topology claims require `debug.jsonl` markers (admitted/applied/certificate);
-  do not claim wins without counters.
-- Artifact contract: `metrics.json`, `summary.md`, per-arm `validation.json`,
-  and for quality runs `stdout.log` / `debug.jsonl`.
+`retrieval_quality` → BEIR quality + engine/topology counters (`retrieval_quality_bench`).  
+`ingestion_e2e` / `retrieval_load` / `repair_ability` / `ops_timeline` → daemon KPIs 2–5.  
+Ablation mapping: `workers/ablation.py` (search weight gates, ingest flags, topology
+mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for axes.
 
-### Example topology A/B (pass this to other agents)
+### Plan hygiene
 
-```bash
-# Classic vs topology_core (smoke)
-python3 tests/benchmarks/xplan/runner.py run topology_core_ab --build-dir build/release
-
-# Expansion arms only
-python3 tests/benchmarks/xplan/runner.py run topology_expansion --build-dir build/release
-
-# Source × expansion (certs enforced for fts5/kg when seed=1)
-python3 tests/benchmarks/xplan/runner.py run topology_source --build-dir build/release
-```
-
-Legacy wrappers still work but only delegate to xplan:
-`topology_expansion_fusion_ablation.sh`, `topology_source_ablation.sh`,
-`topology_cluster_ablation.sh`, `topology_route_scoring_ablation.sh`,
-`ingestion_pipeline_ablation.sh`.
+- Active topology decision plans: `topology_purity_validate`, `topology_optimize_v2`,
+  `topology_vector_seed_ablation`.
+- Superseded multi-arm topology plans: `tests/benchmarks/xplan/plans/archive/`
+  (historical only; not for promote/kill).
+- No new multi-arm shell scripts; wrappers under `scripts/` or
+  `tests/benchmarks/scripts/` only.
 
 ## Patterns To Reuse (High Signal)
 

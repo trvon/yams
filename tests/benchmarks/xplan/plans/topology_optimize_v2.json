@@ -1,11 +1,12 @@
 {
   "name": "topology_optimize_v2",
-  "description": "Focused follow-up to construction purity winners: push CC defaults, denser graph seeding, and fixed graph_neighbors vs topo_off baseline on BEIR scifact.",
+  "description": "Decision-grade topology sweep (CC/graph/louvain) vs topo_off on BEIR scifact. repeats=3 for noise-aware Δ (* / ~). Primary includes quality + latency + expansion.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
-  "timeout_sec": 7200,
+  "timeout_sec": 14400,
   "continue_on_arm_failure": true,
   "mode": "live-ish",
+  "repeats": 3,
   "baseline": "topo_off",
   "fixed": {
     "env": {
@@ -144,7 +145,8 @@
       "name": "graph_neighbors_dense",
       "factors": {
         "topology_mode": "hybrid_assist",
-        "expansion_source": "graph_neighbors"
+        "expansion_source": "graph_neighbors",
+        "vector_seed_probe": 0
       },
       "env": {
         "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
@@ -152,6 +154,7 @@
         "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
         "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.20",
         "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY": "0",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE": "0",
         "YAMS_BENCH_SEED_SEMANTIC_TOPK": "16",
         "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD": "0.20",
         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "12"
@@ -160,6 +163,33 @@
         "expansion_source": "graph_neighbors",
         "seed_semantic_topk": 16,
         "seed_semantic_threshold": 0.20,
+        "vector_seed_probe": 0,
+        "max_docs": 12
+      }
+    },
+    {
+      "name": "graph_neighbors_dense_vseed16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "expansion_source": "graph_neighbors",
+        "vector_seed_probe": 16
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY": "0",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE": "16",
+        "YAMS_BENCH_SEED_SEMANTIC_TOPK": "16",
+        "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "12"
+      },
+      "params": {
+        "expansion_source": "graph_neighbors",
+        "seed_semantic_topk": 16,
+        "seed_semantic_threshold": 0.20,
+        "vector_seed_probe": 16,
         "max_docs": 12
       }
     },
@@ -168,13 +198,15 @@
       "factors": {
         "topology_mode": "hybrid_assist",
         "expansion_source": "graph_neighbors",
-        "expansion_arm": "cap2"
+        "expansion_arm": "cap2",
+        "vector_seed_probe": 0
       },
       "env": {
         "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
         "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors",
         "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
         "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.25",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE": "0",
         "YAMS_BENCH_SEED_SEMANTIC_TOPK": "12",
         "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD": "0.25",
         "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2",
@@ -184,6 +216,7 @@
         "expansion_source": "graph_neighbors",
         "expansion_arm": "cap2",
         "seed_semantic_topk": 12,
+        "vector_seed_probe": 0,
         "max_docs": 8
       }
     }
@@ -196,10 +229,16 @@
         "ndcg_at_k",
         "map",
         "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
         "topology_applied",
         "topology_added_avg",
         "topology_routed_docs_avg",
-        "topology_routed_clusters_avg"
+        "topology_routed_clusters_avg",
+        "topology_path_medoid_rate",
+        "topology_path_seed_neighbors_rate",
+        "topology_vector_seeds_added_avg",
+        "topology_vector_seed_probe_avg"
       ]
     }
   ],
@@ -213,9 +252,10 @@
       "mrr",
       "ndcg_at_k",
       "map",
-      "topology_applied",
+      "search_latency_ms_p50",
       "topology_added_avg",
-      "topology_routed_docs_avg"
+      "topology_path_medoid_rate",
+      "topology_vector_seeds_added_avg"
     ]
   }
 }
