@@ -272,7 +272,8 @@ std::string getActiveSessionId(YamsCLI* cli, bool bypass, bool initContext = tru
     if (bypass)
         return {};
     // Check environment variable first (fast path, no storage init needed)
-    if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT")) { // NOLINT(concurrency-mt-unsafe)
+    if (const char* envSession =
+            std::getenv("YAMS_SESSION_CURRENT")) { // NOLINT(concurrency-mt-unsafe)
         if (*envSession) {
             return std::string(envSession);
         }
@@ -764,10 +765,11 @@ public:
                             }
 
                             auto documentService = app::services::makeDocumentService(*appContext);
-                            auto local = documentService ? documentService->store(req)
-                                                         : Result<app::services::StoreDocumentResponse>(
-                                                               Error{ErrorCode::NotInitialized,
-                                                                     "Failed to create document service"});
+                            auto local = documentService
+                                             ? documentService->store(req)
+                                             : Result<app::services::StoreDocumentResponse>(
+                                                   Error{ErrorCode::NotInitialized,
+                                                         "Failed to create document service"});
                             if (local) {
                                 totalAdded++;
                                 if (cli_->getJsonOutput()) {
@@ -775,9 +777,9 @@ public:
                                                                {"hash", local.value().hash},
                                                                {"success", true}});
                                 } else {
-                                    std::cout << "Added document: "
-                                              << local.value().hash.substr(0, 16) << "..."
-                                              << std::endl;
+                                    std::cout
+                                        << "Added document: " << local.value().hash.substr(0, 16)
+                                        << "..." << std::endl;
                                 }
                                 successfulRequests++;
                             } else {
