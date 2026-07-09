@@ -148,7 +148,9 @@ driven by this loop, not intuition alone.
    | Which hybrid component carries quality? | `search_component_ablation` |
    | Product-default path (topology off) | `search_product_component_ablation` (`repeats=3`) |
    | Vector fusion weight | `search_vector_weight_ablation` (`repeats=3`) |
+   | Graph-vector fusion weight | `search_graph_vector_weight_ablation` (`repeats=3`) |
    | Tiered execution on/off | `search_tiered_ablation` (`repeats=3`) |
+   | Multi-corpus transfer gate | `search_product_nfcorpus_gate` (`repeats=3`) |
    | Compact engine overhead set | `subsystem_overhead` |
    | Pipeline / leg stages | `leg_stage_ablation` (`repeats=3`) |
    | Rerank off vs replace vs blend | `simeon_rerank` / `simeon_rerank_beir` |
@@ -164,7 +166,8 @@ driven by this loop, not intuition alone.
    Mechanism rates from `debug.jsonl` (e.g. medoid vs seed-neighbor path,
    `topology_vector_seeds_added_*`) land in metrics via `retrieval_quality`.
 5. **Compare stamps** with `runner.py compare` before claiming a win. Do not
-   rebuild `build/release` mid-run (poisons arms).
+   rebuild `build/release` mid-run (poisons arms). xplan skips meson compile when
+   the bench binary already exists; force with `YAMS_BENCH_FORCE_BUILD=1`.
 6. **Product default** for topology routing stays **disabled**. Experimental
    engine paths must beat that default hybrid on quality without a large
    latency regression, or stay opt-in / parked.
@@ -182,10 +185,15 @@ mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for 
 
 - Active topology decision plans: `topology_purity_validate`, `topology_optimize_v2`,
   `topology_vector_seed_ablation`.
+- Product-path engine plans: `search_product_component_ablation`,
+  `search_vector_weight_ablation`, `search_graph_vector_weight_ablation`,
+  `search_tiered_ablation`, `search_product_nfcorpus_gate`.
 - Superseded multi-arm topology plans: `tests/benchmarks/xplan/plans/archive/`
   (historical only; not for promote/kill).
 - No new multi-arm shell scripts; wrappers under `scripts/` or
   `tests/benchmarks/scripts/` only.
+- Prefer sanitizer builds for intermittent bench crashes:
+  `build/asan-api|tsan-api|ubsan-api` + `YAMS_BENCH_SKIP_BUILD=1`.
 
 ## Patterns To Reuse (High Signal)
 

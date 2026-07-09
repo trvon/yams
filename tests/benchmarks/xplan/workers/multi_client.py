@@ -59,7 +59,15 @@ def run_multi_client(
         )
 
     skip_build = bool(ctx.params.get("skip_build")) or os.environ.get("YAMS_BENCH_SKIP_BUILD") == "1"
-    maybe_meson_compile(ctx.repo_root, ctx.build_dir, "bench_multi_client", skip=skip_build)
+    force_build = bool(ctx.params.get("force_build")) or os.environ.get("YAMS_BENCH_FORCE_BUILD") == "1"
+    maybe_meson_compile(
+        ctx.repo_root,
+        ctx.build_dir,
+        "bench_multi_client",
+        skip=skip_build,
+        binary=binary,
+        force=force_build,
+    )
     if not binary.exists():
         return WorkerResult(
             status="failed",

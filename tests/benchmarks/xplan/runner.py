@@ -283,6 +283,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"ARTIFACT={run_dir}", flush=True)
     print(f"plan={plan.name} arms={len(plan.arms)} build_dir={build_dir}", flush=True)
 
+    # One pre-run compile for quality plans when binary is missing (workers skip
+    # rebuilds if the binary already exists to avoid mid-run link races).
+    if not args.dry_run:
+        quality_bin = build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
+        needs_quality = any(s.worker == "retrieval_quality" for s in plan.steps)
+        if needs_quality and not quality_bin.is_file():
+            from workers.util import maybe_meson_compile
+
+            print(f"prebuild: meson compile -C {build_dir} bench_retrieval_quality", flush=True)
+            maybe_meson_compile(
+                repo_root,
+                build_dir,
+                "bench_retrieval_quality",
+                binary=quality_bin,
+                force=True,
+            )
+
     arm_results: list[dict[str, Any]] = []
     any_hard_fail = False
 

@@ -16,14 +16,49 @@ def env_truthy(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def maybe_meson_compile(repo_root: Path, build_dir: Path, target: str, *, skip: bool) -> None:
-    if skip:
+def maybe_meson_compile(
+    repo_root: Path,
+    build_dir: Path,
+    target: str,
+    *,
+    skip: bool = False,
+    binary: Path | None = None,
+    force: bool = False,
+) -> None:
+    """Compile a meson target with a build-dir lock.
+
+    Defaults to **not** rebuilding when ``binary`` already exists, so multi-arm /
+    multi-rep plans do not race mid-run (link/strip of a shared build dir). Force
+    with ``force=True`` or env ``YAMS_BENCH_FORCE_BUILD=1``.
+    """
+    if skip and not force:
         return
-    subprocess.run(
-        ["meson", "compile", "-C", str(build_dir), "-j4", target],
-        check=False,
-        cwd=str(repo_root),
-    )
+    force = force or env_truthy("YAMS_BENCH_FORCE_BUILD")
+    if binary is not None and binary.is_file() and not force:
+        return
+
+    build_dir = Path(build_dir)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = build_dir / ".xplan_meson.lock"
+    try:
+        import fcntl  # POSIX only; fine for local macOS/Linux bench hosts
+
+        with open(lock_path, "a", encoding="utf-8") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Re-check under lock: another arm may have finished the build.
+            if binary is not None and binary.is_file() and not force:
+                return
+            subprocess.run(
+                ["meson", "compile", "-C", str(build_dir), "-j4", target],
+                check=False,
+                cwd=str(repo_root),
+            )
+    except ImportError:
+        subprocess.run(
+            ["meson", "compile", "-C", str(build_dir), "-j4", target],
+            check=False,
+            cwd=str(repo_root),
+        )
 
 
 def resolve_binary(

@@ -1,0 +1,92 @@
+{
+  "name": "search_product_nfcorpus_gate",
+  "description": "Multi-corpus gate for product hybrid (topology off) on BEIR nfcorpus. Use after a scifact-only weight win to check transfer before flipping defaults.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "nf_baseline",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_SKIP_BUILD": "1"
+    },
+    "params": {
+      "dataset": "nfcorpus",
+      "corpus_size": 0,
+      "num_queries": 50,
+      "topk": 10,
+      "skip_build": true
+    }
+  },
+  "arms": [
+    {
+      "name": "nf_baseline",
+      "factors": { "graph_vector_weight": 0.08, "vector_weight": 0.30 },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08",
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
+      }
+    },
+    {
+      "name": "nf_gv_w000",
+      "factors": { "graph_vector_weight": 0.0 },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0",
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
+      }
+    },
+    {
+      "name": "nf_vector_w000",
+      "factors": { "vector_weight": 0.0 },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08",
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0",
+        "YAMS_SEARCH_TEXT_WEIGHT": "1.0"
+      }
+    },
+    {
+      "name": "nf_gv_w004",
+      "factors": { "graph_vector_weight": 0.04 },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.04",
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ]
+  }
+}

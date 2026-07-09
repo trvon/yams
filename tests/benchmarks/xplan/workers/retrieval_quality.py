@@ -527,8 +527,18 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message="dry-run retrieval_quality",
         )
 
+    # Skip mid-run rebuilds by default when the binary already exists (avoids
+    # multi-arm/multi-rep link races). Force with YAMS_BENCH_FORCE_BUILD=1.
     skip_build = bool(ctx.params.get("skip_build")) or os.environ.get("YAMS_BENCH_SKIP_BUILD") == "1"
-    maybe_meson_compile(ctx.repo_root, ctx.build_dir, "bench_retrieval_quality", skip=skip_build)
+    force_build = bool(ctx.params.get("force_build")) or os.environ.get("YAMS_BENCH_FORCE_BUILD") == "1"
+    maybe_meson_compile(
+        ctx.repo_root,
+        ctx.build_dir,
+        "bench_retrieval_quality",
+        skip=skip_build,
+        binary=binary,
+        force=force_build,
+    )
     if not binary.exists():
         return WorkerResult(
             status="failed",
