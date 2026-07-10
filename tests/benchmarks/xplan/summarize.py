@@ -18,7 +18,9 @@ def _find_baseline_row(
     if not plan.baseline:
         return None
     for row in rows:
-        if row.get("arm") == plan.baseline or row.get("safe_name") == plan.baseline:
+        if row.get("valid") and (
+            row.get("arm") == plan.baseline or row.get("safe_name") == plan.baseline
+        ):
             return row
     return None
 

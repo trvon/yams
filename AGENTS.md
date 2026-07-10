@@ -148,15 +148,17 @@ driven by this loop, not intuition alone.
    | Which hybrid component carries quality? | `search_component_ablation` |
    | Product-default path (topology off) | `search_product_component_ablation` (`repeats=3`) |
    | Vector fusion weight | `search_vector_weight_ablation` (`repeats=3`) |
-   | Graph-vector fusion weight | `search_graph_vector_weight_ablation` (`repeats=3`) |
+   | Vector weight multi-corpus gate | `search_vector_weight_0_20_multicorp` (`repeats=3`) |
+   | Graph-vector fusion weight | `search_graph_vector_weight_ablation` (`repeats=3`) — **parked for product defaults**: only meaningful with topology assist; SCIENTIFIC/no-KG gates force `graphVectorWeight=0` |
    | Tiered execution on/off | `search_tiered_ablation` (`repeats=3`) |
    | Multi-corpus transfer gate | `search_product_nfcorpus_gate` (`repeats=3`) |
    | Compact engine overhead set | `subsystem_overhead` |
    | Pipeline / leg stages | `leg_stage_ablation` (`repeats=3`) |
    | Rerank off vs replace vs blend | `simeon_rerank` / `simeon_rerank_beir` |
-   | Topology assist vs product default off | `topology_optimize_v2` (`repeats=3`) |
+   | Rerank blend weight multi-corpus | `search_rerank_blend_multicorp` (`repeats=3`) |
+   | Per-query RR class analysis | `analyze_query_class.py` on arm `debug.jsonl` |
+   | Routed vs global ANN at equal budgets | `topology_routing_budget_ablation` (`repeats=3`) |
    | Topology construction purity | `topology_purity_validate` (`repeats=3`) |
-   | GraphNeighbors seed-ANN mechanism | `topology_vector_seed_ablation` (`repeats=3`) |
    | Ingest / load / repair / ops KPIs | `ingest_pipeline`, `retrieval_load`, … |
 
 3. **Decision-grade runs use `repeats>=3`.** Bare Δ with `repeats=1` is exploratory.
@@ -176,18 +178,22 @@ driven by this loop, not intuition alone.
 
 ### Workers (short)
 
-`retrieval_quality` → BEIR quality + engine/topology counters (`retrieval_quality_bench`).  
-`ingestion_e2e` / `retrieval_load` / `repair_ability` / `ops_timeline` → daemon KPIs 2–5.  
+`retrieval_quality` → BEIR quality + engine/topology counters (`retrieval_quality_bench`).\
+`ingestion_e2e` / `retrieval_load` / `repair_ability` / `ops_timeline` → daemon KPIs 2–5.
 Ablation mapping: `workers/ablation.py` (search weight gates, ingest flags, topology
 mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for axes.
 
 ### Plan hygiene
 
-- Active topology decision plans: `topology_purity_validate`, `topology_optimize_v2`,
-  `topology_vector_seed_ablation`.
+- Active topology decision plans: `topology_purity_validate`,
+  `topology_routing_budget_ablation`.
 - Product-path engine plans: `search_product_component_ablation`,
-  `search_vector_weight_ablation`, `search_graph_vector_weight_ablation`,
-  `search_tiered_ablation`, `search_product_nfcorpus_gate`.
+  `search_vector_weight_ablation`, `search_vector_weight_0_20_multicorp`,
+  `search_tiered_ablation`, `search_product_nfcorpus_gate`,
+  `search_rerank_blend_multicorp`, `search_product_clean_baseline`.
+- Parked product levers (do not use for promote/kill of defaults):
+  `search_graph_vector_weight_ablation` (topology-only), path/tag/metadata/entity
+  weight knobs on SCIENTIFIC (capability-gated to 0).
 - Superseded multi-arm topology plans: `tests/benchmarks/xplan/plans/archive/`
   (historical only; not for promote/kill).
 - No new multi-arm shell scripts; wrappers under `scripts/` or

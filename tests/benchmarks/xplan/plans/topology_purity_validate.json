@@ -36,7 +36,7 @@
     {
       "name": "cc_default",
       "factors": { "topology_mode": "hybrid_assist", "topology_engine": "connected", "expansion_arm": "cap2" },
-      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "connected", "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "connected" },
       "params": { "expansion_arm": "cap2" }
     },
     {
@@ -52,18 +52,6 @@
       "params": { "expansion_arm": "cap2" }
     },
     {
-      "name": "hdbscan_sgc1",
-      "factors": { "topology_mode": "hybrid_assist", "topology_engine": "hdbscan", "feature_smoothing_hops": 1, "expansion_arm": "cap2" },
-      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan", "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "1" },
-      "params": { "expansion_arm": "cap2", "feature_smoothing_hops": 1 }
-    },
-    {
-      "name": "hdbscan",
-      "factors": { "topology_mode": "hybrid_assist", "topology_engine": "hdbscan", "expansion_arm": "cap2" },
-      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan", "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0" },
-      "params": { "expansion_arm": "cap2" }
-    },
-    {
       "name": "graph_neighbors",
       "factors": { "topology_mode": "hybrid_assist", "expansion_source": "graph_neighbors" },
       "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors", "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors", "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.25" },
@@ -73,7 +61,15 @@
   "steps": [
     {
       "worker": "retrieval_quality",
-      "metrics": ["mrr", "ndcg_at_k"]
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "topology_narrow_rate",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "topology_member_rerank_candidates_avg",
+        "vector_candidate_work_budget_avg"
+      ]
     }
   ],
   "validate": {
@@ -88,7 +84,10 @@
       "recall_at_k",
       "search_latency_ms_p50",
       "topology_applied",
-      "topology_added_avg"
+      "topology_narrow_rate",
+      "topology_snapshot_cache_hit_rate",
+      "topology_allowed_candidates_avg",
+      "vector_candidate_work_budget_avg"
     ],
     "group_by": ["topology_engine"]
   }

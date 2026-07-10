@@ -33,19 +33,17 @@ def _all_metric_keys(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(keys)
 
 
-def _baseline_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for name in ("baseline", "baseline_hybrid", "baseline_no_vectors"):
-        for row in rows:
-            if row.get("arm") == name or row.get("safe_name") == name:
-                return row
-    # Prefer arm that has factors empty or all "on"
+def _baseline_row(
+    rows: list[dict[str, Any]], declared_baseline: str | None
+) -> dict[str, Any] | None:
+    if not declared_baseline:
+        return None
     for row in rows:
-        factors = row.get("factors") or {}
-        if not factors:
+        if not row.get("valid"):
+            continue
+        if row.get("arm") == declared_baseline or row.get("safe_name") == declared_baseline:
             return row
-        if all(str(v).lower() in {"on", "1", "true", "enabled", "hybrid"} for v in factors.values()):
-            return row
-    return rows[0] if rows else None
+    return None
 
 
 def _ablation_deltas(
@@ -151,7 +149,7 @@ def write_report(
     # Prefer primary first, then remaining keys
     ordered_keys = list(primary) + [k for k in all_keys if k not in primary]
 
-    baseline = _baseline_row(rows)
+    baseline = _baseline_row(rows, plan.baseline)
     deltas = _ablation_deltas(rows, baseline, primary or ordered_keys[:8])
 
     host = host_info()

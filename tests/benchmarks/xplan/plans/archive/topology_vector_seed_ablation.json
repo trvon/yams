@@ -1,6 +1,6 @@
 {
   "name": "topology_vector_seed_ablation",
-  "description": "Mechanism A/B: GraphNeighbors denser edges with product probe=0 vs opt-in k=16. repeats=3 for noise-aware quality×latency decision.",
+  "description": "ARCHIVED: GraphNeighbors seed mechanism screen retained for historical comparison. Superseded by topology_routing_budget_ablation after cluster routing won.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -104,7 +104,12 @@
         "topology_path_seed_neighbors_rate",
         "topology_vector_seeds_added_avg",
         "topology_vector_seeds_nonzero_rate",
-        "topology_vector_seed_probe_avg"
+        "topology_vector_seed_probe_avg",
+        "topology_narrow_rate",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "topology_member_rerank_candidates_avg",
+        "vector_candidate_work_budget_avg"
       ]
     }
   ],
@@ -121,7 +126,10 @@
       "topology_added_avg",
       "topology_path_medoid_rate",
       "topology_path_seed_neighbors_rate",
-      "topology_vector_seeds_added_avg"
+      "topology_vector_seeds_added_avg",
+      "topology_narrow_rate",
+      "topology_allowed_candidates_avg",
+      "vector_candidate_work_budget_avg"
     ]
   }
 }

@@ -137,20 +137,49 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "load_succeeded": 0,
         "admitted": 0,
         "applied": 0,
+        "narrow_applied": 0,
+        "confidence_abstained": 0,
+        "snapshot_cache_hit": 0,
         "added": 0,
         "duplicate": 0,
         "stale": 0,
         "routed_docs": 0,
         "routed_clusters": 0,
+        "route_available": 0,
         "rejected": 0,
         "added_post_fusion": 0,
         "added_fusion_dropped": 0,
         "sidecar_candidates": 0,
+        "allowed_candidates": 0,
+        "member_rerank_candidates": 0,
+        "member_rerank_selected": 0,
+        "vector_candidate_budget": 0,
+        "vector_result_budget": 0,
+        "vector_distance_evaluation_budget": 0,
+        "topology_member_rows_visited_actual": 0,
+        "topology_member_distance_evaluations_actual": 0,
+        "vector_rows_visited_actual": 0,
+        "vector_exact_distance_evaluations_actual": 0,
+        "vector_ann_candidate_budget_actual": 0,
+        "topology_vector_scores_reused_count": 0,
+        "topology_vector_scores_reused_queries": 0,
     }
     added_vals: list[int] = []
     routed_docs: list[int] = []
     routed_clusters: list[int] = []
+    route_available_vals: list[int] = []
+    route_boundary_score_margin_vals: list[float] = []
     sidecar_vals: list[int] = []
+    allowed_candidate_vals: list[int] = []
+    member_rerank_candidate_vals: list[int] = []
+    vector_candidate_budget_vals: list[int] = []
+    vector_result_budget_vals: list[int] = []
+    vector_distance_evaluation_budget_vals: list[int] = []
+    topology_member_rows_visited_actual_vals: list[int] = []
+    topology_member_distance_evaluations_actual_vals: list[int] = []
+    vector_rows_visited_actual_vals: list[int] = []
+    vector_exact_distance_evaluations_actual_vals: list[int] = []
+    vector_ann_candidate_budget_actual_vals: list[int] = []
     skip_reasons: dict[str, int] = {}
     scoring_modes: dict[str, int] = {}
     routing_modes: dict[str, int] = {}
@@ -181,10 +210,27 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "stale": "topology_weak_query_stale_candidates",
         "routed_docs": "topology_weak_query_routed_docs",
         "routed_clusters": "topology_weak_query_routed_clusters",
+        "route_available": "topology_route_available_count",
         "rejected": "topology_weak_query_routes_rejected",
         "added_post_fusion": "topology_added_candidate_post_fusion_count",
         "added_fusion_dropped": "topology_added_candidate_fusion_dropped_count",
         "sidecar_candidates": "topology_sidecar_vector_candidates",
+        "allowed_candidates": "topology_weak_query_allowed_candidates",
+        "member_rerank_candidates": "topology_member_rerank_candidates",
+        "member_rerank_selected": "topology_member_rerank_selected",
+        "vector_candidate_budget": "vector_search_candidate_budget",
+        "vector_result_budget": "vector_search_result_budget",
+        "vector_distance_evaluation_budget": "vector_search_distance_evaluation_budget",
+        "topology_member_rows_visited_actual": "topology_member_rerank_rows_visited_actual",
+        "topology_member_distance_evaluations_actual": (
+            "topology_member_rerank_distance_evaluations_actual"
+        ),
+        "vector_rows_visited_actual": "vector_search_rows_visited_actual",
+        "vector_exact_distance_evaluations_actual": (
+            "vector_search_exact_distance_evaluations_actual"
+        ),
+        "vector_ann_candidate_budget_actual": "vector_search_ann_candidate_budget_actual",
+        "topology_vector_scores_reused_count": "topology_vector_scores_reused_count",
     }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -272,6 +318,14 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
             counters["admitted"] += 1
         if _truthy(stats.get("topology_weak_query_applied")):
             counters["applied"] += 1
+        if _truthy(stats.get("topology_weak_query_narrow_applied")):
+            counters["narrow_applied"] += 1
+        if _truthy(stats.get("topology_route_confidence_abstained")):
+            counters["confidence_abstained"] += 1
+        if _truthy(stats.get("topology_snapshot_cache_hit")):
+            counters["snapshot_cache_hit"] += 1
+        if _truthy(stats.get("topology_vector_scores_reused")):
+            counters["topology_vector_scores_reused_queries"] += 1
         for dst, key in int_keys.items():
             v = _as_int(stats.get(key))
             counters[dst] += v
@@ -281,8 +335,37 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
                 routed_docs.append(v)
             elif dst == "routed_clusters":
                 routed_clusters.append(v)
+            elif dst == "route_available":
+                route_available_vals.append(v)
             elif dst == "sidecar_candidates":
                 sidecar_vals.append(v)
+            elif dst == "allowed_candidates":
+                allowed_candidate_vals.append(v)
+            elif dst == "member_rerank_candidates":
+                member_rerank_candidate_vals.append(v)
+            elif dst == "vector_candidate_budget":
+                vector_candidate_budget_vals.append(v)
+            elif dst == "vector_result_budget":
+                vector_result_budget_vals.append(v)
+            elif dst == "vector_distance_evaluation_budget":
+                vector_distance_evaluation_budget_vals.append(v)
+            elif dst == "topology_member_rows_visited_actual":
+                topology_member_rows_visited_actual_vals.append(v)
+            elif dst == "topology_member_distance_evaluations_actual":
+                topology_member_distance_evaluations_actual_vals.append(v)
+            elif dst == "vector_rows_visited_actual":
+                vector_rows_visited_actual_vals.append(v)
+            elif dst == "vector_exact_distance_evaluations_actual":
+                vector_exact_distance_evaluations_actual_vals.append(v)
+            elif dst == "vector_ann_candidate_budget_actual":
+                vector_ann_candidate_budget_actual_vals.append(v)
+
+        try:
+            margin = stats.get("topology_route_boundary_score_margin")
+            if margin is not None and str(margin) != "":
+                route_boundary_score_margin_vals.append(float(margin))
+        except (TypeError, ValueError):
+            pass
 
         reason = str(stats.get("topology_weak_query_skip_reason", "") or "")
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -332,6 +415,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "topology_load_succeeded": float(counters["load_succeeded"]),
         "topology_admitted": float(counters["admitted"]),
         "topology_applied": float(counters["applied"]),
+        "topology_narrow_applied": float(counters["narrow_applied"]),
+        "topology_confidence_abstained": float(counters["confidence_abstained"]),
+        "topology_snapshot_cache_hits": float(counters["snapshot_cache_hit"]),
         "topology_added_sum": float(counters["added"]),
         "topology_duplicate_sum": float(counters["duplicate"]),
         "topology_stale_sum": float(counters["stale"]),
@@ -341,6 +427,27 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "topology_added_post_fusion_sum": float(counters["added_post_fusion"]),
         "topology_added_fusion_dropped_sum": float(counters["added_fusion_dropped"]),
         "topology_sidecar_sum": float(counters["sidecar_candidates"]),
+        "topology_allowed_candidates_sum": float(counters["allowed_candidates"]),
+        "topology_member_rerank_candidates_sum": float(counters["member_rerank_candidates"]),
+        "topology_member_rerank_selected_sum": float(counters["member_rerank_selected"]),
+        "vector_candidate_budget_sum": float(counters["vector_candidate_budget"]),
+        "vector_result_budget_sum": float(counters["vector_result_budget"]),
+        "vector_distance_evaluation_budget_sum": float(
+            counters["vector_distance_evaluation_budget"]
+        ),
+        "topology_member_rows_visited_actual_sum": float(
+            counters["topology_member_rows_visited_actual"]
+        ),
+        "topology_member_distance_evaluations_actual_sum": float(
+            counters["topology_member_distance_evaluations_actual"]
+        ),
+        "vector_rows_visited_actual_sum": float(counters["vector_rows_visited_actual"]),
+        "vector_exact_distance_evaluations_actual_sum": float(
+            counters["vector_exact_distance_evaluations_actual"]
+        ),
+        "vector_ann_candidate_budget_actual_sum": float(
+            counters["vector_ann_candidate_budget_actual"]
+        ),
         "topology_cert_seen": float(cert_seen),
         "topology_cert_ok": float(cert_ok),
     }
@@ -382,6 +489,75 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["topology_routed_clusters_avg"] = float(statistics.mean(routed_clusters))
     if sidecar_vals:
         metrics["topology_sidecar_avg"] = float(statistics.mean(sidecar_vals))
+    if allowed_candidate_vals:
+        metrics["topology_allowed_candidates_avg"] = float(
+            statistics.mean(allowed_candidate_vals)
+        )
+    if member_rerank_candidate_vals:
+        metrics["topology_member_rerank_candidates_avg"] = float(
+            statistics.mean(member_rerank_candidate_vals)
+        )
+    if vector_candidate_budget_vals:
+        metrics["vector_candidate_budget_avg"] = float(
+            statistics.mean(vector_candidate_budget_vals)
+        )
+    if vector_result_budget_vals:
+        metrics["vector_result_budget_avg"] = float(statistics.mean(vector_result_budget_vals))
+    if vector_distance_evaluation_budget_vals:
+        metrics["vector_distance_evaluation_budget_avg"] = float(
+            statistics.mean(vector_distance_evaluation_budget_vals)
+        )
+    if topology_member_rows_visited_actual_vals:
+        metrics["topology_member_rows_visited_actual_avg"] = float(
+            statistics.mean(topology_member_rows_visited_actual_vals)
+        )
+    if topology_member_distance_evaluations_actual_vals:
+        metrics["topology_member_distance_evaluations_actual_avg"] = float(
+            statistics.mean(topology_member_distance_evaluations_actual_vals)
+        )
+    if vector_rows_visited_actual_vals:
+        metrics["vector_rows_visited_actual_avg"] = float(
+            statistics.mean(vector_rows_visited_actual_vals)
+        )
+    if vector_exact_distance_evaluations_actual_vals:
+        metrics["vector_exact_distance_evaluations_actual_avg"] = float(
+            statistics.mean(vector_exact_distance_evaluations_actual_vals)
+        )
+    if vector_ann_candidate_budget_actual_vals:
+        metrics["vector_ann_candidate_budget_actual_avg"] = float(
+            statistics.mean(vector_ann_candidate_budget_actual_vals)
+        )
+    if route_available_vals:
+        metrics["topology_route_available_avg"] = float(
+            statistics.mean(route_available_vals)
+        )
+    if route_boundary_score_margin_vals:
+        metrics["topology_route_boundary_score_margin_avg"] = float(
+            statistics.mean(route_boundary_score_margin_vals)
+        )
+    if hybrid > 0:
+        metrics["vector_candidate_work_budget_avg"] = float(
+            counters["member_rerank_candidates"] + counters["vector_candidate_budget"]
+        ) / float(hybrid)
+        metrics["vector_total_rows_visited_actual_avg"] = float(
+            counters["topology_member_rows_visited_actual"]
+            + counters["vector_rows_visited_actual"]
+        ) / float(hybrid)
+        metrics["vector_total_exact_distance_evaluations_actual_avg"] = float(
+            counters["topology_member_distance_evaluations_actual"]
+            + counters["vector_exact_distance_evaluations_actual"]
+        ) / float(hybrid)
+        metrics["topology_vector_scores_reuse_rate"] = float(
+            counters["topology_vector_scores_reused_queries"]
+        ) / float(hybrid)
+    if hybrid > 0:
+        metrics["topology_narrow_rate"] = float(counters["narrow_applied"]) / float(hybrid)
+        metrics["topology_confidence_abstain_rate"] = float(
+            counters["confidence_abstained"]
+        ) / float(hybrid)
+        metrics["topology_snapshot_cache_hit_rate"] = float(
+            counters["snapshot_cache_hit"]
+        ) / float(hybrid)
 
     # Path / seed-ANN mechanism rates (for quality×cost loops).
     if hybrid > 0:
@@ -395,6 +571,10 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["topology_vector_seeds_nonzero_rate"] = float(
             sum(1 for v in vector_seeds_added_vals if v > 0)
         ) / float(len(vector_seeds_added_vals))
+    else:
+        metrics["topology_vector_seeds_added_avg"] = 0.0
+        metrics["topology_vector_seeds_added_max"] = 0.0
+        metrics["topology_vector_seeds_nonzero_rate"] = 0.0
     if vector_seed_probe_vals:
         metrics["topology_vector_seed_probe_avg"] = float(statistics.mean(vector_seed_probe_vals))
         metrics["topology_vector_seed_probe_max"] = float(max(vector_seed_probe_vals))
@@ -452,6 +632,29 @@ def require_topology_certificate(
     if bad:
         return f"invalid topology construction certificate for source={source}: {bad[0]}"
     return None
+
+
+def _merge_benchmark_env(
+    *,
+    ambient: dict[str, str],
+    declared_env: dict[str, str],
+    params: dict[str, Any],
+    param_env: dict[str, str],
+) -> dict[str, str]:
+    """Merge benchmark configuration with deterministic experiment precedence.
+
+    Plan parameters override ambient shell state. Explicit fixed/arm/step env is
+    authoritative when a plan intentionally expresses the same axis as an env var.
+    """
+    env = dict(ambient)
+    for pkey, ekey in param_env.items():
+        if pkey in params:
+            env[ekey] = str(params[pkey])
+    env.update(declared_env)
+    # The benchmark writes a per-process config and DaemonHarness makes it
+    # authoritative. Never let a developer's ambient config shadow that file.
+    env["YAMS_CONFIG_PATH"] = ""
+    return env
 
 
 def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
@@ -518,6 +721,25 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "topology_vector_seeds_added_avg": 0.0,
                 "topology_vector_seeds_nonzero_rate": 0.0,
                 "topology_vector_seed_probe_avg": 0.0,
+                "topology_narrow_rate": 0.0,
+                "topology_confidence_abstain_rate": 0.0,
+                "topology_route_available_avg": 0.0,
+                "topology_route_boundary_score_margin_avg": 0.0,
+                "topology_snapshot_cache_hit_rate": 0.0,
+                "topology_allowed_candidates_avg": 0.0,
+                "topology_member_rerank_candidates_avg": 0.0,
+                "vector_candidate_budget_avg": 0.0,
+                "vector_result_budget_avg": 0.0,
+                "vector_candidate_work_budget_avg": 0.0,
+                "vector_distance_evaluation_budget_avg": 0.0,
+                "topology_member_rows_visited_actual_avg": 0.0,
+                "topology_member_distance_evaluations_actual_avg": 0.0,
+                "vector_rows_visited_actual_avg": 0.0,
+                "vector_exact_distance_evaluations_actual_avg": 0.0,
+                "vector_ann_candidate_budget_actual_avg": 0.0,
+                "vector_total_rows_visited_actual_avg": 0.0,
+                "vector_total_exact_distance_evaluations_actual_avg": 0.0,
+                "topology_vector_scores_reuse_rate": 0.0,
             },
             attributes={
                 "dry_run": True,
@@ -548,18 +770,6 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=f"retrieval_quality_bench missing: {binary}",
         )
 
-    env = os.environ.copy()
-    env.update(ctx.env)
-    env.setdefault("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1")
-    env.setdefault("YAMS_SEARCH_STAGE_TRACE", "1")
-
-    # Default topology scoring knobs (match former common_env).
-    env.setdefault("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING", "current")
-    env.setdefault("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA", "0.5")
-    env.setdefault("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE", "0")
-    env.setdefault("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", "2")
-    env.setdefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", "0")
-
     param_env = {
         "corpus_size": "YAMS_BENCH_CORPUS_SIZE",
         "num_queries": "YAMS_BENCH_NUM_QUERIES",
@@ -569,13 +779,17 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
         "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
         "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
-        "feature_smoothing_hops": "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS",
         "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
         "sparse_dense_alpha": "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA",
         "min_route_score": "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE",
         "medoid_only_expansion": "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION",
-        "max_docs": "YAMS_SEARCH_TOPOLOGY_MAX_DOCS",
-        "max_clusters": "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS",
+        "min_clusters": "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS",
+        "max_docs": "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
+        "max_docs_per_cluster": "YAMS_BENCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
+        "max_clusters": "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
+        "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
+        "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
+        "narrow_min_boundary_margin": "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN",
         "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
         "min_edge_score": "YAMS_TOPOLOGY_MIN_EDGE_SCORE",
         "expansion_source": "YAMS_BENCH_TOPOLOGY_EXPANSION",
@@ -584,8 +798,6 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
         "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
         "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
-        "hdbscan_min_points": "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS",
-        "hdbscan_min_cluster_size": "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE",
         "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
         "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
         "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
@@ -595,9 +807,21 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
         "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
     }
-    for pkey, ekey in param_env.items():
-        if pkey in ctx.params and ekey not in env:
-            env[ekey] = str(ctx.params[pkey])
+    env = _merge_benchmark_env(
+        ambient=os.environ,
+        declared_env=ctx.env,
+        params=ctx.params,
+        param_env=param_env,
+    )
+    env.setdefault("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1")
+    env.setdefault("YAMS_SEARCH_STAGE_TRACE", "1")
+
+    # Default topology scoring knobs (match former common_env).
+    env.setdefault("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING", "current")
+    env.setdefault("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA", "0.5")
+    env.setdefault("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE", "0")
+    env.setdefault("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", "2")
+    env.setdefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", "0")
 
     # Construction purity: mirror bench cert cap into TopologyManager build env.
     if "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS" in env and "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS" not in env:

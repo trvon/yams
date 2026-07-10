@@ -1,12 +1,14 @@
 # Archived topology plans
 
-Superseded by the decision-grade set under `plans/`:
+The active decision-grade set under `plans/` is intentionally compact:
 
 | Active plan | Role |
 |-------------|------|
 | `topology_purity_validate` | Construction/routing purity + quality, `repeats=3` |
-| `topology_optimize_v2` | CC / louvain / graph sweep vs `topo_off`, `repeats=3` |
-| `topology_vector_seed_ablation` | Mechanism A/B for GraphNeighbors seed ANN, `repeats=3` |
+| `topology_routing_budget_ablation` | Adaptive routed CC vs global ANN at equal recall/work budgets, `repeats=3` |
+
+`topology_optimize_v2` and `topology_vector_seed_ablation` are retained here as
+the mechanism screens that selected the active routed-CC path.
 
 Archived files are kept for historical stamp replay only. Run explicitly:
 

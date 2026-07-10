@@ -21,14 +21,8 @@
                                           Write typed topology routing mode into isolated config
     YAMS_BENCH_TOPOLOGY_EXPANSION=clusters|graph_neighbors
                                           Cluster partition vs pure semantic_neighbor expansion
-    YAMS_BENCH_TOPOLOGY_ENGINE=connected|hdbscan|louvain
+    YAMS_BENCH_TOPOLOGY_ENGINE=connected|louvain|kmeans
                                           Write topology engine into isolated config
-    YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS=N
-                                          SGC smoothing hops before embedding clustering
-    YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS=N
-                                          HDBSCAN min points
-    YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE=N
-                                          HDBSCAN min cluster size
     YAMS_BENCH_TOPOLOGY_ROUTE_SCORING=current|size_weighted|seed_coverage
                                           Topology route scoring policy
     YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA=0..1
@@ -37,13 +31,21 @@
                                           Reject routed clusters below score
     YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION=1
                                           Expand only route medoids, not full clusters
+    YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS=N     Minimum adaptive routed-cluster prefix
+    YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS=N
+                                          Cap ranked lexical routing evidence
+    YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
+                                          Grow route prefix while scores remain near the best
+    YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
+                                          Abstain when selected/excluded route margin is smaller
     YAMS_BENCH_TOPOLOGY_SOURCE=vector|fts5|keyphrase|segment_keyphrase|kg|gliner|header|theme
                                           Benchmark semantic_neighbor seeding source for topology
     YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Legacy opt-in topology weak-query routing
     YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS=N        - Cap routed topology clusters (default: 2)
     YAMS_SEARCH_TOPOLOGY_MAX_DOCS=N            - Cap routed topology docs (default: 64)
     YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE=N
-                                          GraphNeighbors seed ANN k (0=off/product default; opt-in e.g. 16)
+                                          GraphNeighbors seed ANN k (0=off/product default; opt-in
+  e.g. 16)
 
   Tuning for faster ingestion (recommended for large corpora):
     YAMS_POST_EMBED_CONCURRENT=12     - Parallel embedding workers (default: 4-8)
@@ -2283,6 +2285,14 @@ static std::size_t parseSizeEnvOrDefault(const char* key, std::size_t defaultVal
     } catch (...) {
         return defaultValue;
     }
+}
+
+static std::size_t parseSizeEnvOrFallback(const char* key, const char* fallbackKey,
+                                          std::size_t defaultValue) {
+    if (const char* raw = std::getenv(key); raw && *raw) {
+        return parseSizeEnvOrDefault(key, defaultValue);
+    }
+    return parseSizeEnvOrDefault(fallbackKey, defaultValue);
 }
 
 static float parseFloatEnvOrDefault(const char* key, float defaultValue) {
@@ -6243,16 +6253,16 @@ struct BenchFixture {
             bool useIsolatedBenchmarkConfig = true;
             const char* topologyModeEnv = std::getenv("YAMS_BENCH_TOPOLOGY_MODE");
             const char* topologyEngineEnv = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE");
-            const bool writeTopologyEngineConfig =
-                (topologyEngineEnv && *topologyEngineEnv) ||
-                (std::getenv("YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS") != nullptr) ||
-                (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS") != nullptr) ||
-                (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE") != nullptr);
+            const bool writeTopologyEngineConfig = topologyEngineEnv && *topologyEngineEnv;
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
+                (std::getenv("YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
                 (std::getenv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE") != nullptr);
 
@@ -6501,15 +6511,36 @@ struct BenchFixture {
                         if (topologyModeEnv && *topologyModeEnv) {
                             configOut << "mode = \"" << topologyModeEnv << "\"\n";
                         }
+                        configOut << "min_clusters = "
+                                  << parseSizeEnvOrDefault(
+                                         "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS", 1)
+                                  << "\n";
                         configOut << "max_clusters = "
-                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", 2)
+                                  << parseSizeEnvOrFallback(
+                                         "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
+                                         "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", 2)
                                   << "\n";
                         configOut << "max_docs = "
-                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
+                                  << parseSizeEnvOrFallback(
+                                         "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
+                                         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
                                   << "\n";
                         configOut << "max_docs_per_cluster = "
-                                  << parseSizeEnvOrDefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
-                                                           0)
+                                  << parseSizeEnvOrFallback(
+                                         "YAMS_BENCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
+                                         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", 0)
+                                  << "\n";
+                        configOut << "max_seed_documents = "
+                                  << parseSizeEnvOrDefault(
+                                         "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS", 32)
+                                  << "\n";
+                        configOut << "adaptive_probe_score_gap = "
+                                  << parseFloatEnvOrDefault(
+                                         "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP", 0.0F)
+                                  << "\n";
+                        configOut << "narrow_min_boundary_margin = "
+                                  << parseFloatEnvOrDefault(
+                                         "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN", 0.0F)
                                   << "\n";
                         if (const char* scoring = std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING");
                             scoring && *scoring) {
@@ -6570,25 +6601,6 @@ struct BenchFixture {
                         configOut << "\n[topology]\n";
                         if (topologyEngineEnv && *topologyEngineEnv) {
                             configOut << "engine = \"" << topologyEngineEnv << "\"\n";
-                        }
-                        if (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS") != nullptr) {
-                            configOut << "hdbscan_min_points = "
-                                      << parseSizeEnvOrDefault(
-                                             "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_POINTS", 0)
-                                      << "\n";
-                        }
-                        if (std::getenv("YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE") !=
-                            nullptr) {
-                            configOut << "hdbscan_min_cluster_size = "
-                                      << parseSizeEnvOrDefault(
-                                             "YAMS_BENCH_TOPOLOGY_HDBSCAN_MIN_CLUSTER_SIZE", 0)
-                                      << "\n";
-                        }
-                        if (std::getenv("YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS") != nullptr) {
-                            configOut << "feature_smoothing_hops = "
-                                      << parseSizeEnvOrDefault(
-                                             "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS", 0)
-                                      << "\n";
                         }
                     }
                     configOut.close();
@@ -6896,9 +6908,8 @@ struct BenchFixture {
                         (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
                          lastSymbolInFlight == 0 && lastEntityInFlight == 0 &&
                          lastEmbedQueued == 0 && lastEmbedInFlight == 0);
-                    const bool extractionOrPostDone =
-                        (lastContentExtracted >= ingestTargetDocs) ||
-                        (lastPostProcessed >= ingestTargetDocs);
+                    const bool extractionOrPostDone = (lastContentExtracted >= ingestTargetDocs) ||
+                                                      (lastPostProcessed >= ingestTargetDocs);
                     return targetReached && allQueuesDrained && extractionOrPostDone;
                 };
 
@@ -6955,8 +6966,8 @@ struct BenchFixture {
                                 (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
                                  kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
                                  embedQueued == 0 && embedInFlight == 0);
-                            const bool extractionOrPostDone =
-                                (extracted >= ingestTargetDocs) || (postProcessed >= ingestTargetDocs);
+                            const bool extractionOrPostDone = (extracted >= ingestTargetDocs) ||
+                                                              (postProcessed >= ingestTargetDocs);
 
                             if (targetReached && allQueuesDrained && extractionOrPostDone) {
                                 spdlog::warn(

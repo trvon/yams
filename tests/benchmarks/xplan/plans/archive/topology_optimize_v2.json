@@ -1,6 +1,6 @@
 {
   "name": "topology_optimize_v2",
-  "description": "Decision-grade topology sweep (CC/graph/louvain) vs topo_off on BEIR scifact. repeats=3 for noise-aware Δ (* / ~). Primary includes quality + latency + expansion.",
+  "description": "ARCHIVED: decision-grade CC/graph/Louvain mechanism screen retained for historical comparison. Superseded by topology_routing_budget_ablation after adaptive connected-component routing won.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 14400,
@@ -120,28 +120,6 @@
       }
     },
     {
-      "name": "hdbscan_sgc1",
-      "factors": {
-        "topology_mode": "hybrid_assist",
-        "topology_engine": "hdbscan",
-        "feature_smoothing_hops": 1,
-        "expansion_arm": "cap2"
-      },
-      "env": {
-        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
-        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
-        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "1",
-        "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2",
-        "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "8"
-      },
-      "params": {
-        "expansion_arm": "cap2",
-        "topology_engine": "hdbscan",
-        "feature_smoothing_hops": 1,
-        "max_docs": 8
-      }
-    },
-    {
       "name": "graph_neighbors_dense",
       "factors": {
         "topology_mode": "hybrid_assist",
@@ -238,7 +216,12 @@
         "topology_path_medoid_rate",
         "topology_path_seed_neighbors_rate",
         "topology_vector_seeds_added_avg",
-        "topology_vector_seed_probe_avg"
+        "topology_vector_seed_probe_avg",
+        "topology_narrow_rate",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "topology_member_rerank_candidates_avg",
+        "vector_candidate_work_budget_avg"
       ]
     }
   ],
@@ -255,7 +238,10 @@
       "search_latency_ms_p50",
       "topology_added_avg",
       "topology_path_medoid_rate",
-      "topology_vector_seeds_added_avg"
+      "topology_vector_seeds_added_avg",
+      "topology_narrow_rate",
+      "topology_allowed_candidates_avg",
+      "vector_candidate_work_budget_avg"
     ]
   }
 }

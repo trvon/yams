@@ -29,8 +29,8 @@ queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
 
 ## Latest snapshot
 
-**Stamp:** `kpi-20260709T031007Z` (search quality) · `kpi-20260709T003228Z` (ingest / load / repair / ops)  
-**Host:** local macOS  
+**Stamp:** `kpi-20260709T031007Z` (search quality) · `kpi-20260709T003228Z` (ingest / load / repair / ops)\
+**Host:** local macOS
 **Builds:** `build/release` (ingest, repair, quality); `build/prepush-macos` (load, ops — Catch2)
 
 ### Ingest — `ingest_pipeline` (80 docs × 1 KB, synthetic throughput)
@@ -106,7 +106,7 @@ Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
 
 ## Refresh
 
-1. `download-beir` (or let quality worker auto-fetch).  
-2. Run the default plans under a common stamp.  
-3. Replace tables above from each `summary.md` / `REPORT.md` (default arms only).  
-4. Update the stamp line.  
+1. `download-beir` (or let quality worker auto-fetch).
+2. Run the default plans under a common stamp.
+3. Replace tables above from each `summary.md` / `REPORT.md` (default arms only).
+4. Update the stamp line.

@@ -69,7 +69,7 @@ tests/benchmarks/xplan/
 | `leg_stage_ablation` / `simeon_rerank*` | Search pipeline / rerank arms |
 | `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
 | `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
-| `topology_purity_validate` / `topology_optimize_v2` / `topology_vector_seed_ablation` | Topology assist (repeats=3) |
+| `topology_purity_validate` / `topology_routing_budget_ablation` | Topology construction purity and routed-vs-global ANN budget gate (repeats=3) |
 | `plans/archive/*` | Superseded plans (historical only) |
 
 Agent measurement loop and plan selection: repo `AGENTS.md` (Benchmarks & Experiments).
