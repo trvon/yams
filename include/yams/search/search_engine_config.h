@@ -176,7 +176,17 @@ struct SearchEngineConfig {
 
     // Legacy compatibility switch. Prefer topologyRoutingMode for new code.
     bool enableTopologyWeakQueryRouting = false;
+    /// Minimum and maximum cluster probes. Adaptive probing is disabled when
+    /// topologyAdaptiveProbeScoreGap is zero, preserving fixed maxClusters behavior.
+    size_t topologyMinClusters = 1;
     size_t topologyMaxClusters = 2;
+    /// Highest-ranked lexical documents allowed to influence cluster routing.
+    size_t topologyMaxSeedDocuments = 32;
+    /// Include another cluster while its score remains this close to the best route.
+    float topologyAdaptiveProbeScoreGap = 0.0f;
+    /// Abstain from hard narrowing when the selected/excluded boundary is closer
+    /// than this margin. Zero disables confidence abstention.
+    float topologyNarrowMinBoundaryMargin = 0.0f;
     size_t topologyMaxDocs = 64;
     size_t topologyMaxDocsPerCluster = 0;
     float topologyMedoidBoost = 0.05f;
@@ -461,6 +471,32 @@ struct SearchEngineConfig {
     float complexQueryFusionExpansion = 1.5f;   // multiply fusion caps for ≥ threshold
     std::size_t narrowQueryTokenThreshold = 2;  // ≤ this = narrow
     std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
+
+    /// Reapply the operator-selected topology policy after corpus tuning.
+    /// Topology routing is an opt-in execution policy, not a corpus-derived
+    /// relevance weight, so tuning must not silently reset it to Disabled.
+    void applyTopologyPolicyFrom(const SearchEngineConfig& source) noexcept {
+        topologyRoutingMode = source.topologyRoutingMode;
+        topologyRouteScoringMode = source.topologyRouteScoringMode;
+        enableTopologyWeakQueryRouting = source.enableTopologyWeakQueryRouting;
+        topologyMinClusters = source.topologyMinClusters;
+        topologyMaxClusters = source.topologyMaxClusters;
+        topologyMaxSeedDocuments = source.topologyMaxSeedDocuments;
+        topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
+        topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
+        topologyMaxDocs = source.topologyMaxDocs;
+        topologyMaxDocsPerCluster = source.topologyMaxDocsPerCluster;
+        topologyMedoidBoost = source.topologyMedoidBoost;
+        topologySparseDenseAlpha = source.topologySparseDenseAlpha;
+        topologyMinRouteScore = source.topologyMinRouteScore;
+        topologyMedoidOnlyExpansion = source.topologyMedoidOnlyExpansion;
+        topologyExpansionSource = source.topologyExpansionSource;
+        topologyGraphNeighborMinScore = source.topologyGraphNeighborMinScore;
+        topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
+        topologyGraphVectorSeedProbe = source.topologyGraphVectorSeedProbe;
+        topologySidecarFusionRescueSlots = source.topologySidecarFusionRescueSlots;
+        topologySidecarFusionRescueMinScore = source.topologySidecarFusionRescueMinScore;
+    }
 
     // Per-query multi-armed bandit arm selections. When non-empty, the
     // tuning pipeline overrides the corresponding static config value with

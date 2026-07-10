@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/search/search_engine_config.h>
+#include <yams/search/search_models.h>
 #include <yams/search/topology_routing_session.h>
 
 #include <cstddef>
@@ -25,11 +26,14 @@ struct TopologyAssistStageRequest {
         SearchEngineConfig::TopologyRoutingMode::Disabled};
     bool weakTier1Query{false};
     std::vector<std::string> tier1SeedHashes;
+    std::vector<yams::topology::WeightedDocumentSeed> tier1SeedEvidence;
     std::unordered_set<std::string> existingCandidateHashes;
     std::optional<std::vector<float>> queryEmbedding;
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore;
     TopologyMemberReranker memberReranker;
+    std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
+    std::uint64_t expectedTopologyEpoch{0};
     /// Extra vector hits to mix into graph-neighbor seeds (already ranked preferred).
     std::vector<std::string> vectorSeedHashes;
     /// Cap on newly added vector seeds. 0 = add none (Tier-1 only).
@@ -49,11 +53,16 @@ struct TopologyAssistStageResult {
 mergeTopologySeedHashes(const std::vector<std::string>& tier1Seeds,
                         const std::vector<std::string>& vectorSeeds, std::size_t maxVectorSeeds);
 
+/// Preserve lexical rank/score evidence before Tier-1 candidates become an
+/// unordered set. Vector/metadata legs are deliberately excluded.
+[[nodiscard]] std::vector<yams::topology::WeightedDocumentSeed>
+rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds);
+
 /// Fill skipReason when the session did not apply expansion (stable product diagnostics).
 void fillTopologySkipReason(std::string& skipReason,
-                            SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
-                            bool routingEnabled, bool hasStores, bool sessionApplied,
-                            bool loadSucceeded, std::size_t routedClusters);
+                            SearchEngineConfig::TopologyRoutingMode routingMode,
+                            bool weakTier1Query, bool routingEnabled, bool hasStores,
+                            bool sessionApplied, bool loadSucceeded, std::size_t routedClusters);
 
 /// Run topology routing for tiered search and return session + diagnostics.
 [[nodiscard]] TopologyAssistStageResult

@@ -62,8 +62,7 @@ DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& ha
     return info;
 }
 
-std::unordered_map<std::string, std::string>
-clusterByDocument(const TopologyArtifactBatch& batch) {
+std::unordered_map<std::string, std::string> clusterByDocument(const TopologyArtifactBatch& batch) {
     std::unordered_map<std::string, std::string> clusterOf;
     for (const auto& membership : batch.memberships) {
         clusterOf.emplace(membership.documentHash, membership.clusterId);
@@ -73,13 +72,12 @@ clusterByDocument(const TopologyArtifactBatch& batch) {
 
 const ClusterArtifact* findClusterContaining(const TopologyArtifactBatch& batch,
                                              const std::string& documentHash) {
-    const auto it = std::find_if(batch.clusters.begin(), batch.clusters.end(),
-                                 [&](const ClusterArtifact& cluster) {
-                                     return std::find(cluster.memberDocumentHashes.begin(),
-                                                      cluster.memberDocumentHashes.end(),
-                                                      documentHash) !=
-                                            cluster.memberDocumentHashes.end();
-                                 });
+    const auto it = std::find_if(
+        batch.clusters.begin(), batch.clusters.end(), [&](const ClusterArtifact& cluster) {
+            return std::find(cluster.memberDocumentHashes.begin(),
+                             cluster.memberDocumentHashes.end(),
+                             documentHash) != cluster.memberDocumentHashes.end();
+        });
     return it == batch.clusters.end() ? nullptr : &*it;
 }
 
@@ -98,7 +96,8 @@ void requireWellFormedBatch(const TopologyArtifactBatch& batch) {
     for (const auto& membership : batch.memberships) {
         CAPTURE(membership.documentHash, membership.clusterId);
         CHECK(clusterIds.contains(membership.clusterId));
-        CHECK(membershipKeys.insert(membership.documentHash + "\x1F" + membership.clusterId).second);
+        CHECK(
+            membershipKeys.insert(membership.documentHash + "\x1F" + membership.clusterId).second);
     }
 
     for (const auto& cluster : batch.clusters) {
@@ -213,14 +212,15 @@ TEST_CASE("Topology baseline enforces Lean edge-filter contract",
         TopologyDocumentInput{
             .documentHash = "aaa",
             .filePath = "/repo/a.md",
-            .neighbors = {
-                {.documentHash = "bbb", .score = 0.9F, .reciprocal = true},
-                {.documentHash = "ccc", .score = 0.49F, .reciprocal = true},
-                {.documentHash = "ddd", .score = 0.9F, .reciprocal = false},
-                {.documentHash = "missing", .score = 0.9F, .reciprocal = true},
-                {.documentHash = "aaa", .score = 1.0F, .reciprocal = true},
-                {.documentHash = "", .score = 1.0F, .reciprocal = true},
-            }},
+            .neighbors =
+                {
+                    {.documentHash = "bbb", .score = 0.9F, .reciprocal = true},
+                    {.documentHash = "ccc", .score = 0.49F, .reciprocal = true},
+                    {.documentHash = "ddd", .score = 0.9F, .reciprocal = false},
+                    {.documentHash = "missing", .score = 0.9F, .reciprocal = true},
+                    {.documentHash = "aaa", .score = 1.0F, .reciprocal = true},
+                    {.documentHash = "", .score = 1.0F, .reciprocal = true},
+                }},
         TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md", .neighbors = {}},
         TopologyDocumentInput{.documentHash = "ccc", .filePath = "/repo/c.md", .neighbors = {}},
         TopologyDocumentInput{.documentHash = "ddd", .filePath = "/repo/d.md", .neighbors = {}},
@@ -285,10 +285,9 @@ TEST_CASE("Topology baseline satisfies connected component and router contracts"
     REQUIRE((routes.value().size() <= request.limit));
     for (const auto& route : routes.value()) {
         CAPTURE(route.clusterId);
-        CHECK(std::any_of(batch.clusters.begin(), batch.clusters.end(),
-                          [&](const ClusterArtifact& cluster) {
-                              return cluster.clusterId == route.clusterId;
-                          }));
+        CHECK(std::any_of(
+            batch.clusters.begin(), batch.clusters.end(),
+            [&](const ClusterArtifact& cluster) { return cluster.clusterId == route.clusterId; }));
     }
 }
 
@@ -399,6 +398,75 @@ TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
     REQUIRE((routes.value().size() == 1U));
     REQUIRE(routes.value().front().medoidDocumentHash.has_value());
     CHECK((routes.value().front().medoidDocumentHash.value() == "ccc"));
+}
+
+TEST_CASE("Sparse-guided topology routing uses weighted lexical evidence",
+          "[unit][topology][routing][weighted-seeds]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{.clusterId = "focused", .memberCount = 1, .memberDocumentHashes = {"high"}},
+        ClusterArtifact{
+            .clusterId = "broad", .memberCount = 2, .memberDocumentHashes = {"low-a", "low-b"}},
+    };
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.seedDocumentHashes = {"high", "low-a", "low-b"};
+    request.weightedSeedDocuments = {
+        WeightedDocumentSeed{.documentHash = "high", .weight = 1.0F},
+        WeightedDocumentSeed{.documentHash = "low-a", .weight = 0.1F},
+        WeightedDocumentSeed{.documentHash = "low-b", .weight = 0.1F},
+    };
+    request.limit = 1;
+    request.sparseDenseAlpha = 1.0F;
+
+    auto routes = router.route(request, batch);
+    REQUIRE(routes.has_value());
+    REQUIRE(routes.value().size() == 1);
+    CHECK(routes.value().front().clusterId == "focused");
+}
+
+TEST_CASE("Sparse-guided topology routing reuses a prepared membership index",
+          "[unit][topology][routing][prepared-index]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{.clusterId = "focused",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"high", "peer"},
+                        .centroidEmbedding = {1.0F, 0.0F}},
+        ClusterArtifact{.clusterId = "broad",
+                        .memberCount = 3,
+                        .memberDocumentHashes = {"low-a", "low-b", "low-c"},
+                        .centroidEmbedding = {0.0F, 1.0F}},
+    };
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.seedDocumentHashes = {"high", "low-a", "low-b"};
+    request.weightedSeedDocuments = {
+        WeightedDocumentSeed{.documentHash = "high", .weight = 1.0F},
+        WeightedDocumentSeed{.documentHash = "low-a", .weight = 0.2F},
+        WeightedDocumentSeed{.documentHash = "low-b", .weight = 0.2F},
+    };
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.limit = 2;
+    request.sparseDenseAlpha = 0.7F;
+
+    auto baseline = router.route(request, batch);
+    REQUIRE(baseline.has_value());
+
+    const auto index = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    SparseRouteWork work;
+    auto indexed = router.route(request, batch, index, &work);
+    REQUIRE(indexed.has_value());
+    REQUIRE(indexed.value().size() == baseline.value().size());
+    for (std::size_t i = 0; i < indexed.value().size(); ++i) {
+        CHECK(indexed.value()[i].clusterId == baseline.value()[i].clusterId);
+        CHECK(indexed.value()[i].routeScore == Catch::Approx(baseline.value()[i].routeScore));
+    }
+    CHECK(work.seedClusterLookups == 3);
+    CHECK(work.clusterMemberHashesScanned == 0);
+    CHECK(work.queryNormEvaluations == 1);
 }
 
 TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
@@ -736,21 +804,14 @@ TEST_CASE("Topology baseline splits oversized CC components (anti-giant)",
         return TopologyNeighbor{.documentHash = target, .score = 0.9F, .reciprocal = true};
     };
     std::vector<TopologyDocumentInput> docs{
-        TopologyDocumentInput{.documentHash = "a",
-                              .filePath = "/a",
-                              .neighbors = {makeEdge("b")}},
-        TopologyDocumentInput{.documentHash = "b",
-                              .filePath = "/b",
-                              .neighbors = {makeEdge("a"), makeEdge("c")}},
-        TopologyDocumentInput{.documentHash = "c",
-                              .filePath = "/c",
-                              .neighbors = {makeEdge("b"), makeEdge("d")}},
-        TopologyDocumentInput{.documentHash = "d",
-                              .filePath = "/d",
-                              .neighbors = {makeEdge("c"), makeEdge("e")}},
-        TopologyDocumentInput{.documentHash = "e",
-                              .filePath = "/e",
-                              .neighbors = {makeEdge("d")}},
+        TopologyDocumentInput{.documentHash = "a", .filePath = "/a", .neighbors = {makeEdge("b")}},
+        TopologyDocumentInput{
+            .documentHash = "b", .filePath = "/b", .neighbors = {makeEdge("a"), makeEdge("c")}},
+        TopologyDocumentInput{
+            .documentHash = "c", .filePath = "/c", .neighbors = {makeEdge("b"), makeEdge("d")}},
+        TopologyDocumentInput{
+            .documentHash = "d", .filePath = "/d", .neighbors = {makeEdge("c"), makeEdge("e")}},
+        TopologyDocumentInput{.documentHash = "e", .filePath = "/e", .neighbors = {makeEdge("d")}},
     };
 
     auto uncapped = engine.buildArtifacts(docs, [&] {

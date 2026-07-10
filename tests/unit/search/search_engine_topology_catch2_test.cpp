@@ -240,7 +240,6 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
 
 } // namespace
 
-
 TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
           "[search][topology][catch2]") {
     TopologySearchFixture fix;
@@ -323,17 +322,63 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
-    CHECK((debug.at("topology_weak_query_narrow_applied") == "0"));
-    CHECK((debug.at("topology_sidecar_vector_candidates") == "2"));
-    CHECK((debug.at("topology_sidecar_post_fusion_count") == "2"));
+    CHECK((debug.at("topology_weak_query_narrow_applied") == "1"));
+    CHECK((debug.at("topology_weak_query_allowed_candidates") == "2"));
+    CHECK((debug.at("vector_search_candidate_budget") == "2"));
+    CHECK((debug.at("vector_search_distance_evaluation_budget") == "4"));
+    CHECK((debug.at("topology_vector_scores_reused") == "1"));
+    CHECK((debug.at("topology_vector_scores_reused_count") == "2"));
+    CHECK((debug.at("topology_member_rerank_rows_visited_actual") == "2"));
+    CHECK((debug.at("topology_member_rerank_distance_evaluations_actual") == "2"));
+    CHECK((debug.at("vector_search_rows_visited_actual") == "0"));
+    CHECK((debug.at("vector_search_exact_distance_evaluations_actual") == "0"));
+    CHECK((debug.at("topology_sidecar_vector_candidates") == "0"));
+    CHECK((debug.at("topology_sidecar_post_fusion_count") == "0"));
     CHECK((debug.at("topology_new_post_fusion_count") == "0"));
-    CHECK((debug.at("topology_duplicate_post_fusion_count") == "2"));
+    CHECK((debug.at("topology_duplicate_post_fusion_count") == "0"));
     CHECK(debug.contains("topology_sidecar_post_fusion_doc_ids"));
     CHECK(debug.contains("topology_new_post_fusion_doc_ids"));
     CHECK(debug.contains("topology_duplicate_post_fusion_doc_ids"));
     CHECK((debug.at("topology_weak_query_routed_clusters") == "1"));
     CHECK((debug.at("topology_weak_query_added_candidates") == "2"));
     CHECK((debug.at("topology_weak_query_total_candidates") == "2"));
+    CHECK((debug.at("topology_snapshot_cache_hit") == "0"));
+
+    auto cachedResponse = engine.searchWithResponse("unmatched query", params);
+    REQUIRE(cachedResponse.has_value());
+    CHECK((cachedResponse.value().debugStats.at("topology_snapshot_cache_hit") == "1"));
+}
+
+TEST_CASE("Hybrid topology routing does not copy unrelated lexical hits into vector narrowing",
+          "[search][topology][narrowing][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    fix.addDocument("lexical-only", "unique needle", {1.0F, 0.0F});
+    seedTwoClusterTopology(fix);
+
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologySparseDenseAlpha = 0.0F;
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 4;
+    auto response = engine.searchWithResponse("unique needle", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    REQUIRE(debug.at("topology_weak_query_narrow_applied") == "1");
+    CHECK(debug.at("topology_weak_query_allowed_candidates") == "2");
+    CHECK(debug.at("vector_search_candidate_budget") == "2");
+    CHECK(debug.at("topology_vector_scores_reused") == "1");
 }
 
 TEST_CASE("SearchEngine topology routing loads stored artifacts without freshness readiness",
@@ -473,10 +518,11 @@ TEST_CASE("SearchEngine weak-only topology routing skips strong tier-1 queries",
     CHECK((debug.at("topology_weak_query_added_candidates") == "0"));
 }
 
-TEST_CASE("SearchEngine hybrid-assist topology routing applies to strong tier-1 queries",
+TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without vector scoring",
           "[search][topology][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
+    fix.addDocument("z1", "alpha outside route", {0.0F, 1.0F});
     seedTwoClusterTopology(fix);
     auto generator = makeFixedGenerator({0.0F, 1.0F});
 
@@ -503,15 +549,21 @@ TEST_CASE("SearchEngine hybrid-assist topology routing applies to strong tier-1 
     CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
-    CHECK((debug.at("topology_weak_query_narrow_applied") == "0"));
-    CHECK((debug.at("topology_weak_query_added_candidates") == "2"));
-    CHECK((debug.at("topology_sidecar_vector_candidates") == "2"));
+    CHECK((debug.at("topology_weak_query_narrow_applied") == "1"));
+    CHECK((debug.at("topology_weak_query_allowed_candidates") == "2"));
+    CHECK((debug.at("topology_sidecar_vector_candidates") == "0"));
+
+    const auto outsideRoute =
+        std::find_if(response.value().results.begin(), response.value().results.end(),
+                     [](const auto& result) { return result.document.sha256Hash == "z1"; });
+    REQUIRE((outsideRoute != response.value().results.end()));
+    CHECK_FALSE(outsideRoute->vectorScore.has_value());
 
     const bool hasTopologyVectorScore = std::any_of(
         response.value().results.begin(), response.value().results.end(), [](const auto& result) {
             return result.graphVectorScore.has_value() && result.graphVectorScore.value() > 0.0;
         });
-    CHECK(hasTopologyVectorScore);
+    CHECK_FALSE(hasTopologyVectorScore);
 }
 
 TEST_CASE("SearchEngine rerank-only topology routing loads but does not add candidates",
@@ -701,7 +753,6 @@ TEST_CASE("Topology routing session excludes min-score-rejected routes from conf
     CHECK((session.addedCandidates == 0));
 }
 
-
 TEST_CASE("Topology routing applies the per-cluster member reranker and caps members",
           "[search][topology][catch2]") {
     TopologySearchFixture fix;
@@ -733,7 +784,7 @@ TEST_CASE("Topology routing applies the per-cluster member reranker and caps mem
     CHECK((session.addedCandidates <= session.acceptedRoutes * request.perClusterLimit));
 }
 
-TEST_CASE("Topology routing without a reranker keeps flat expansion at perClusterLimit",
+TEST_CASE("Topology routing without a reranker falls back to query-independent medoids",
           "[search][topology][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
@@ -751,29 +802,124 @@ TEST_CASE("Topology routing without a reranker keeps flat expansion at perCluste
 
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     REQUIRE(session.artifactAdmitted);
-    CHECK((session.addedCandidates >= session.acceptedRoutes));
+    CHECK((session.addedCandidates <= session.acceptedRoutes));
+    CHECK((session.routedCandidateHashes.size() <= session.acceptedRoutes));
+}
+
+TEST_CASE("Topology snapshot cache validates once and reuses the admitted epoch",
+          "[search][topology][cache][catch2]") {
+    auto batch = buildTwoClusterTopologyBatch();
+    int loadCalls = 0;
+    TopologyRoutingSnapshotCache cache([&]() {
+        ++loadCalls;
+        return Result<std::optional<yams::topology::TopologyArtifactBatch>>{
+            std::optional<yams::topology::TopologyArtifactBatch>{batch}};
+    });
+
+    auto first = cache.get(batch.topologyEpoch);
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().snapshot);
+    CHECK_FALSE(first.value().cacheHit);
+    CHECK((first.value().snapshot->clustersById.size() == batch.clusters.size()));
+
+    auto second = cache.get(batch.topologyEpoch);
+    REQUIRE(second.has_value());
+    REQUIRE(second.value().snapshot);
+    CHECK(second.value().cacheHit);
+    CHECK((loadCalls == 1));
+}
+
+TEST_CASE("Topology snapshot cache rejects duplicate cluster identifiers",
+          "[search][topology][cache][validation][catch2]") {
+    auto batch = buildTwoClusterTopologyBatch();
+    REQUIRE((batch.clusters.size() >= 2));
+    batch.clusters[1].clusterId = batch.clusters[0].clusterId;
+
+    TopologyRoutingSnapshotCache cache([batch]() mutable {
+        return Result<std::optional<yams::topology::TopologyArtifactBatch>>{
+            std::optional<yams::topology::TopologyArtifactBatch>{std::move(batch)}};
+    });
+
+    const auto result = cache.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().message == "invalid_artifact:duplicate_cluster_id"));
 }
 
 TEST_CASE("mergeTopologySeedHashes keeps Tier-1 first and caps vector seeds",
           "[unit][search][topology][graph_neighbors]") {
     const auto merged =
         mergeTopologySeedHashes({"t1", "t2", "t1"}, {"v1", "t2", "v2", "v3"}, /*maxVectorSeeds=*/2);
-    REQUIRE(merged.size() == 4);
-    CHECK(merged[0] == "t1");
-    CHECK(merged[1] == "t2");
-    CHECK(merged[2] == "v1");
-    CHECK(merged[3] == "v2");
+    REQUIRE((merged.size() == 4));
+    CHECK((merged[0] == "t1"));
+    CHECK((merged[1] == "t2"));
+    CHECK((merged[2] == "v1"));
+    CHECK((merged[3] == "v2"));
 
-    const auto none =
-        mergeTopologySeedHashes({"t1", "t2"}, {"v1", "v2"}, /*maxVectorSeeds=*/0);
-    REQUIRE(none.size() == 2);
-    CHECK(none[0] == "t1");
-    CHECK(none[1] == "t2");
+    const auto none = mergeTopologySeedHashes({"t1", "t2"}, {"v1", "v2"}, /*maxVectorSeeds=*/0);
+    REQUIRE((none.size() == 2));
+    CHECK((none[0] == "t1"));
+    CHECK((none[1] == "t2"));
 
-    const auto emptyVec =
-        mergeTopologySeedHashes({"t1"}, {}, /*maxVectorSeeds=*/16);
-    REQUIRE(emptyVec.size() == 1);
-    CHECK(emptyVec[0] == "t1");
+    const auto emptyVec = mergeTopologySeedHashes({"t1"}, {}, /*maxVectorSeeds=*/16);
+    REQUIRE((emptyVec.size() == 1));
+    CHECK((emptyVec[0] == "t1"));
+}
+
+TEST_CASE("rankTopologySeedEvidence keeps ranked lexical evidence and caps fanout",
+          "[unit][search][topology][weighted-seeds]") {
+    std::vector<ComponentResult> components{
+        ComponentResult{.documentHash = "rank-zero",
+                        .score = 0.80F,
+                        .source = ComponentResult::Source::Text,
+                        .rank = 0},
+        ComponentResult{.documentHash = "late-high",
+                        .score = 0.95F,
+                        .source = ComponentResult::Source::Text,
+                        .rank = 10},
+        ComponentResult{.documentHash = "early",
+                        .score = 0.80F,
+                        .source = ComponentResult::Source::Text,
+                        .rank = 1},
+        ComponentResult{.documentHash = "late-high",
+                        .score = 0.90F,
+                        .source = ComponentResult::Source::SimeonText,
+                        .rank = 2},
+        ComponentResult{.documentHash = "vector-only",
+                        .score = 1.0F,
+                        .source = ComponentResult::Source::Vector,
+                        .rank = 1},
+    };
+
+    const auto evidence = rankTopologySeedEvidence(components, 3);
+    REQUIRE((evidence.size() == 3));
+    CHECK((evidence[0].documentHash == "rank-zero"));
+    CHECK((evidence[1].documentHash == "early"));
+    CHECK((evidence[2].documentHash == "late-high"));
+    CHECK((evidence[0].weight > evidence[1].weight));
+}
+
+TEST_CASE("selectTopologyRoutesForNarrowing adapts probes and abstains at an unsafe boundary",
+          "[unit][search][topology][adaptive-probe]") {
+    std::vector<yams::topology::ClusterRoute> routes{
+        yams::topology::ClusterRoute{.clusterId = "a", .routeScore = 1.00},
+        yams::topology::ClusterRoute{.clusterId = "b", .routeScore = 0.97},
+        yams::topology::ClusterRoute{.clusterId = "c", .routeScore = 0.80},
+    };
+
+    const auto safe = selectTopologyRoutesForNarrowing(routes, /*minClusters=*/1, /*maxClusters=*/3,
+                                                       /*adaptiveScoreGap=*/0.05F,
+                                                       /*minBoundaryMargin=*/0.10F);
+    REQUIRE((safe.routes.size() == 2));
+    CHECK((safe.routes[0].clusterId == "a"));
+    CHECK((safe.routes[1].clusterId == "b"));
+    CHECK((safe.boundaryScoreMargin == 0.17F));
+    CHECK_FALSE(safe.abstained);
+
+    const auto unsafe = selectTopologyRoutesForNarrowing(
+        routes, /*minClusters=*/1, /*maxClusters=*/2, /*adaptiveScoreGap=*/0.05F,
+        /*minBoundaryMargin=*/0.20F);
+    REQUIRE((unsafe.routes.size() == 2));
+    CHECK(unsafe.abstained);
 }
 
 TEST_CASE("fillTopologySkipReason preserves session reason and fills product defaults",
@@ -781,15 +927,15 @@ TEST_CASE("fillTopologySkipReason preserves session reason and fills product def
     using Mode = SearchEngineConfig::TopologyRoutingMode;
     std::string reason = "graph_medoid_neighbors";
     fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 0);
-    CHECK(reason == "graph_medoid_neighbors");
+    CHECK((reason == "graph_medoid_neighbors"));
 
     reason.clear();
     fillTopologySkipReason(reason, Mode::Disabled, false, false, true, false, false, 0);
-    CHECK(reason == "disabled");
+    CHECK((reason == "disabled"));
 
     reason.clear();
     fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 2);
-    CHECK(reason == "no_added_candidates");
+    CHECK((reason == "no_added_candidates"));
 }
 
 TEST_CASE("rankGraphNeighborCandidates ranks multi-seed hits and filters score/reciprocal",

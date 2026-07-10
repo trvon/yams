@@ -135,11 +135,14 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.artifactsFresh = true;
     session.topologyEpoch = 7;
     session.routedClusters = 2;
+    session.availableRoutes = 3;
     session.routedDocs = 5;
     session.routesRejected = 1;
     session.addedCandidates = 4;
     session.duplicateCandidates = 3;
     session.staleCandidates = 1;
+    session.routeBoundaryScoreMargin = 0.17F;
+    session.confidenceAbstained = true;
     session.addedCandidateHashes = {"hash-a", "hash-b"};
     session.timings.totalMicros = 100;
     session.timings.loadMicros = 10;
@@ -170,6 +173,9 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_weak_query_skip_reason") == "skip-reason");
     CHECK(debug.at("topology_weak_query_routes_rejected") == "1");
     CHECK(debug.at("topology_weak_query_routed_clusters") == "2");
+    CHECK(debug.at("topology_route_available_count") == "3");
+    CHECK(debug.at("topology_route_boundary_score_margin") == std::to_string(0.17F));
+    CHECK(debug.at("topology_route_confidence_abstained") == "1");
     CHECK(debug.at("topology_weak_query_routed_docs") == "5");
     CHECK(debug.at("topology_weak_query_added_candidates") == "4");
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");

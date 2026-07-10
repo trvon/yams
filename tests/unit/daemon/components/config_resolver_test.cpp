@@ -472,8 +472,13 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     auto configPath = writeToml("config.toml", R"TOML(
 [search.topology]
 enable_weak_query_routing = true
+min_clusters = 1
 max_clusters = 3
+max_seed_documents = 24
+adaptive_probe_score_gap = 0.07
+narrow_min_boundary_margin = 0.03
 max_docs = 42
+max_docs_per_cluster = 12
 medoid_boost = 0.2
 rrf_k = 33
 )TOML");
@@ -485,8 +490,18 @@ rrf_k = 33
     CHECK(*policy.enableWeakQueryRouting == true);
     REQUIRE(policy.maxClusters.has_value());
     CHECK(*policy.maxClusters == 3U);
+    REQUIRE(policy.minClusters.has_value());
+    CHECK(*policy.minClusters == 1U);
+    REQUIRE(policy.maxSeedDocuments.has_value());
+    CHECK(*policy.maxSeedDocuments == 24U);
+    REQUIRE(policy.adaptiveProbeScoreGap.has_value());
+    CHECK(*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F));
+    REQUIRE(policy.narrowMinBoundaryMargin.has_value());
+    CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
     REQUIRE(policy.maxDocs.has_value());
     CHECK(*policy.maxDocs == 42U);
+    REQUIRE(policy.maxDocsPerCluster.has_value());
+    CHECK(*policy.maxDocsPerCluster == 12U);
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.19f);
     CHECK(*policy.medoidBoost < 0.21f);

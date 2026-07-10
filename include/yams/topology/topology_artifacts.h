@@ -77,14 +77,6 @@ struct TopologyBuildConfig {
     DirtyRegionExpansionMode dirtyRegionExpansion{
         DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
-    // HDBSCAN engine: minimum points for core-distance / minimum cluster size
-    // (0 = auto from corpus size). Ignored by other engines.
-    std::size_t hdbscanMinPoints{0};
-    std::size_t hdbscanMinClusterSize{0};
-    // SGC (Wu 2019) feature propagation hops applied to document embeddings
-    // before clustering runs: X' = S_hat^K * X. K = 0 disables smoothing.
-    // Only embedding-consuming engines (HDBSCAN) observe the smoothed features.
-    std::size_t featureSmoothingHops{0};
     // Phase S: KMeans engine knobs.
     // kmeansK: target cluster count for KMeans engines (0 = auto: max(64, min(300, sqrt(n)))).
     // kmeansMaxIterations: Lloyd iteration cap during buildArtifacts.
@@ -137,7 +129,7 @@ struct ClusterArtifact {
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
     // Phase S: optional running-mean centroid for online KMeans engine.
-    // Empty for engines that don't compute it (HDBSCAN/Connected/Louvain).
+    // Empty for engines that don't compute it (Connected/Louvain).
     std::vector<float> centroidEmbedding;
 };
 
@@ -174,9 +166,18 @@ enum class RouteScoringMode : uint8_t {
     SeedCoverage,
 };
 
+/// Query-time evidence for routing a document into a cluster. The weight is
+/// already normalized/rank-discounted by the caller; routers aggregate it
+/// without needing to know which lexical backend produced it.
+struct WeightedDocumentSeed {
+    std::string documentHash;
+    float weight{0.0F};
+};
+
 struct TopologyRouteRequest {
     std::string queryText;
     std::vector<std::string> seedDocumentHashes;
+    std::vector<WeightedDocumentSeed> weightedSeedDocuments;
     std::size_t limit{8};
     bool preferStableClusters{true};
     bool weakQueryOnly{true};

@@ -194,7 +194,8 @@ Result<std::vector<ComponentResult>>
 queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                      const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                      const std::vector<float>& embedding, const SearchEngineConfig& config,
-                     size_t limit, const std::unordered_set<std::string>* candidates) {
+                     size_t limit, const std::unordered_set<std::string>* candidates,
+                     vector::VectorSearchDiagnostics* diagnostics) {
     std::vector<ComponentResult> results;
     results.reserve(limit);
 
@@ -206,6 +207,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
         vector::VectorSearchParams params;
         params.k = vectorRawCandidateLimit(config, limit, candidates != nullptr);
         params.similarity_threshold = config.similarityThreshold;
+        params.diagnostics = diagnostics;
         if (candidates != nullptr) {
             params.candidate_hashes = *candidates;
         }
@@ -256,12 +258,52 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 
 } // namespace
 
+std::optional<std::vector<ComponentResult>> reusePrecomputedVectorResults(
+    const std::vector<ComponentResult>& precomputed,
+    const std::unordered_set<std::string>& allowedDocuments, size_t limit) {
+    std::unordered_map<std::string, ComponentResult> bestByHash;
+    bestByHash.reserve(allowedDocuments.size());
+    for (const auto& result : precomputed) {
+        if (result.documentHash.empty() || !allowedDocuments.contains(result.documentHash)) {
+            continue;
+        }
+        auto [it, inserted] = bestByHash.emplace(result.documentHash, result);
+        if (!inserted && result.score > it->second.score) {
+            it->second = result;
+        }
+    }
+    if (bestByHash.size() != allowedDocuments.size()) {
+        return std::nullopt;
+    }
+
+    std::vector<ComponentResult> out;
+    out.reserve(bestByHash.size());
+    for (auto& [_, result] : bestByHash) {
+        out.push_back(std::move(result));
+    }
+    std::sort(out.begin(), out.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+        return lhs.documentHash < rhs.documentHash;
+    });
+    if (limit > 0 && out.size() > limit) {
+        out.resize(limit);
+    }
+    for (std::size_t rank = 0; rank < out.size(); ++rank) {
+        out[rank].rank = rank;
+        out[rank].debugInfo["vector_score_reused"] = "1";
+    }
+    return out;
+}
+
 Result<std::vector<ComponentResult>>
 queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                          const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
-                         size_t limit) {
-    return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, nullptr);
+                         size_t limit, vector::VectorSearchDiagnostics* diagnostics) {
+    return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, nullptr,
+                                diagnostics);
 }
 
 size_t testingVectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
@@ -273,8 +315,10 @@ Result<std::vector<ComponentResult>>
 queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                          const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
-                         size_t limit, const std::unordered_set<std::string>& candidates) {
-    return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, &candidates);
+                         size_t limit, const std::unordered_set<std::string>& candidates,
+                         vector::VectorSearchDiagnostics* diagnostics) {
+    return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, &candidates,
+                                diagnostics);
 }
 
 Result<std::vector<ComponentResult>>

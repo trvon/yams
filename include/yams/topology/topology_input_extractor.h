@@ -16,7 +16,7 @@ namespace yams::topology {
 // Composer concatenates: w_dense * dense_view + w_entity * entity_signature + w_minhash *
 // minhash_sketch. Each branch is a no-op when its enable flag is false; V0 baseline (all off)
 // reproduces the pre-Phase-V dense-only feature exactly (modulo L2 normalization, which matches
-// HDBSCAN's prior input).
+// the prior embedding-only input).
 struct FeatureComposition {
     // V-A: GLiNER entity-type histogram fused with dense embedding.
     bool enableEntityFusion{false};

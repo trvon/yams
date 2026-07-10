@@ -2,7 +2,7 @@
 """Task #57 analysis: compare per-query topology seed-set fingerprints across bench cells.
 
 Usage:
-    scripts/analyze_seed_fingerprints.py /tmp/bench_sgc_xxl_fp.jsonl
+    scripts/analyze_seed_fingerprints.py /tmp/bench_topology_fp.jsonl
 """
 
 import json
@@ -20,14 +20,14 @@ def main(path: str) -> int:
 
     cells = defaultdict(list)
     for r in rows:
-        key = (r.get("topology_engine_requested", "?"), r.get("feature_smoothing_hops", 0))
+        key = r.get("topology_engine_requested", "?")
         cells[key].append(r)
 
     def mean(xs):
         return statistics.mean(xs) if xs else 0.0
 
     print("Per-cell summary (3-rep means; ranges in [])")
-    print(f"{'engine':<12}{'hops':>5}  {'ndcg_mean':>10}  {'ndcg_range':>11}  "
+    print(f"{'engine':<12}  {'ndcg_mean':>10}  {'ndcg_range':>11}  "
           f"{'clusters':>9}  {'manifest_hash(rep1)':<22}  {'manifest_unique_reps':>4}")
     cell_means = {}
     cell_manifests = {}
@@ -36,7 +36,7 @@ def main(path: str) -> int:
         mans = [r.get("topology_seed_set_manifest_hash", "") for r in recs]
         cell_means[key] = mean(ndcgs)
         cell_manifests[key] = mans
-        print(f"{key[0]:<12}{key[1]:>5}  {mean(ndcgs):>10.5f}  "
+        print(f"{key:<12}  {mean(ndcgs):>10.5f}  "
               f"{(max(ndcgs) - min(ndcgs)):>11.5f}  "
               f"{int(mean([r.get('cluster_count', 0) for r in recs])):>9}  "
               f"{mans[0]:<22}  {len(set(mans)):>4}")
@@ -53,9 +53,9 @@ def main(path: str) -> int:
             row.append(f"{'EQ' if a == b and a else 'NE':<24}")
         print("".join(row))
 
-    baseline_key = ("connected", 0)
+    baseline_key = "connected"
     if baseline_key not in cells:
-        print("\n(no connected/hops=0 baseline to compare per-query fingerprints against)")
+        print("\n(no connected baseline to compare per-query fingerprints against)")
         return 0
     baseline = cells[baseline_key][0].get("topology_seed_set_fingerprints")
     if not baseline:

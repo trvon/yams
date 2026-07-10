@@ -72,9 +72,6 @@ structure TopologyBuildConfig where
   emitBridgeAnnotations : Bool := true
   emitOutliers : Bool := true
   dirtyRegionExpansion : DirtyRegionExpansionMode := .priorClusterAndNeighbors
-  hdbscanMinPoints : Nat := 0
-  hdbscanMinClusterSize : Nat := 0
-  featureSmoothingHops : Nat := 0
   kmeansK : Nat := 0
   kmeansMaxIterations : Nat := 10
   minSimilarityToJoin : Rat := 45 / 100

@@ -4,6 +4,19 @@
 
 namespace yams::topology {
 
+/// Immutable query-time index derived from a validated topology artifact batch.
+/// Cluster indices refer to the corresponding position in TopologyArtifactBatch::clusters.
+struct SparseRouteIndex {
+    std::unordered_map<std::string, std::vector<std::size_t>> clustersByDocumentHash;
+    std::vector<float> centroidNorms;
+};
+
+struct SparseRouteWork {
+    std::size_t seedClusterLookups{0};
+    std::size_t clusterMemberHashesScanned{0};
+    std::size_t queryNormEvaluations{0};
+};
+
 class ConnectedComponentTopologyEngine final : public ITopologyEngine {
 public:
     Result<TopologyArtifactBatch> buildArtifacts(std::span<const TopologyDocumentInput> documents,
@@ -39,8 +52,15 @@ public:
 // is empty (skips dense leg for that cluster).
 class SparseGuidedClusterRouter final : public ITopologyRouter {
 public:
+    [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts);
+
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts) const override;
+
+    Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
+                                            const TopologyArtifactBatch& artifacts,
+                                            const SparseRouteIndex& index,
+                                            SparseRouteWork* work = nullptr) const;
 };
 
 } // namespace yams::topology

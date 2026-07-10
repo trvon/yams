@@ -238,6 +238,12 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(session.routesRejected));
     setDebug(debug, metrics::kTopologyWeakQueryRoutedClusters,
              std::to_string(session.routedClusters));
+    setDebug(debug, metrics::kTopologyRouteAvailableCount,
+             std::to_string(session.availableRoutes));
+    setDebug(debug, metrics::kTopologyRouteBoundaryScoreMargin,
+             std::to_string(session.routeBoundaryScoreMargin));
+    setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained,
+                 session.confidenceAbstained);
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
              std::to_string(session.addedCandidates));
@@ -248,6 +254,13 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
              joinWithTab(session.addedCandidateHashes));
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
+    setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
+             std::to_string(session.routedCandidateHashes.size()));
+    setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
+    setDebug(debug, metrics::kTopologyMemberRerankCandidates,
+             std::to_string(session.memberRerankCandidates));
+    setDebug(debug, metrics::kTopologyMemberRerankSelected,
+             std::to_string(session.memberRerankSelected));
     setDebug(debug, metrics::kTopologyRouteBestScore, std::to_string(session.bestRouteScore));
     setDebug(debug, metrics::kTopologyRouteMeanAcceptedScore,
              std::to_string(session.meanAcceptedRouteScore));

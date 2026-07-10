@@ -466,65 +466,28 @@ struct TunedParams {
                                   TuningLayer::Profile);
             break;
 
-        case TuningState::SCIENTIFIC:
+        case TuningState::SCIENTIFIC: {
+            // Product builds default to MIXED_PRECISION (BuildOptions::makeDefault).
+            // Measured product scifact ~0.65–0.67 MRR under that package. Historical
+            // SCIENTIFIC knobs (rrfK=12, simThresh=0.30, fanout inflate, strong
+            // vector-only relief) regressed to ~0.35 when applied on rebuild.
+            // SCIENTIFIC = MIXED_PRECISION + structure sources zeroed (path/entity/
+            // tag/kg/metadata never contribute on flat BEIR-style corpora).
+            // Simeon research: pure dense is weak; soft lexical↔dense fusion wins —
+            // keep MIXED_PRECISION lexical-floor + vector-only guardrails.
+            params = getTunedParams(TuningState::MIXED_PRECISION);
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Auto;
-            // For scientific/benchmark corpora: balanced text + vector fusion.
-            // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
-            // documents found by only one component.
-            params.rrfK = 12; // Low k for better top-rank discrimination
-            // GLiNER concept extraction returns empty for 99% of short biomedical
-            // claims (verified by benchmark diagnostics). Use the fast fallback
-            // (sub-phrase mining + IDF-weighted tokens, <1ms) instead.
             params.conceptExtractionBackend =
                 SearchEngineConfig::ConceptExtractionBackend::Fallback;
-            // KG entity weighting is disabled by default: queryKnowledgeGraph() FTS5
-            // searches document text for entity labels, which is redundant with the
-            // text component on scientific corpora where queries are short biomedical
-            // claims. The real value is in graph reranking + query expansion, which
-            // require the GLiNER concept extractor to produce query-time entities.
-            params.weights.setAll(0.50f, 0.10f, 0.35f, 0.00f, 0.00f, 0.00f, 0.00f, 0.05f,
-                                  TuningLayer::Profile);
-            // F3b's top-k unfiltered (0.0) regressed on scifact under COMB_MNZ; reverted to
-            // 0.30 (E7 baseline) until a coverage-robust fusion (RRF) is wired.
-            params.similarityThreshold = TuningSlot<float>(0.30f, TuningLayer::Profile);
-            params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL,
-                                           TuningLayer::Profile);
-            // Sub-phrase rescoring re-scores already-retrieved docs via AND-clause
-            // sub-phrase queries. This is the only mechanism that helps when base FTS5
-            // returns the entire corpus at low scores (expansion gates never fire).
-            params.enableSubPhraseRescoring = true;
-            params.subPhraseScoringPenalty = 0.70f;
-            params.enableSubPhraseExpansion = true;
-            params.subPhraseExpansionMinHits = 3;
-            params.subPhraseExpansionPenalty = 0.65f;
-            // Strong vector-only relief: prevent high-quality semantic matches
-            // from being dropped by vectorOnlyThreshold when they lack text anchors.
-            params.enableStrongVectorOnlyRelief = true;
-            params.strongVectorOnlyMinScore = 0.78f;
-            params.strongVectorOnlyTopRank = 3;
-            params.strongVectorOnlyPenalty = 0.90f;
-            // Rescue high-confidence vector matches that fall below the fusion cutoff.
-            // Critical for multi-session conversational data where semantic similarity
-            // captures relevance that keyword matching misses.
-            params.semanticRescueSlots = TuningSlot<size_t>(2, TuningLayer::Profile);
-            params.semanticRescueMinVectorScore = 0.65f;
-            // Widen rerank window to give cross-encoder more candidates to reorder.
-            params.rerankTopK = 12;
-            params.rerankAnchoredMinRelativeScore = 0.50f;
-            // Use SUM aggregation for chunk-level vector scores. Multi-chunk documents
-            // (e.g., multi-turn chat sessions) benefit from accumulating semantic signal
-            // across chunks rather than taking only the single best chunk.
-            params.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
-            // Graph signal weights: entity-heavy for scientific corpora where
-            // GLiNER entity extraction provides high-quality biomedical NER data.
-            // Graph scoring budget is bumped to 30ms (from default 10) to give
-            // the graph scorer enough time to resolve query concepts against KG
-            // entities — critical for biomedical corpora with ~15 entities/doc.
+            params.weights.pathTree = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            params.weights.entityVector = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            params.weights.kg = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            params.weights.tag = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            params.weights.metadata = TuningSlot<float>(0.0f, TuningLayer::Profile);
+            params.graphTextWeight = 0.0f;
+            params.graphVectorWeight = 0.0f;
+            params.weights.normalize();
             params.graphScoringBudgetMs = 30;
-            // Tighter min-signal threshold matches the elevated edge-confidence
-            // floor (0.08) from PostIngestQueue's biomedical-edge filtering.
-            // Pre-Phase-1 edges hovered around 0.05-0.10; post-Phase-1
-            // biomedical edges land at 0.20-0.45.
             params.graphRerankMinSignal = 0.08F;
             params.graphEntitySignalWeight = 0.50F;
             params.graphStructuralSignalWeight = 0.15F;
@@ -532,6 +495,7 @@ struct TunedParams {
             params.graphPathSignalWeight = 0.10F;
             params.graphCorroborationFloor = 0.25F;
             break;
+        }
 
         case TuningState::MIXED:
             params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Neighborhood;

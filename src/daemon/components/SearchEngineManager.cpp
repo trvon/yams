@@ -406,8 +406,21 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     yams::search::SearchEngineConfig::TopologyRoutingMode::Disabled;
             }
         }
+        if (tp.minClusters) {
+            opts.config.topologyMinClusters = std::max<std::size_t>(1, *tp.minClusters);
+        }
         if (tp.maxClusters) {
             opts.config.topologyMaxClusters = *tp.maxClusters;
+        }
+        if (tp.maxSeedDocuments) {
+            opts.config.topologyMaxSeedDocuments = *tp.maxSeedDocuments;
+        }
+        if (tp.adaptiveProbeScoreGap) {
+            opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
+        }
+        if (tp.narrowMinBoundaryMargin) {
+            opts.config.topologyNarrowMinBoundaryMargin =
+                std::max(0.0F, *tp.narrowMinBoundaryMargin);
         }
         if (tp.maxDocs) {
             opts.config.topologyMaxDocs = *tp.maxDocs;

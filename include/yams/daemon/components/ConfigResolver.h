@@ -73,7 +73,11 @@ public:
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
         std::optional<bool> enableWeakQueryRouting;
+        std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
+        std::optional<std::size_t> maxSeedDocuments;
+        std::optional<float> adaptiveProbeScoreGap;
+        std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
         std::optional<std::size_t> maxDocsPerCluster;
         std::optional<float> medoidBoost;
@@ -94,9 +98,6 @@ public:
 
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
-        std::optional<std::size_t> hdbscanMinPoints;
-        std::optional<std::size_t> hdbscanMinClusterSize;
-        std::optional<std::size_t> featureSmoothingHops;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
@@ -418,7 +419,11 @@ public:
      *
      * Config keys:
      * - search.topology.enable_weak_query_routing = true|false
+     * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
+     * - search.topology.max_seed_documents = int
+     * - search.topology.adaptive_probe_score_gap = float
+     * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
      * - search.topology.medoid_boost = float
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
@@ -434,20 +439,15 @@ public:
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
 
-
     /**
      * @brief Resolve topology cluster-engine selection from config file.
      *
      * Reads [topology] keys. Callers apply `engine` to
      * TuningConfig::topologyAlgorithm (which seeds topology::makeEngine
-     * dispatch) and the hdbscan_* knobs to TopologyBuildConfig.
+     * dispatch).
      *
      * Config keys:
-     * - topology.engine = connected|hdbscan
-     * - topology.hdbscan_min_points = int (0 = auto from corpus size)
-     * - topology.hdbscan_min_cluster_size = int (0 = auto from corpus size)
-     * - topology.feature_smoothing_hops = int (0 = off; SGC K for embedding
-     *   propagation over the semantic-neighbor graph before clustering)
+     * - topology.engine = connected|louvain|kmeans
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 

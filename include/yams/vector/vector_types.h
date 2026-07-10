@@ -195,6 +195,19 @@ struct EntitySearchParams {
     bool include_embeddings = false;
 };
 
+/// Per-call backend work counters. ANN libraries do not always expose graph
+/// traversal or distance counts, so rowsVisited and exactDistanceEvaluations
+/// remain zero when unavailable; annCandidateBudget records the configured ANN
+/// frontier without presenting an estimate as observed work.
+struct VectorSearchDiagnostics {
+    bool usedAnn = false;
+    bool usedExactScan = false;
+    size_t rowsVisited = 0;
+    size_t exactDistanceEvaluations = 0;
+    size_t annCandidateBudget = 0;
+    size_t returnedRows = 0;
+};
+
 struct VectorSearchParams {
     size_t k = 10;
     float similarity_threshold = 0.7f;
@@ -202,6 +215,7 @@ struct VectorSearchParams {
     std::unordered_set<std::string> candidate_hashes;
     std::map<std::string, std::string> metadata_filters;
     bool include_embeddings = false;
+    VectorSearchDiagnostics* diagnostics = nullptr;
 };
 
 struct VectorDatabaseStats {

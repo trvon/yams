@@ -811,8 +811,21 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
+            if (auto it = kv.find("search.topology.min_clusters"); it != kv.end()) {
+                policy.minClusters = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.max_clusters"); it != kv.end()) {
                 policy.maxClusters = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.max_seed_documents"); it != kv.end()) {
+                policy.maxSeedDocuments = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
+                policy.adaptiveProbeScoreGap = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.narrow_min_boundary_margin");
+                it != kv.end()) {
+                policy.narrowMinBoundaryMargin = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
@@ -968,12 +981,6 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
                 policy.engine = it->second;
             }
         }
-        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end())
-            policy.hdbscanMinPoints = parseSize(it->second);
-        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end())
-            policy.hdbscanMinClusterSize = parseSize(it->second);
-        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end())
-            policy.featureSmoothingHops = parseSize(it->second);
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }

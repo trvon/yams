@@ -96,8 +96,8 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
-#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
@@ -373,29 +373,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("Topology engine applied via config: {} (resolved={})",
                          *enginePolicy.engine, resolved);
         }
-        if (enginePolicy.hdbscanMinPoints) {
-            topologyManager_.setHdbscanMinPoints(*enginePolicy.hdbscanMinPoints);
-            spdlog::info("Topology hdbscan_min_points applied via config: {}",
-                         *enginePolicy.hdbscanMinPoints);
-        }
-        if (enginePolicy.hdbscanMinClusterSize) {
-            topologyManager_.setHdbscanMinClusterSize(*enginePolicy.hdbscanMinClusterSize);
-            spdlog::info("Topology hdbscan_min_cluster_size applied via config: {}",
-                         *enginePolicy.hdbscanMinClusterSize);
-        }
-        if (enginePolicy.featureSmoothingHops) {
-            topologyManager_.setFeatureSmoothingHops(*enginePolicy.featureSmoothingHops);
-            spdlog::info("Topology feature_smoothing_hops applied via config: {}",
-                         *enginePolicy.featureSmoothingHops);
-        }
     }
 
     // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest
     // every embedding batch fires a `requestTopologyRebuild("post_ingest_drain")`
     // and without throttling each rebuild starts immediately after the previous
-    // one finishes — turning O(N) ingest into O(N²) wall time because every
-    // rebuild runs HDBSCAN over the full corpus. Default 60s; set to 0 to
-    // disable. Env knob `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
+    // one finishes — turning O(N) ingest into repeated full-corpus work.
+    // Default 60s; set to 0 to disable. Env knob
+    // `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
     {
         std::int64_t throttleMs = 60'000; // 60s default
         if (const std::string raw = getenvCopy("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");

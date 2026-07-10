@@ -44,10 +44,13 @@ constexpr double kFusionDroppedPressureThreshold = 0.35;
 constexpr double kAnchoredDroppedPressureThreshold = 0.18;
 constexpr double kTopTextDroppedPressureThreshold = 0.12;
 constexpr std::uint64_t kFusionPressureWarmupObservations = 5;
-constexpr size_t kMaxAdaptiveLexicalFloorTopN = 12;
-constexpr float kMaxAdaptiveLexicalFloorBoost = 0.18f;
+// Caps sit above MIXED_PRECISION / SCIENTIFIC profile defaults (topN=12,
+// boost=0.20) so fusion-drop pressure can still push the lexical floor harder.
+// Simeon soft-fusion work: pure dense is weak; lexical floor is the hedge.
+constexpr size_t kMaxAdaptiveLexicalFloorTopN = 24;
+constexpr float kMaxAdaptiveLexicalFloorBoost = 0.35f;
 constexpr float kAdaptiveLexicalFloorBoostStep = 0.04f;
-constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.010f;
+constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.015f;
 constexpr float kAdaptiveLexicalTieBreakEpsilonStep = 0.0025f;
 constexpr float kMinAdaptiveVectorOnlyPenalty = 0.85f;
 // Vector-only pressure thresholds — activate when too many vector-only
@@ -529,6 +532,50 @@ bool applyFusionGuardrailAdjustments(TunedParams& candidate, const RuntimeTeleme
     return changed;
 }
 
+/// Pin a fusion weight at zero so normalize/zoom cannot resurrect it while
+/// the capability remains absent.
+void pinWeightZero(TuningSlot<float>& slot) {
+    slot.forceSet(0.0f, TuningLayer::Corpus);
+    slot.pinned = true;
+}
+
+/// Capability-gated dead-source zeros for flat scientific / structure-less corpora.
+/// Product hybrid only contributes text+vector (measured stage traces); path/tag/
+/// entity/kg/metadata were attempted with 0 contribute under default weights.
+void applyDeadSourceGates(const storage::CorpusStats& stats, TuningState state, TunedParams& params,
+                          bool preserveExplicitGraph = false) {
+    const bool scientific = state == TuningState::SCIENTIFIC;
+
+    // SCIENTIFIC is selected for flat-relative corpora even when absolute pathDepthAvg
+    // is high (hasPaths() true). Always zero path on SCIENTIFIC.
+    if (scientific || !stats.hasPaths()) {
+        pinWeightZero(params.weights.pathTree);
+    }
+    if (!stats.hasTags()) {
+        pinWeightZero(params.weights.tag);
+    }
+    if (scientific) {
+        pinWeightZero(params.weights.metadata);
+        pinWeightZero(params.weights.entityVector);
+        params.graphTextWeight = 0.0f;
+        params.graphVectorWeight = 0.0f;
+    }
+    // Absent KG: zero the kg fusion leg unless the caller explicitly seeded a
+    // graph override package (seedRuntimeConfig preserveExplicitGraph).
+    // Scientific alone must not clobber an explicit graph seed.
+    if (!stats.hasKnowledgeGraph() && !preserveExplicitGraph) {
+        pinWeightZero(params.weights.kg);
+        params.graphTextWeight = 0.0f;
+        params.graphVectorWeight = 0.0f;
+        params.kgMaxResults = 0;
+        params.graphScoringBudgetMs = 0;
+        params.enableGraphRerank = false;
+        params.enableGraphQueryExpansion = false;
+        params.graphEnablePathEnumeration = false;
+    }
+    params.weights.normalize();
+}
+
 } // namespace
 
 SearchTuner::SearchTuner(const storage::CorpusStats& stats) : SearchTuner(stats, std::nullopt) {}
@@ -546,6 +593,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
     applyGraphAwareAdjustments(stats_, params_, stateReason_);
     applyCorpusStateAdjustments(stats_, state_, params_, stateReason_);
     applyAdaptiveClamp(stats_, params_);
+    applyDeadSourceGates(stats_, state_, params_);
     baseParams_ = params_;
     baseConfig_ = buildConfigFromParamsLocked();
 
@@ -565,6 +613,12 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.weights.kg.value = config.kgWeight;
     params_.weights.tag.value = config.tagWeight;
     params_.weights.metadata.value = config.metadataWeight;
+    // seed writes .value only; clear capability pins so gates re-evaluate cleanly.
+    params_.weights.pathTree.unpin();
+    params_.weights.tag.unpin();
+    params_.weights.kg.unpin();
+    params_.weights.entityVector.unpin();
+    params_.weights.metadata.unpin();
     params_.similarityThreshold.value = config.similarityThreshold;
     params_.vectorBoostFactor = config.vectorBoostFactor;
     params_.rrfK = static_cast<int>(std::lround(config.rrfK));
@@ -613,6 +667,10 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
          config.graphRerankMaxBoost > 0.0f || config.graphCommunityWeight > 0.0f ||
          config.kgMaxResults > 0 || config.graphScoringBudgetMs > 0);
     applyAdaptiveClamp(stats_, params_, preserveExplicitGraphConfig);
+    // seedRuntimeConfig writes raw .value fields from the live SearchEngineConfig
+    // (BuildOptions defaults, env overlays). Re-apply capability gates so path/
+    // tag/entity/kg cannot resurrect after a seed clobber.
+    applyDeadSourceGates(stats_, state_, params_, preserveExplicitGraphConfig);
     baseParams_ = params_;
 }
 

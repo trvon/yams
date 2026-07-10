@@ -14,7 +14,7 @@ intended usage explicit at each boundary.
 
 namespace Yams.Core
 
-/-- Universal document identifier. 
+/-- Universal document identifier.
 
 This is the abstract notion of a document's identity, independent of how it is
 stored, processed, or retrieved. In the C++ codebase, this corresponds to the
@@ -22,27 +22,27 @@ content-addressable hash of a document.
 -/
 abbrev DocumentId := String
 
-/-- Content hash from the storage layer. 
+/-- Content hash from the storage layer.
 
 This is the identifier used by the storage system (StoreDoc, manifest entries).
 It is definitionally equal to DocumentId but used to make storage-boundary usage explicit.
 -/
 abbrev ContentHash := DocumentId
 
-/-- Document hash from the topology layer. 
+/-- Document hash from the topology layer.
 
 This is the identifier used in topology artifacts (clusters, neighbors, edges).
 It is definitionally equal to DocumentId but used for topology-specific contexts.
 -/
 abbrev DocumentHash := DocumentId
 
-/-- File path identifier. 
+/-- File path identifier.
 
 Used for source file tracking in topology and search contexts.
 -/
 abbrev FilePath := String
 
-/-- Cluster identifier. 
+/-- Cluster identifier.
 
 Used to name connected components or algorithmic clusters in topology.
 -/

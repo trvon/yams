@@ -504,14 +504,23 @@ include_debug_scores = false
 parallel_search = true
 
 [search.topology]
-# Topology-aware weak-query routing (medoid/bridge cluster boosts).
-# Each key can be overridden at runtime via YAMS_SEARCH_TOPOLOGY_* env vars.
+# Optional topology assist. Product-default routing remains disabled.
 # Route weak queries through cluster medoids/bridges
 enable_weak_query_routing = false
+# Minimum selected-cluster prefix when adaptive routing is enabled
+min_clusters = 1
 # Max number of clusters considered when routing a weak query
 max_clusters = 2
+# Cap ranked lexical documents used as sparse routing evidence
+max_seed_documents = 32
+# Grow the selected prefix while route scores remain this close to the best (0 = fixed max_clusters)
+adaptive_probe_score_gap = 0.0
+# Abstain from narrowing when the selected/excluded score boundary is smaller (0 = disabled)
+narrow_min_boundary_margin = 0.0
 # Max number of candidate docs pulled from routed clusters
 max_docs = 64
+# Per-cluster candidate cap before the global max_docs cap (0 = use max_docs)
+max_docs_per_cluster = 0
 # Score boost applied to medoid documents in routed clusters
 medoid_boost = 0.05
 # Score boost applied to bridge documents linking routed clusters
@@ -539,27 +548,20 @@ route_scoring = "current"
 [topology]
 # Cluster-formation engine used by the background topology rebuild.
 #   "connected" — reciprocal-edge connected components (default, baseline)
-#   "hdbscan"   — density-based clustering (McInnes/Healy 2017) via hdbscan-cpp
+#   "louvain"   — modularity-greedy communities on the reciprocal-edge graph
+#   "kmeans"    — embedding-space coarse quantizer
 engine = "connected"
-# HDBSCAN minimum points for core-distance (0 = auto from corpus size).
-hdbscan_min_points = 0
-# HDBSCAN minimum cluster size (0 = auto from corpus size).
-hdbscan_min_cluster_size = 0
-# SGC feature propagation hops applied to embeddings before HDBSCAN runs
-# (Wu 2019, X' = S_hat^K * X). 0 disables smoothing; 2-3 is typical.
-# Ignored by the "connected" engine (which uses graph topology only).
-feature_smoothing_hops = 0
 
 [topology.tuner]
 # Phase G: per-corpus adaptive topology tuner (UCB1 multi-armed bandit over
-# {engine, HDBSCAN params, SGC hops}). Each successful rebuild produces an
+# supported engines). Each successful rebuild produces an
 # intrinsic-quality reward (singletonRatio, giantClusterRatio, gini, intraEdge);
 # the bandit learns which arm fits the corpus shape best. No relevance labels
 # required. Off by default.
 #
 # Tuning recipes — uncomment one block to activate, leaving the others as
-# documentation. Enabling the tuner overrides the static [topology] knobs above
-# whenever an arm is pulled.
+# documentation. Enabling the tuner overrides the static engine above whenever
+# an arm is pulled.
 #
 # off (default): static [topology] knobs win; bandit dormant.
 enabled = false

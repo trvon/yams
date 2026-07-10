@@ -150,51 +150,52 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.semanticRescueMinVectorScore,
             SearchEngineConfig::conceptExtractionBackendToString(cfg.conceptExtractionBackend));
     } else if (options.autoTune && metadataRepo_) {
-        const auto cachedDocCount = metadataRepo_->getCachedDocumentCount();
-        if (cachedDocCount > 0) {
-            spdlog::info(
-                "SearchTuner: skipping corpus stats on build critical path (docs={}), using "
-                "default tuned config until background warmup populates exact stats",
-                cachedDocCount);
-        } else {
-            auto statsResult = metadataRepo_->getCorpusStats();
-            if (statsResult.has_value()) {
-                // Create tuner and get optimized config
-                runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
-                cfg = runtimeTuner->getConfig();
+        // Always materialize a SearchTuner from corpus stats. Skipping when
+        // docs>0 left product builds on ungated MIXED_PRECISION defaults
+        // (path/entity/tag still weighted despite zero stage contribution).
+        auto statsResult = metadataRepo_->getCorpusStats();
+        if (statsResult.has_value()) {
+            runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
+            // Prefer tuner config (dead-source gates already applied) over the
+            // raw BuildOptions defaults sitting in options.config.
+            cfg = runtimeTuner->getConfig();
 
-                // Preserve user-specified options that shouldn't be overridden by tuner
-                cfg.maxResults = options.config.maxResults;
-                cfg.enableParallelExecution = options.config.enableParallelExecution;
-                cfg.includeDebugInfo = options.config.includeDebugInfo;
-                {
-                    const auto& tp = runtimeTuner->getParams();
-                    spdlog::info(
-                        "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
-                        "(zoom={}, k={}, "
-                        "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
-                        "kg={:.2f}[{}], "
-                        "fusion={}, semantic_rescue={}[{}]@{:.4f})",
-                        tuningStateToString(runtimeTuner->currentState()),
-                        statsResult.value().usedOnlineOverlay,
-                        statsResult.value().reconciledComputedAtMs,
-                        SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                        runtimeTuner->getRrfK(), tp.weights.text.value,
-                        tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
-                        tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
-                        tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
-                        tuningLayerToString(tp.weights.kg.source),
-                        SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                        tp.semanticRescueSlots.value,
-                        tuningLayerToString(tp.semanticRescueSlots.source),
-                        cfg.semanticRescueMinVectorScore);
-                }
-            } else {
-                spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
-                             statsResult.error().message);
+            // Preserve user-specified options that shouldn't be overridden by tuner
+            cfg.maxResults = options.config.maxResults;
+            cfg.enableParallelExecution = options.config.enableParallelExecution;
+            cfg.includeDebugInfo = options.config.includeDebugInfo;
+            {
+                const auto& tp = runtimeTuner->getParams();
+                spdlog::info(
+                    "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                    "(zoom={}, k={}, "
+                    "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
+                    "kg={:.2f}[{}], "
+                    "fusion={}, semantic_rescue={}[{}]@{:.4f})",
+                    tuningStateToString(runtimeTuner->currentState()),
+                    statsResult.value().usedOnlineOverlay,
+                    statsResult.value().reconciledComputedAtMs,
+                    SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                    runtimeTuner->getRrfK(), tp.weights.text.value,
+                    tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
+                    tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
+                    tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
+                    tuningLayerToString(tp.weights.kg.source),
+                    SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                    tp.semanticRescueSlots.value,
+                    tuningLayerToString(tp.semanticRescueSlots.source),
+                    cfg.semanticRescueMinVectorScore);
             }
+        } else {
+            spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
+                         statsResult.error().message);
         }
     }
+
+    // Tuning owns relevance weights and result budgets. The topology policy is
+    // explicitly selected through typed config and must survive replacement of
+    // cfg by SearchTuner::getConfig().
+    cfg.applyTopologyPolicyFrom(options.config);
 
     // Allow environment variable overrides for individual weights (for benchmarking)
     // These take precedence over tuning state weights and are pinned so that
@@ -324,7 +325,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel));
         }
     }
-
 
     // Allow fusion strategy override for benchmarking
     if (allowEnvOverrides) {
@@ -824,6 +824,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             envSimilarityThresholdPinned) {
             runtimeTuner->pinEnvOverrides(envTextPinned, envSimeonTextPinned, envVectorPinned,
                                           envKgPinned, envSimilarityThresholdPinned);
+        }
+        // seedRuntimeConfig re-applies dead-source gates; push the gated view
+        // back into cfg so the engine and tuner share one weight package.
+        {
+            const auto maxResults = cfg.maxResults;
+            const auto enableParallelExecution = cfg.enableParallelExecution;
+            const auto includeDebugInfo = cfg.includeDebugInfo;
+            cfg = runtimeTuner->getConfig();
+            cfg.maxResults = maxResults;
+            cfg.enableParallelExecution = enableParallelExecution;
+            cfg.includeDebugInfo = includeDebugInfo;
         }
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);

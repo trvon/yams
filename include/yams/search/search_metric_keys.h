@@ -33,6 +33,11 @@ constexpr std::string_view kTopologyWeakQueryNarrowApplied = "topology_weak_quer
 constexpr std::string_view kTopologyWeakQuerySkipReason = "topology_weak_query_skip_reason";
 constexpr std::string_view kTopologyWeakQueryRoutesRejected = "topology_weak_query_routes_rejected";
 constexpr std::string_view kTopologyWeakQueryRoutedClusters = "topology_weak_query_routed_clusters";
+constexpr std::string_view kTopologyRouteAvailableCount = "topology_route_available_count";
+constexpr std::string_view kTopologyRouteBoundaryScoreMargin =
+    "topology_route_boundary_score_margin";
+constexpr std::string_view kTopologyRouteConfidenceAbstained =
+    "topology_route_confidence_abstained";
 constexpr std::string_view kTopologyWeakQueryRoutedDocs = "topology_weak_query_routed_docs";
 constexpr std::string_view kTopologyWeakQueryAddedCandidates =
     "topology_weak_query_added_candidates";
@@ -44,6 +49,27 @@ constexpr std::string_view kTopologyWeakQueryAddedCandidateHashes =
     "topology_weak_query_added_candidate_hashes";
 constexpr std::string_view kTopologyWeakQueryTotalCandidates =
     "topology_weak_query_total_candidates";
+constexpr std::string_view kTopologyWeakQueryAllowedCandidates =
+    "topology_weak_query_allowed_candidates";
+constexpr std::string_view kTopologySnapshotCacheHit = "topology_snapshot_cache_hit";
+constexpr std::string_view kTopologyMemberRerankCandidates = "topology_member_rerank_candidates";
+constexpr std::string_view kTopologyMemberRerankSelected = "topology_member_rerank_selected";
+constexpr std::string_view kVectorSearchCandidateBudget = "vector_search_candidate_budget";
+constexpr std::string_view kVectorSearchResultBudget = "vector_search_result_budget";
+constexpr std::string_view kVectorSearchDistanceEvaluationBudget =
+    "vector_search_distance_evaluation_budget";
+constexpr std::string_view kVectorSearchRowsVisitedActual = "vector_search_rows_visited_actual";
+constexpr std::string_view kVectorSearchExactDistanceEvaluationsActual =
+    "vector_search_exact_distance_evaluations_actual";
+constexpr std::string_view kVectorSearchAnnCandidateBudgetActual =
+    "vector_search_ann_candidate_budget_actual";
+constexpr std::string_view kTopologyMemberRerankRowsVisitedActual =
+    "topology_member_rerank_rows_visited_actual";
+constexpr std::string_view kTopologyMemberRerankDistanceEvaluationsActual =
+    "topology_member_rerank_distance_evaluations_actual";
+constexpr std::string_view kTopologyVectorScoresReused = "topology_vector_scores_reused";
+constexpr std::string_view kTopologyVectorScoresReusedCount =
+    "topology_vector_scores_reused_count";
 
 constexpr std::string_view kTimingTopologyWeakQuery = "topology_weak_query";
 constexpr std::string_view kTimingTopologyLoad = "topology_load";
@@ -53,7 +79,6 @@ constexpr std::string_view kTimingTopologyRoute = "topology_route";
 constexpr std::string_view kTimingTopologyClusterLookup = "topology_cluster_lookup";
 constexpr std::string_view kTimingTopologyDocLookup = "topology_doc_lookup";
 constexpr std::string_view kTimingTopologyCandidateInsert = "topology_candidate_insert";
-
 constexpr std::string_view kTopologySidecarVectorCandidates = "topology_sidecar_vector_candidates";
 constexpr std::string_view kTopologySidecarVectorDocIds = "topology_sidecar_vector_doc_ids";
 constexpr std::string_view kTopologySidecarPostFusionCount = "topology_sidecar_post_fusion_count";

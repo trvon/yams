@@ -1226,7 +1226,8 @@ public:
     searchSimilar(const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
                   const std::optional<std::string>& document_hash,
                   const std::unordered_set<std::string>& candidate_hashes,
-                  const std::map<std::string, std::string>& metadata_filters) {
+                  const std::map<std::string, std::string>& metadata_filters,
+                  VectorSearchDiagnostics* diagnostics = nullptr) {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
@@ -1239,7 +1240,8 @@ public:
             if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
                 spdlog::debug("[vec0] filtered search falling back to exact cosine scan");
                 return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                document_hash, candidate_hashes, metadata_filters);
+                                                document_hash, candidate_hashes, metadata_filters,
+                                                diagnostics);
             }
 
             if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
@@ -1257,7 +1259,15 @@ public:
                 }
             }
 
-            return vec0SearchUnlocked(query_embedding, k, similarity_threshold);
+            auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold);
+            if (diagnostics && result) {
+                diagnostics->usedAnn = true;
+                diagnostics->annCandidateBudget = config_.vec0_phss_enabled
+                                                      ? std::max(k, config_.vec0_phss_candidates)
+                                                      : query_dim_counts_[query_dim];
+                diagnostics->returnedRows = result.value().size();
+            }
+            return result;
         }
 
         if (usesSimeonPqSearchEngine()) {
@@ -1266,7 +1276,8 @@ public:
             if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
                 spdlog::debug("[SPQ] filtered search falling back to exact cosine scan");
                 return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                document_hash, candidate_hashes, metadata_filters);
+                                                document_hash, candidate_hashes, metadata_filters,
+                                                diagnostics);
             }
 
             if (!simeon_pq_ready_dims_.contains(query_dim) ||
@@ -1286,7 +1297,13 @@ public:
                 }
             }
 
-            return simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
+            auto result = simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
+            if (diagnostics && result) {
+                diagnostics->usedAnn = true;
+                diagnostics->annCandidateBudget = query_dim_counts_[query_dim];
+                diagnostics->returnedRows = result.value().size();
+            }
+            return result;
         }
 
         return Error{ErrorCode::InvalidOperation, "no search engine configured"};
@@ -3359,14 +3376,21 @@ private:
                              float similarity_threshold,
                              const std::optional<std::string>& document_hash,
                              const std::unordered_set<std::string>& candidate_hashes,
-                             const std::map<std::string, std::string>& metadata_filters) {
+                             const std::map<std::string, std::string>& metadata_filters,
+                             VectorSearchDiagnostics* diagnostics = nullptr) {
         if (!db_ || query_embedding.empty() || k == 0) {
             return std::vector<VectorRecord>{};
         }
+        if (diagnostics) {
+            diagnostics->usedExactScan = true;
+        }
 
         // Extended SQL to include quantized sidecar columns for dequantization in
-        // quantized-primary mode (where the float blob is NULL).
-        const char* sql = R"sql(
+        // quantized-primary mode (where the float blob is NULL). Push bounded
+        // candidate sets into SQLite so idx_vectors_document_hash avoids a
+        // full-table scan. Very large sets retain the in-memory filter fallback
+        // when they exceed SQLite's bind-variable limit.
+        std::string sql = R"sql(
 SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
@@ -3374,20 +3398,47 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        source_chunk_ids, parent_document_hash, child_document_hashes,
        quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
 FROM vectors
-WHERE embedding_dim = ?1 AND (?2 IS NULL OR document_hash = ?2)
-ORDER BY rowid
+WHERE embedding_dim = ?1
 )sql";
 
+        if (document_hash) {
+            sql += " AND document_hash = ?2\n";
+        }
+
+        std::vector<std::string> orderedCandidateHashes;
+        const int bindVariableLimit = sqlite3_limit(db_, SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+        const std::size_t reservedBindVariables = document_hash ? 2U : 1U;
+        const bool pushDownCandidateHashes =
+            !candidate_hashes.empty() && bindVariableLimit > 0 &&
+            candidate_hashes.size() <=
+                static_cast<std::size_t>(bindVariableLimit) -
+                    std::min(static_cast<std::size_t>(bindVariableLimit), reservedBindVariables);
+        int candidateBindIndex = document_hash ? 3 : 2;
+        if (pushDownCandidateHashes) {
+            orderedCandidateHashes.assign(candidate_hashes.begin(), candidate_hashes.end());
+            std::sort(orderedCandidateHashes.begin(), orderedCandidateHashes.end());
+            sql += " AND document_hash IN (";
+            for (std::size_t i = 0; i < orderedCandidateHashes.size(); ++i) {
+                if (i != 0) {
+                    sql += ',';
+                }
+                sql += '?' + std::to_string(candidateBindIndex + static_cast<int>(i));
+            }
+            sql += ")\n";
+        }
+        sql += "ORDER BY rowid\n";
+
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
             return Error{ErrorCode::DatabaseError, "Failed to prepare brute-force vector search"};
         }
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(query_embedding.size()));
         if (document_hash) {
             sqlite3_bind_text(stmt, 2, document_hash->c_str(), -1, SQLITE_TRANSIENT);
-        } else {
-            sqlite3_bind_null(stmt, 2);
+        }
+        for (const auto& hash : orderedCandidateHashes) {
+            sqlite3_bind_text(stmt, candidateBindIndex++, hash.c_str(), -1, SQLITE_TRANSIENT);
         }
 
         // Dequantizer for quantized-primary rows (when float blob is absent)
@@ -3423,7 +3474,10 @@ ORDER BY rowid
             scored.reserve(k + 1);
             std::vector<float> dequant_buffer;
             while (sqlite3_step(stmt) == SQLITE_ROW) {
-                if (!candidate_hashes.empty()) {
+                if (diagnostics) {
+                    ++diagnostics->rowsVisited;
+                }
+                if (!candidate_hashes.empty() && !pushDownCandidateHashes) {
                     const auto* hash_text = sqlite3_column_text(stmt, 2);
                     if (!hash_text ||
                         !candidate_hashes.contains(reinterpret_cast<const char*>(hash_text))) {
@@ -3435,25 +3489,26 @@ ORDER BY rowid
                 const int bytes = sqlite3_column_bytes(stmt, 3);
                 std::span<const float> embedding;
                 if (blob && bytes == static_cast<int>(dim * sizeof(float))) {
-                    embedding =
-                        std::span<const float>(static_cast<const float*>(blob), dim);
+                    embedding = std::span<const float>(static_cast<const float*>(blob), dim);
                 } else if (bf_tq) {
                     const void* packed = sqlite3_column_blob(stmt, 23);
                     const int packed_bytes = sqlite3_column_bytes(stmt, 23);
                     if (!packed || packed_bytes <= 0) {
                         continue;
                     }
-                    std::vector<uint8_t> codes(
-                        static_cast<const uint8_t*>(packed),
-                        static_cast<const uint8_t*>(packed) + packed_bytes);
-                    dequant_buffer =
-                        vector_utils::packedDequantizeVector(codes, dim, bf_tq.get());
+                    std::vector<uint8_t> codes(static_cast<const uint8_t*>(packed),
+                                               static_cast<const uint8_t*>(packed) + packed_bytes);
+                    dequant_buffer = vector_utils::packedDequantizeVector(codes, dim, bf_tq.get());
                     if (dequant_buffer.size() != dim) {
                         continue;
                     }
                     embedding = std::span<const float>(dequant_buffer);
                 } else {
                     continue;
+                }
+
+                if (diagnostics) {
+                    ++diagnostics->exactDistanceEvaluations;
                 }
 
                 float norm_sq = 0.0f;
@@ -3500,12 +3555,18 @@ ORDER BY rowid
                 record_opt->relevance_score = similarity;
                 records.push_back(std::move(*record_opt));
             }
+            if (diagnostics) {
+                diagnostics->returnedRows = records.size();
+            }
             return records;
         }
 
         std::vector<std::pair<float, VectorRecord>> scored_results;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            if (!candidate_hashes.empty()) {
+            if (diagnostics) {
+                ++diagnostics->rowsVisited;
+            }
+            if (!candidate_hashes.empty() && !pushDownCandidateHashes) {
                 const auto* hash_text = sqlite3_column_text(stmt, 2);
                 if (!hash_text ||
                     !candidate_hashes.contains(reinterpret_cast<const char*>(hash_text))) {
@@ -3543,6 +3604,10 @@ ORDER BY rowid
                 continue;
             }
 
+            if (diagnostics) {
+                ++diagnostics->exactDistanceEvaluations;
+            }
+
             float similarity = static_cast<float>(
                 VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
             if (similarity < similarity_threshold) {
@@ -3562,6 +3627,10 @@ ORDER BY rowid
         records.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             records.push_back(std::move(scored_results[i].second));
+        }
+
+        if (diagnostics) {
+            diagnostics->returnedRows = records.size();
         }
 
         return records;
@@ -3791,6 +3860,17 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
                                 const std::map<std::string, std::string>& metadata_filters) {
     return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
                                 candidate_hashes, metadata_filters);
+}
+
+Result<std::vector<VectorRecord>> SqliteVecBackend::searchSimilarWithDiagnostics(
+    const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
+    const std::optional<std::string>& document_hash,
+    const std::unordered_set<std::string>& candidate_hashes,
+    const std::map<std::string, std::string>& metadata_filters,
+    VectorSearchDiagnostics& diagnostics) {
+    diagnostics = {};
+    return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
+                                candidate_hashes, metadata_filters, &diagnostics);
 }
 
 Result<std::vector<std::vector<VectorRecord>>>

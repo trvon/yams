@@ -1165,8 +1165,14 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
 
     // Search WITH candidate filter - only doc_group_A allowed
     std::unordered_set<std::string> candidatesA = {"doc_group_A"};
-    auto filteredResultA = backend.searchSimilar(query, 10, 0.0f, std::nullopt, candidatesA, {});
+    VectorSearchDiagnostics diagnostics;
+    auto filteredResultA = backend.searchSimilarWithDiagnostics(
+        query, 10, 0.0f, std::nullopt, candidatesA, {}, diagnostics);
     REQUIRE((filteredResultA.has_value()));
+    CHECK(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.usedAnn);
+    CHECK(diagnostics.rowsVisited == 10);
+    CHECK(diagnostics.exactDistanceEvaluations == 10);
 
     // All results should be from doc_group_A
     for (const auto& result : filteredResultA.value()) {

@@ -335,6 +335,10 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
     CHECK(cfg.enableTopologyWeakQueryRouting == false);
     CHECK(cfg.topologyMaxClusters == 2U);
+    CHECK(cfg.topologyMinClusters == 1U);
+    CHECK(cfg.topologyMaxSeedDocuments == 32U);
+    CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
+    CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.0F));
     CHECK(cfg.topologyMaxDocs == 64U);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
@@ -343,6 +347,62 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.rerankTopK == 5);
     CHECK(cfg.rerankReplaceScores == false);
     CHECK(cfg.rerankBlendWeight == Approx(0.30f));
+}
+
+TEST_CASE("SearchEngineConfig preserves typed topology policy across tuning",
+          "[search][config][topology][catch2]") {
+    SearchEngineConfig tuned;
+    tuned.textWeight = 0.25F;
+
+    SearchEngineConfig configured;
+    configured.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    configured.enableTopologyWeakQueryRouting = true;
+    configured.topologyMaxClusters = 3;
+    configured.topologyMinClusters = 2;
+    configured.topologyMaxSeedDocuments = 24;
+    configured.topologyAdaptiveProbeScoreGap = 0.08F;
+    configured.topologyNarrowMinBoundaryMargin = 0.12F;
+    configured.topologyMaxDocs = 48;
+    configured.topologyMaxDocsPerCluster = 12;
+    configured.topologyMedoidBoost = 0.17F;
+    configured.topologyRouteScoringMode =
+        SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage;
+    configured.topologySparseDenseAlpha = 0.7F;
+    configured.topologyMinRouteScore = 0.2F;
+    configured.topologyMedoidOnlyExpansion = true;
+    configured.topologyExpansionSource =
+        SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    configured.topologyGraphNeighborMinScore = 0.4F;
+    configured.topologyGraphNeighborReciprocalOnly = false;
+    configured.topologyGraphVectorSeedProbe = 16;
+    configured.topologySidecarFusionRescueSlots = 2;
+    configured.topologySidecarFusionRescueMinScore = 0.3F;
+
+    tuned.applyTopologyPolicyFrom(configured);
+
+    CHECK(tuned.textWeight == Approx(0.25F));
+    CHECK(tuned.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(tuned.enableTopologyWeakQueryRouting);
+    CHECK(tuned.topologyMaxClusters == 3);
+    CHECK(tuned.topologyMinClusters == 2);
+    CHECK(tuned.topologyMaxSeedDocuments == 24);
+    CHECK(tuned.topologyAdaptiveProbeScoreGap == Approx(0.08F));
+    CHECK(tuned.topologyNarrowMinBoundaryMargin == Approx(0.12F));
+    CHECK(tuned.topologyMaxDocs == 48);
+    CHECK(tuned.topologyMaxDocsPerCluster == 12);
+    CHECK(tuned.topologyMedoidBoost == Approx(0.17F));
+    CHECK(tuned.topologyRouteScoringMode ==
+          SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage);
+    CHECK(tuned.topologySparseDenseAlpha == Approx(0.7F));
+    CHECK(tuned.topologyMinRouteScore == Approx(0.2F));
+    CHECK(tuned.topologyMedoidOnlyExpansion);
+    CHECK(tuned.topologyExpansionSource ==
+          SearchEngineConfig::TopologyExpansionSource::GraphNeighbors);
+    CHECK(tuned.topologyGraphNeighborMinScore == Approx(0.4F));
+    CHECK_FALSE(tuned.topologyGraphNeighborReciprocalOnly);
+    CHECK(tuned.topologyGraphVectorSeedProbe == 16);
+    CHECK(tuned.topologySidecarFusionRescueSlots == 2);
+    CHECK(tuned.topologySidecarFusionRescueMinScore == Approx(0.3F));
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

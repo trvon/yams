@@ -628,9 +628,20 @@ public:
         }
 
         try {
-            auto result = backend_->searchSimilar(query_embedding, params.k,
-                                                  params.similarity_threshold, params.document_hash,
-                                                  params.candidate_hashes, params.metadata_filters);
+            Result<std::vector<VectorRecord>> result = [&]() {
+                if (params.diagnostics != nullptr) {
+                    if (auto* diagnosticStore =
+                            dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
+                        return diagnosticStore->searchSimilarWithDiagnostics(
+                            query_embedding, params.k, params.similarity_threshold,
+                            params.document_hash, params.candidate_hashes,
+                            params.metadata_filters, *params.diagnostics);
+                    }
+                }
+                return backend_->searchSimilar(query_embedding, params.k,
+                                               params.similarity_threshold, params.document_hash,
+                                               params.candidate_hashes, params.metadata_filters);
+            }();
             if (!result) {
                 setError("Vector search failed: " + result.error().message);
                 return {};
@@ -672,9 +683,18 @@ public:
         }
 
         try {
-            return backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,
-                                           params.document_hash, params.candidate_hashes,
-                                           params.metadata_filters);
+            if (params.diagnostics != nullptr) {
+                if (auto* diagnosticStore =
+                        dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
+                    return diagnosticStore->searchSimilarWithDiagnostics(
+                        query_embedding, params.k, params.similarity_threshold,
+                        params.document_hash, params.candidate_hashes, params.metadata_filters,
+                        *params.diagnostics);
+                }
+            }
+            return backend_->searchSimilar(query_embedding, params.k,
+                                           params.similarity_threshold, params.document_hash,
+                                           params.candidate_hashes, params.metadata_filters);
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, "Vector search failed: " + std::string(e.what())};
         }

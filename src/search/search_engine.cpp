@@ -23,10 +23,10 @@
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
-#include <yams/search/search_observability.h>
 #include <yams/search/search_metric_keys.h>
-#include <yams/search/search_tracing.h>
+#include <yams/search/search_observability.h>
 #include <yams/search/search_topology_stage.h>
+#include <yams/search/search_tracing.h>
 #include <yams/search/search_tuner.h>
 #include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/topology_routing_session.h>
@@ -34,6 +34,7 @@
 #include <yams/search/tuning_features.h>
 #include <yams/search/tuning_pipeline.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -943,7 +944,6 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
     return (pos == yams::app::services::kMemmemNpos) ? std::string_view::npos : pos;
 }
 
-
 } // namespace
 
 #if YAMS_HAS_RANGES
@@ -971,6 +971,12 @@ public:
           embeddingGen_(std::move(embeddingGen)), kgStore_(std::move(kgStore)), config_(config) {
         if (kgStore_) {
             kgScorer_ = makeSimpleKGScorer(kgStore_);
+        }
+        if (metadataRepo_ && kgStore_) {
+            auto store = std::make_shared<yams::topology::MetadataKgTopologyArtifactStore>(
+                metadataRepo_, kgStore_);
+            topologySnapshotCache_ = std::make_shared<TopologyRoutingSnapshotCache>(
+                [store]() { return store->loadLatest(); });
         }
     }
 
@@ -1070,12 +1076,13 @@ private:
     Result<std::vector<ComponentResult>>
     queryKnowledgeGraph(const std::string& query, size_t limit,
                         const std::vector<QueryConcept>* concepts = nullptr);
-    Result<std::vector<ComponentResult>> queryVectorIndex(const std::vector<float>& embedding,
-                                                          const SearchEngineConfig& config,
-                                                          size_t limit);
     Result<std::vector<ComponentResult>>
     queryVectorIndex(const std::vector<float>& embedding, const SearchEngineConfig& config,
-                     size_t limit, const std::unordered_set<std::string>& candidates);
+                     size_t limit, vector::VectorSearchDiagnostics* diagnostics = nullptr);
+    Result<std::vector<ComponentResult>>
+    queryVectorIndex(const std::vector<float>& embedding, const SearchEngineConfig& config,
+                     size_t limit, const std::unordered_set<std::string>& candidates,
+                     vector::VectorSearchDiagnostics* diagnostics = nullptr);
     Result<std::vector<ComponentResult>> queryEntityVectors(const std::vector<float>& embedding,
                                                             const SearchEngineConfig& config,
                                                             size_t limit);
@@ -1089,6 +1096,7 @@ private:
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGen_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
+    std::shared_ptr<TopologyRoutingSnapshotCache> topologySnapshotCache_;
     std::shared_ptr<KGScorer> kgScorer_;
     std::optional<boost::asio::any_io_executor> executor_;
     SearchEngineConfig config_;
@@ -1211,6 +1219,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::atomic<bool> relaxedVectorRetryAttempted{false};
     std::atomic<int> relaxedVectorPrimaryHitCount{0};
     std::atomic<int> relaxedVectorRetryThresholdMilli{0};
+    vector::VectorSearchDiagnostics vectorSearchDiagnostics;
+    vector::VectorSearchDiagnostics topologyMemberDiagnostics;
+    std::vector<ComponentResult> topologyPrecomputedVectorResults;
     bool weakQueryFanoutBoostApplied = false;
     size_t effectiveVectorMaxResults = 0;
     size_t effectiveEntityVectorMaxResults = 0;
@@ -1398,10 +1409,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
          &relaxedVectorRetryAttempted, &relaxedVectorPrimaryHitCount,
          &relaxedVectorRetryThresholdMilli](const std::vector<float>& embedding, size_t limit,
                                             const std::unordered_set<std::string>* candidates =
+                                                nullptr,
+                                            vector::VectorSearchDiagnostics* diagnostics =
                                                 nullptr) -> Result<std::vector<ComponentResult>> {
+        const auto mergeDiagnostics = [](vector::VectorSearchDiagnostics& total,
+                                         const vector::VectorSearchDiagnostics& sample) {
+            total.usedAnn = total.usedAnn || sample.usedAnn;
+            total.usedExactScan = total.usedExactScan || sample.usedExactScan;
+            total.rowsVisited += sample.rowsVisited;
+            total.exactDistanceEvaluations += sample.exactDistanceEvaluations;
+            total.annCandidateBudget += sample.annCandidateBudget;
+            total.returnedRows += sample.returnedRows;
+        };
         const auto runVectorQuery = [&](const SearchEngineConfig& config) {
-            return candidates != nullptr ? queryVectorIndex(embedding, config, limit, *candidates)
-                                         : queryVectorIndex(embedding, config, limit);
+            vector::VectorSearchDiagnostics sample;
+            auto result = candidates != nullptr
+                              ? queryVectorIndex(embedding, config, limit, *candidates, &sample)
+                              : queryVectorIndex(embedding, config, limit, &sample);
+            if (diagnostics != nullptr) {
+                mergeDiagnostics(*diagnostics, sample);
+            }
+            return result;
         };
 
         auto primary = runVectorQuery(workingConfig);
@@ -1842,14 +1870,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(fanout.metadata, "metadata", stats_.metadataQueries,
                       stats_.avgMetadataTimeMicros);
 
-            const bool needTier1Candidates = workingConfig.tieredNarrowVectorSearch;
+            const bool needTier1Candidates =
+                workingConfig.tieredNarrowVectorSearch ||
+                topologyRoutingMode != SearchEngineConfig::TopologyRoutingMode::Disabled;
             std::unordered_set<std::string> tier1Candidates;
+            std::vector<yams::topology::WeightedDocumentSeed> topologySeedEvidence;
             if (needTier1Candidates) {
                 tier1Candidates.reserve(allComponentResults.size());
                 for (const auto& r : allComponentResults) {
                     if (!r.documentHash.empty()) {
                         tier1Candidates.insert(r.documentHash);
                     }
+                }
+                if (topologyRoutingMode != SearchEngineConfig::TopologyRoutingMode::Disabled) {
+                    topologySeedEvidence = rankTopologySeedEvidence(
+                        allComponentResults, workingConfig.topologyMaxSeedDocuments);
                 }
             }
 
@@ -1926,19 +1961,32 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             awaitEmbedding();
 
             TopologyMemberReranker topologyMemberReranker;
-            if (workingConfig.topologyMaxDocsPerCluster > 0 && queryEmbedding.has_value() &&
-                vectorDb_) {
+            if (workingConfig.topologyExpansionSource ==
+                    SearchEngineConfig::TopologyExpansionSource::Clusters &&
+                queryEmbedding.has_value() && vectorDb_) {
                 topologyMemberReranker = [&](const std::vector<std::string>& members,
                                              std::size_t limit) -> std::vector<std::string> {
                     std::unordered_set<std::string> candidateSet(members.begin(), members.end());
-                    auto scored = detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_,
-                                                                   queryEmbedding.value(),
-                                                                   workingConfig, limit,
-                                                                   candidateSet);
+                    vector::VectorSearchDiagnostics sample;
+                    auto scored = detail::queryVectorIndexPipeline(
+                        metadataRepo_, vectorDb_, queryEmbedding.value(), workingConfig, limit,
+                        candidateSet, &sample);
+                    topologyMemberDiagnostics.usedAnn =
+                        topologyMemberDiagnostics.usedAnn || sample.usedAnn;
+                    topologyMemberDiagnostics.usedExactScan =
+                        topologyMemberDiagnostics.usedExactScan || sample.usedExactScan;
+                    topologyMemberDiagnostics.rowsVisited += sample.rowsVisited;
+                    topologyMemberDiagnostics.exactDistanceEvaluations +=
+                        sample.exactDistanceEvaluations;
+                    topologyMemberDiagnostics.annCandidateBudget += sample.annCandidateBudget;
+                    topologyMemberDiagnostics.returnedRows += sample.returnedRows;
                     std::vector<std::string> out;
                     if (!scored) {
                         return out;
                     }
+                    topologyPrecomputedVectorResults.insert(topologyPrecomputedVectorResults.end(),
+                                                            scored.value().begin(),
+                                                            scored.value().end());
                     out.reserve(std::min(limit, scored.value().size()));
                     for (const auto& hit : scored.value()) {
                         if (hit.documentHash.empty()) {
@@ -1964,9 +2012,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     SearchEngineConfig::TopologyExpansionSource::GraphNeighbors &&
                 graphVectorSeedProbe > 0 && queryEmbedding.has_value() && vectorDb_ &&
                 !hasVectorTierDimMismatch()) {
-                auto probe = detail::queryVectorIndexPipeline(
-                    metadataRepo_, vectorDb_, queryEmbedding.value(), workingConfig,
-                    graphVectorSeedProbe);
+                auto probe = detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_,
+                                                              queryEmbedding.value(), workingConfig,
+                                                              graphVectorSeedProbe);
                 if (probe) {
                     vectorSeedHashes.reserve(probe.value().size());
                     for (const auto& hit : probe.value()) {
@@ -1982,13 +2030,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologyAssistReq.config = workingConfig;
             topologyAssistReq.routingMode = topologyRoutingMode;
             topologyAssistReq.weakTier1Query = weakTier1Query;
-            topologyAssistReq.tier1SeedHashes.assign(tier1Candidates.begin(),
-                                                     tier1Candidates.end());
+            topologyAssistReq.tier1SeedEvidence = topologySeedEvidence;
+            topologyAssistReq.tier1SeedHashes.reserve(topologySeedEvidence.size());
+            for (const auto& seed : topologySeedEvidence) {
+                topologyAssistReq.tier1SeedHashes.push_back(seed.documentHash);
+            }
             topologyAssistReq.existingCandidateHashes = tier2Candidates;
             topologyAssistReq.queryEmbedding = queryEmbedding;
             topologyAssistReq.metadataRepo = metadataRepo_;
             topologyAssistReq.kgStore = kgStore_;
             topologyAssistReq.memberReranker = topologyMemberReranker;
+            topologyAssistReq.snapshotCache = topologySnapshotCache_;
+            topologyAssistReq.expectedTopologyEpoch = freshness.topologyEpoch;
             topologyAssistReq.vectorSeedHashes = std::move(vectorSeedHashes);
             topologyAssistReq.maxVectorSeeds = graphVectorSeedProbe;
 
@@ -2010,8 +2063,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             for (const auto& hash : topologyWeakQueryAddedCandidateHashes) {
                 tier2Candidates.insert(hash);
             }
+            std::unordered_set<std::string> topologyVectorSearchNarrowSet =
+                topologySession.routedCandidateHashes;
             const std::unordered_set<std::string>* vectorSearchNarrowSet =
-                topologyWeakQueryNarrowApplied ? &tier2Candidates : nullptr;
+                topologyWeakQueryNarrowApplied ? &topologyVectorSearchNarrowSet : nullptr;
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -2019,16 +2074,69 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 (vectorSearchNarrowSet != nullptr) ||
                 (workingConfig.tieredNarrowVectorSearch &&
                  baselineTier2Candidates.size() >= workingConfig.tieredMinCandidates);
+            std::shared_ptr<const std::vector<ComponentResult>> reusableVectorResults;
+            if (vectorSearchNarrowSet != nullptr) {
+                auto reused = detail::reusePrecomputedVectorResults(
+                    topologyPrecomputedVectorResults, *vectorSearchNarrowSet,
+                    effectiveVectorMaxResults);
+                if (reused.has_value()) {
+                    reusableVectorResults = std::make_shared<const std::vector<ComponentResult>>(
+                        std::move(reused.value()));
+                }
+            }
+            setDebugBool(response.debugStats, metrics::kTopologyVectorScoresReused,
+                         static_cast<bool>(reusableVectorResults));
+            setDebug(response.debugStats, metrics::kTopologyVectorScoresReusedCount,
+                     std::to_string(reusableVectorResults ? reusableVectorResults->size() : 0));
+
+            std::size_t vectorSearchCandidateBudget =
+                vectorSearchNarrowSet ? vectorSearchNarrowSet->size() : 0;
+            std::size_t vectorSearchDistanceEvaluationBudget =
+                topologySession.memberRerankCandidates + vectorSearchCandidateBudget;
+            if (!vectorSearchNarrowSet && vectorDb_) {
+                const auto& vectorConfig = vectorDb_->getConfig();
+                const auto vectorCount = vectorDb_->getVectorCount();
+                switch (vectorConfig.search_engine) {
+                    case vector::VectorSearchEngine::Vec0L2:
+                        vectorSearchCandidateBudget =
+                            vectorConfig.vec0_phss_enabled
+                                ? std::min(vectorCount, std::max(effectiveVectorMaxResults,
+                                                                 vectorConfig.vec0_phss_candidates))
+                                : vectorCount;
+                        vectorSearchDistanceEvaluationBudget =
+                            vectorSearchCandidateBudget +
+                            std::min(vectorSearchCandidateBudget, effectiveVectorMaxResults);
+                        break;
+                    case vector::VectorSearchEngine::SimeonPqAdc:
+                        vectorSearchCandidateBudget = vectorCount;
+                        vectorSearchDistanceEvaluationBudget =
+                            vectorCount +
+                            std::min(vectorCount, effectiveVectorMaxResults *
+                                                      vectorConfig.simeon_pq_rerank_factor);
+                        break;
+                }
+            }
+            setDebug(response.debugStats, metrics::kVectorSearchCandidateBudget,
+                     std::to_string(vectorSearchCandidateBudget));
+            setDebug(response.debugStats, metrics::kVectorSearchResultBudget,
+                     std::to_string(effectiveVectorMaxResults));
+            setDebug(response.debugStats, metrics::kVectorSearchDistanceEvaluationBudget,
+                     std::to_string(vectorSearchDistanceEvaluationBudget));
 
             recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
-                                       topologySession, topologySkipReason,
-                                       tier2Candidates.size());
+                                       topologySession, topologySkipReason, tier2Candidates.size());
 
             traceCollector.recordStageCounter("vector", "budget_guard_skip", 0);
             traceCollector.recordStageCounter("vector", "budget_guard_cap_applied",
                                               semanticBudgetCapApplied ? 1 : 0);
             traceCollector.recordStageCounter("vector", "should_narrow_applied",
                                               shouldNarrow ? 1 : 0);
+            traceCollector.recordStageCounter(
+                "vector", "candidate_budget",
+                static_cast<std::int64_t>(vectorSearchCandidateBudget));
+            traceCollector.recordStageCounter(
+                "vector", "distance_evaluation_budget",
+                static_cast<std::int64_t>(vectorSearchDistanceEvaluationBudget));
             traceCollector.recordStageCounter("vector", "effective_max_results",
                                               static_cast<std::int64_t>(effectiveVectorMaxResults));
             traceCollector.recordStageCounter("vector", "weak_query_fanout_boost_applied",
@@ -2043,9 +2151,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                const std::unordered_set<std::string> topologySidecarCandidates(
-                    topologyWeakQueryAddedCandidateHashes.begin(),
-                    topologyWeakQueryAddedCandidateHashes.end());
+                const std::unordered_set<std::string> topologySidecarCandidates =
+                    topologyWeakQueryNarrowApplied
+                        ? std::unordered_set<std::string>{}
+                        : std::unordered_set<std::string>(
+                              topologyWeakQueryAddedCandidateHashes.begin(),
+                              topologyWeakQueryAddedCandidateHashes.end());
                 response.debugStats["topology_sidecar_vector_candidates"] =
                     std::to_string(topologySidecarCandidates.size());
 
@@ -2053,17 +2164,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
                     [&queryEmbedding, &baselineTier2Candidates, vectorSearchNarrowSet, shouldNarrow,
-                     effectiveVectorMaxResults, &queryVectorWithRelaxedRetry]() {
+                     effectiveVectorMaxResults, &queryVectorWithRelaxedRetry,
+                     &vectorSearchDiagnostics, reusableVectorResults]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
+                        if (reusableVectorResults) {
+                            return Result<std::vector<ComponentResult>>{*reusableVectorResults};
+                        }
                         if (shouldNarrow) {
                             const auto* narrowSet = vectorSearchNarrowSet
                                                         ? vectorSearchNarrowSet
                                                         : &baselineTier2Candidates;
-                            return queryVectorWithRelaxedRetry(
-                                queryEmbedding.value(), effectiveVectorMaxResults, narrowSet);
+                            return queryVectorWithRelaxedRetry(queryEmbedding.value(),
+                                                               effectiveVectorMaxResults, narrowSet,
+                                                               &vectorSearchDiagnostics);
                         } else {
                             return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                               effectiveVectorMaxResults);
+                                                               effectiveVectorMaxResults, nullptr,
+                                                               &vectorSearchDiagnostics);
                         }
                     });
 
@@ -2215,10 +2332,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     fanout.vector =
                         schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                                  stats_.avgVectorTimeMicros,
-                                 [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry]() {
+                                 [&queryEmbedding, &workingConfig, &queryVectorWithRelaxedRetry,
+                                  &vectorSearchDiagnostics]() {
                                      YAMS_ZONE_SCOPED_N("component::vector");
                                      return queryVectorWithRelaxedRetry(
-                                         queryEmbedding.value(), workingConfig.vectorMaxResults);
+                                         queryEmbedding.value(), workingConfig.vectorMaxResults,
+                                         nullptr, &vectorSearchDiagnostics);
                                  });
 
                     fanout.entityVector = schedule(
@@ -2344,7 +2463,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 runSequential(
                     [&]() {
                         return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                           effectiveVectorMaxResults);
+                                                           effectiveVectorMaxResults, nullptr,
+                                                           &vectorSearchDiagnostics);
                     },
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros);
@@ -3374,8 +3494,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::to_string(workingConfig.rerankSnippetMaxChars);
 
         const auto crossStart = std::chrono::steady_clock::now();
-        auto outcome = detail::applyCrossRerank(response.results, query, workingConfig, rerankWindow,
-                                                crossReranker_, metadataRepo_);
+        auto outcome = detail::applyCrossRerank(response.results, query, workingConfig,
+                                                rerankWindow, crossReranker_, metadataRepo_);
         const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::steady_clock::now() - crossStart)
                                   .count();
@@ -3789,6 +3909,31 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(relaxedPrimaryHitFinal);
     response.debugStats["relaxed_vector_retry_threshold"] =
         fmt::format("{:.3f}", static_cast<double>(relaxedRetryThresholdMilliFinal) / 1000.0);
+    setDebug(response.debugStats, metrics::kVectorSearchRowsVisitedActual,
+             std::to_string(vectorSearchDiagnostics.rowsVisited));
+    setDebug(response.debugStats, metrics::kVectorSearchExactDistanceEvaluationsActual,
+             std::to_string(vectorSearchDiagnostics.exactDistanceEvaluations));
+    setDebug(response.debugStats, metrics::kVectorSearchAnnCandidateBudgetActual,
+             std::to_string(vectorSearchDiagnostics.annCandidateBudget));
+    setDebug(response.debugStats, metrics::kTopologyMemberRerankRowsVisitedActual,
+             std::to_string(topologyMemberDiagnostics.rowsVisited));
+    setDebug(response.debugStats, metrics::kTopologyMemberRerankDistanceEvaluationsActual,
+             std::to_string(topologyMemberDiagnostics.exactDistanceEvaluations));
+    traceCollector.recordStageCounter(
+        "vector", "rows_visited_actual",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.rowsVisited));
+    traceCollector.recordStageCounter(
+        "vector", "exact_distance_evaluations_actual",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.exactDistanceEvaluations));
+    traceCollector.recordStageCounter(
+        "vector", "ann_candidate_budget_actual",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.annCandidateBudget));
+    traceCollector.recordStageCounter(
+        "vector", "topology_member_rows_visited_actual",
+        static_cast<std::int64_t>(topologyMemberDiagnostics.rowsVisited));
+    traceCollector.recordStageCounter(
+        "vector", "topology_member_distance_evaluations_actual",
+        static_cast<std::int64_t>(topologyMemberDiagnostics.exactDistanceEvaluations));
     traceCollector.recordStageCounter("vector", "relaxed_retry_enabled",
                                       relaxedVectorRetryEnabled ? 1 : 0);
     traceCollector.recordStageCounter("vector", "relaxed_retry_attempted",
@@ -4678,16 +4823,19 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit,
 
 Result<std::vector<ComponentResult>>
 SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
-                                     const SearchEngineConfig& config, size_t limit) {
-    return detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_, embedding, config, limit);
+                                     const SearchEngineConfig& config, size_t limit,
+                                     vector::VectorSearchDiagnostics* diagnostics) {
+    return detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_, embedding, config, limit,
+                                            diagnostics);
 }
 
 Result<std::vector<ComponentResult>>
 SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding,
                                      const SearchEngineConfig& config, size_t limit,
-                                     const std::unordered_set<std::string>& candidates) {
+                                     const std::unordered_set<std::string>& candidates,
+                                     vector::VectorSearchDiagnostics* diagnostics) {
     return detail::queryVectorIndexPipeline(metadataRepo_, vectorDb_, embedding, config, limit,
-                                            candidates);
+                                            candidates, diagnostics);
 }
 
 Result<std::vector<ComponentResult>>

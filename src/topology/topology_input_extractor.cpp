@@ -287,7 +287,7 @@ std::vector<float> composeFeatureVector(std::vector<float> dense,
         cfg.matryoshkaTargetDim > 0 && cfg.matryoshkaTargetDim < dense.size()) {
         dense = applyMatryoshkaCoarse(dense, matryoshkaWeights, cfg.matryoshkaTargetDim);
     } else {
-        // Always L2-normalize the dense view to make weight tuning interpretable; HDBSCAN
+        // Always L2-normalize the dense view to make weight tuning interpretable; embedding
         // already operates on cosine, so this is a no-op for clustering geometry but
         // makes weighted concat well-defined.
         l2NormalizeInPlace(dense);

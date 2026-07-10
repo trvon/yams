@@ -112,16 +112,22 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
+    // SCIENTIFIC is MIXED_PRECISION + structure sources zeroed (measured product
+    // path: full SCIENTIFIC knobs regressed MRR; soft lexical+vector fusion wins).
     CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
-    CHECK(params.rrfK == 12);
-    CHECK(params.weights.text.value == Approx(0.50f));
-    CHECK(params.weights.simeonText.value == Approx(0.10f));
-    CHECK(params.weights.vector.value == Approx(0.35f));
+    CHECK(params.rrfK == 45);
+    // After zeroing path/entity/kg/tag/metadata, normalize leaves text+vector.
+    CHECK(params.weights.text.value == Approx(0.40f / 0.65f).epsilon(0.01));
+    CHECK(params.weights.simeonText.value == Approx(0.00f));
+    CHECK(params.weights.vector.value == Approx(0.25f / 0.65f).epsilon(0.01));
     CHECK(params.weights.entityVector.value == Approx(0.00f));
     CHECK(params.weights.pathTree.value == Approx(0.00f));
     CHECK(params.weights.kg.value == Approx(0.00f));
     CHECK(params.weights.tag.value == Approx(0.00f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
+    CHECK(params.weights.metadata.value == Approx(0.00f));
+    CHECK(params.lexicalFloorTopN == 12);
+    CHECK(params.lexicalFloorBoost == Approx(0.20f));
+    CHECK(params.vectorOnlyThreshold == Approx(0.94f));
     CHECK(params.conceptExtractionBackend ==
           SearchEngineConfig::ConceptExtractionBackend::Fallback);
 }
@@ -383,6 +389,9 @@ TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]
     stats.docCount = 5000;
     stats.codeRatio = 0.85f;
     stats.symbolDensity = 0.0f; // No KG: kgWeight is zeroed and remaining weights are normalized
+    // No tags / shallow absolute paths → tag + path also gated off.
+    stats.tagCoverage = 0.0f;
+    stats.pathDepthAvg = 0.0;
 
     SearchTuner tuner(stats);
     const auto& params = tuner.getParams();
@@ -391,8 +400,12 @@ TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]
     CHECK(params.rrfK == 60);
     CHECK(stats.hasKnowledgeGraph() == false);
     CHECK(params.weights.kg.value == Approx(0.0f));
-    CHECK(params.weights.text.value == Approx(0.42105263f));
-    CHECK(params.weights.vector.value == Approx(0.21052632f));
+    CHECK(params.weights.pathTree.value == Approx(0.0f));
+    CHECK(params.weights.tag.value == Approx(0.0f));
+    // LARGE_CODE: text=0.40 vector=0.20 entity=0.15 path=0.10 kg=0.05 tag=0.05 meta=0.05
+    // After gating path/kg/tag → remaining mass 0.80 → text=0.50 vector=0.25
+    CHECK(params.weights.text.value == Approx(0.50f));
+    CHECK(params.weights.vector.value == Approx(0.25f));
 }
 
 TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][search_tuner]") {
@@ -533,6 +546,72 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides"
     CHECK(seeded.rerankTopK == 50);
     CHECK(seeded.rerankReplaceScores == false);
     CHECK(seeded.rerankAnchoredMinRelativeScore == Approx(0.37f));
+}
+
+TEST_CASE("SearchTuner: dead-source gates pin structure weights on SCIENTIFIC",
+          "[unit][search_tuner][dead_source]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5; // flat → SCIENTIFIC
+    stats.pathDepthAvg = 8.0;         // absolute depth can still be high
+    stats.tagCoverage = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.90f;
+
+    REQUIRE(SearchTuner::computeState(stats) == TuningState::SCIENTIFIC);
+
+    SearchTuner tuner(stats);
+    const auto cfg = tuner.getConfig();
+    CHECK(cfg.pathTreeWeight == Approx(0.0f));
+    CHECK(cfg.entityVectorWeight == Approx(0.0f));
+    CHECK(cfg.tagWeight == Approx(0.0f));
+    CHECK(cfg.metadataWeight == Approx(0.0f));
+    CHECK(cfg.kgWeight == Approx(0.0f));
+    // Live fusion legs stay mass-bearing after normalize.
+    CHECK(cfg.textWeight > 0.35f);
+    CHECK(cfg.vectorWeight > 0.25f);
+    // Lexical floor / vector-only guardrails retained from MIXED_PRECISION.
+    CHECK(cfg.lexicalFloorTopN == 12);
+    CHECK(cfg.lexicalFloorBoost == Approx(0.20f));
+    CHECK(cfg.vectorOnlyThreshold == Approx(0.94f));
+}
+
+TEST_CASE("SearchTuner: seedRuntimeConfig cannot resurrect dead structure weights",
+          "[unit][search_tuner][dead_source]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.90f;
+
+    SearchTuner tuner(stats);
+    REQUIRE(tuner.currentState() == TuningState::SCIENTIFIC);
+
+    SearchEngineConfig clobber = tuner.getConfig();
+    // Simulate BuildOptions / env-shaped seed writing structure weights back.
+    // Keep kgWeight=0 so this is not treated as an explicit graph override seed.
+    clobber.pathTreeWeight = 0.12f;
+    clobber.entityVectorWeight = 0.10f;
+    clobber.tagWeight = 0.05f;
+    clobber.metadataWeight = 0.05f;
+    clobber.kgWeight = 0.0f;
+    clobber.textWeight = 0.40f;
+    clobber.vectorWeight = 0.25f;
+
+    tuner.seedRuntimeConfig(clobber);
+    const auto seeded = tuner.getConfig();
+
+    CHECK(seeded.pathTreeWeight == Approx(0.0f));
+    CHECK(seeded.entityVectorWeight == Approx(0.0f));
+    CHECK(seeded.tagWeight == Approx(0.0f));
+    CHECK(seeded.metadataWeight == Approx(0.0f));
+    CHECK(seeded.kgWeight == Approx(0.0f));
+    CHECK(seeded.textWeight > 0.35f);
+    CHECK(seeded.vectorWeight > 0.25f);
 }
 
 TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][search_tuner][edge]") {
@@ -925,43 +1004,29 @@ TEST_CASE("resolveQueryPolicy preserves no-tuner config fields unaffected by que
 TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
+    const auto sci = getTunedParams(TuningState::SCIENTIFIC);
 
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
 
-    // Weights: 60% toward SCIENTIFIC, 40% current (MIXED_PRECISION)
-    // MIXED_PRECISION text=0.40, SCIENTIFIC text=0.50 -> 0.46; SimeonText gets its own blend.
-    CHECK(params.weights.text.value == Approx(0.46f).epsilon(0.01));
+    // Weights: 60% toward SCIENTIFIC (MIXED_PRECISION + structure zeros + normalize).
+    const float expectedText = 0.40f + 0.60f * (sci.weights.text.value - 0.40f);
+    const float expectedVector = 0.25f + 0.60f * (sci.weights.vector.value - 0.25f);
+    CHECK(params.weights.text.value == Approx(expectedText).epsilon(0.01));
     CHECK(params.weights.text.source == TuningLayer::Community);
-    CHECK(params.weights.simeonText.value == Approx(0.06f).epsilon(0.01));
-    CHECK(params.weights.simeonText.source == TuningLayer::Community);
-    // MIXED_PRECISION vector=0.25, SCIENTIFIC vector=0.35 → 0.25 + 0.60*(0.35-0.25) = 0.31
-    CHECK(params.weights.vector.value == Approx(0.31f).epsilon(0.01));
+    CHECK(params.weights.simeonText.value == Approx(0.00f).epsilon(0.01));
+    CHECK(params.weights.vector.value == Approx(expectedVector).epsilon(0.01));
 
-    // semanticRescueSlots: lerp(1, 2, 0.60) = round(1.6) = 2
-    CHECK(params.semanticRescueSlots.value == 2);
-    CHECK(params.semanticRescueSlots.source == TuningLayer::Community);
+    // SCIENTIFIC inherits MIXED_PRECISION rescue slots (=1); lerp is a no-op.
+    CHECK(params.semanticRescueSlots.value == 1);
 
-    // semanticRescueMinVectorScore: lerp(0.0, 0.65, 0.60) = 0.39
-    CHECK(params.semanticRescueMinVectorScore == Approx(0.39f).epsilon(0.01));
+    // Both profiles leave sub-phrase rescoring off by default.
+    CHECK(params.enableSubPhraseRescoring == false);
 
-    // enableSubPhraseRescoring: false || true = true
-    CHECK(params.enableSubPhraseRescoring == true);
-
-    // fusionStrategy: adopted from SCIENTIFIC
+    // fusionStrategy stays WEIGHTED_RECIPROCAL on both profiles.
     CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 
-    // chunkAggregation: adopted from SCIENTIFIC
-    CHECK(params.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
-
-    // rerankTopK: lerp(5, 12, 0.60) = round(9.2) = 9
-    CHECK(params.rerankTopK == 9);
-
-    // rerankAnchoredMinRelativeScore: lerp(0.0, 0.50, 0.60) = 0.30
-    CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.30f).epsilon(0.01));
-
-    // similarityThreshold: lerp(0.0, 0.30, 0.60) = 0.18 because MIXED_PRECISION inherits the
-    // default unfiltered threshold while SCIENTIFIC overrides to 0.30.
-    CHECK(params.similarityThreshold.value == Approx(0.18f).epsilon(0.01));
+    // similarityThreshold: both profiles use the unfiltered default (0.0).
+    CHECK(params.similarityThreshold.value == Approx(0.0f).epsilon(0.01));
 }
 
 TEST_CASE("applyCommunityLayer: no-op when already in target state",
@@ -996,15 +1061,15 @@ TEST_CASE("applyCommunityLayer: env-pinned weight survives blend",
     CHECK(params.weights.text.source == TuningLayer::Community);
 }
 
-TEST_CASE("applyCommunityLayer: SCIENTIFIC → Code blend preserves sub-phrase rescoring",
+TEST_CASE("applyCommunityLayer: SCIENTIFIC → Code blend keeps sub-phrase off",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
-    CHECK(params.enableSubPhraseRescoring == true); // SCIENTIFIC enables it
+    CHECK(params.enableSubPhraseRescoring == false);
 
     applyCommunityLayer(TuningState::SMALL_CODE, TuningState::SCIENTIFIC, params);
 
-    // OR semantics: current=true || target=false → true (preserved)
-    CHECK(params.enableSubPhraseRescoring == true);
+    // Both profiles leave sub-phrase rescoring off; OR stays false.
+    CHECK(params.enableSubPhraseRescoring == false);
 }
 
 TEST_CASE("applyCommunityLayer: nullopt is no-op", "[unit][search_tuner][community]") {
@@ -1210,9 +1275,11 @@ TEST_CASE("SearchTuner: no-KG fusion pressure enables lexical preservation",
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
     REQUIRE(before.weights.kg.value == Approx(0.0f));
-    REQUIRE_FALSE(before.enableLexicalTieBreak);
-    REQUIRE(before.lexicalFloorTopN == 0);
-    REQUIRE(before.lexicalFloorBoost == Approx(0.0f));
+    // SCIENTIFIC inherits MIXED_PRECISION lexical floor (already on). Adaptive
+    // pressure should still raise floor topN / boost further.
+    REQUIRE(before.enableLexicalTieBreak);
+    REQUIRE(before.lexicalFloorTopN == 12);
+    REQUIRE(before.lexicalFloorBoost == Approx(0.20f));
 
     SearchTuner::RuntimeTelemetry telemetry;
     telemetry.latencyMs = 35.0;
@@ -1235,7 +1302,9 @@ TEST_CASE("SearchTuner: no-KG fusion pressure enables lexical preservation",
 
     const auto after = tuner.getParams();
     CHECK(after.enableLexicalTieBreak);
-    CHECK(after.lexicalTieBreakEpsilon > before.lexicalTieBreakEpsilon);
+    // Profile default epsilon already sits at the adaptive step; floor topN/boost
+    // are the primary pressure response under MIXED_PRECISION inheritance.
+    CHECK(after.lexicalTieBreakEpsilon >= before.lexicalTieBreakEpsilon);
     CHECK(after.lexicalFloorTopN > before.lexicalFloorTopN);
     CHECK(after.lexicalFloorBoost > before.lexicalFloorBoost);
     CHECK(after.vectorOnlyPenalty >= 0.85f);
@@ -1302,9 +1371,8 @@ TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases resc
 
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
-    // SCIENTIFIC profile's default vectorOnlyThreshold remains at 0.90
-    // (corpus_state pushes recall but doesn't touch vectorOnlyThreshold now)
-    REQUIRE(before.vectorOnlyThreshold == Approx(0.90f));
+    // SCIENTIFIC inherits MIXED_PRECISION vector-only guardrails (0.94).
+    REQUIRE(before.vectorOnlyThreshold == Approx(0.94f));
     REQUIRE(before.semanticRescueSlots.value > 0);
 
     SearchTuner::RuntimeTelemetry telemetry;
@@ -1404,7 +1472,9 @@ TEST_CASE("SearchTuner: semantic rescue saturation increases slots",
 
     const auto after = tuner.getParams();
     CHECK(after.semanticRescueSlots.value > before.semanticRescueSlots.value);
-    CHECK(after.semanticRescueMinVectorScore < before.semanticRescueMinVectorScore);
+    // MIXED_PRECISION / SCIENTIFIC start at minVectorScore=0.0; adaptive cannot
+    // lower further, only raise slots under saturation pressure.
+    CHECK(after.semanticRescueMinVectorScore == Approx(before.semanticRescueMinVectorScore));
 }
 
 TEST_CASE("SearchTuner: result pool resizes when vector dominates and fusion drops high",
@@ -1508,7 +1578,12 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     const auto& p = tuner.getParams();
     // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
     CHECK(p.semanticRescueSlots.value == 3);
-    CHECK(p.enableSubPhraseRescoring == true);
+    // Dead-source gates pin structure weights off on flat scientific corpora.
+    CHECK(p.weights.pathTree.value == Approx(0.0f));
+    CHECK(p.weights.entityVector.value == Approx(0.0f));
+    CHECK(p.weights.tag.value == Approx(0.0f));
+    CHECK(p.weights.metadata.value == Approx(0.0f));
+    CHECK(p.lexicalFloorTopN == 12);
     CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
 }
 
