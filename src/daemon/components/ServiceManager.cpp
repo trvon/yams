@@ -2189,13 +2189,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             metadata::KnowledgeGraphStoreConfig kgCfg;
             kgCfg.enable_alias_fts = true;
             kgCfg.enable_wal = true;
-            auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
+            auto readPool = getReadConnectionPool();
+            auto kgRes = readPool
+                             ? metadata::makeSqliteKnowledgeGraphStore(*writePool, *readPool, kgCfg)
+                             : metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
             if (kgRes) {
                 auto kgStore =
                     std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgRes).value());
-                if (auto readPool = getReadConnectionPool()) {
-                    kgStore->setReadPool(readPool.get());
-                }
                 if (databaseManager_) {
                     databaseManager_->setKgStore(kgStore);
                 }
@@ -3220,11 +3220,27 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
     return openDatabaseOnce(dbPath);
 }
 
+bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
+                                      std::uint64_t freePageCount, std::uint64_t pageSize) {
+    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
+    constexpr std::uint64_t kMinReclaimableBytes = 128ULL * 1024 * 1024;
+    constexpr double kMinReclaimableRatio = 0.10;
+    if (databaseBytes <= kAutoVacuumThreshold || pageCount == 0 || pageSize == 0 ||
+        freePageCount > pageCount) {
+        return false;
+    }
+    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
+        return false;
+    }
+    const auto reclaimableBytes = freePageCount * pageSize;
+    const auto reclaimableRatio = static_cast<double>(freePageCount) / pageCount;
+    return reclaimableBytes >= kMinReclaimableBytes && reclaimableRatio >= kMinReclaimableRatio;
+}
+
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
     std::error_code ec;
     const auto dbSize = std::filesystem::file_size(dbPath, ec);
-    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
-    if (ec || dbSize <= kAutoVacuumThreshold) {
+    if (ec) {
         return;
     }
 
@@ -3237,10 +3253,6 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         return;
     }
 
-    spdlog::info("[ServiceManager] DB file is {} MB, background auto-VACUUM to reclaim space "
-                 "({} MB free)",
-                 dbSize / kMiB, spaceInfo.available / kMiB);
-
     metadata::Database vacuumDb;
     auto openR = vacuumDb.open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
     if (!openR) {
@@ -3248,6 +3260,36 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
                      openR.error().message);
         return;
     }
+
+    const auto readPragma = [&](std::string_view sql) -> std::optional<std::uint64_t> {
+        auto stmtR = vacuumDb.prepare(std::string(sql));
+        if (!stmtR) {
+            return std::nullopt;
+        }
+        auto stmt = std::move(stmtR).value();
+        auto stepR = stmt.step();
+        if (!stepR || !stepR.value()) {
+            return std::nullopt;
+        }
+        const auto value = stmt.getInt64(0);
+        return value >= 0 ? std::optional<std::uint64_t>(static_cast<std::uint64_t>(value))
+                          : std::nullopt;
+    };
+    const auto pageCount = readPragma("PRAGMA page_count");
+    const auto freePageCount = readPragma("PRAGMA freelist_count");
+    const auto pageSize = readPragma("PRAGMA page_size");
+    if (!pageCount || !freePageCount || !pageSize ||
+        !shouldAutoVacuum(dbSize, *pageCount, *freePageCount, *pageSize)) {
+        const auto reclaimableBytes = freePageCount && pageSize ? (*freePageCount * *pageSize) : 0;
+        spdlog::debug("[ServiceManager] auto-VACUUM not useful: db={} MB reclaimable={} MB",
+                      dbSize / kMiB, reclaimableBytes / kMiB);
+        vacuumDb.close();
+        return;
+    }
+
+    spdlog::info("[ServiceManager] DB file is {} MB, background auto-VACUUM to reclaim {} MB "
+                 "({} MB free)",
+                 dbSize / kMiB, (*freePageCount * *pageSize) / kMiB, spaceInfo.available / kMiB);
 
     sqlite3_progress_handler(
         vacuumDb.rawHandle(), 1000,

@@ -772,5 +772,17 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     }
 }
 
+TEST_CASE("ServiceManager auto-vacuum requires material reclaimable space",
+          "[daemon][service_manager][vacuum]") {
+    constexpr std::uint64_t kPageSize = 4096;
+    constexpr std::uint64_t kLargeDatabaseBytes = 13ULL * 1024 * 1024 * 1024;
+
+    CHECK_FALSE(
+        ServiceManager::__test_shouldAutoVacuum(kLargeDatabaseBytes, 3'405'384, 182, kPageSize));
+    CHECK_FALSE(
+        ServiceManager::__test_shouldAutoVacuum(256ULL * 1024 * 1024, 65'536, 20'000, kPageSize));
+    CHECK(ServiceManager::__test_shouldAutoVacuum(2ULL * 1024 * 1024 * 1024, 524'288, 131'072,
+                                                  kPageSize));
+}
 
 } // namespace yams::daemon::test

@@ -373,6 +373,10 @@ public:
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
     }
+    static bool __test_shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
+                                        std::uint64_t freePageCount, std::uint64_t pageSize) {
+        return shouldAutoVacuum(databaseBytes, pageCount, freePageCount, pageSize);
+    }
 #endif
 
     // Graph Component (PBI-009)
@@ -691,6 +695,8 @@ private:
     void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
     bool openDatabaseOnce(const std::filesystem::path& dbPath);
     bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath);
+    static bool shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
+                                 std::uint64_t freePageCount, std::uint64_t pageSize);
     void maybeAutoVacuumDatabase(const std::filesystem::path& dbPath);
     bool openDatabaseBlocking(const std::filesystem::path& dbPath);
 
