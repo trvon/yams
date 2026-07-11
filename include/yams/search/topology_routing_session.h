@@ -82,6 +82,9 @@ struct TopologyRoutingSessionRequest {
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
     bool medoidOnlyExpansion = false;
+    /// Materialize full membership for confidently selected clusters so callers can gate an
+    /// existing candidate stream without query-scoring every member.
+    bool collectRouteMembership = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
     std::uint64_t expectedTopologyEpoch = 0;
@@ -117,6 +120,7 @@ struct TopologyRoutingSessionResult {
     std::size_t memberRerankSelected = 0;
     std::vector<std::string> addedCandidateHashes;
     std::unordered_set<std::string> routedCandidateHashes;
+    std::unordered_set<std::string> routeAllowedDocumentHashes;
     std::unordered_set<std::string> medoidHashes;
     TopologyRoutingTimings timings;
 };

@@ -76,6 +76,14 @@ constexpr std::string_view kTopologyMemberRerankDistanceEvaluationsActual =
     "topology_member_rerank_distance_evaluations_actual";
 constexpr std::string_view kTopologyVectorScoresReused = "topology_vector_scores_reused";
 constexpr std::string_view kTopologyVectorScoresReusedCount = "topology_vector_scores_reused_count";
+constexpr std::string_view kTopologyVectorFilterApplied = "topology_vector_filter_applied";
+constexpr std::string_view kTopologyVectorFilterFallback = "topology_vector_filter_fallback";
+constexpr std::string_view kTopologyVectorFilterMatched = "topology_vector_filter_matched";
+constexpr std::string_view kTopologyVectorFilterRemoved = "topology_vector_filter_removed";
+constexpr std::string_view kTopologyVectorPartitionAnnApplied =
+    "topology_vector_partition_ann_applied";
+constexpr std::string_view kTopologyVectorPartitionAnnFallback =
+    "topology_vector_partition_ann_fallback";
 
 constexpr std::string_view kTimingTopologyWeakQuery = "topology_weak_query";
 constexpr std::string_view kTimingTopologyLoad = "topology_load";

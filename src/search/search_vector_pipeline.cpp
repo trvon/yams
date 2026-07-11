@@ -195,6 +195,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
                      const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                      const std::vector<float>& embedding, const SearchEngineConfig& config,
                      size_t limit, const std::unordered_set<std::string>* candidates,
+                     vector::CandidateFilterMode candidateFilterMode,
                      vector::VectorSearchDiagnostics* diagnostics) {
     std::vector<ComponentResult> results;
     results.reserve(limit);
@@ -210,6 +211,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
         params.diagnostics = diagnostics;
         if (candidates != nullptr) {
             params.candidate_hashes = *candidates;
+            params.candidate_filter_mode = candidateFilterMode;
         }
 
         auto vectorRecords = vectorDb->search(embedding, params);
@@ -257,6 +259,39 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 }
 
 } // namespace
+
+RoutedVectorFilterResult
+filterVectorResultsByAllowedDocuments(std::vector<ComponentResult> globalResults,
+                                      const std::unordered_set<std::string>& allowedDocuments) {
+    RoutedVectorFilterResult out;
+    if (globalResults.empty() || allowedDocuments.empty()) {
+        out.results = std::move(globalResults);
+        return out;
+    }
+
+    std::vector<ComponentResult> matched;
+    matched.reserve(std::min(globalResults.size(), allowedDocuments.size()));
+    for (auto& result : globalResults) {
+        if (!result.documentHash.empty() && allowedDocuments.contains(result.documentHash)) {
+            matched.push_back(std::move(result));
+        }
+    }
+    if (matched.empty()) {
+        out.results = std::move(globalResults);
+        out.fellBackToGlobal = true;
+        return out;
+    }
+
+    out.applied = true;
+    out.matched = matched.size();
+    out.removed = globalResults.size() - matched.size();
+    for (std::size_t rank = 0; rank < matched.size(); ++rank) {
+        matched[rank].rank = rank;
+        matched[rank].debugInfo["topology_route_filter"] = "1";
+    }
+    out.results = std::move(matched);
+    return out;
+}
 
 std::optional<std::vector<ComponentResult>>
 reusePrecomputedVectorResults(const std::vector<ComponentResult>& precomputed,
@@ -356,7 +391,7 @@ queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepositor
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
                          size_t limit, vector::VectorSearchDiagnostics* diagnostics) {
     return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, nullptr,
-                                diagnostics);
+                                vector::CandidateFilterMode::BackendDefault, diagnostics);
 }
 
 size_t testingVectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
@@ -369,9 +404,10 @@ queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepositor
                          const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
                          size_t limit, const std::unordered_set<std::string>& candidates,
+                         vector::CandidateFilterMode candidateFilterMode,
                          vector::VectorSearchDiagnostics* diagnostics) {
     return queryVectorIndexImpl(metadataRepo, vectorDb, embedding, config, limit, &candidates,
-                                diagnostics);
+                                candidateFilterMode, diagnostics);
 }
 
 Result<std::vector<ComponentResult>>

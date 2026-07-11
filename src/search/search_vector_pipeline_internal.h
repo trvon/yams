@@ -31,6 +31,7 @@ queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepositor
                          const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                          const std::vector<float>& embedding, const SearchEngineConfig& config,
                          size_t limit, const std::unordered_set<std::string>& candidates,
+                         vector::CandidateFilterMode candidateFilterMode,
                          vector::VectorSearchDiagnostics* diagnostics = nullptr);
 
 Result<std::vector<ComponentResult>>
@@ -38,6 +39,20 @@ queryEntityVectorsPipeline(const std::shared_ptr<yams::metadata::MetadataReposit
                            const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                            const std::vector<float>& embedding, const SearchEngineConfig& config,
                            size_t limit);
+
+struct RoutedVectorFilterResult {
+    std::vector<ComponentResult> results;
+    bool applied{false};
+    bool fellBackToGlobal{false};
+    std::size_t matched{0};
+    std::size_t removed{0};
+};
+
+/// Retain global vector hits belonging to a confident topology route. When the ANN result has no
+/// route overlap, preserve it unchanged so routing cannot erase the vector fallback.
+[[nodiscard]] RoutedVectorFilterResult
+filterVectorResultsByAllowedDocuments(std::vector<ComponentResult> globalResults,
+                                      const std::unordered_set<std::string>& allowedDocuments);
 
 /// Reuse exact/ANN scores already computed while selecting routed members.
 /// Returns nullopt unless every allowed document has a precomputed score.

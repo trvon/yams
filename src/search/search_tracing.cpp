@@ -254,10 +254,13 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
              joinWithTab(session.addedCandidateHashes));
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
+    const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
+                                             ? session.routedCandidateHashes
+                                             : session.routeAllowedDocumentHashes;
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
-             std::to_string(session.routedCandidateHashes.size()));
-    std::vector<std::string> routedCandidateHashes(session.routedCandidateHashes.begin(),
-                                                   session.routedCandidateHashes.end());
+             std::to_string(allowedCandidateHashes.size()));
+    std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
+                                                   allowedCandidateHashes.end());
     std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
              joinWithTab(routedCandidateHashes));

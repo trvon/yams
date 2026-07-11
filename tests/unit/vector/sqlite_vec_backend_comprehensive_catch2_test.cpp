@@ -1136,6 +1136,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
     skipIfNeeded();
 
     SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::Vec0L2;
+    config.vec0_phss_enabled = true;
+    config.vec0_phss_candidates = 16;
     SqliteVecBackend backend(config);
     REQUIRE((backend.initialize(":memory:").has_value()));
     REQUIRE((backend.createTables(64).has_value()));
@@ -1166,13 +1169,14 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
     // Search WITH candidate filter - only doc_group_A allowed
     std::unordered_set<std::string> candidatesA = {"doc_group_A"};
     VectorSearchDiagnostics diagnostics;
-    auto filteredResultA = backend.searchSimilarWithDiagnostics(
-        query, 10, 0.0f, std::nullopt, candidatesA, {}, diagnostics);
+    auto filteredResultA = backend.searchSimilarWithDiagnostics(query, 10, 0.0f, std::nullopt,
+                                                                candidatesA, {}, diagnostics);
     REQUIRE((filteredResultA.has_value()));
-    CHECK(diagnostics.usedExactScan);
-    CHECK_FALSE(diagnostics.usedAnn);
-    CHECK(diagnostics.rowsVisited == 10);
-    CHECK(diagnostics.exactDistanceEvaluations == 10);
+    CHECK(diagnostics.usedAnn);
+    CHECK_FALSE(diagnostics.usedExactScan);
+    CHECK(diagnostics.rowsVisited == 0);
+    CHECK(diagnostics.exactDistanceEvaluations == 0);
+    CHECK(diagnostics.annCandidateBudget == 16);
 
     // All results should be from doc_group_A
     for (const auto& result : filteredResultA.value()) {

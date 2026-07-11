@@ -157,7 +157,8 @@ struct SearchEngineConfig {
 
     /// How routed topology members interact with the global vector retriever.
     /// Augment preserves the bounded ANN leg and unions query-ranked routed members.
-    /// Narrow replaces ANN with the routed allowed-document set.
+    /// Narrow filters Vec0 ANN traversal by routed cluster membership. Other vector engines
+    /// post-filter their bounded global results. Both paths preserve global vector fallback.
     enum class TopologyVectorPolicy {
         Augment,
         Narrow,

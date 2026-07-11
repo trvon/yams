@@ -103,12 +103,18 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                     "vector_search_ann_candidate_budget_actual": "16",
                     "topology_vector_scores_reused": "1",
                     "topology_vector_scores_reused_count": "12",
+                    "topology_vector_filter_applied": "1",
+                    "topology_vector_filter_fallback": "0",
+                    "topology_vector_filter_matched": "6",
+                    "topology_vector_filter_removed": "10",
+                    "topology_vector_partition_ann_applied": "1",
+                    "topology_vector_partition_ann_fallback": "0",
                 },
             },
             {
                 "search_type": "hybrid",
                 "search_stats": {
-                    "topology_weak_query_narrow_applied": "1",
+                    "topology_weak_query_narrow_applied": "0",
                     "topology_route_available_count": "1",
                     "topology_route_boundary_score_margin": "0.05",
                     "topology_route_confidence_abstained": "1",
@@ -126,6 +132,12 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                     "vector_search_ann_candidate_budget_actual": "8",
                     "topology_vector_scores_reused": "0",
                     "topology_vector_scores_reused_count": "0",
+                    "topology_vector_filter_applied": "0",
+                    "topology_vector_filter_fallback": "1",
+                    "topology_vector_filter_matched": "0",
+                    "topology_vector_filter_removed": "0",
+                    "topology_vector_partition_ann_applied": "0",
+                    "topology_vector_partition_ann_fallback": "1",
                 },
             },
         ]
@@ -136,7 +148,7 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             )
             metrics = parse_debug_jsonl(debug_path)["metrics"]
 
-        self.assertEqual(metrics["topology_narrow_rate"], 1.0)
+        self.assertEqual(metrics["topology_narrow_rate"], 0.5)
         self.assertEqual(metrics["topology_confidence_abstain_rate"], 0.5)
         self.assertEqual(metrics["topology_route_available_avg"], 2.0)
         self.assertAlmostEqual(
@@ -160,6 +172,12 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             metrics["vector_total_exact_distance_evaluations_actual_avg"], 34.0
         )
         self.assertEqual(metrics["topology_vector_scores_reuse_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_filter_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_filter_fallback_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_filter_matched_avg"], 3.0)
+        self.assertEqual(metrics["topology_vector_filter_removed_avg"], 5.0)
+        self.assertEqual(metrics["topology_vector_partition_ann_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_partition_ann_fallback_rate"], 0.5)
 
     def test_disabled_topology_zero_fills_vector_seed_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

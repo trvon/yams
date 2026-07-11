@@ -25,7 +25,9 @@ namespace yams::vector {
  *   vectors_simeon_pq_*: PQ codebook/codes for SimeonPqAdc.
  *   vectors_vec0_*: sqlite-vec virtual-table shadow tables for Vec0L2.
  */
-class SqliteVecBackend : public IVectorBackend, public IDiagnosticVectorStore {
+class SqliteVecBackend : public IVectorBackend,
+                         public IDiagnosticVectorStore,
+                         public IExactCandidateVectorStore {
 public:
     /// Statistics for orphan cleanup operations
     struct OrphanCleanupStats {
@@ -106,12 +108,19 @@ public:
                   const std::unordered_set<std::string>& candidate_hashes = {},
                   const std::map<std::string, std::string>& metadata_filters = {}) override;
 
-    Result<std::vector<VectorRecord>> searchSimilarWithDiagnostics(
-        const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
-        const std::optional<std::string>& document_hash,
-        const std::unordered_set<std::string>& candidate_hashes,
-        const std::map<std::string, std::string>& metadata_filters,
-        VectorSearchDiagnostics& diagnostics) override;
+    Result<std::vector<VectorRecord>>
+    searchSimilarWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                 float similarity_threshold,
+                                 const std::optional<std::string>& document_hash,
+                                 const std::unordered_set<std::string>& candidate_hashes,
+                                 const std::map<std::string, std::string>& metadata_filters,
+                                 VectorSearchDiagnostics& diagnostics) override;
+
+    Result<std::vector<VectorRecord>>
+    searchExactCandidatesWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                         float similarity_threshold,
+                                         const std::unordered_set<std::string>& candidate_hashes,
+                                         VectorSearchDiagnostics& diagnostics) override;
 
     Result<std::vector<std::vector<VectorRecord>>>
     searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings, size_t k,

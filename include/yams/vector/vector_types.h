@@ -208,12 +208,21 @@ struct VectorSearchDiagnostics {
     size_t returnedRows = 0;
 };
 
+/// Controls how an explicit candidate-document set is evaluated. BackendDefault lets the selected
+/// engine use its native filtered-search path; Exact is reserved for controls and rerank seams that
+/// require exhaustive scoring within the candidate set.
+enum class CandidateFilterMode {
+    BackendDefault,
+    Exact,
+};
+
 struct VectorSearchParams {
     size_t k = 10;
     float similarity_threshold = 0.7f;
     std::optional<std::string> document_hash;
     std::unordered_set<std::string> candidate_hashes;
     std::map<std::string, std::string> metadata_filters;
+    CandidateFilterMode candidate_filter_mode = CandidateFilterMode::BackendDefault;
     bool include_embeddings = false;
     VectorSearchDiagnostics* diagnostics = nullptr;
 };

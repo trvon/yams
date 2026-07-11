@@ -78,7 +78,8 @@ private:
 };
 
 struct TopologySearchFixture {
-    TopologySearchFixture()
+    explicit TopologySearchFixture(
+        vector::VectorSearchEngine searchEngine = vector::VectorSearchEngine::SimeonPqAdc)
         : disableVectors("YAMS_DISABLE_VECTORS", std::optional<std::string>("0")),
           skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::optional<std::string>("0")) {
         dbPath = tempDbPath("search_topology_");
@@ -97,6 +98,9 @@ struct TopologySearchFixture {
         vectorConfig.embedding_dim = 2;
         vectorConfig.create_if_missing = true;
         vectorConfig.use_in_memory = true;
+        vectorConfig.search_engine = searchEngine;
+        vectorConfig.vec0_phss_enabled = searchEngine == vector::VectorSearchEngine::Vec0L2;
+        vectorConfig.vec0_phss_candidates = 4;
         vectorDb = std::make_shared<vector::VectorDatabase>(vectorConfig);
         REQUIRE(vectorDb->initialize());
     }
@@ -243,7 +247,7 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
 
 TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
           "[search][topology][catch2]") {
-    TopologySearchFixture fix;
+    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
     fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
     fix.addDocument("y1", "omega one", {0.0F, 1.0F});
@@ -326,14 +330,19 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK((debug.at("topology_weak_query_applied") == "1"));
     CHECK((debug.at("topology_weak_query_narrow_applied") == "1"));
     CHECK((debug.at("topology_weak_query_allowed_candidates") == "2"));
-    CHECK((debug.at("vector_search_candidate_budget") == "2"));
-    CHECK((debug.at("vector_search_distance_evaluation_budget") == "4"));
-    CHECK((debug.at("topology_vector_scores_reused") == "1"));
-    CHECK((debug.at("topology_vector_scores_reused_count") == "2"));
-    CHECK((debug.at("topology_member_rerank_rows_visited_actual") == "2"));
-    CHECK((debug.at("topology_member_rerank_distance_evaluations_actual") == "2"));
-    CHECK((debug.at("vector_search_rows_visited_actual") == "0"));
-    CHECK((debug.at("vector_search_exact_distance_evaluations_actual") == "0"));
+    CHECK((debug.at("topology_vector_filter_applied") == "1"));
+    CHECK((debug.at("topology_vector_filter_fallback") == "0"));
+    CHECK((debug.at("topology_vector_partition_ann_applied") == "1"));
+    CHECK((debug.at("topology_vector_partition_ann_fallback") == "0"));
+    CHECK((debug.at("topology_vector_filter_matched") == "2"));
+    CHECK((debug.at("topology_vector_filter_removed") == "0"));
+    CHECK((debug.at("topology_vector_scores_reused") == "0"));
+    CHECK((debug.at("topology_vector_scores_reused_count") == "0"));
+    CHECK((debug.at("topology_member_rerank_rows_visited_actual") == "0"));
+    CHECK((debug.at("topology_member_rerank_distance_evaluations_actual") == "0"));
+    CHECK((std::stoull(debug.at("vector_search_rows_visited_actual")) +
+               std::stoull(debug.at("vector_search_ann_candidate_budget_actual")) >
+           0));
     CHECK((debug.at("topology_sidecar_vector_candidates") == "0"));
     CHECK((debug.at("topology_sidecar_post_fusion_count") == "0"));
     CHECK((debug.at("topology_new_post_fusion_count") == "0"));
@@ -342,8 +351,8 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK(debug.contains("topology_new_post_fusion_doc_ids"));
     CHECK(debug.contains("topology_duplicate_post_fusion_doc_ids"));
     CHECK((debug.at("topology_weak_query_routed_clusters") == "1"));
-    CHECK((debug.at("topology_weak_query_added_candidates") == "2"));
-    CHECK((debug.at("topology_weak_query_total_candidates") == "2"));
+    CHECK((debug.at("topology_weak_query_added_candidates") == "1"));
+    CHECK((debug.at("topology_weak_query_total_candidates") == "1"));
     CHECK((debug.at("topology_snapshot_cache_hit") == "0"));
 
     auto cachedResponse = engine.searchWithResponse("unmatched query", params);
@@ -379,8 +388,14 @@ TEST_CASE("Hybrid topology routing does not copy unrelated lexical hits into vec
     const auto& debug = response.value().debugStats;
     REQUIRE(debug.at("topology_weak_query_narrow_applied") == "1");
     CHECK(debug.at("topology_weak_query_allowed_candidates") == "2");
-    CHECK(debug.at("vector_search_candidate_budget") == "2");
-    CHECK(debug.at("topology_vector_scores_reused") == "1");
+    CHECK(debug.at("topology_vector_filter_applied") == "1");
+    CHECK(debug.at("topology_vector_scores_reused") == "0");
+    CHECK(debug.at("topology_member_rerank_distance_evaluations_actual") == "0");
+
+    const auto lexical = std::find_if(
+        response.value().results.begin(), response.value().results.end(),
+        [](const auto& result) { return result.document.sha256Hash == "lexical-only"; });
+    REQUIRE(lexical != response.value().results.end());
 }
 
 TEST_CASE("SearchEngine topology routing loads stored artifacts without freshness readiness",
@@ -417,7 +432,7 @@ TEST_CASE("SearchEngine topology routing loads stored artifacts without freshnes
     CHECK(debug.contains("topology_epoch"));
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
-    CHECK((debug.at("topology_weak_query_added_candidates") == "2"));
+    CHECK((debug.at("topology_weak_query_added_candidates") == "1"));
 }
 
 TEST_CASE("SearchEngine rejects inconsistent topology artifacts before routing",
@@ -570,7 +585,7 @@ TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without v
 
 TEST_CASE("SearchEngine topology augmentation preserves global ANN vector candidates",
           "[search][topology][augmentation][catch2]") {
-    TopologySearchFixture fix;
+    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
     auto generator = makeFixedGenerator({0.0F, 1.0F});
@@ -599,6 +614,7 @@ TEST_CASE("SearchEngine topology augmentation preserves global ANN vector candid
     CHECK(debug.at("topology_weak_query_applied") == "1");
     CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
     CHECK(debug.at("topology_vector_augmentation_candidates") == "2");
+    CHECK(std::stoull(debug.at("topology_member_rerank_distance_evaluations_actual")) > 0U);
 
     const auto globalAnn =
         std::find_if(response.value().results.begin(), response.value().results.end(),
@@ -846,6 +862,34 @@ TEST_CASE("Topology routing without a reranker falls back to query-independent m
     REQUIRE(session.artifactAdmitted);
     CHECK((session.addedCandidates <= session.acceptedRoutes));
     CHECK((session.routedCandidateHashes.size() <= session.acceptedRoutes));
+}
+
+TEST_CASE("Topology routing can expose full selected-cluster membership without reranking",
+          "[search][topology][narrowing][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+
+    TopologyRoutingSessionRequest request;
+    request.query = "omega";
+    request.seedDocumentHashes = {"y1"};
+    request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
+    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.weakTier1Query = true;
+    request.maxClusters = 1;
+    request.maxDocs = 1;
+    request.collectRouteMembership = true;
+
+    const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+
+    REQUIRE(session.artifactAdmitted);
+    REQUIRE(session.narrowApplied);
+    CHECK(session.routedCandidateHashes.size() == 1U);
+    CHECK(session.routeAllowedDocumentHashes.size() == 2U);
+    CHECK(session.routeAllowedDocumentHashes.contains("y1"));
+    CHECK(session.routeAllowedDocumentHashes.contains("y2"));
+    CHECK(session.memberRerankCandidates == 0U);
+    CHECK(session.memberRerankSelected == 0U);
 }
 
 TEST_CASE("Topology snapshot cache validates once and reuses the admitted epoch",

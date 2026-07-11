@@ -165,6 +165,8 @@ TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageReques
     sessionRequest.sparseDenseAlpha = request.config.topologySparseDenseAlpha;
     sessionRequest.minRouteScore = request.config.topologyMinRouteScore;
     sessionRequest.medoidOnlyExpansion = request.config.topologyMedoidOnlyExpansion;
+    sessionRequest.collectRouteMembership =
+        request.config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow;
     sessionRequest.graphNeighborMinScore = request.config.topologyGraphNeighborMinScore;
     sessionRequest.graphNeighborReciprocalOnly = request.config.topologyGraphNeighborReciprocalOnly;
     sessionRequest.expectedTopologyEpoch = request.expectedTopologyEpoch;

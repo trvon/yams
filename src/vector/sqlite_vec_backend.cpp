@@ -1237,7 +1237,7 @@ public:
         if (usesVec0SearchEngine()) {
             const size_t query_dim = query_embedding.size();
 
-            if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
+            if (document_hash || !metadata_filters.empty()) {
                 spdlog::debug("[vec0] filtered search falling back to exact cosine scan");
                 return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
                                                 document_hash, candidate_hashes, metadata_filters,
@@ -1259,7 +1259,17 @@ public:
                 }
             }
 
-            auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold);
+            std::vector<int64_t> candidateRowids;
+            if (!candidate_hashes.empty()) {
+                auto rowids = lookupCandidateRowidsUnlocked(query_dim, candidate_hashes);
+                if (!rowids) {
+                    return rowids.error();
+                }
+                candidateRowids = std::move(rowids.value());
+            }
+
+            auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold,
+                                             candidate_hashes.empty() ? nullptr : &candidateRowids);
             if (diagnostics && result) {
                 diagnostics->usedAnn = true;
                 diagnostics->annCandidateBudget = config_.vec0_phss_enabled
@@ -1307,6 +1317,23 @@ public:
         }
 
         return Error{ErrorCode::InvalidOperation, "no search engine configured"};
+    }
+
+    Result<std::vector<VectorRecord>>
+    searchExactCandidates(const std::vector<float>& query_embedding, size_t k,
+                          float similarity_threshold,
+                          const std::unordered_set<std::string>& candidate_hashes,
+                          VectorSearchDiagnostics* diagnostics) {
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (candidate_hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Exact candidate search requires candidate hashes"};
+        }
+        return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, std::nullopt,
+                                        candidate_hashes, {}, diagnostics);
     }
 
     Result<std::vector<std::vector<VectorRecord>>>
@@ -3636,9 +3663,52 @@ WHERE embedding_dim = ?1
         return records;
     }
 
-    Result<std::vector<VectorRecord>> vec0SearchUnlocked(const std::vector<float>& query_embedding,
-                                                         size_t k, float similarity_threshold) {
+    Result<std::vector<int64_t>>
+    lookupCandidateRowidsUnlocked(size_t queryDim,
+                                  const std::unordered_set<std::string>& candidateHashes) {
+        if (candidateHashes.empty()) {
+            return std::vector<int64_t>{};
+        }
+
+        std::vector<std::string> orderedHashes(candidateHashes.begin(), candidateHashes.end());
+        std::sort(orderedHashes.begin(), orderedHashes.end());
+        constexpr std::string_view sql = R"sql(
+SELECT rowid
+FROM vectors
+WHERE embedding_dim = ?1
+  AND document_hash IN (SELECT value FROM json_each(?2))
+ORDER BY rowid
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &stmt, nullptr) !=
+            SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError, "Failed to prepare candidate rowid lookup"};
+        }
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(queryDim));
+        const std::string candidateHashesJson = nlohmann::json(orderedHashes).dump();
+        sqlite3_bind_text(stmt, 2, candidateHashesJson.c_str(), -1, SQLITE_TRANSIENT);
+
+        std::vector<int64_t> rowids;
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            rowids.push_back(sqlite3_column_int64(stmt, 0));
+        }
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError, "Failed to query candidate vector rowids"};
+        }
+        return rowids;
+    }
+
+    Result<std::vector<VectorRecord>>
+    vec0SearchUnlocked(const std::vector<float>& query_embedding, size_t k,
+                       float similarity_threshold,
+                       const std::vector<int64_t>* candidateRowids = nullptr) {
         if (!db_ || query_embedding.empty() || k == 0) {
+            return std::vector<VectorRecord>{};
+        }
+        if (candidateRowids != nullptr && candidateRowids->empty()) {
             return std::vector<VectorRecord>{};
         }
 
@@ -3649,6 +3719,10 @@ WHERE embedding_dim = ?1
                           "\" WHERE embedding MATCH ?1 AND k = ?2";
         if (config_.vec0_phss_enabled) {
             sql += " AND phss = ?3 AND phss_candidates = ?4";
+        }
+        if (candidateRowids != nullptr) {
+            sql += config_.vec0_phss_enabled ? " AND rowid IN (SELECT value FROM json_each(?5))"
+                                             : " AND rowid IN (SELECT value FROM json_each(?3))";
         }
         sql += " ORDER BY distance";
         int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
@@ -3667,6 +3741,11 @@ WHERE embedding_dim = ?1
             sqlite3_bind_int(stmt, 3, 1);
             sqlite3_bind_int64(
                 stmt, 4, static_cast<sqlite3_int64>(std::max(k, config_.vec0_phss_candidates)));
+        }
+        if (candidateRowids != nullptr) {
+            const std::string candidateRowidsJson = nlohmann::json(*candidateRowids).dump();
+            sqlite3_bind_text(stmt, config_.vec0_phss_enabled ? 5 : 3, candidateRowidsJson.c_str(),
+                              -1, SQLITE_TRANSIENT);
         }
 
         std::vector<VectorRecord> records;
@@ -3871,6 +3950,14 @@ Result<std::vector<VectorRecord>> SqliteVecBackend::searchSimilarWithDiagnostics
     diagnostics = {};
     return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
                                 candidate_hashes, metadata_filters, &diagnostics);
+}
+
+Result<std::vector<VectorRecord>> SqliteVecBackend::searchExactCandidatesWithDiagnostics(
+    const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
+    const std::unordered_set<std::string>& candidate_hashes, VectorSearchDiagnostics& diagnostics) {
+    diagnostics = {};
+    return impl_->searchExactCandidates(query_embedding, k, similarity_threshold, candidate_hashes,
+                                        &diagnostics);
 }
 
 Result<std::vector<std::vector<VectorRecord>>>

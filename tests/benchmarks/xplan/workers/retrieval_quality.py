@@ -183,6 +183,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "vector_ann_candidate_budget_actual": 0,
         "topology_vector_scores_reused_count": 0,
         "topology_vector_scores_reused_queries": 0,
+        "topology_vector_filter_applied_queries": 0,
+        "topology_vector_filter_fallback_queries": 0,
+        "topology_vector_filter_matched": 0,
+        "topology_vector_filter_removed": 0,
+        "topology_vector_partition_ann_applied_queries": 0,
+        "topology_vector_partition_ann_fallback_queries": 0,
     }
     added_vals: list[int] = []
     routed_docs: list[int] = []
@@ -201,6 +207,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     vector_rows_visited_actual_vals: list[int] = []
     vector_exact_distance_evaluations_actual_vals: list[int] = []
     vector_ann_candidate_budget_actual_vals: list[int] = []
+    topology_vector_filter_matched_vals: list[int] = []
+    topology_vector_filter_removed_vals: list[int] = []
     skip_reasons: dict[str, int] = {}
     scoring_modes: dict[str, int] = {}
     routing_modes: dict[str, int] = {}
@@ -271,6 +279,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "vector_ann_candidate_budget_actual": "vector_search_ann_candidate_budget_actual",
         "topology_vector_scores_reused_count": "topology_vector_scores_reused_count",
+        "topology_vector_filter_matched": "topology_vector_filter_matched",
+        "topology_vector_filter_removed": "topology_vector_filter_removed",
     }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -427,6 +437,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["snapshot_cache_hit"] += 1
         if _truthy(stats.get("topology_vector_scores_reused")):
             counters["topology_vector_scores_reused_queries"] += 1
+        if _truthy(stats.get("topology_vector_filter_applied")):
+            counters["topology_vector_filter_applied_queries"] += 1
+        if _truthy(stats.get("topology_vector_filter_fallback")):
+            counters["topology_vector_filter_fallback_queries"] += 1
+        if _truthy(stats.get("topology_vector_partition_ann_applied")):
+            counters["topology_vector_partition_ann_applied_queries"] += 1
+        if _truthy(stats.get("topology_vector_partition_ann_fallback")):
+            counters["topology_vector_partition_ann_fallback_queries"] += 1
         for dst, key in int_keys.items():
             v = _as_int(stats.get(key))
             counters[dst] += v
@@ -462,6 +480,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 vector_exact_distance_evaluations_actual_vals.append(v)
             elif dst == "vector_ann_candidate_budget_actual":
                 vector_ann_candidate_budget_actual_vals.append(v)
+            elif dst == "topology_vector_filter_matched":
+                topology_vector_filter_matched_vals.append(v)
+            elif dst == "topology_vector_filter_removed":
+                topology_vector_filter_removed_vals.append(v)
 
         try:
             margin = stats.get("topology_route_boundary_score_margin")
@@ -539,6 +561,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "topology_member_rerank_selected_sum": float(
             counters["member_rerank_selected"]
+        ),
+        "topology_vector_filter_matched_sum": float(
+            counters["topology_vector_filter_matched"]
+        ),
+        "topology_vector_filter_removed_sum": float(
+            counters["topology_vector_filter_removed"]
         ),
         "vector_candidate_budget_sum": float(counters["vector_candidate_budget"]),
         "vector_result_budget_sum": float(counters["vector_result_budget"]),
@@ -653,6 +681,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["vector_ann_candidate_budget_actual_avg"] = float(
             statistics.mean(vector_ann_candidate_budget_actual_vals)
         )
+    if topology_vector_filter_matched_vals:
+        metrics["topology_vector_filter_matched_avg"] = float(
+            statistics.mean(topology_vector_filter_matched_vals)
+        )
+    if topology_vector_filter_removed_vals:
+        metrics["topology_vector_filter_removed_avg"] = float(
+            statistics.mean(topology_vector_filter_removed_vals)
+        )
     if route_available_vals:
         metrics["topology_route_available_avg"] = float(
             statistics.mean(route_available_vals)
@@ -680,6 +716,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ) / float(hybrid)
         metrics["topology_vector_scores_reuse_rate"] = float(
             counters["topology_vector_scores_reused_queries"]
+        ) / float(hybrid)
+        metrics["topology_vector_filter_rate"] = float(
+            counters["topology_vector_filter_applied_queries"]
+        ) / float(hybrid)
+        metrics["topology_vector_filter_fallback_rate"] = float(
+            counters["topology_vector_filter_fallback_queries"]
+        ) / float(hybrid)
+        metrics["topology_vector_partition_ann_rate"] = float(
+            counters["topology_vector_partition_ann_applied_queries"]
+        ) / float(hybrid)
+        metrics["topology_vector_partition_ann_fallback_rate"] = float(
+            counters["topology_vector_partition_ann_fallback_queries"]
         ) / float(hybrid)
     if effective_vector_caps:
         metrics["effective_vector_cap_min"] = float(min(effective_vector_caps))
@@ -989,6 +1037,12 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "vector_total_rows_visited_actual_avg": 0.0,
                 "vector_total_exact_distance_evaluations_actual_avg": 0.0,
                 "topology_vector_scores_reuse_rate": 0.0,
+                "topology_vector_filter_rate": 0.0,
+                "topology_vector_filter_fallback_rate": 0.0,
+                "topology_vector_filter_matched_avg": 0.0,
+                "topology_vector_filter_removed_avg": 0.0,
+                "topology_vector_partition_ann_rate": 0.0,
+                "topology_vector_partition_ann_fallback_rate": 0.0,
                 "corpus_warming_rate": 0.0,
                 "search_engine_ready_rate": 0.0,
                 "vector_ready_rate": 0.0,

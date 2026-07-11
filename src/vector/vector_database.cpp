@@ -634,8 +634,8 @@ public:
                             dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
                         return diagnosticStore->searchSimilarWithDiagnostics(
                             query_embedding, params.k, params.similarity_threshold,
-                            params.document_hash, params.candidate_hashes,
-                            params.metadata_filters, *params.diagnostics);
+                            params.document_hash, params.candidate_hashes, params.metadata_filters,
+                            *params.diagnostics);
                     }
                 }
                 return backend_->searchSimilar(query_embedding, params.k,
@@ -683,18 +683,34 @@ public:
         }
 
         try {
+            if (params.candidate_filter_mode == CandidateFilterMode::Exact) {
+                if (params.candidate_hashes.empty()) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Exact candidate search requires candidate hashes"};
+                }
+                auto* exactStore = dynamic_cast<IExactCandidateVectorStore*>(backend_.get());
+                if (exactStore == nullptr) {
+                    return Error{ErrorCode::NotSupported,
+                                 "Vector backend does not support exact candidate search"};
+                }
+                VectorSearchDiagnostics localDiagnostics;
+                auto& diagnostics =
+                    params.diagnostics != nullptr ? *params.diagnostics : localDiagnostics;
+                return exactStore->searchExactCandidatesWithDiagnostics(
+                    query_embedding, params.k, params.similarity_threshold, params.candidate_hashes,
+                    diagnostics);
+            }
             if (params.diagnostics != nullptr) {
-                if (auto* diagnosticStore =
-                        dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
+                if (auto* diagnosticStore = dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
                     return diagnosticStore->searchSimilarWithDiagnostics(
                         query_embedding, params.k, params.similarity_threshold,
                         params.document_hash, params.candidate_hashes, params.metadata_filters,
                         *params.diagnostics);
                 }
             }
-            return backend_->searchSimilar(query_embedding, params.k,
-                                           params.similarity_threshold, params.document_hash,
-                                           params.candidate_hashes, params.metadata_filters);
+            return backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,
+                                           params.document_hash, params.candidate_hashes,
+                                           params.metadata_filters);
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, "Vector search failed: " + std::string(e.what())};
         }

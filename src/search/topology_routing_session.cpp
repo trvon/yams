@@ -292,6 +292,9 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             ++result.staleCandidates;
             continue;
         }
+        if (request.collectRouteMembership) {
+            result.routeAllowedDocumentHashes.insert(hash);
+        }
         result.routedCandidateHashes.insert(hash);
         const auto insertStart = std::chrono::steady_clock::now();
         const auto [_, inserted] = candidateHashes.insert(hash);
@@ -303,7 +306,9 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             ++result.duplicateCandidates;
         }
     }
-    result.narrowApplied = !result.routedCandidateHashes.empty();
+    result.narrowApplied = request.collectRouteMembership
+                               ? !result.routeAllowedDocumentHashes.empty()
+                               : !result.routedCandidateHashes.empty();
     result.applied = result.narrowApplied || result.addedCandidates > 0;
 }
 
@@ -489,6 +494,13 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         }
         const auto& cluster = topology.clusters[clusterIt->second];
         coverSeedsInCluster(cluster, seedSet, seedsCovered);
+        if (request.collectRouteMembership && mayExpand) {
+            for (const auto& hash : cluster.memberDocumentHashes) {
+                if (!hash.empty()) {
+                    result.routeAllowedDocumentHashes.insert(hash);
+                }
+            }
+        }
 
         if (memberReranker && !request.medoidOnlyExpansion) {
             result.memberRerankCandidates += cluster.memberDocumentHashes.size();
@@ -524,7 +536,8 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 ++result.duplicateCandidates;
             }
         }
-        if (request.maxDocs > 0 && result.routedDocs >= request.maxDocs) {
+        if (!request.collectRouteMembership && request.maxDocs > 0 &&
+            result.routedDocs >= request.maxDocs) {
             break;
         }
     }
@@ -534,7 +547,9 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         result.meanAcceptedRouteScore =
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
     }
-    result.narrowApplied = mayExpand && !result.routedCandidateHashes.empty();
+    result.narrowApplied =
+        mayExpand && (request.collectRouteMembership ? !result.routeAllowedDocumentHashes.empty()
+                                                     : !result.routedCandidateHashes.empty());
     result.applied = result.narrowApplied || result.addedCandidates > 0;
     // Preserve graph fallthrough skip reason when cluster path also fails.
     if (result.applied && result.skipReason == "graph_no_neighbors_fallback_clusters") {

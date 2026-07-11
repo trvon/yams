@@ -44,7 +44,8 @@ TEST_CASE("Vector pipeline propagates exact routed work diagnostics",
     const std::unordered_set<std::string> routed{"a", "b"};
 
     const auto result = yams::search::detail::queryVectorIndexPipeline(
-        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed, &diagnostics);
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed, yams::vector::CandidateFilterMode::Exact,
+        &diagnostics);
 
     REQUIRE(result.has_value());
     CHECK(result.value().size() == 2U);
@@ -97,4 +98,35 @@ TEST_CASE("Vector pipeline unions topology members into the global vector candid
     CHECK(merged[1].debugInfo.at("topology_augmentation") == "1");
     CHECK(merged[2].debugInfo.at("topology_augmentation") == "1");
     CHECK(merged[2].score == 0.80F);
+}
+
+TEST_CASE("Vector pipeline filters global hits by routed membership with zero-overlap fallback",
+          "[search][vector][topology][narrowing][catch2]") {
+    using yams::search::ComponentResult;
+    std::vector<ComponentResult> global{{.documentHash = "distractor", .score = 0.95F, .rank = 0},
+                                        {.documentHash = "routed-a", .score = 0.90F, .rank = 1},
+                                        {.documentHash = "routed-b", .score = 0.80F, .rank = 2}};
+
+    auto filtered = yams::search::detail::filterVectorResultsByAllowedDocuments(
+        global, std::unordered_set<std::string>{"routed-a", "routed-b"});
+
+    REQUIRE(filtered.applied);
+    CHECK_FALSE(filtered.fellBackToGlobal);
+    CHECK(filtered.matched == 2U);
+    CHECK(filtered.removed == 1U);
+    REQUIRE(filtered.results.size() == 2U);
+    CHECK(filtered.results[0].documentHash == "routed-a");
+    CHECK(filtered.results[0].rank == 0U);
+    CHECK(filtered.results[0].debugInfo.at("topology_route_filter") == "1");
+    CHECK(filtered.results[1].documentHash == "routed-b");
+    CHECK(filtered.results[1].rank == 1U);
+
+    auto fallback = yams::search::detail::filterVectorResultsByAllowedDocuments(
+        std::move(global), std::unordered_set<std::string>{"route-miss"});
+    CHECK_FALSE(fallback.applied);
+    REQUIRE(fallback.fellBackToGlobal);
+    CHECK(fallback.matched == 0U);
+    CHECK(fallback.removed == 0U);
+    REQUIRE(fallback.results.size() == 3U);
+    CHECK(fallback.results[0].documentHash == "distractor");
 }

@@ -1,6 +1,6 @@
 {
   "name": "search_generalized_memory_topology_gate",
-  "description": "Single-index generalized-memory gate: SciFact and NF-Corpus coexist in one daemon; compare global ANN, hard topology narrowing, and additive topology-vector augmentation with per-cluster overlap and explicit quality/cost accounting.",
+  "description": "Single-index generalized-memory gate: SciFact and NF-Corpus coexist in one daemon; compare global ANN, topology-filtered ANN traversal at the same budget, and additive exact topology-vector augmentation with per-cluster overlap and explicit quality/cost accounting.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -52,7 +52,9 @@
       "factors": {
         "topology_mode": "hybrid_assist",
         "topology_vector_policy": "narrow",
-        "route_candidate_budget": 16,
+        "ann_candidate_budget": 32,
+        "vector_result_budget": 32,
+        "route_partition_ann": true,
         "adaptive_routing": true,
         "confidence_margin": 0.2,
         "min_clusters": 1
@@ -60,7 +62,7 @@
       "env": {
         "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
         "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow",
-        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "48"
+        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "32"
       },
       "params": {
         "topology_vector_policy": "narrow",
@@ -149,6 +151,12 @@
         "topology_vector_augmentation_avg",
         "topology_confidence_abstain_rate",
         "topology_snapshot_cache_hit_rate",
+        "topology_vector_filter_rate",
+        "topology_vector_filter_fallback_rate",
+        "topology_vector_filter_matched_avg",
+        "topology_vector_filter_removed_avg",
+        "topology_vector_partition_ann_rate",
+        "topology_vector_partition_ann_fallback_rate",
         "vector_candidate_work_budget_avg",
         "vector_distance_evaluation_budget_avg",
         "vector_ann_candidate_budget_actual_avg",
@@ -233,6 +241,12 @@
       "topology_vector_augmentation_avg",
       "topology_confidence_abstain_rate",
       "topology_snapshot_cache_hit_rate",
+      "topology_vector_filter_rate",
+      "topology_vector_filter_fallback_rate",
+      "topology_vector_filter_matched_avg",
+      "topology_vector_filter_removed_avg",
+      "topology_vector_partition_ann_rate",
+      "topology_vector_partition_ann_fallback_rate",
       "vector_candidate_work_budget_avg",
       "vector_distance_evaluation_budget_avg",
       "vector_ann_candidate_budget_actual_avg",
