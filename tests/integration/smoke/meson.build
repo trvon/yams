@@ -44,7 +44,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
   integ_exe = executable('yams_integration_smoke_tests',
     integration_smoke_srcs + files('test_main_smoke_catch2.cpp'),
     include_directories: incs,
-    dependencies: [catch2_dep, test_deps],
+    dependencies: [catch2_dep, test_deps, dependency('yams_daemon_client_embedded')],
     cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
     install: false,
   )

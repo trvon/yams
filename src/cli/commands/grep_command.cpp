@@ -677,6 +677,11 @@ public:
                         "grep: socket transport unavailable; using in-process transport: {}",
                         prepared.plan.fallbackReason);
                 }
+                if (prepared.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                    spdlog::info("grep: socket-only client cannot service in-process plan; using "
+                                 "local services");
+                    return executeLocal();
+                }
 
                 // Use RetrievalService facade with helper-resolved transport plan.
                 yams::app::services::RetrievalService rsvc;
@@ -1935,7 +1940,7 @@ private:
         }
 
         if (documents.empty()) {
-            std::cerr << "No files to search" << std::endl;
+            renderNoResults(0);
             return Result<void>();
         }
 

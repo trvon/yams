@@ -7,7 +7,8 @@
 #include "common/test_helpers_catch2.h"
 
 #include <yams/cli/cli_sync.h>
-#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/in_process_transport.h>
+#include <yams/daemon/embedded_service_host.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace fs = std::filesystem;
@@ -43,18 +44,29 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList",
     yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
     yams::test::ScopedEnvVar syncAdd("YAMS_SYNC_SINGLE_FILE_ADD", std::string("1"));
 
-    yams::daemon::ClientConfig cfg;
-    cfg.autoStart = false;
-    cfg.transportMode = yams::daemon::ClientTransportMode::Auto;
+    yams::daemon::EmbeddedServiceHost::Options hostOpts;
+    hostOpts.dataDir = dataDir;
+    hostOpts.ioThreads = 1;
+    hostOpts.enableAutoRepair = false;
+    hostOpts.autoLoadPlugins = false;
+    hostOpts.enableModelProvider = false;
+    hostOpts.initTimeoutSeconds = 30;
 
-    yams::daemon::DaemonClient client(cfg);
+    auto hostRes = yams::daemon::EmbeddedServiceHost::getOrCreate(hostOpts);
+    INFO((hostRes.has_value() ? std::string{} : hostRes.error().message));
+    REQUIRE(hostRes.has_value());
+    auto host = hostRes.value();
+    const bool hostCreated = host != nullptr;
+    REQUIRE(hostCreated);
 
-    auto connectRes = yams::cli::run_sync(client.connect(), 20s);
-    INFO((connectRes.has_value() ? std::string{} : connectRes.error().message));
-    REQUIRE(connectRes.has_value());
-    REQUIRE(client.isConnected());
+    yams::daemon::InProcessTransport transport(host);
+    auto call = [&](const yams::daemon::Request& request) {
+        return yams::cli::run_sync(transport.send_request(request), 15s);
+    };
 
-    auto addDoc = [&](const std::string& name, const std::string& content) {
+    auto addDoc =
+        [&](const std::string& name,
+            const std::string& content) -> yams::Result<yams::daemon::AddDocumentResponse> {
         yams::daemon::AddDocumentRequest req;
         req.name = name;
         req.content = content;
@@ -62,7 +74,18 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList",
         req.noEmbeddings = true;
         req.waitForProcessing = true;
         req.waitTimeoutSeconds = 10;
-        return yams::cli::run_sync(client.streamingAddDocument(req), 15s);
+        auto response =
+            call(yams::daemon::Request{std::in_place_type<yams::daemon::AddDocumentRequest>, req});
+        if (!response) {
+            return response.error();
+        }
+        if (const auto* error = std::get_if<yams::daemon::ErrorResponse>(&response.value())) {
+            return yams::Error{error->code, error->message};
+        }
+        if (const auto* add = std::get_if<yams::daemon::AddDocumentResponse>(&response.value())) {
+            return *add;
+        }
+        return yams::Error{yams::ErrorCode::InvalidData, "unexpected add response type"};
     };
 
     auto add1 =
@@ -84,8 +107,22 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList",
         yams::Error{yams::ErrorCode::NotFound, "list not executed"};
     const bool listReady = wait_until(
         [&]() {
-            lastList = yams::cli::run_sync(client.streamingList(listReq), 10s);
-            return lastList.has_value() && lastList.value().items.size() >= 2;
+            auto response =
+                call(yams::daemon::Request{std::in_place_type<yams::daemon::ListRequest>, listReq});
+            if (!response) {
+                lastList = response.error();
+                return false;
+            }
+            if (const auto* error = std::get_if<yams::daemon::ErrorResponse>(&response.value())) {
+                lastList = yams::Error{error->code, error->message};
+                return false;
+            }
+            if (const auto* list = std::get_if<yams::daemon::ListResponse>(&response.value())) {
+                lastList = *list;
+                return lastList.value().items.size() >= 2;
+            }
+            lastList = yams::Error{yams::ErrorCode::InvalidData, "unexpected list response type"};
+            return false;
         },
         15s);
 
@@ -104,17 +141,34 @@ TEST_CASE("IntegrationSmoke.DaemonClientEmbeddedStreamingSearchAndList",
         yams::Error{yams::ErrorCode::NotFound, "search not executed"};
     const bool searchReady = wait_until(
         [&]() {
-            lastSearch = yams::cli::run_sync(client.streamingSearch(searchReq), 10s);
-            return lastSearch.has_value() && !lastSearch.value().results.empty();
+            auto response = call(
+                yams::daemon::Request{std::in_place_type<yams::daemon::SearchRequest>, searchReq});
+            if (!response) {
+                lastSearch = response.error();
+                return false;
+            }
+            if (const auto* error = std::get_if<yams::daemon::ErrorResponse>(&response.value())) {
+                lastSearch = yams::Error{error->code, error->message};
+                return false;
+            }
+            if (const auto* search = std::get_if<yams::daemon::SearchResponse>(&response.value())) {
+                lastSearch = *search;
+                return !lastSearch.value().results.empty();
+            }
+            lastSearch =
+                yams::Error{yams::ErrorCode::InvalidData, "unexpected search response type"};
+            return false;
         },
         15s);
 
     INFO((lastSearch ? "search returned no results"
                      : std::string("search failed: ") + lastSearch.error().message));
     REQUIRE(searchReady);
-    CHECK(lastSearch.value().totalCount >= 1u);
+    const bool hasSearchResults = lastSearch.value().totalCount >= 1u;
+    CHECK(hasSearchResults);
 
-    client.disconnect();
+    auto shutdownRes = host->shutdown();
+    REQUIRE(shutdownRes.has_value());
 
     std::error_code ec;
     fs::remove_all(dataDir, ec);

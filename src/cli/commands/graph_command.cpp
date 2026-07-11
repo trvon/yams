@@ -1,5 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -223,6 +225,125 @@ private:
         if (!plan.fallbackReason.empty()) {
             std::cout << "  Reason: " << plan.fallbackReason << "\n";
         }
+    }
+
+    static std::int64_t toUnixSeconds(std::chrono::sys_seconds tp) {
+        return tp.time_since_epoch().count();
+    }
+
+    void printGraphNotFoundHints(const std::string& name) const {
+        const auto displayName = projectPathForCli(name, invocationCwd_);
+        if (!displayName.empty()) {
+            std::cout << yams::cli::ui::status_info("If this file is new, run: yams add \"" +
+                                                    displayName + "\" --sync")
+                      << "\n";
+            std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
+                                                    displayName + "\" --depth " +
+                                                    std::to_string(depth_))
+                      << "\n";
+        }
+        if (auto searchHint = buildGraphSearchHint(name, invocationCwd_); !searchHint.empty()) {
+            std::cout << yams::cli::ui::status_info("Or explore graph labels with: " + searchHint)
+                      << "\n";
+        }
+    }
+
+    Result<std::optional<metadata::DocumentInfo>> findLocalGraphDocument() const {
+        if (cli_ == nullptr) {
+            return Error{ErrorCode::InvalidState, "CLI unavailable"};
+        }
+        auto ensured = cli_->ensureMetadataInitialized();
+        if (!ensured) {
+            return ensured.error();
+        }
+        auto repo = cli_->getMetadataRepository();
+        if (!repo) {
+            return Error{ErrorCode::InvalidState, "Metadata repository unavailable"};
+        }
+
+        if (!hash_.empty()) {
+            return repo->getDocumentByHash(hash_);
+        }
+        if (name_.empty()) {
+            return std::optional<metadata::DocumentInfo>{};
+        }
+
+        auto exact = repo->findDocumentByExactPath(name_);
+        if (exact && exact.value().has_value()) {
+            return exact.value();
+        }
+        if (!std::filesystem::path(name_).is_absolute()) {
+            const auto absolute = (invocationCwd_ / name_).lexically_normal().generic_string();
+            exact = repo->findDocumentByExactPath(absolute);
+            if (exact && exact.value().has_value()) {
+                return exact.value();
+            }
+        }
+
+        auto pickNewest = [](const std::vector<metadata::DocumentInfo>& docs)
+            -> std::optional<metadata::DocumentInfo> {
+            if (docs.empty()) {
+                return std::nullopt;
+            }
+            return *std::max_element(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
+                return a.indexedTime < b.indexedTime;
+            });
+        };
+
+        metadata::DocumentQueryOptions q;
+        q.fileName = std::filesystem::path(name_).filename().string();
+        q.limit = 32;
+        q.orderByIndexedDesc = true;
+        if (!q.fileName->empty()) {
+            auto byName = repo->queryDocuments(q);
+            if (byName) {
+                if (auto picked = pickNewest(byName.value())) {
+                    return picked;
+                }
+            }
+        }
+
+        metadata::DocumentQueryOptions contains;
+        contains.containsFragment = name_;
+        contains.limit = 64;
+        contains.orderByIndexedDesc = true;
+        auto byFragment = repo->queryDocuments(contains);
+        if (byFragment) {
+            return pickNewest(byFragment.value());
+        }
+        return std::optional<metadata::DocumentInfo>{};
+    }
+
+    Result<void> renderLocalDocumentGraphFallback() const {
+        auto docRes = findLocalGraphDocument();
+        if (!docRes) {
+            if (!name_.empty()) {
+                printGraphNotFoundHints(name_);
+            }
+            return docRes.error();
+        }
+        if (!docRes.value().has_value()) {
+            if (!name_.empty()) {
+                printGraphNotFoundHints(name_);
+                return Error{ErrorCode::NotFound, "Document not found with name: " + name_};
+            }
+            return Error{ErrorCode::NotFound, "Document not found"};
+        }
+
+        const auto& doc = *docRes.value();
+        yams::daemon::GetResponse resp;
+        resp.hash = doc.sha256Hash;
+        resp.path = projectPathForCli(doc.filePath, invocationCwd_);
+        resp.name = doc.fileName;
+        resp.fileName = doc.fileName;
+        resp.size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, doc.fileSize));
+        resp.mimeType = doc.mimeType;
+        resp.fileType = doc.fileExtension;
+        resp.created = toUnixSeconds(doc.createdTime);
+        resp.modified = toUnixSeconds(doc.modifiedTime);
+        resp.indexed = toUnixSeconds(doc.indexedTime);
+        resp.graphEnabled = false;
+        return printDocumentGraphResponse(resp);
     }
 
     static std::string displayNodePath(const yams::daemon::GraphNode& node) {
@@ -909,6 +1030,10 @@ private:
         }
         auto leaseHandle = std::move(leaseRes.value());
         printFallbackNoticeIfNeeded(leaseHandle.plan);
+        if (leaseHandle.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess &&
+            (!name_.empty() || !hash_.empty()) && nodeKey_.empty() && nodeId_ < 0) {
+            co_return renderLocalDocumentGraphFallback();
+        }
         auto& client = **leaseHandle.lease;
 
         const GraphTraversalQueryOptions traversalOptions{.depth = depth_,
@@ -949,23 +1074,7 @@ private:
             std::cerr << "Graph error: " << r.error().message << "\n";
             if (!name_.empty() &&
                 r.error().message.find("Document not found with name") != std::string::npos) {
-                const auto displayName = projectPathForCli(name_, invocationCwd_);
-                if (!displayName.empty()) {
-                    std::cout << yams::cli::ui::status_info(
-                                     "If this file is new, run: yams add \"" + displayName +
-                                     "\" --sync")
-                              << "\n";
-                    std::cout << yams::cli::ui::status_info("Then retry: yams graph --name \"" +
-                                                            displayName + "\" --depth " +
-                                                            std::to_string(depth_))
-                              << "\n";
-                }
-                if (auto searchHint = buildGraphSearchHint(name_, invocationCwd_);
-                    !searchHint.empty()) {
-                    std::cout << yams::cli::ui::status_info("Or explore graph labels with: " +
-                                                            searchHint)
-                              << "\n";
-                }
+                printGraphNotFoundHints(name_);
             }
             co_return r.error();
         }
@@ -983,7 +1092,7 @@ private:
                                     .cwd = invocationCwd_});
     }
 
-    Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) {
+    Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) const {
         return yams::cli::renderDocumentGraphResponse(
             std::cout, resp,
             DocumentGraphRenderOptions{

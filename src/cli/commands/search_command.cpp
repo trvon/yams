@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <optional>
@@ -1257,14 +1256,16 @@ public:
             groupVersions_ = true;
             showTools_ = true;
             // These environment variables allow forcing defaults at runtime if needed
-            if (const char* envNoGroup = std::getenv("YAMS_NO_GROUP_VERSIONS")) {
+            if (const char* envNoGroup =
+                    std::getenv("YAMS_NO_GROUP_VERSIONS")) { // NOLINT(concurrency-mt-unsafe)
                 std::string v(envNoGroup);
                 std::transform(v.begin(), v.end(), v.begin(),
                                [](unsigned char c) { return (char)std::tolower(c); });
                 if (v == "1" || v == "true" || v == "yes" || v == "on")
                     groupVersions_ = false;
             }
-            if (const char* envNoTools = std::getenv("YAMS_NO_GROUP_TOOLS")) {
+            if (const char* envNoTools =
+                    std::getenv("YAMS_NO_GROUP_TOOLS")) { // NOLINT(concurrency-mt-unsafe)
                 std::string v(envNoTools);
                 std::transform(v.begin(), v.end(), v.begin(),
                                [](unsigned char c) { return (char)std::tolower(c); });
@@ -1426,12 +1427,16 @@ public:
             // Seed env aliases for any subprocess-based startup paths
             if (clientConfig.dataDir != std::filesystem::path{}) {
 #ifndef _WIN32
+                // NOLINTNEXTLINE(concurrency-mt-unsafe)
                 ::setenv("YAMS_STORAGE", clientConfig.dataDir.string().c_str(), 1);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe)
                 ::setenv("YAMS_DATA_DIR", clientConfig.dataDir.string().c_str(), 1);
 #endif
             }
+            yams::cli::CliDaemonClientPlan daemonPlan;
             auto daemonLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-                clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 12,
+                std::chrono::milliseconds{-1}, &daemonPlan);
             std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemonLease;
             if (daemonLeaseRes) {
                 daemonLease = std::move(daemonLeaseRes.value());
@@ -1545,6 +1550,15 @@ public:
                 (void)printDiffForSearchResult(resp);
                 return renderResult;
             };
+            if (daemonLease &&
+                daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                spdlog::info("search: socket-only client cannot service in-process plan; using "
+                             "local services");
+                auto fb = fallback();
+                if (!fb)
+                    return fb.error();
+                return Result<void>();
+            }
             if (!daemonLease) {
                 if (yams::cli::is_transport_failure(daemonLeaseRes.error())) {
                     return daemonLeaseRes.error();
@@ -1857,6 +1871,11 @@ public:
             }
 
             auto plan = std::move(planRes.value());
+            if (plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                spdlog::info("search: socket-only client cannot service in-process plan; using "
+                             "local services");
+                co_return co_await localFallback();
+            }
             yams::daemon::DaemonClient directClient(plan.config);
             directClient.setStreamingEnabled(false);
             const auto daemonCallStart = std::chrono::steady_clock::now();
@@ -1875,11 +1894,18 @@ public:
             co_return render(directRes.value());
         }
 
+        yams::cli::CliDaemonClientPlan daemonPlan;
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-            clientConfig, daemonOpts.accessPolicy);
+            clientConfig, daemonOpts.accessPolicy, 1, 12, std::chrono::milliseconds{-1},
+            &daemonPlan);
         if (!leaseRes) {
             co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
                 leaseRes.error(), "search", localFallback);
+        }
+        if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+            spdlog::info(
+                "search: socket-only client cannot service in-process plan; using local services");
+            co_return co_await localFallback();
         }
         auto leaseHandle = std::move(leaseRes.value());
         struct LeaseScopeExit {
