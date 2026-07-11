@@ -114,6 +114,9 @@ def run_multi_client(
     env["YAMS_BENCH_MIXED_SEARCHERS"] = str(int(clients))
     env["YAMS_BENCH_MIXED_WRITERS"] = str(max(1, int(int(clients) // 2)))
     env["YAMS_BENCH_MIXED_READER_OPS"] = str(int(ctx.params.get("mixed_reader_ops") or 50))
+    env["YAMS_BENCH_MIXED_OPS_PER_CLIENT"] = str(
+        int(ctx.params.get("mixed_ops_per_client") or 0)
+    )
     env["YAMS_BENCH_IDLE_PROBE"] = str(ctx.params.get("idle_probe", "1"))
 
     if env_extra:
@@ -177,16 +180,21 @@ def run_multi_client(
 def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
     search = record.get("search_latency") or nested_get(record, "search", "latency") or {}
     add = record.get("add_latency") or {}
+    list_latency = record.get("list_latency") or {}
     idle = record.get("idle_probe") or {}
     idle_base = idle.get("idle_baseline") if isinstance(idle, dict) else {}
     drain = record.get("drain_metrics") or {}
     peaks = record.get("resource_peaks") or {}
+    baseline = record.get("resource_baseline") or {}
+    if not isinstance(baseline, dict):
+        baseline = {}
 
     metrics: dict[str, Any] = {
         "elapsed_seconds": float(record.get("elapsed_seconds") or 0),
         "docs_per_s": float(record.get("throughput_docs_per_sec") or 0),
         "total_searches": float(record.get("total_searches") or 0),
         "total_adds": float(record.get("total_adds") or 0),
+        "total_lists": float(record.get("total_lists") or 0),
         "total_failures": float(record.get("total_failures") or 0),
         "num_clients": float(record.get("num_clients") or 0),
         "drained": 1.0 if record.get("drained") else 0.0,
@@ -204,16 +212,39 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
     elif p90 is not None:
         # multi_client emits p90; map to p95 slot when p95 absent
         metrics["search_p95_ms"] = p90
+    search_p99 = latency_ms_from_us_block(
+        search if isinstance(search, dict) else None, "p99_us"
+    )
+    if search_p99 is not None:
+        metrics["search_p99_ms"] = search_p99
 
     add_p50 = latency_ms_from_us_block(add if isinstance(add, dict) else None, "p50_us")
     if add_p50 is not None:
         metrics["add_p50_ms"] = add_p50
+    for percentile in ("p95_us", "p99_us"):
+        value = latency_ms_from_us_block(add if isinstance(add, dict) else None, percentile)
+        if value is not None:
+            metrics[f"add_{percentile.removesuffix('_us')}_ms"] = value
+
+    for percentile in ("p50_us", "p95_us", "p99_us"):
+        value = latency_ms_from_us_block(
+            list_latency if isinstance(list_latency, dict) else None, percentile
+        )
+        if value is not None:
+            metrics[f"list_{percentile.removesuffix('_us')}_ms"] = value
 
     metrics["search_rejected"] = float(record.get("search_rejected") or 0)
     if metrics["total_searches"] > 0 and metrics["elapsed_seconds"] > 0:
         metrics["qps"] = metrics["total_searches"] / metrics["elapsed_seconds"]
     else:
         metrics["qps"] = 0.0
+    elapsed = metrics["elapsed_seconds"]
+    metrics["add_ops_per_s"] = metrics["total_adds"] / elapsed if elapsed > 0 else 0.0
+    metrics["search_ops_per_s"] = metrics["total_searches"] / elapsed if elapsed > 0 else 0.0
+    metrics["list_ops_per_s"] = metrics["total_lists"] / elapsed if elapsed > 0 else 0.0
+    metrics["total_ops_per_s"] = (
+        metrics["total_adds"] + metrics["total_searches"] + metrics["total_lists"]
+    ) / elapsed if elapsed > 0 else 0.0
 
     # Idle / ops timeline fields
     if isinstance(idle_base, dict):
@@ -255,6 +286,63 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
             peaks.get("peak_write_max_batch_excess_queue_wait_ms") or 0
         )
         metrics["pressure_level_peak"] = float(peaks.get("max_pressure_level") or 0)
+        metrics["db_write_pool_waiting_peak"] = float(
+            peaks.get("peak_db_write_pool_waiting") or 0
+        )
+        metrics["db_read_pool_waiting_peak"] = float(
+            peaks.get("peak_db_read_pool_waiting") or 0
+        )
+        metrics["db_write_pool_slow_holders_delta"] = max(
+            0.0,
+            float(peaks.get("peak_db_write_pool_slow_holders") or 0)
+            - float(baseline.get("db_write_pool_slow_holders") or 0),
+        )
+        metrics["db_read_pool_slow_holders_delta"] = max(
+            0.0,
+            float(peaks.get("peak_db_read_pool_slow_holders") or 0)
+            - float(baseline.get("db_read_pool_slow_holders") or 0),
+        )
+        metrics["db_write_pool_max_holder_high_water_ms"] = max(
+            0.0,
+            float(peaks.get("peak_db_write_pool_max_holder_us") or 0)
+            - float(baseline.get("db_write_pool_max_holder_us") or 0),
+        ) / 1000.0
+        metrics["db_read_pool_max_holder_high_water_ms"] = max(
+            0.0,
+            float(peaks.get("peak_db_read_pool_max_holder_us") or 0)
+            - float(baseline.get("db_read_pool_max_holder_us") or 0),
+        ) / 1000.0
+        metrics["write_queue_capacity"] = float(peaks.get("write_queue_capacity") or 0)
+        metrics["write_queue_depth_max"] = float(
+            peaks.get("peak_write_queue_depth_max") or 0
+        )
+        metrics["write_queue_capacity_rejections"] = float(
+            peaks.get("peak_write_queue_capacity_rejections") or 0
+        )
+        metrics["write_queue_forced_over_capacity"] = float(
+            peaks.get("peak_write_queue_forced_over_capacity") or 0
+        )
+        metrics["metadata_wal_bytes_peak"] = float(
+            peaks.get("peak_metadata_wal_bytes") or 0
+        )
+
+        def workload_delta(peak_key: str, baseline_key: str) -> float:
+            peak = float(peaks.get(peak_key) or 0)
+            base = float(baseline.get(baseline_key) or 0)
+            return max(0.0, peak - base)
+
+        metrics["write_queue_depth_high_water_delta"] = workload_delta(
+            "peak_write_queue_depth_max", "write_queue_depth_max"
+        )
+        metrics["write_queue_capacity_rejections_delta"] = workload_delta(
+            "peak_write_queue_capacity_rejections", "write_queue_capacity_rejections"
+        )
+        metrics["write_queue_forced_over_capacity_delta"] = workload_delta(
+            "peak_write_queue_forced_over_capacity", "write_queue_forced_over_capacity"
+        )
+        metrics["metadata_wal_growth_bytes"] = workload_delta(
+            "peak_metadata_wal_bytes", "metadata_wal_bytes"
+        )
 
     # Work-share proxies from final snapshot if present
     snap = record.get("daemon_snapshot_final") or record.get("daemon_snapshot") or {}

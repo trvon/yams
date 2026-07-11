@@ -316,6 +316,66 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
 
 
 class MultiClientMetricTests(unittest.TestCase):
+    def test_read_write_latency_and_pool_pressure_are_preserved(self) -> None:
+        metrics = _metrics_from_record(
+            {
+                "elapsed_seconds": 2.0,
+                "total_adds": 20,
+                "total_searches": 60,
+                "total_lists": 20,
+                "add_latency": {"p50_us": 2000, "p95_us": 5000, "p99_us": 9000},
+                "search_latency": {
+                    "p50_us": 1000,
+                    "p95_us": 3000,
+                    "p99_us": 7000,
+                },
+                "list_latency": {"p50_us": 500, "p95_us": 1500, "p99_us": 2500},
+                "resource_peaks": {
+                    "peak_db_write_pool_waiting": 4,
+                    "peak_db_read_pool_waiting": 7,
+                    "peak_db_write_pool_slow_holders": 8,
+                    "peak_db_read_pool_slow_holders": 3,
+                    "peak_db_write_pool_max_holder_us": 950000,
+                    "peak_db_read_pool_max_holder_us": 400000,
+                    "peak_write_queue_depth_max": 11,
+                    "peak_write_queue_capacity_rejections": 9,
+                    "peak_write_queue_forced_over_capacity": 3,
+                    "peak_metadata_wal_bytes": 5000,
+                },
+                "resource_baseline": {
+                    "write_queue_depth_max": 5,
+                    "write_queue_capacity_rejections": 2,
+                    "write_queue_forced_over_capacity": 1,
+                    "metadata_wal_bytes": 1200,
+                    "db_write_pool_slow_holders": 5,
+                    "db_read_pool_slow_holders": 1,
+                    "db_write_pool_max_holder_us": 500000,
+                    "db_read_pool_max_holder_us": 400000,
+                },
+            }
+        )
+
+        self.assertEqual(metrics["add_p95_ms"], 5.0)
+        self.assertEqual(metrics["add_p99_ms"], 9.0)
+        self.assertEqual(metrics["search_p99_ms"], 7.0)
+        self.assertEqual(metrics["list_p50_ms"], 0.5)
+        self.assertEqual(metrics["list_p95_ms"], 1.5)
+        self.assertEqual(metrics["list_p99_ms"], 2.5)
+        self.assertEqual(metrics["add_ops_per_s"], 10.0)
+        self.assertEqual(metrics["search_ops_per_s"], 30.0)
+        self.assertEqual(metrics["list_ops_per_s"], 10.0)
+        self.assertEqual(metrics["total_ops_per_s"], 50.0)
+        self.assertEqual(metrics["db_write_pool_waiting_peak"], 4.0)
+        self.assertEqual(metrics["db_read_pool_waiting_peak"], 7.0)
+        self.assertEqual(metrics["write_queue_depth_high_water_delta"], 6.0)
+        self.assertEqual(metrics["write_queue_capacity_rejections_delta"], 7.0)
+        self.assertEqual(metrics["write_queue_forced_over_capacity_delta"], 2.0)
+        self.assertEqual(metrics["metadata_wal_growth_bytes"], 3800.0)
+        self.assertEqual(metrics["db_write_pool_slow_holders_delta"], 3.0)
+        self.assertEqual(metrics["db_read_pool_slow_holders_delta"], 2.0)
+        self.assertEqual(metrics["db_write_pool_max_holder_high_water_ms"], 450.0)
+        self.assertEqual(metrics["db_read_pool_max_holder_high_water_ms"], 0.0)
+
     def test_write_coordinator_pressure_is_preserved(self) -> None:
         metrics = _metrics_from_record(
             {
@@ -340,6 +400,28 @@ class MultiClientMetricTests(unittest.TestCase):
         self.assertEqual(metrics["write_max_batch_queue_wait_ms_peak"], 912.0)
         self.assertEqual(metrics["write_max_batch_excess_queue_wait_ms_peak"], 712.0)
         self.assertEqual(metrics["pressure_level_peak"], 3.0)
+
+    def test_read_write_pressure_plan_uses_equal_operation_budgets(self) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "read_write_pressure.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(plan["repeats"], 3)
+        self.assertGreater(plan["fixed"]["params"]["mixed_ops_per_client"], 0)
+        ratios = {
+            arm["name"]: arm["factors"]["search_ratio"] for arm in plan["arms"]
+        }
+        self.assertEqual(
+            ratios,
+            {
+                "write_heavy": 0.2,
+                "balanced": 0.5,
+                "read_heavy": 0.8,
+                "read_only": 1.0,
+            },
+        )
 
 
 class MixedCorpusTests(unittest.TestCase):

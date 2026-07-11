@@ -69,6 +69,7 @@ tests/benchmarks/xplan/
 | `leg_stage_ablation` / `simeon_rerank*` | Search pipeline / rerank arms |
 | `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
 | `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
+| `read_write_pressure` | Equal-budget write-heavy/balanced/read-heavy/read-only daemon load; per-op latency, DB pools, WriteCoordinator pressure, WAL growth, drain, and recovery (repeats=3) |
 | `topology_purity_validate` / `topology_routing_budget_ablation` | Topology construction purity and routed-vs-global ANN budget gate (repeats=3) |
 | `search_generalized_memory_topology_gate` | SciFact + NF-Corpus in one index; per-source quality, cross-source interference, and topology-vs-global cost (repeats=3) |
 | `search_simeon_ann_attribution_multicorp` | Mixed-corpus text/current-PQ/exact-vec0 attribution over identical Simeon embeddings (repeats=3) |
@@ -103,6 +104,11 @@ route purity. Use `retrieval_load` for concurrent adds/searches through the daem
 post-ingest backlog plus WriteCoordinator queue depth, in-flight work, apply time, queue wait, and
 excess queue wait. Do not combine these into one score: promote an ingestion change only when it
 preserves the per-source quality floor and improves or holds the read-under-write pressure KPIs.
+
+Use `read_write_pressure` when the question is contention rather than search-component attribution.
+Its arms execute the same operation budget per client, vary only the read/write mix, and subtract a
+post-warmup infrastructure baseline from cumulative queue/WAL counters. Point-in-time queue depth
+and the workload high-water delta are both retained so short bursts are not hidden by sampling.
 
 ## Rules
 

@@ -14,6 +14,7 @@
 //   YAMS_BENCH_DOCS_PER_CLIENT    - Documents each client ingests (default: 100)
 //   YAMS_BENCH_DOC_SIZE_BYTES     - Average document size in bytes (default: 2048)
 //   YAMS_BENCH_SEARCH_RATIO       - Fraction of ops that are search (default: 0.2)
+//   YAMS_BENCH_MIXED_OPS_PER_CLIENT - Fixed operation budget per mixed client (default: derived)
 //   YAMS_BENCH_WARMUP_DOCS        - Docs to pre-ingest for search queries (default: 50)
 //   YAMS_BENCH_OUTPUT              - JSONL output path (default: bench_results/multi_client.jsonl)
 //   YAMS_BENCH_DRAIN_TIMEOUT_S    - Seconds to wait for queue drain (default: 120)
@@ -279,6 +280,7 @@ struct BenchConfig {
     int mixedListClients{4};
     int mixedStatusClients{4};
     int mixedOpsPerReader{200};
+    int mixedOpsPerClient{0};
     double mixedMaxFailRate{0.0};
 
     // --- Storage / corpus overrides ---
@@ -361,6 +363,8 @@ struct BenchConfig {
                                                     cfg.mixedStatusClients, 1, kMaxBenchClients);
         cfg.mixedOpsPerReader = parseEnvIntClamped("YAMS_BENCH_MIXED_READER_OPS",
                                                    cfg.mixedOpsPerReader, 1, kMaxBenchOpsPerClient);
+        cfg.mixedOpsPerClient = parseEnvIntClamped("YAMS_BENCH_MIXED_OPS_PER_CLIENT",
+                                                   cfg.mixedOpsPerClient, 0, kMaxBenchOpsPerClient);
         cfg.mixedMaxFailRate =
             parseEnvDoubleClamped("YAMS_BENCH_MIXED_MAX_FAIL_RATE", cfg.mixedMaxFailRate, 0.0, 1.0);
         cfg.scalingMaxClients =
@@ -1223,8 +1227,24 @@ struct DaemonSnapshot {
     uint64_t searchQueued{0};
     uint64_t dbWritePoolWaiting{0};
     uint64_t dbReadPoolWaiting{0};
+    uint64_t dbWritePoolMaxObservedWaiting{0};
+    uint64_t dbReadPoolMaxObservedWaiting{0};
+    uint64_t dbWritePoolTotalWaitMicros{0};
+    uint64_t dbReadPoolTotalWaitMicros{0};
+    uint64_t dbWritePoolTimeoutCount{0};
+    uint64_t dbReadPoolTimeoutCount{0};
+    uint64_t dbWritePoolFailedAcquisitions{0};
+    uint64_t dbReadPoolFailedAcquisitions{0};
+    uint64_t dbWritePoolSlowHolders{0};
+    uint64_t dbReadPoolSlowHolders{0};
+    uint64_t dbWritePoolMaxHolderMicros{0};
+    uint64_t dbReadPoolMaxHolderMicros{0};
     uint64_t muxWriterBudgetBytes{0};
     uint64_t writeQueueDepth{0};
+    uint64_t writeQueueCapacity{0};
+    uint64_t writeQueueDepthMax{0};
+    uint64_t writeQueueCapacityRejections{0};
+    uint64_t writeQueueForcedOverCapacity{0};
     uint64_t writeInFlight{0};
     uint64_t writeMaxBatchApplyMs{0};
     uint64_t writeMaxBatchQueueWaitMs{0};
@@ -1253,9 +1273,17 @@ struct DaemonSnapshot {
     uint32_t ipcPoolSize{0};
     uint32_t ioPoolSize{0};
     uint32_t retryAfterMs{0};
+    uint64_t metadataWalBytes{0};
 
-    static DaemonSnapshot capture(DaemonClient& client) {
+    static DaemonSnapshot capture(DaemonClient& client, const fs::path& dataDir = {}) {
         DaemonSnapshot snap;
+        if (!dataDir.empty()) {
+            std::error_code ec;
+            const auto walPath = dataDir / "yams.db-wal";
+            if (fs::exists(walPath, ec) && !ec) {
+                snap.metadataWalBytes = static_cast<uint64_t>(fs::file_size(walPath, ec));
+            }
+        }
         auto st = yams::cli::run_sync(client.status(), 5s);
         if (!st)
             return snap;
@@ -1352,6 +1380,26 @@ struct DaemonSnapshot {
         snap.writeMaxBatchApplyMs = getAdditionalUint("write_max_batch_apply_ms");
         snap.writeQueueDepth = getAdditionalUint("write_queue_depth");
         snap.writeInFlight = getAdditionalUint("write_in_flight");
+        snap.writeQueueCapacity = getAdditionalUint("write_queue_capacity");
+        snap.writeQueueDepthMax = getAdditionalUint("write_queue_depth_max");
+        snap.writeQueueCapacityRejections = getAdditionalUint("write_queue_capacity_rejections");
+        snap.writeQueueForcedOverCapacity = getAdditionalUint("write_queue_forced_over_capacity");
+        snap.dbWritePoolMaxObservedWaiting =
+            getAdditionalUint(metrics::kDbWritePoolMaxObservedWaiting);
+        snap.dbReadPoolMaxObservedWaiting =
+            getAdditionalUint(metrics::kDbReadPoolMaxObservedWaiting);
+        snap.dbWritePoolTotalWaitMicros = getAdditionalUint(metrics::kDbWritePoolTotalWaitMicros);
+        snap.dbReadPoolTotalWaitMicros = getAdditionalUint(metrics::kDbReadPoolTotalWaitMicros);
+        snap.dbWritePoolTimeoutCount = getAdditionalUint(metrics::kDbWritePoolTimeoutCount);
+        snap.dbReadPoolTimeoutCount = getAdditionalUint(metrics::kDbReadPoolTimeoutCount);
+        snap.dbWritePoolFailedAcquisitions =
+            getAdditionalUint(metrics::kDbWritePoolFailedAcquisitions);
+        snap.dbReadPoolFailedAcquisitions =
+            getAdditionalUint(metrics::kDbReadPoolFailedAcquisitions);
+        snap.dbWritePoolSlowHolders = getAdditionalUint(metrics::kDbWritePoolSlowHolders);
+        snap.dbReadPoolSlowHolders = getAdditionalUint(metrics::kDbReadPoolSlowHolders);
+        snap.dbWritePoolMaxHolderMicros = getAdditionalUint(metrics::kDbWritePoolMaxHolderMicros);
+        snap.dbReadPoolMaxHolderMicros = getAdditionalUint(metrics::kDbReadPoolMaxHolderMicros);
         snap.writeMaxBatchQueueWaitMs = getAdditionalUint("write_max_batch_queue_wait_ms");
         snap.writeMaxBatchExcessQueueWaitMs =
             getAdditionalUint("write_max_batch_excess_queue_wait_ms");
@@ -1388,7 +1436,23 @@ struct DaemonSnapshot {
                     {"search_queued", searchQueued},
                     {"db_write_pool_waiting", dbWritePoolWaiting},
                     {"db_read_pool_waiting", dbReadPoolWaiting},
+                    {"db_write_pool_max_observed_waiting", dbWritePoolMaxObservedWaiting},
+                    {"db_read_pool_max_observed_waiting", dbReadPoolMaxObservedWaiting},
+                    {"db_write_pool_total_wait_us", dbWritePoolTotalWaitMicros},
+                    {"db_read_pool_total_wait_us", dbReadPoolTotalWaitMicros},
+                    {"db_write_pool_timeouts", dbWritePoolTimeoutCount},
+                    {"db_read_pool_timeouts", dbReadPoolTimeoutCount},
+                    {"db_write_pool_failed_acquisitions", dbWritePoolFailedAcquisitions},
+                    {"db_read_pool_failed_acquisitions", dbReadPoolFailedAcquisitions},
+                    {"db_write_pool_slow_holders", dbWritePoolSlowHolders},
+                    {"db_read_pool_slow_holders", dbReadPoolSlowHolders},
+                    {"db_write_pool_max_holder_us", dbWritePoolMaxHolderMicros},
+                    {"db_read_pool_max_holder_us", dbReadPoolMaxHolderMicros},
                     {"write_queue_depth", writeQueueDepth},
+                    {"write_queue_capacity", writeQueueCapacity},
+                    {"write_queue_depth_max", writeQueueDepthMax},
+                    {"write_queue_capacity_rejections", writeQueueCapacityRejections},
+                    {"write_queue_forced_over_capacity", writeQueueForcedOverCapacity},
                     {"write_in_flight", writeInFlight},
                     {"write_max_batch_apply_ms", writeMaxBatchApplyMs},
                     {"write_max_batch_queue_wait_ms", writeMaxBatchQueueWaitMs},
@@ -1417,7 +1481,8 @@ struct DaemonSnapshot {
                     {"mux_writer_budget_bytes", muxWriterBudgetBytes},
                     {"ipc_pool_size", ipcPoolSize},
                     {"io_pool_size", ioPoolSize},
-                    {"retry_after_ms", retryAfterMs}};
+                    {"retry_after_ms", retryAfterMs},
+                    {"metadata_wal_bytes", metadataWalBytes}};
     }
 };
 
@@ -1613,7 +1678,8 @@ public:
 
     ~TimeSeriesSampler() { stop(); }
 
-    void start(DaemonClient& client, std::chrono::milliseconds interval = 500ms) {
+    void start(DaemonClient& client, std::chrono::milliseconds interval = 500ms,
+               fs::path dataDir = {}) {
         stop();
         stop_ = false;
         startTime_ = std::chrono::steady_clock::now();
@@ -1621,13 +1687,13 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             samples_.clear();
         }
-        thread_ = std::thread([this, &client, interval]() {
+        thread_ = std::thread([this, &client, interval, dataDir = std::move(dataDir)]() {
             while (!stop_) {
                 Sample sample;
                 sample.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now() - startTime_)
                                        .count();
-                sample.snap = DaemonSnapshot::capture(client);
+                sample.snap = DaemonSnapshot::capture(client, dataDir);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     samples_.push_back(sample);
@@ -1774,8 +1840,24 @@ struct ResourcePeaks {
     uint64_t peakSearchQueued{0};
     uint64_t peakDbWritePoolWaiting{0};
     uint64_t peakDbReadPoolWaiting{0};
+    uint64_t peakDbWritePoolMaxObservedWaiting{0};
+    uint64_t peakDbReadPoolMaxObservedWaiting{0};
+    uint64_t peakDbWritePoolTotalWaitMicros{0};
+    uint64_t peakDbReadPoolTotalWaitMicros{0};
+    uint64_t peakDbWritePoolTimeoutCount{0};
+    uint64_t peakDbReadPoolTimeoutCount{0};
+    uint64_t peakDbWritePoolFailedAcquisitions{0};
+    uint64_t peakDbReadPoolFailedAcquisitions{0};
+    uint64_t peakDbWritePoolSlowHolders{0};
+    uint64_t peakDbReadPoolSlowHolders{0};
+    uint64_t peakDbWritePoolMaxHolderMicros{0};
+    uint64_t peakDbReadPoolMaxHolderMicros{0};
     uint64_t peakMuxWriterBudgetBytes{0};
     uint64_t peakWriteQueueDepth{0};
+    uint64_t writeQueueCapacity{0};
+    uint64_t peakWriteQueueDepthMax{0};
+    uint64_t peakWriteQueueCapacityRejections{0};
+    uint64_t peakWriteQueueForcedOverCapacity{0};
     uint64_t peakWriteInFlight{0};
     uint64_t peakWriteMaxBatchApplyMs{0};
     uint64_t peakWriteMaxBatchQueueWaitMs{0};
@@ -1793,6 +1875,7 @@ struct ResourcePeaks {
     uint64_t peakClientPoolOpenSockets{0};
     uint64_t peakClientPoolAliveConnections{0};
     uint64_t peakClientPoolInUseConnections{0};
+    uint64_t peakMetadataWalBytes{0};
     std::string lastWriteHotSources;
     uint32_t maxPressureLevel{0};
 
@@ -1809,8 +1892,24 @@ struct ResourcePeaks {
             {"peak_search_queued", peakSearchQueued},
             {"peak_db_write_pool_waiting", peakDbWritePoolWaiting},
             {"peak_db_read_pool_waiting", peakDbReadPoolWaiting},
+            {"peak_db_write_pool_max_observed_waiting", peakDbWritePoolMaxObservedWaiting},
+            {"peak_db_read_pool_max_observed_waiting", peakDbReadPoolMaxObservedWaiting},
+            {"peak_db_write_pool_total_wait_us", peakDbWritePoolTotalWaitMicros},
+            {"peak_db_read_pool_total_wait_us", peakDbReadPoolTotalWaitMicros},
+            {"peak_db_write_pool_timeouts", peakDbWritePoolTimeoutCount},
+            {"peak_db_read_pool_timeouts", peakDbReadPoolTimeoutCount},
+            {"peak_db_write_pool_failed_acquisitions", peakDbWritePoolFailedAcquisitions},
+            {"peak_db_read_pool_failed_acquisitions", peakDbReadPoolFailedAcquisitions},
+            {"peak_db_write_pool_slow_holders", peakDbWritePoolSlowHolders},
+            {"peak_db_read_pool_slow_holders", peakDbReadPoolSlowHolders},
+            {"peak_db_write_pool_max_holder_us", peakDbWritePoolMaxHolderMicros},
+            {"peak_db_read_pool_max_holder_us", peakDbReadPoolMaxHolderMicros},
             {"peak_mux_writer_budget_bytes", peakMuxWriterBudgetBytes},
             {"peak_write_queue_depth", peakWriteQueueDepth},
+            {"write_queue_capacity", writeQueueCapacity},
+            {"peak_write_queue_depth_max", peakWriteQueueDepthMax},
+            {"peak_write_queue_capacity_rejections", peakWriteQueueCapacityRejections},
+            {"peak_write_queue_forced_over_capacity", peakWriteQueueForcedOverCapacity},
             {"peak_write_in_flight", peakWriteInFlight},
             {"peak_write_max_batch_apply_ms", peakWriteMaxBatchApplyMs},
             {"peak_write_max_batch_queue_wait_ms", peakWriteMaxBatchQueueWaitMs},
@@ -1828,6 +1927,7 @@ struct ResourcePeaks {
             {"peak_client_pool_open_sockets", peakClientPoolOpenSockets},
             {"peak_client_pool_alive_connections", peakClientPoolAliveConnections},
             {"peak_client_pool_in_use_connections", peakClientPoolInUseConnections},
+            {"peak_metadata_wal_bytes", peakMetadataWalBytes},
             {"last_write_hot_sources", lastWriteHotSources},
             {"max_pressure_level", maxPressureLevel}};
     }
@@ -1850,9 +1950,40 @@ ResourcePeaks summarizeResourcePeaks(const std::vector<TimeSeriesSampler::Sample
         peaks.peakDbWritePoolWaiting =
             std::max(peaks.peakDbWritePoolWaiting, snap.dbWritePoolWaiting);
         peaks.peakDbReadPoolWaiting = std::max(peaks.peakDbReadPoolWaiting, snap.dbReadPoolWaiting);
+        peaks.peakDbWritePoolMaxObservedWaiting =
+            std::max(peaks.peakDbWritePoolMaxObservedWaiting, snap.dbWritePoolMaxObservedWaiting);
+        peaks.peakDbReadPoolMaxObservedWaiting =
+            std::max(peaks.peakDbReadPoolMaxObservedWaiting, snap.dbReadPoolMaxObservedWaiting);
+        peaks.peakDbWritePoolTotalWaitMicros =
+            std::max(peaks.peakDbWritePoolTotalWaitMicros, snap.dbWritePoolTotalWaitMicros);
+        peaks.peakDbReadPoolTotalWaitMicros =
+            std::max(peaks.peakDbReadPoolTotalWaitMicros, snap.dbReadPoolTotalWaitMicros);
+        peaks.peakDbWritePoolTimeoutCount =
+            std::max(peaks.peakDbWritePoolTimeoutCount, snap.dbWritePoolTimeoutCount);
+        peaks.peakDbReadPoolTimeoutCount =
+            std::max(peaks.peakDbReadPoolTimeoutCount, snap.dbReadPoolTimeoutCount);
+        peaks.peakDbWritePoolFailedAcquisitions =
+            std::max(peaks.peakDbWritePoolFailedAcquisitions, snap.dbWritePoolFailedAcquisitions);
+        peaks.peakDbReadPoolFailedAcquisitions =
+            std::max(peaks.peakDbReadPoolFailedAcquisitions, snap.dbReadPoolFailedAcquisitions);
+        peaks.peakDbWritePoolSlowHolders =
+            std::max(peaks.peakDbWritePoolSlowHolders, snap.dbWritePoolSlowHolders);
+        peaks.peakDbReadPoolSlowHolders =
+            std::max(peaks.peakDbReadPoolSlowHolders, snap.dbReadPoolSlowHolders);
+        peaks.peakDbWritePoolMaxHolderMicros =
+            std::max(peaks.peakDbWritePoolMaxHolderMicros, snap.dbWritePoolMaxHolderMicros);
+        peaks.peakDbReadPoolMaxHolderMicros =
+            std::max(peaks.peakDbReadPoolMaxHolderMicros, snap.dbReadPoolMaxHolderMicros);
         peaks.peakMuxWriterBudgetBytes =
             std::max(peaks.peakMuxWriterBudgetBytes, snap.muxWriterBudgetBytes);
         peaks.peakWriteQueueDepth = std::max(peaks.peakWriteQueueDepth, snap.writeQueueDepth);
+        peaks.writeQueueCapacity = std::max(peaks.writeQueueCapacity, snap.writeQueueCapacity);
+        peaks.peakWriteQueueDepthMax =
+            std::max(peaks.peakWriteQueueDepthMax, snap.writeQueueDepthMax);
+        peaks.peakWriteQueueCapacityRejections =
+            std::max(peaks.peakWriteQueueCapacityRejections, snap.writeQueueCapacityRejections);
+        peaks.peakWriteQueueForcedOverCapacity =
+            std::max(peaks.peakWriteQueueForcedOverCapacity, snap.writeQueueForcedOverCapacity);
         peaks.peakWriteInFlight = std::max(peaks.peakWriteInFlight, snap.writeInFlight);
         peaks.peakWriteMaxBatchApplyMs =
             std::max(peaks.peakWriteMaxBatchApplyMs, snap.writeMaxBatchApplyMs);
@@ -1879,6 +2010,7 @@ ResourcePeaks summarizeResourcePeaks(const std::vector<TimeSeriesSampler::Sample
             std::max(peaks.peakClientPoolAliveConnections, snap.clientPoolAliveConnections);
         peaks.peakClientPoolInUseConnections =
             std::max(peaks.peakClientPoolInUseConnections, snap.clientPoolInUseConnections);
+        peaks.peakMetadataWalBytes = std::max(peaks.peakMetadataWalBytes, snap.metadataWalBytes);
         if (!snap.writeHotSources.empty()) {
             peaks.lastWriteHotSources = snap.writeHotSources;
         }
@@ -2745,7 +2877,7 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
 
     // Start time-series sampler
     TimeSeriesSampler sampler;
-    sampler.start(monitorClient, 500ms);
+    sampler.start(monitorClient, 500ms, harness.dataDir());
 
     // Shared counters
     std::atomic<int> totalDocsIngested{0};
@@ -3005,8 +3137,9 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         std::this_thread::sleep_for(1s);
     }
 
+    const auto resourceBaseline = DaemonSnapshot::capture(monitorClient, harness.dataDir());
     TimeSeriesSampler sampler;
-    sampler.start(monitorClient, 500ms);
+    sampler.start(monitorClient, 500ms, harness.dataDir());
 
     std::atomic<int> totalAdds{0};
     std::atomic<int> totalSearches{0};
@@ -3038,10 +3171,14 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
             int docIdx = 0;
 
             // Total operations = docsPerClient ingestions + proportional reads
-            int totalOps = cfg.docsPerClient;
-            if (cfg.searchRatio > 0.0) {
+            int totalOps = cfg.mixedOpsPerClient;
+            if (totalOps <= 0 && cfg.searchRatio >= 1.0) {
+                totalOps = cfg.docsPerClient;
+            } else if (totalOps <= 0 && cfg.searchRatio > 0.0) {
                 totalOps = static_cast<int>(static_cast<double>(cfg.docsPerClient) /
                                             (1.0 - cfg.searchRatio));
+            } else if (totalOps <= 0) {
+                totalOps = cfg.docsPerClient;
             }
 
             for (int op = 0; op < totalOps; ++op) {
@@ -3167,7 +3304,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         waitForDrainObservation(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
     const bool drained = drainObservation.drained;
     const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), monitorClient);
-    auto finalSnap = DaemonSnapshot::capture(monitorClient);
+    auto finalSnap = DaemonSnapshot::capture(monitorClient, harness.dataDir());
     const auto recovery = runRecoveryCheck(harness.socketPath());
 
     // Compute per-op-type latency stats
@@ -3201,7 +3338,10 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     printRecoverySummary(recovery);
     std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n\n";
 
-    CHECK(totalAdds.load() > 0);
+    if (cfg.searchRatio < 1.0) {
+        CHECK(totalAdds.load() > 0);
+    }
+    CHECK((totalAdds.load() + totalSearches.load() + totalLists.load()) > 0);
     CHECK(drained);
     CHECK(recovery.ok());
 
@@ -3210,6 +3350,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"test", "mixed_read_write"},
         {"num_clients", cfg.numClients},
         {"docs_per_client", cfg.docsPerClient},
+        {"mixed_ops_per_client", cfg.mixedOpsPerClient},
         {"search_ratio", cfg.searchRatio},
         {"warmup_docs", cfg.warmupDocs},
         {"total_adds", totalAdds.load()},
@@ -3224,6 +3365,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"drain_metrics", drainObservation.toJson()},
         {"idle_probe", idleProbe.toJson()},
         {"recovery", recovery.toJson()},
+        {"resource_baseline", resourceBaseline.toJson()},
         {"resource_peaks", resourcePeaks.toJson()},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},

@@ -1547,6 +1547,8 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
                 out.dbWritePoolTotalWaitMicros = stats.totalWaitMicros;
                 out.dbWritePoolTimeoutCount = stats.timeoutCount;
                 out.dbWritePoolFailedAcquisitions = stats.failedAcquisitions;
+                out.dbWritePoolSlowHolders = stats.slowHolderCount;
+                out.dbWritePoolMaxHolderMicros = stats.maxHolderMicros;
             }
 
             if (auto readPool = services_->getReadConnectionPool()) {
@@ -1560,6 +1562,8 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
                 out.dbReadPoolTotalWaitMicros = stats.totalWaitMicros;
                 out.dbReadPoolTimeoutCount = stats.timeoutCount;
                 out.dbReadPoolFailedAcquisitions = stats.failedAcquisitions;
+                out.dbReadPoolSlowHolders = stats.slowHolderCount;
+                out.dbReadPoolMaxHolderMicros = stats.maxHolderMicros;
             }
         }
     } catch (...) {

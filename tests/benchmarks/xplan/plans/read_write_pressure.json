@@ -1,0 +1,104 @@
+{
+  "name": "read_write_pressure",
+  "description": "Equal-operation-budget daemon read/write mix: add, search, list, database pools, WriteCoordinator pressure, WAL growth, drain, and recovery.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 1200,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "repeats": 3,
+  "baseline": "balanced",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "search_type": "hybrid",
+      "vectors": "off",
+      "search_clients": 4,
+      "docs_per_client": 100,
+      "mixed_ops_per_client": 100,
+      "doc_size": 1024,
+      "warmup_docs": 32
+    }
+  },
+  "arms": [
+    {
+      "name": "write_heavy",
+      "factors": { "search_ratio": 0.2 }
+    },
+    {
+      "name": "balanced",
+      "factors": { "search_ratio": 0.5 }
+    },
+    {
+      "name": "read_heavy",
+      "factors": { "search_ratio": 0.8 }
+    },
+    {
+      "name": "read_only",
+      "factors": { "search_ratio": 1.0 }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_load",
+      "metrics": [
+        "total_ops_per_s",
+        "add_p95_ms",
+        "search_p95_ms",
+        "list_p95_ms",
+        "db_write_pool_waiting_peak",
+        "db_read_pool_waiting_peak",
+        "db_write_pool_slow_holders_delta",
+        "db_write_pool_max_holder_high_water_ms",
+        "write_queue_depth_peak",
+        "write_queue_capacity_rejections_delta",
+        "write_queue_forced_over_capacity_delta",
+        "metadata_wal_growth_bytes"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["total_ops_per_s", "search_p95_ms"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "total_ops_per_s",
+      "add_ops_per_s",
+      "search_ops_per_s",
+      "list_ops_per_s",
+      "add_p50_ms",
+      "add_p95_ms",
+      "add_p99_ms",
+      "search_p50_ms",
+      "search_p95_ms",
+      "search_p99_ms",
+      "list_p50_ms",
+      "list_p95_ms",
+      "list_p99_ms",
+      "db_write_pool_waiting_peak",
+      "db_read_pool_waiting_peak",
+      "db_write_pool_slow_holders_delta",
+      "db_read_pool_slow_holders_delta",
+      "db_write_pool_max_holder_high_water_ms",
+      "db_read_pool_max_holder_high_water_ms",
+      "backlog_peak",
+      "write_queue_depth_peak",
+      "write_queue_depth_max",
+      "write_queue_depth_high_water_delta",
+      "write_queue_capacity",
+      "write_queue_capacity_rejections_delta",
+      "write_queue_forced_over_capacity_delta",
+      "write_max_batch_apply_ms_peak",
+      "write_max_batch_queue_wait_ms_peak",
+      "metadata_wal_growth_bytes",
+      "drain_elapsed_ms",
+      "total_failures"
+    ],
+    "group_by": ["search_ratio"]
+  }
+}

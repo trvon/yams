@@ -191,6 +191,14 @@ TEST_CASE("WriteCoordinator: tryEnqueue rejects batches at channel capacity",
     REQUIRE((rejected != nullptr));
     CHECK((coordinator.queuedBatches() == 2));
 
+    coordinator.enqueue(makeTermBatch("forced"));
+    REQUIRE((coordinator.queuedBatches() == 3));
+
+    auto pressureStats = coordinator.getStats();
+    CHECK((pressureStats.maxQueueDepth == 3));
+    CHECK((pressureStats.capacityRejections == 1));
+    CHECK((pressureStats.forcedEnqueuesOverCapacity == 1));
+
     coordinator.start();
     std::thread writerLoop([&io] { io.run(); });
 
@@ -204,8 +212,8 @@ TEST_CASE("WriteCoordinator: tryEnqueue rejects batches at channel capacity",
     REQUIRE((secondFlush.has_value()));
 
     auto stats = coordinator.getStats();
-    CHECK((stats.batchesEnqueued == 3));
-    CHECK((stats.batchesCommitted == 3));
+    CHECK((stats.batchesEnqueued == 4));
+    CHECK((stats.batchesCommitted == 4));
 
     coordinator.shutdown();
     io.stop();
@@ -257,8 +265,8 @@ TEST_CASE("WriteCoordinator: orphan edge/doc-entity cleanup populates deletion s
     // which the repair path now snapshots before/after the flush. This proves the
     // stats source is actually populated by the orphan-cleanup ops.
     namespace fs = std::filesystem;
-    auto dir = fs::temp_directory_path() /
-               ("wc_kg_orphan_" + std::to_string(std::random_device{}()));
+    auto dir =
+        fs::temp_directory_path() / ("wc_kg_orphan_" + std::to_string(std::random_device{}()));
     fs::create_directories(dir);
     auto dbPath = (dir / "kg.db").string();
 

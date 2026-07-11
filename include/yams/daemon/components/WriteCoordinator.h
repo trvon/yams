@@ -247,6 +247,9 @@ public:
         std::uint64_t docEntitiesDeleted = 0;
         std::uint64_t edgesCoalesced = 0;
         std::uint64_t nodeKeyLookupsBatched = 0;
+        std::uint64_t maxQueueDepth = 0;
+        std::uint64_t capacityRejections = 0;
+        std::uint64_t forcedEnqueuesOverCapacity = 0;
         std::uint64_t maxBatchApplyMs = 0;
         std::uint64_t maxBatchQueueWaitMs = 0;
         std::uint64_t maxBatchExcessQueueWaitMs = 0;
@@ -277,6 +280,7 @@ public:
     }
 
     std::size_t queuedBatches() const;
+    [[nodiscard]] std::size_t channelCapacity() const noexcept { return config_.channelCapacity; }
     std::size_t inFlight() const { return inFlight_.load(); }
     Stats getStats() const;
 
