@@ -16,7 +16,7 @@ if str(XPLAN_ROOT) not in sys.path:
 
 from analyze_query_class import load_by_type  # noqa: E402
 from report import _baseline_row  # noqa: E402
-from workers.multi_client import _metrics_from_record  # noqa: E402
+from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_cluster_overlap,
     analyze_mixed_corpus_debug,
@@ -30,6 +30,28 @@ from workers.retrieval_quality import (  # noqa: E402
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_multi_client_corpus_seed_is_cloned_into_an_isolated_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "seed"
+            destination = root / "arm" / "corpus"
+            source.mkdir()
+            (source / "yams.db").write_bytes(b"symbol-rich-fixture")
+            (source / "storage").mkdir()
+            (source / "storage" / "object").write_text("content", encoding="utf-8")
+
+            method = _clone_corpus_seed(source, destination)
+
+            self.assertIn(method, {"clone", "copy"})
+            self.assertEqual(
+                (destination / "yams.db").read_bytes(), b"symbol-rich-fixture"
+            )
+            self.assertEqual(
+                (destination / "storage" / "object").read_text(encoding="utf-8"),
+                "content",
+            )
+            self.assertNotEqual(source, destination)
+
     def test_simeon_vector_attribution_disables_both_text_legs(self) -> None:
         plan = json.loads(
             (XPLAN_ROOT / "plans" / "search_simeon_ann_attribution_multicorp.json")

@@ -2756,6 +2756,21 @@ DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
 
 // Startup timeout: 30s to handle TSan/debug builds where init is ~5-10x slower
 constexpr auto kStartTimeout = std::chrono::seconds(30);
+constexpr auto kCorpusStartTimeout = std::chrono::seconds(180);
+
+std::chrono::seconds benchStartTimeout(const BenchConfig& cfg) {
+    return cfg.dataDir.has_value() ? kCorpusStartTimeout : kStartTimeout;
+}
+
+TEST_CASE("Multi-client benchmark allows explicit corpora a longer startup window",
+          "[multi-client][config]") {
+    BenchConfig synthetic;
+    CHECK(benchStartTimeout(synthetic) == kStartTimeout);
+
+    BenchConfig corpus;
+    corpus.dataDir = fs::path("symbol-rich-corpus");
+    CHECK(benchStartTimeout(corpus) == kCorpusStartTimeout);
+}
 
 bool startHarnessWithRetry(DaemonHarness& harness, std::chrono::milliseconds timeout,
                            int maxAttempts = 3) {
@@ -2781,7 +2796,7 @@ TEST_CASE("Multi-client ingestion: baseline single client",
     cfg.numClients = 1; // Force single client for baseline
 
     DaemonHarness harness(benchHarnessOptions(cfg));
-    REQUIRE(harness.start(kStartTimeout));
+    REQUIRE(harness.start(benchStartTimeout(cfg)));
 
     // Create client
     ClientConfig ccfg;
@@ -3102,8 +3117,8 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
           "[!benchmark][multi-client][mixed]") {
     auto cfg = BenchConfig::fromEnv();
 
-    DaemonHarness harness(benchHarnessOptions());
-    REQUIRE(harness.start(kStartTimeout));
+    DaemonHarness harness(benchHarnessOptions(cfg));
+    REQUIRE(harness.start(benchStartTimeout(cfg)));
 
     // Monitor client
     ClientConfig monCfg;

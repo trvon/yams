@@ -109,6 +109,9 @@ Use `read_write_pressure` when the question is contention rather than search-com
 Its arms execute the same operation budget per client, vary only the read/write mix, and subtract a
 post-warmup infrastructure baseline from cumulative queue/WAL counters. Point-in-time queue depth
 and the workload high-water delta are both retained so short bursts are not hidden by sampling.
+Set harness-only `YAMS_BENCH_CORPUS_SEED_DIR` to a frozen YAMS data directory to give every
+arm/repeat an isolated copy-on-write corpus; `YAMS_BENCH_SEARCH_QUERY` can select a representative
+symbol or concept. The source directory is never opened by the daemon and remains unchanged.
 
 ## Rules
 

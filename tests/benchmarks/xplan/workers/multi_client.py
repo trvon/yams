@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,43 @@ def _binary(ctx: WorkerContext) -> Path:
         "multi_client_ingestion_bench",
         explicit=str(explicit) if explicit else None,
     )
+
+
+def _clone_corpus_seed(source: Path, destination: Path) -> str:
+    """Create an isolated corpus copy, preferring filesystem copy-on-write clones."""
+    source = source.expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"corpus seed directory does not exist: {source}")
+    if destination.exists():
+        raise FileExistsError(f"isolated corpus destination already exists: {destination}")
+    if destination == source or source in destination.parents:
+        raise ValueError("isolated corpus destination must not be inside its seed")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    clone_cmd: list[str] | None = None
+    if sys.platform == "darwin":
+        clone_cmd = ["cp", "-cR", str(source), str(destination)]
+    elif sys.platform.startswith("linux"):
+        clone_cmd = ["cp", "--reflink=auto", "-a", str(source), str(destination)]
+
+    if clone_cmd is not None:
+        try:
+            cloned = subprocess.run(
+                clone_cmd,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if cloned.returncode == 0:
+                return "clone"
+        except OSError:
+            pass
+        if destination.exists():
+            shutil.rmtree(destination)
+
+    shutil.copytree(source, destination, symlinks=True)
+    return "copy"
 
 
 def run_multi_client(
@@ -87,6 +127,28 @@ def run_multi_client(
     env.setdefault("YAMS_DISABLE_VECTORS", "1")
     env["YAMS_BENCH_OUTPUT"] = str(jsonl_path)
 
+    corpus_seed = ctx.params.get("corpus_seed_dir") or env.get(
+        "YAMS_BENCH_CORPUS_SEED_DIR"
+    )
+    corpus_clone_method: str | None = None
+    if corpus_seed:
+        isolated_data_dir = ctx.arm_dir / f"step{ctx.step_index:02d}_corpus"
+        try:
+            corpus_clone_method = _clone_corpus_seed(
+                Path(str(corpus_seed)), isolated_data_dir
+            )
+        except (OSError, ValueError) as exc:
+            return WorkerResult(
+                status="failed",
+                exit_code=2,
+                metrics={},
+                attributes={"corpus_seed_dir": str(corpus_seed)},
+                message=f"failed to isolate corpus seed: {exc}",
+            )
+        env["YAMS_BENCH_DATA_DIR"] = str(isolated_data_dir)
+    elif ctx.params.get("data_dir"):
+        env["YAMS_BENCH_DATA_DIR"] = str(ctx.params["data_dir"])
+
     arm_factors = getattr(getattr(ctx.arm, "arm", None), "factors", None) or {}
     ablation = apply_ablation(env, factors=arm_factors, params=ctx.params)
     # If ablation wants vectors on, clear the default disable.
@@ -111,6 +173,8 @@ def run_multi_client(
     env["YAMS_BENCH_SEARCH_RATIO"] = str(float(search_ratio))
     env["YAMS_BENCH_WARMUP_DOCS"] = str(int(warmup))
     env["YAMS_BENCH_SEARCH_TYPE"] = str(search_type)
+    if ctx.params.get("search_query"):
+        env["YAMS_BENCH_SEARCH_QUERY"] = str(ctx.params["search_query"])
     env["YAMS_BENCH_MIXED_SEARCHERS"] = str(int(clients))
     env["YAMS_BENCH_MIXED_WRITERS"] = str(max(1, int(int(clients) // 2)))
     env["YAMS_BENCH_MIXED_READER_OPS"] = str(int(ctx.params.get("mixed_reader_ops") or 50))
@@ -171,6 +235,10 @@ def run_multi_client(
             "jsonl": str(jsonl_path),
             "ablation": ablation,
             "search_type": search_type,
+            "search_query": env.get("YAMS_BENCH_SEARCH_QUERY"),
+            "data_dir": env.get("YAMS_BENCH_DATA_DIR"),
+            "corpus_seed_dir": str(corpus_seed) if corpus_seed else None,
+            "corpus_clone_method": corpus_clone_method,
         },
         message="multi_client completed" if proc.returncode == 0 else f"exit {proc.returncode}",
         raw_path=str(raw_path),
