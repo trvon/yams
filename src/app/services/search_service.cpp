@@ -258,9 +258,10 @@ std::vector<search::SearchResultItem> toPostProcessItems(const std::vector<Searc
 search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx,
                                                            const SearchRequest& req,
                                                            std::string_view normalizedQuery) {
-    auto context = search::defaultSearchExecutionContext();
+    auto context = ctx.searchExecutionContextProvider ? ctx.searchExecutionContextProvider()
+                                                      : search::defaultSearchExecutionContext();
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
-    if (ctx.service_manager) {
+    if (!ctx.searchExecutionContextProvider && ctx.service_manager) {
         const auto metrics = ctx.service_manager->getSearchLoadMetrics();
         context.activeRequests = std::max<std::uint32_t>(1, metrics.active);
         context.queuedRequests = metrics.queued;

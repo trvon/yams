@@ -3892,6 +3892,21 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
+    ctx.searchExecutionContextProvider = [self = const_cast<ServiceManager*>(this)] {
+        auto context = search::defaultSearchExecutionContext();
+        const auto metrics = self->getSearchLoadMetrics();
+        context.activeRequests = std::max<std::uint32_t>(1, metrics.active);
+        context.queuedRequests = metrics.queued;
+        context.concurrencyLimit = std::max<std::uint32_t>(
+            1, metrics.concurrencyLimit == 0
+                   ? static_cast<std::uint32_t>(TuneAdvisor::searchConcurrencyLimit())
+                   : metrics.concurrencyLimit);
+        context.recommendedWorkers = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(TuneAdvisor::recommendedThreads(0.5, 0)));
+        context.freshness = self->getIndexFreshnessSnapshot();
+        context.topologyOverlayHashes = self->getTopologyOverlayHashes();
+        return context;
+    };
     ctx.enqueuePostIngest = [self = const_cast<ServiceManager*>(this)](const std::string& hash,
                                                                        const std::string& mime) {
         self->enqueuePostIngest(hash, mime);
