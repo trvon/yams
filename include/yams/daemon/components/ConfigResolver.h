@@ -72,6 +72,8 @@ public:
 
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
+        // augment | narrow
+        std::optional<std::string> vectorPolicy;
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
@@ -419,6 +421,7 @@ public:
      *
      * Config keys:
      * - search.topology.enable_weak_query_routing = true|false
+     * - search.topology.vector_policy = augment|narrow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int

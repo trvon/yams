@@ -258,9 +258,10 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 
 } // namespace
 
-std::optional<std::vector<ComponentResult>> reusePrecomputedVectorResults(
-    const std::vector<ComponentResult>& precomputed,
-    const std::unordered_set<std::string>& allowedDocuments, size_t limit) {
+std::optional<std::vector<ComponentResult>>
+reusePrecomputedVectorResults(const std::vector<ComponentResult>& precomputed,
+                              const std::unordered_set<std::string>& allowedDocuments,
+                              size_t limit) {
     std::unordered_map<std::string, ComponentResult> bestByHash;
     bestByHash.reserve(allowedDocuments.size());
     for (const auto& result : precomputed) {
@@ -295,6 +296,58 @@ std::optional<std::vector<ComponentResult>> reusePrecomputedVectorResults(
         out[rank].debugInfo["vector_score_reused"] = "1";
     }
     return out;
+}
+
+std::vector<ComponentResult>
+mergeVectorCandidateResults(std::vector<ComponentResult> globalResults,
+                            std::vector<ComponentResult> topologyResults) {
+    std::unordered_map<std::string, ComponentResult> bestByHash;
+    bestByHash.reserve(globalResults.size() + topologyResults.size());
+
+    auto admit = [&bestByHash](ComponentResult result, bool topologyAugmentation) {
+        if (result.documentHash.empty()) {
+            return;
+        }
+        if (topologyAugmentation) {
+            result.debugInfo["topology_augmentation"] = "1";
+        }
+        auto it = bestByHash.find(result.documentHash);
+        if (it == bestByHash.end()) {
+            bestByHash.emplace(result.documentHash, std::move(result));
+            return;
+        }
+        const bool wasTopology = it->second.debugInfo.contains("topology_augmentation");
+        if (result.score > it->second.score) {
+            it->second = std::move(result);
+        }
+        if (topologyAugmentation || wasTopology) {
+            it->second.debugInfo["topology_augmentation"] = "1";
+        }
+    };
+
+    for (auto& result : globalResults) {
+        admit(std::move(result), false);
+    }
+    for (auto& result : topologyResults) {
+        result.source = ComponentResult::Source::Vector;
+        admit(std::move(result), true);
+    }
+
+    std::vector<ComponentResult> merged;
+    merged.reserve(bestByHash.size());
+    for (auto& [_, result] : bestByHash) {
+        merged.push_back(std::move(result));
+    }
+    std::sort(merged.begin(), merged.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+        return lhs.documentHash < rhs.documentHash;
+    });
+    for (std::size_t rank = 0; rank < merged.size(); ++rank) {
+        merged[rank].rank = rank;
+    }
+    return merged;
 }
 
 Result<std::vector<ComponentResult>>

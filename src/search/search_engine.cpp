@@ -2052,8 +2052,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologyWeakQueryRoutedClusters = topologySession.routedClusters;
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
             topologyMedoidHashes = topologySession.medoidHashes;
-            topologyWeakQueryNarrowApplied = topologySession.narrowApplied;
+            const bool topologyVectorAugmentation =
+                topologySession.narrowApplied &&
+                workingConfig.topologyVectorPolicy ==
+                    SearchEngineConfig::TopologyVectorPolicy::Augment;
+            topologyWeakQueryNarrowApplied = topologySession.narrowApplied &&
+                                             workingConfig.topologyVectorPolicy ==
+                                                 SearchEngineConfig::TopologyVectorPolicy::Narrow;
             topologyWeakQueryRoutingApplied = topologySession.applied;
+            setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
+                     SearchEngineConfig::topologyVectorPolicyToString(
+                         workingConfig.topologyVectorPolicy));
             response.debugStats["topology_vector_seed_probe"] =
                 std::to_string(graphVectorSeedProbe);
             if (topologyAssist.vectorSeedsAdded > 0) {
@@ -2084,15 +2093,60 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         std::move(reused.value()));
                 }
             }
+
+            std::vector<ComponentResult> topologyAugmentationResults;
+            bool topologyAugmentationScoresReused = false;
+            if (topologyVectorAugmentation && queryEmbedding.has_value() && vectorDb_ &&
+                !hasVectorTierDimMismatch()) {
+                auto reused = detail::reusePrecomputedVectorResults(
+                    topologyPrecomputedVectorResults, topologySession.routedCandidateHashes,
+                    topologySession.routedCandidateHashes.size());
+                if (reused.has_value()) {
+                    topologyAugmentationResults = std::move(reused.value());
+                    topologyAugmentationScoresReused = true;
+                } else {
+                    vector::VectorSearchDiagnostics sample;
+                    auto scored = detail::queryVectorIndexPipeline(
+                        metadataRepo_, vectorDb_, queryEmbedding.value(), workingConfig,
+                        topologySession.routedCandidateHashes.size(),
+                        topologySession.routedCandidateHashes, &sample);
+                    topologyMemberDiagnostics.usedAnn =
+                        topologyMemberDiagnostics.usedAnn || sample.usedAnn;
+                    topologyMemberDiagnostics.usedExactScan =
+                        topologyMemberDiagnostics.usedExactScan || sample.usedExactScan;
+                    topologyMemberDiagnostics.rowsVisited += sample.rowsVisited;
+                    topologyMemberDiagnostics.exactDistanceEvaluations +=
+                        sample.exactDistanceEvaluations;
+                    topologyMemberDiagnostics.annCandidateBudget += sample.annCandidateBudget;
+                    topologyMemberDiagnostics.returnedRows += sample.returnedRows;
+                    if (scored) {
+                        topologyAugmentationResults = std::move(scored.value());
+                    }
+                }
+            }
+            std::vector<std::string> topologyAugmentationDocIds;
+            topologyAugmentationDocIds.reserve(topologyAugmentationResults.size());
+            for (const auto& result : topologyAugmentationResults) {
+                topologyAugmentationDocIds.push_back(
+                    documentIdForTrace(result.filePath, result.documentHash));
+            }
+            setDebug(response.debugStats, metrics::kTopologyVectorAugmentationCandidates,
+                     std::to_string(topologyAugmentationResults.size()));
+            setDebug(response.debugStats, metrics::kTopologyVectorAugmentationDocIds,
+                     joinWithTab(topologyAugmentationDocIds));
             setDebugBool(response.debugStats, metrics::kTopologyVectorScoresReused,
-                         static_cast<bool>(reusableVectorResults));
+                         static_cast<bool>(reusableVectorResults) ||
+                             topologyAugmentationScoresReused);
             setDebug(response.debugStats, metrics::kTopologyVectorScoresReusedCount,
-                     std::to_string(reusableVectorResults ? reusableVectorResults->size() : 0));
+                     std::to_string(reusableVectorResults
+                                        ? reusableVectorResults->size()
+                                        : (topologyAugmentationScoresReused
+                                               ? topologyAugmentationResults.size()
+                                               : 0)));
 
             std::size_t vectorSearchCandidateBudget =
                 vectorSearchNarrowSet ? vectorSearchNarrowSet->size() : 0;
-            std::size_t vectorSearchDistanceEvaluationBudget =
-                topologySession.memberRerankCandidates + vectorSearchCandidateBudget;
+            std::size_t vectorSearchDistanceEvaluationBudget = vectorSearchCandidateBudget;
             if (!vectorSearchNarrowSet && vectorDb_) {
                 const auto& vectorConfig = vectorDb_->getConfig();
                 const auto vectorCount = vectorDb_->getVectorCount();
@@ -2116,6 +2170,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         break;
                 }
             }
+            vectorSearchDistanceEvaluationBudget += topologySession.memberRerankCandidates;
             setDebug(response.debugStats, metrics::kVectorSearchCandidateBudget,
                      std::to_string(vectorSearchCandidateBudget));
             setDebug(response.debugStats, metrics::kVectorSearchResultBudget,
@@ -2125,6 +2180,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
                                        topologySession, topologySkipReason, tier2Candidates.size());
+            setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,
+                         topologyWeakQueryNarrowApplied);
 
             traceCollector.recordStageCounter("vector", "budget_guard_skip", 0);
             traceCollector.recordStageCounter("vector", "budget_guard_cap_applied",
@@ -2151,62 +2208,41 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                const std::unordered_set<std::string> topologySidecarCandidates =
-                    topologyWeakQueryNarrowApplied
-                        ? std::unordered_set<std::string>{}
-                        : std::unordered_set<std::string>(
-                              topologyWeakQueryAddedCandidateHashes.begin(),
-                              topologyWeakQueryAddedCandidateHashes.end());
-                response.debugStats["topology_sidecar_vector_candidates"] =
-                    std::to_string(topologySidecarCandidates.size());
+                response.debugStats["topology_sidecar_vector_candidates"] = "0";
+
+                auto topologyAugmentation = std::make_shared<const std::vector<ComponentResult>>(
+                    std::move(topologyAugmentationResults));
 
                 fanout.vector = schedule(
                     "vector", workingConfig.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
                     [&queryEmbedding, &baselineTier2Candidates, vectorSearchNarrowSet, shouldNarrow,
                      effectiveVectorMaxResults, &queryVectorWithRelaxedRetry,
-                     &vectorSearchDiagnostics, reusableVectorResults]() {
+                     &vectorSearchDiagnostics, reusableVectorResults, topologyAugmentation]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         if (reusableVectorResults) {
                             return Result<std::vector<ComponentResult>>{*reusableVectorResults};
                         }
-                        if (shouldNarrow) {
-                            const auto* narrowSet = vectorSearchNarrowSet
-                                                        ? vectorSearchNarrowSet
-                                                        : &baselineTier2Candidates;
-                            return queryVectorWithRelaxedRetry(queryEmbedding.value(),
-                                                               effectiveVectorMaxResults, narrowSet,
-                                                               &vectorSearchDiagnostics);
-                        } else {
+                        Result<std::vector<ComponentResult>> results = [&]() {
+                            if (shouldNarrow) {
+                                const auto* narrowSet = vectorSearchNarrowSet
+                                                            ? vectorSearchNarrowSet
+                                                            : &baselineTier2Candidates;
+                                return queryVectorWithRelaxedRetry(
+                                    queryEmbedding.value(), effectiveVectorMaxResults, narrowSet,
+                                    &vectorSearchDiagnostics);
+                            }
                             return queryVectorWithRelaxedRetry(queryEmbedding.value(),
                                                                effectiveVectorMaxResults, nullptr,
                                                                &vectorSearchDiagnostics);
+                        }();
+                        if (!results || topologyAugmentation->empty()) {
+                            return results;
                         }
+                        return Result<std::vector<ComponentResult>>{
+                            detail::mergeVectorCandidateResults(std::move(results.value()),
+                                                                *topologyAugmentation)};
                     });
-
-                if (!topologySidecarCandidates.empty()) {
-                    const size_t topologySidecarLimit = std::max<size_t>(
-                        1, std::min(effectiveVectorMaxResults, topologySidecarCandidates.size()));
-                    fanout.topologyVector =
-                        schedule("topology_vector", workingConfig.graphVectorWeight,
-                                 stats_.vectorQueries, stats_.avgVectorTimeMicros,
-                                 [topologySidecarCandidates, topologySidecarLimit, &queryEmbedding,
-                                  &queryVectorWithRelaxedRetry]() {
-                                     YAMS_ZONE_SCOPED_N("component::topology_vector");
-                                     auto results = queryVectorWithRelaxedRetry(
-                                         queryEmbedding.value(), topologySidecarLimit,
-                                         &topologySidecarCandidates);
-                                     if (results) {
-                                         for (auto& result : results.value()) {
-                                             result.source = ComponentResult::Source::GraphVector;
-                                             result.debugInfo["topology_sidecar"] = "1";
-                                         }
-                                     }
-                                     return results;
-                                 });
-                } else {
-                    response.debugStats["topology_sidecar_vector_candidates"] = "0";
-                }
 
                 fanout.entityVector = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
@@ -2234,8 +2270,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             // Collect Tier 2 results (always collect, never skip)
             collectIf(fanout.vector, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
-            collectIf(fanout.topologyVector, "topology_vector", stats_.vectorQueries,
-                      stats_.avgVectorTimeMicros);
             collectIf(fanout.entityVector, "entity_vector", stats_.entityVectorQueries,
                       stats_.avgEntityVectorTimeMicros);
             collectIf(fanout.kg, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);

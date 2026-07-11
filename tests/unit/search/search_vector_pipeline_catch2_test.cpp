@@ -27,10 +27,8 @@ TEST_CASE("Vector pipeline propagates exact routed work diagnostics",
     auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(dbConfig);
     REQUIRE(vectorDb->initialize());
 
-    for (const auto& [hash, embedding] :
-         std::vector<std::pair<std::string, std::vector<float>>>{{"a", {1.0F, 0.0F}},
-                                                                 {"b", {0.8F, 0.2F}},
-                                                                 {"c", {0.0F, 1.0F}}}) {
+    for (const auto& [hash, embedding] : std::vector<std::pair<std::string, std::vector<float>>>{
+             {"a", {1.0F, 0.0F}}, {"b", {0.8F, 0.2F}}, {"c", {0.0F, 1.0F}}}) {
         yams::vector::VectorRecord record;
         record.chunk_id = "chunk-" + hash;
         record.document_hash = hash;
@@ -76,4 +74,27 @@ TEST_CASE("Vector pipeline reuses precomputed routed scores only with full cover
     CHECK_FALSE(yams::search::detail::reusePrecomputedVectorResults(
                     precomputed, std::unordered_set<std::string>{"a", "missing"}, 2)
                     .has_value());
+}
+
+TEST_CASE("Vector pipeline unions topology members into the global vector candidate stream",
+          "[search][vector][topology][augmentation][catch2]") {
+    using yams::search::ComponentResult;
+    std::vector<ComponentResult> global{
+        {.documentHash = "global", .score = 0.95F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "shared", .score = 0.70F, .source = ComponentResult::Source::Vector}};
+    std::vector<ComponentResult> topology{
+        {.documentHash = "routed", .score = 0.90F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "shared", .score = 0.80F, .source = ComponentResult::Source::Vector}};
+
+    const auto merged =
+        yams::search::detail::mergeVectorCandidateResults(std::move(global), std::move(topology));
+
+    REQUIRE(merged.size() == 3U);
+    CHECK(merged[0].documentHash == "global");
+    CHECK(merged[1].documentHash == "routed");
+    CHECK(merged[2].documentHash == "shared");
+    CHECK_FALSE(merged[0].debugInfo.contains("topology_augmentation"));
+    CHECK(merged[1].debugInfo.at("topology_augmentation") == "1");
+    CHECK(merged[2].debugInfo.at("topology_augmentation") == "1");
+    CHECK(merged[2].score == 0.80F);
 }

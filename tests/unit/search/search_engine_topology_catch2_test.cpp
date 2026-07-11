@@ -233,6 +233,7 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
     config.enableTopologyWeakQueryRouting = enabled;
     config.topologyRoutingMode = enabled ? SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly
                                          : SearchEngineConfig::TopologyRoutingMode::Disabled;
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
     config.topologyMaxClusters = 1;
     config.topologyMaxDocs = 2;
     return config;
@@ -297,6 +298,7 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     config.vectorOnlyPenalty = 1.0F;
     config.vectorMaxResults = 4;
     config.enableTopologyWeakQueryRouting = true;
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
     config.topologyMaxClusters = 1;
     config.topologyMaxDocs = 2;
 
@@ -564,6 +566,46 @@ TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without v
             return result.graphVectorScore.has_value() && result.graphVectorScore.value() > 0.0;
         });
     CHECK_FALSE(hasTopologyVectorScore);
+}
+
+TEST_CASE("SearchEngine topology augmentation preserves global ANN vector candidates",
+          "[search][topology][augmentation][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngineConfig config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+    config.topologySparseDenseAlpha = 0.0F;
+    config.vectorMaxResults = 1;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 4;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_vector_policy") == "augment");
+    CHECK(debug.at("topology_weak_query_applied") == "1");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_vector_augmentation_candidates") == "2");
+
+    const auto globalAnn =
+        std::find_if(response.value().results.begin(), response.value().results.end(),
+                     [](const auto& result) { return result.document.sha256Hash == "y1"; });
+    REQUIRE(globalAnn != response.value().results.end());
+    REQUIRE(globalAnn->vectorScore.has_value());
+    CHECK(globalAnn->vectorScore.value() > 0.0);
 }
 
 TEST_CASE("SearchEngine rerank-only topology routing loads but does not add candidates",

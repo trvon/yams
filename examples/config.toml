@@ -516,7 +516,7 @@ max_seed_documents = 32
 # Grow the selected prefix while route scores remain this close to the best (0 = fixed max_clusters)
 adaptive_probe_score_gap = 0.0
 # Abstain from narrowing when the selected/excluded score boundary is smaller (0 = disabled)
-narrow_min_boundary_margin = 0.0
+narrow_min_boundary_margin = 0.20
 # Max number of candidate docs pulled from routed clusters
 max_docs = 64
 # Per-cluster candidate cap before the global max_docs cap (0 = use max_docs)

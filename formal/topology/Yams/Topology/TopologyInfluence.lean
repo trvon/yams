@@ -28,6 +28,54 @@ structure TopologyCluster where
   docs : List Yams.Core.DocumentId := []
   deriving Repr, BEq
 
+/-- Unbounded union of the documents represented by a collection of topology
+fragments. Fragmentation is useful when each component is a small local memory
+neighborhood; retrieval may select and union several such neighborhoods. -/
+def fragmentUnionDocs (fragments : List TopologyCluster) : List Yams.Core.DocumentId :=
+  fragments.flatMap (fun fragment => fragment.docs)
+
+/-- `fragments` refine a coarse semantic region when they neither invent
+documents outside it nor lose any document from it. No lower bound on fragment
+size is required: singleton fragments are valid refinements. -/
+def IsFragmentationOf (coarse : TopologyCluster) (fragments : List TopologyCluster) : Prop :=
+  (∀ fragment ∈ fragments, ∀ doc ∈ fragment.docs, doc ∈ coarse.docs) ∧
+    (∀ doc ∈ coarse.docs, ∃ fragment ∈ fragments, doc ∈ fragment.docs)
+
+/-- Fragmentation does not lose recoverability: every document represented by
+the coarse region remains present in the union of its fragments. -/
+theorem fragmentation_preservesDocumentCoverage
+    {coarse : TopologyCluster}
+    {fragments : List TopologyCluster}
+    {doc : Yams.Core.DocumentId}
+    (hFragmentation : IsFragmentationOf coarse fragments)
+    (hDoc : doc ∈ coarse.docs) :
+    doc ∈ fragmentUnionDocs fragments := by
+  rcases hFragmentation.2 doc hDoc with ⟨fragment, hFragment, hMember⟩
+  simp [fragmentUnionDocs]
+  exact ⟨fragment, hFragment, hMember⟩
+
+/-- Refinement cannot invent a document outside the coarse region. -/
+theorem fragmentation_noArbitraryDocuments
+    {coarse : TopologyCluster}
+    {fragments : List TopologyCluster}
+    {doc : Yams.Core.DocumentId}
+    (hFragmentation : IsFragmentationOf coarse fragments)
+    (hDoc : doc ∈ fragmentUnionDocs fragments) :
+    doc ∈ coarse.docs := by
+  simp [fragmentUnionDocs] at hDoc
+  rcases hDoc with ⟨fragment, hFragment, hMember⟩
+  exact hFragmentation.1 fragment hFragment doc hMember
+
+/-- Selecting another fragment is monotone before budget truncation: it can add
+coverage but cannot remove a document already exposed by earlier fragments. -/
+theorem fragmentUnionDocs_append_monotone
+    (selected additional : List TopologyCluster)
+    {doc : Yams.Core.DocumentId}
+    (hDoc : doc ∈ fragmentUnionDocs selected) :
+    doc ∈ fragmentUnionDocs (selected ++ additional) := by
+  simp [fragmentUnionDocs] at hDoc ⊢
+  exact Or.inl hDoc
+
 /-- Search-path observability for topology routing. This mirrors the benchmark
 counters used to decide whether a measured A/B run actually exercised topology. -/
 structure TopologyRouteObservation where
@@ -72,6 +120,108 @@ def selectedTopologyDocs
     (cfg : TopologyInfluenceConfig) (clusters : List TopologyCluster) : List Yams.Core.DocumentId :=
   (selectedTopologyDocsUnbounded cfg clusters).take cfg.maxDocs
 
+/-- A bounded fragment route is safe for a protected set when the selected
+document budget explicitly covers every protected document. The empirical router
+must establish this premise; fragmentation itself does not make it false. -/
+def FragmentBudgetCovers
+    (cfg : TopologyInfluenceConfig)
+    (clusters : List TopologyCluster)
+    (protectedDocs : List Yams.Core.DocumentId) : Prop :=
+  ∀ doc ∈ protectedDocs, doc ∈ selectedTopologyDocs cfg clusters
+
+/-- Additive retrieval needs a weaker but useful certificate: at least one
+protected/relevant document is exposed by the selected fragment budget. This is
+not sufficient for replacing global ANN, but it can augment vector recall. -/
+def FragmentBudgetHits
+    (cfg : TopologyInfluenceConfig)
+    (clusters : List TopologyCluster)
+    (protectedDocs : List Yams.Core.DocumentId) : Prop :=
+  ∃ doc ∈ protectedDocs, doc ∈ selectedTopologyDocs cfg clusters
+
+/-- Every protected document survives a fragment budget that certifies coverage. -/
+theorem selectedTopologyDocs_preservesProtected
+    {cfg : TopologyInfluenceConfig}
+    {clusters : List TopologyCluster}
+    {protectedDocs : List Yams.Core.DocumentId}
+    (hCoverage : FragmentBudgetCovers cfg clusters protectedDocs) :
+    ∀ doc ∈ protectedDocs, doc ∈ selectedTopologyDocs cfg clusters := by
+  exact hCoverage
+
+/-- A fragment hit certificate yields an explicit protected document in the
+bounded selected set. -/
+theorem selectedTopologyDocs_hitsProtected
+    {cfg : TopologyInfluenceConfig}
+    {clusters : List TopologyCluster}
+    {protectedDocs : List Yams.Core.DocumentId}
+    (hHit : FragmentBudgetHits cfg clusters protectedDocs) :
+    ∃ doc ∈ protectedDocs, doc ∈ selectedTopologyDocs cfg clusters := by
+  exact hHit
+
+/-- Confidence-bearing decision for the live hard-narrowing path. An unconfident
+decision is an explicit abstention and must preserve the baseline candidate set. -/
+structure TopologyNarrowingDecision where
+  confident : Bool := false
+  allowedDocs : List Yams.Core.DocumentId := []
+  deriving Repr, BEq
+
+/-- Restrict one candidate leg to topology-selected documents only when the
+route is confident. This models the live vector-leg narrowing boundary. -/
+def narrowCandidates
+    (decision : TopologyNarrowingDecision)
+    (candidates : List ComponentCandidate) : List ComponentCandidate :=
+  if decision.confident then
+    candidates.filter (fun candidate => decision.allowedDocs.contains candidate.doc)
+  else
+    candidates
+
+/-- Abstention is candidate-set identity. This is the formal fallback contract
+that an empirical confidence gate must preserve. -/
+theorem narrowCandidates_abstain_identity
+    (decision : TopologyNarrowingDecision)
+    (candidates : List ComponentCandidate)
+    (hAbstain : decision.confident = false) :
+    narrowCandidates decision candidates = candidates := by
+  simp [narrowCandidates, hAbstain]
+
+/-- Hard narrowing cannot invent candidates. -/
+theorem narrowCandidates_subset
+    {decision : TopologyNarrowingDecision}
+    {candidates : List ComponentCandidate}
+    {candidate : ComponentCandidate}
+    (h : candidate ∈ narrowCandidates decision candidates) :
+    candidate ∈ candidates := by
+  by_cases hConfident : decision.confident
+  · have hFiltered : candidate ∈ candidates ∧ candidate.doc ∈ decision.allowedDocs := by
+      simpa [narrowCandidates, hConfident] using h
+    exact hFiltered.1
+  · simpa [narrowCandidates, hConfident] using h
+
+/-- Every candidate surviving a confident narrowing decision is explicitly in
+the allowed-document set. -/
+theorem narrowCandidates_confident_fromAllowed
+    {decision : TopologyNarrowingDecision}
+    {candidates : List ComponentCandidate}
+    {candidate : ComponentCandidate}
+    (hConfident : decision.confident = true)
+    (h : candidate ∈ narrowCandidates decision candidates) :
+    candidate.doc ∈ decision.allowedDocs := by
+  simp [narrowCandidates, hConfident] at h
+  exact h.2
+
+/-- A protected candidate is retained when it was present before narrowing and
+its document is covered by the confidence certificate's allowed set. Benchmarks
+must establish which observable candidates deserve this protection. -/
+theorem narrowCandidates_preservesProtected
+    {decision : TopologyNarrowingDecision}
+    {candidates protectedCandidates : List ComponentCandidate}
+    (hConfident : decision.confident = true)
+    (hPresent : ∀ candidate ∈ protectedCandidates, candidate ∈ candidates)
+    (hCovered : ∀ candidate ∈ protectedCandidates, candidate.doc ∈ decision.allowedDocs) :
+    ∀ candidate ∈ protectedCandidates, candidate ∈ narrowCandidates decision candidates := by
+  intro candidate hProtected
+  simp [narrowCandidates, hConfident, hPresent candidate hProtected,
+    hCovered candidate hProtected]
+
 /-- Convert bounded topology documents into search candidates. The abstract model
 uses the KG source for topology-expanded candidates; the provenance theorem below
 is the important guard: every added doc must come from a selected cluster member. -/
@@ -85,81 +235,66 @@ def topologyCandidates
   else
     []
 
-/-- Topology sidecar vector candidates. This models the tightened C++ path:
-topology-expanded hashes are queried through a separate graph-vector leg instead
-of narrowing the ordinary vector leg. -/
-def topologySidecarCandidates
+/-- Topology vector-augmentation candidates. Routed hashes are scored by the query
+embedding and unioned with global ANN under ordinary vector provenance. -/
+def topologyVectorAugmentationCandidates
     (cfg : TopologyInfluenceConfig)
     (weakTier1Query : Bool)
     (clusters : List TopologyCluster) : List ComponentCandidate :=
   if topologyMayExpand cfg.mode weakTier1Query then
     (selectedTopologyDocs cfg clusters).map
-      (fun doc => { doc := doc, source := .graphVector, score := 0 })
+      (fun doc => { doc := doc, source := .vector, score := 0 })
   else
     []
 
-/-- Fusion-window policy for topology sidecar survival. Slots are off by default
-in C++; when enabled, the fusion window reserves a bounded suffix for eligible
-topology sidecar results instead of letting ordinary top-k saturation drop all of
-them before final ranking metrics can observe them. -/
-structure TopologySidecarSurvivalConfig where
-  slots : Nat := 0
-  deriving Repr, BEq
+/-- Unbounded candidate view of explicitly selected fragments. This separates
+the semantic value of fragmentation from a later candidate-budget policy. -/
+def fragmentCandidates (fragments : List TopologyCluster) : List ComponentCandidate :=
+  (fragmentUnionDocs fragments).map
+    (fun doc => { doc := doc, source := .vector, score := 0 })
 
-/-- Abstract topology sidecar survival reserve. `baseRanked` models the ordinary
-fusion ranking with eligible sidecar results removed or displaced; `topologyRanked`
-models eligible sidecar results ordered by topology-sidecar evidence. -/
-def reserveTopologySidecarResults
-    (limit : Nat)
-    (cfg : TopologySidecarSurvivalConfig)
-    (baseRanked topologyRanked : List SearchResult) : List SearchResult :=
-  let reserve := Nat.min cfg.slots limit
-  (baseRanked.take (limit - reserve)) ++ (topologyRanked.take reserve)
+/-- Additive fragment augmentation keeps the global ANN/component candidates and
+appends query-scored local topology neighborhoods to the vector candidate stream. -/
+def augmentWithFragments
+    (baseCandidates : List ComponentCandidate)
+    (fragments : List TopologyCluster) : List ComponentCandidate :=
+  baseCandidates ++ fragmentCandidates fragments
 
-/-- The topology sidecar reserve remains bounded by the fusion-window limit. -/
-theorem reserveTopologySidecarResults_respectsLimit
-    (limit : Nat)
-    (cfg : TopologySidecarSurvivalConfig)
-    (baseRanked topologyRanked : List SearchResult) :
-    (reserveTopologySidecarResults limit cfg baseRanked topologyRanked).length ≤ limit := by
-  unfold reserveTopologySidecarResults
-  let reserve := Nat.min cfg.slots limit
-  have hReserveLe : reserve ≤ limit := Nat.min_le_right cfg.slots limit
-  have hBase : (baseRanked.take (limit - reserve)).length ≤ limit - reserve := by
-    rw [List.length_take]
-    exact Nat.min_le_left (limit - reserve) baseRanked.length
-  have hTopo : (topologyRanked.take reserve).length ≤ reserve := by
-    rw [List.length_take]
-    exact Nat.min_le_left reserve topologyRanked.length
-  calc
-    ((baseRanked.take (limit - reserve)) ++ (topologyRanked.take reserve)).length
-        = (baseRanked.take (limit - reserve)).length +
-          (topologyRanked.take reserve).length := by simp
-    _ ≤ (limit - reserve) + reserve := Nat.add_le_add hBase hTopo
-    _ = limit := Nat.sub_add_cancel hReserveLe
+/-- Fragment augmentation cannot remove a global ANN/component candidate. -/
+theorem augmentWithFragments_preservesBase
+    (baseCandidates : List ComponentCandidate)
+    (fragments : List TopologyCluster)
+    {candidate : ComponentCandidate}
+    (hCandidate : candidate ∈ baseCandidates) :
+    candidate ∈ augmentWithFragments baseCandidates fragments := by
+  exact List.mem_append_left (fragmentCandidates fragments) hCandidate
 
-/-- If at least one sidecar result is eligible and a positive bounded slot exists,
-the reserve admits a topology sidecar result into the bounded fusion window. -/
-theorem reserveTopologySidecarResults_admitsSidecarWhenSlotAvailable
-    {limit : Nat}
-    {cfg : TopologySidecarSurvivalConfig}
-    {baseRanked : List SearchResult}
-    {topologyHead : SearchResult}
-    {topologyTail : List SearchResult}
-    (hLimit : 0 < limit)
-    (hSlots : 0 < cfg.slots) :
-    topologyHead ∈ reserveTopologySidecarResults limit cfg baseRanked
-      (topologyHead :: topologyTail) := by
-  unfold reserveTopologySidecarResults
-  have hReservePos : 0 < Nat.min cfg.slots limit := by
-    exact Nat.lt_min.mpr ⟨hSlots, hLimit⟩
+/-- Adding more fragments is candidate-set monotone before a budget is applied. -/
+theorem fragmentCandidates_append_monotone
+    (selected additional : List TopologyCluster)
+    {candidate : ComponentCandidate}
+    (hCandidate : candidate ∈ fragmentCandidates selected) :
+    candidate ∈ fragmentCandidates (selected ++ additional) := by
+  rcases List.mem_map.mp hCandidate with ⟨doc, hDoc, rfl⟩
+  apply List.mem_map.mpr
+  exact ⟨doc, fragmentUnionDocs_append_monotone selected additional hDoc, rfl⟩
+
+/-- If selected fragments refine a coarse region, additive augmentation exposes
+every coarse-region document as a vector candidate, regardless of how many
+or how small the fragments are. -/
+theorem fragmentedAugmentation_recoversDocument
+    (baseCandidates : List ComponentCandidate)
+    {coarse : TopologyCluster}
+    {fragments : List TopologyCluster}
+    {doc : Yams.Core.DocumentId}
+    (hFragmentation : IsFragmentationOf coarse fragments)
+    (hDoc : doc ∈ coarse.docs) :
+    ∃ candidate ∈ augmentWithFragments baseCandidates fragments, candidate.doc = doc := by
+  let candidate : ComponentCandidate := { doc := doc, source := .vector, score := 0 }
+  refine ⟨candidate, ?_, rfl⟩
   apply List.mem_append_right
-  cases hReserve : Nat.min cfg.slots limit with
-  | zero =>
-      rw [hReserve] at hReservePos
-      cases hReservePos
-  | succ _ =>
-      simp
+  apply List.mem_map.mpr
+  exact ⟨doc, fragmentation_preservesDocumentCoverage hFragmentation hDoc, rfl⟩
 
 /-- Search pipeline with topology candidate expansion. Rerank-only intentionally
 uses the baseline pipeline here because this model separates candidate-set safety
@@ -174,9 +309,9 @@ def runSearchWithTopology
   runSearch searchCfg (baseCandidates ++ topologyCandidates topologyCfg weakTier1Query clusters)
     failed timedOut
 
-/-- Additive sidecar topology pipeline: the ordinary component candidates are
-kept unchanged, and graph-vector topology hits are appended as a separate leg. -/
-def runSearchWithTopologySidecar
+/-- Additive topology pipeline: ordinary candidates remain present while routed,
+query-scored members are unioned into the normal vector candidate stream. -/
+def runSearchWithTopologyAugmentation
     (searchCfg : SearchConfig)
     (topologyCfg : TopologyInfluenceConfig)
     (weakTier1Query : Bool)
@@ -184,20 +319,22 @@ def runSearchWithTopologySidecar
     (clusters : List TopologyCluster)
     (failed timedOut : List SearchSource := []) : SearchResponse :=
   runSearch searchCfg
-    (baseCandidates ++ topologySidecarCandidates topologyCfg weakTier1Query clusters)
+    (baseCandidates ++ topologyVectorAugmentationCandidates topologyCfg weakTier1Query clusters)
     failed timedOut
 
-/-- The sidecar form cannot narrow away any pre-existing component candidate
+/-- The augmentation form cannot narrow away any pre-existing component candidate
 before fusion: every baseline candidate is still present in the additive input. -/
-theorem topologySidecar_preservesBaseCandidateMembership
+theorem topologyAugmentation_preservesBaseCandidateMembership
     (cfg : TopologyInfluenceConfig)
     (weakTier1Query : Bool)
     (baseCandidates : List ComponentCandidate)
     (clusters : List TopologyCluster)
     {candidate : ComponentCandidate}
     (h : candidate ∈ baseCandidates) :
-    candidate ∈ baseCandidates ++ topologySidecarCandidates cfg weakTier1Query clusters := by
-  exact List.mem_append_left (topologySidecarCandidates cfg weakTier1Query clusters) h
+    candidate ∈ baseCandidates ++
+      topologyVectorAugmentationCandidates cfg weakTier1Query clusters := by
+  exact List.mem_append_left
+    (topologyVectorAugmentationCandidates cfg weakTier1Query clusters) h
 
 /-- Benchmark observability model: applied requires a successful load and at
 least one added candidate. -/

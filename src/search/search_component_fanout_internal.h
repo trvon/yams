@@ -45,7 +45,6 @@ struct SearchCandidateFanout {
     Future kg;
     Future path;
     Future vector;
-    Future topologyVector;
     Future entityVector;
     Future tag;
     Future metadata;

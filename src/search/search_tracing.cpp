@@ -41,8 +41,10 @@ std::string documentIdForTrace(const std::string& filePath, const std::string& d
 namespace {
 
 bool isTopologySidecarComponent(const ComponentResult& comp) {
-    return comp.source == ComponentResult::Source::GraphVector &&
-           comp.debugInfo.contains("topology_sidecar");
+    return (comp.source == ComponentResult::Source::GraphVector &&
+            comp.debugInfo.contains("topology_sidecar")) ||
+           (comp.source == ComponentResult::Source::Vector &&
+            comp.debugInfo.contains("topology_augmentation"));
 }
 
 std::unordered_set<std::string> toIdSet(const std::vector<std::string>& ids) {
@@ -238,12 +240,10 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(session.routesRejected));
     setDebug(debug, metrics::kTopologyWeakQueryRoutedClusters,
              std::to_string(session.routedClusters));
-    setDebug(debug, metrics::kTopologyRouteAvailableCount,
-             std::to_string(session.availableRoutes));
+    setDebug(debug, metrics::kTopologyRouteAvailableCount, std::to_string(session.availableRoutes));
     setDebug(debug, metrics::kTopologyRouteBoundaryScoreMargin,
              std::to_string(session.routeBoundaryScoreMargin));
-    setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained,
-                 session.confidenceAbstained);
+    setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained, session.confidenceAbstained);
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
              std::to_string(session.addedCandidates));
@@ -256,6 +256,11 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
              std::to_string(session.routedCandidateHashes.size()));
+    std::vector<std::string> routedCandidateHashes(session.routedCandidateHashes.begin(),
+                                                   session.routedCandidateHashes.end());
+    std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
+    setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
+             joinWithTab(routedCandidateHashes));
     setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
     setDebug(debug, metrics::kTopologyMemberRerankCandidates,
              std::to_string(session.memberRerankCandidates));

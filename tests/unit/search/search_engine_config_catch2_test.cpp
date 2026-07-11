@@ -338,7 +338,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyMinClusters == 1U);
     CHECK(cfg.topologyMaxSeedDocuments == 32U);
     CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
-    CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.0F));
+    CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
     CHECK(cfg.topologyMaxDocs == 64U);
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
@@ -377,6 +377,7 @@ TEST_CASE("SearchEngineConfig preserves typed topology policy across tuning",
     configured.topologyGraphVectorSeedProbe = 16;
     configured.topologySidecarFusionRescueSlots = 2;
     configured.topologySidecarFusionRescueMinScore = 0.3F;
+    configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
 
     tuned.applyTopologyPolicyFrom(configured);
 
@@ -403,6 +404,7 @@ TEST_CASE("SearchEngineConfig preserves typed topology policy across tuning",
     CHECK(tuned.topologyGraphVectorSeedProbe == 16);
     CHECK(tuned.topologySidecarFusionRescueSlots == 2);
     CHECK(tuned.topologySidecarFusionRescueMinScore == Approx(0.3F));
+    CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow);
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

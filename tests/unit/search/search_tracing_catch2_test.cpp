@@ -144,6 +144,7 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.routeBoundaryScoreMargin = 0.17F;
     session.confidenceAbstained = true;
     session.addedCandidateHashes = {"hash-a", "hash-b"};
+    session.routedCandidateHashes = {"hash-c", "hash-a"};
     session.timings.totalMicros = 100;
     session.timings.loadMicros = 10;
     session.timings.validateMicros = 20;
@@ -154,9 +155,9 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.timings.candidateInsertMicros = 70;
 
     yams::search::SearchResponse response;
-    yams::search::recordTopologyRoutingDebug(
-        response, config, SearchEngineConfig::TopologyRoutingMode::HybridAssist, session,
-        "skip-reason", 42);
+    yams::search::recordTopologyRoutingDebug(response, config,
+                                             SearchEngineConfig::TopologyRoutingMode::HybridAssist,
+                                             session, "skip-reason", 42);
 
     const auto& debug = response.debugStats;
     CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
@@ -181,6 +182,7 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
     CHECK(debug.at("topology_weak_query_stale_candidates") == "1");
     CHECK(debug.at("topology_weak_query_added_candidate_hashes") == "hash-a\thash-b");
+    CHECK(debug.at("topology_weak_query_allowed_candidate_hashes") == "hash-a\thash-c");
     CHECK(debug.at("topology_weak_query_total_candidates") == "42");
     CHECK(debug.at("topology_ready") == "1");
     CHECK(debug.at("topology_artifacts_fresh") == "1");
@@ -203,9 +205,9 @@ TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not a
     yams::search::TopologyRoutingSessionResult session;
 
     yams::search::SearchResponse response;
-    yams::search::recordTopologyRoutingDebug(
-        response, config, SearchEngineConfig::TopologyRoutingMode::Disabled, session, "disabled",
-        0);
+    yams::search::recordTopologyRoutingDebug(response, config,
+                                             SearchEngineConfig::TopologyRoutingMode::Disabled,
+                                             session, "disabled", 0);
 
     const auto& debug = response.debugStats;
     CHECK(debug.at("topology_weak_query_enabled") == "0");

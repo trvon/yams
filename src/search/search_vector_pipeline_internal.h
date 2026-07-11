@@ -41,9 +41,16 @@ queryEntityVectorsPipeline(const std::shared_ptr<yams::metadata::MetadataReposit
 
 /// Reuse exact/ANN scores already computed while selecting routed members.
 /// Returns nullopt unless every allowed document has a precomputed score.
-[[nodiscard]] std::optional<std::vector<ComponentResult>> reusePrecomputedVectorResults(
-    const std::vector<ComponentResult>& precomputed,
-    const std::unordered_set<std::string>& allowedDocuments, size_t limit);
+[[nodiscard]] std::optional<std::vector<ComponentResult>>
+reusePrecomputedVectorResults(const std::vector<ComponentResult>& precomputed,
+                              const std::unordered_set<std::string>& allowedDocuments,
+                              size_t limit);
+
+/// Union global ANN and query-ranked topology results as one vector candidate stream.
+/// Duplicate documents retain their best similarity and topology provenance.
+[[nodiscard]] std::vector<ComponentResult>
+mergeVectorCandidateResults(std::vector<ComponentResult> globalResults,
+                            std::vector<ComponentResult> topologyResults);
 
 #ifdef YAMS_TESTING
 size_t testingVectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,

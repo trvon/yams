@@ -20,6 +20,11 @@ constexpr std::string_view kTopologyArtifactsFresh = "topology_artifacts_fresh";
 constexpr std::string_view kTopologyEpoch = "topology_epoch";
 
 constexpr std::string_view kTopologyRoutingMode = "topology_routing_mode";
+constexpr std::string_view kTopologyVectorPolicy = "topology_vector_policy";
+constexpr std::string_view kTopologyVectorAugmentationCandidates =
+    "topology_vector_augmentation_candidates";
+constexpr std::string_view kTopologyVectorAugmentationDocIds =
+    "topology_vector_augmentation_doc_ids";
 constexpr std::string_view kTopologyRouteScoringMode = "topology_route_scoring_mode";
 constexpr std::string_view kTopologySparseDenseAlpha = "topology_sparse_dense_alpha";
 constexpr std::string_view kTopologyMinRouteScore = "topology_min_route_score";
@@ -51,6 +56,8 @@ constexpr std::string_view kTopologyWeakQueryTotalCandidates =
     "topology_weak_query_total_candidates";
 constexpr std::string_view kTopologyWeakQueryAllowedCandidates =
     "topology_weak_query_allowed_candidates";
+constexpr std::string_view kTopologyWeakQueryAllowedCandidateHashes =
+    "topology_weak_query_allowed_candidate_hashes";
 constexpr std::string_view kTopologySnapshotCacheHit = "topology_snapshot_cache_hit";
 constexpr std::string_view kTopologyMemberRerankCandidates = "topology_member_rerank_candidates";
 constexpr std::string_view kTopologyMemberRerankSelected = "topology_member_rerank_selected";
@@ -68,8 +75,7 @@ constexpr std::string_view kTopologyMemberRerankRowsVisitedActual =
 constexpr std::string_view kTopologyMemberRerankDistanceEvaluationsActual =
     "topology_member_rerank_distance_evaluations_actual";
 constexpr std::string_view kTopologyVectorScoresReused = "topology_vector_scores_reused";
-constexpr std::string_view kTopologyVectorScoresReusedCount =
-    "topology_vector_scores_reused_count";
+constexpr std::string_view kTopologyVectorScoresReusedCount = "topology_vector_scores_reused_count";
 
 constexpr std::string_view kTimingTopologyWeakQuery = "topology_weak_query";
 constexpr std::string_view kTimingTopologyLoad = "topology_load";

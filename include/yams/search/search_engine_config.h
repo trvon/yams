@@ -155,6 +155,25 @@ struct SearchEngineConfig {
         return "disabled";
     }
 
+    /// How routed topology members interact with the global vector retriever.
+    /// Augment preserves the bounded ANN leg and unions query-ranked routed members.
+    /// Narrow replaces ANN with the routed allowed-document set.
+    enum class TopologyVectorPolicy {
+        Augment,
+        Narrow,
+    } topologyVectorPolicy = TopologyVectorPolicy::Augment;
+
+    [[nodiscard]] static constexpr const char*
+    topologyVectorPolicyToString(TopologyVectorPolicy policy) noexcept {
+        switch (policy) {
+            case TopologyVectorPolicy::Augment:
+                return "augment";
+            case TopologyVectorPolicy::Narrow:
+                return "narrow";
+        }
+        return "augment";
+    }
+
     enum class TopologyRouteScoringMode {
         Current,
         SizeWeighted,
@@ -185,8 +204,8 @@ struct SearchEngineConfig {
     /// Include another cluster while its score remains this close to the best route.
     float topologyAdaptiveProbeScoreGap = 0.0f;
     /// Abstain from hard narrowing when the selected/excluded boundary is closer
-    /// than this margin. Zero disables confidence abstention.
-    float topologyNarrowMinBoundaryMargin = 0.0f;
+    /// than this margin. Mixed-corpus calibration favors 0.20; zero disables abstention.
+    float topologyNarrowMinBoundaryMargin = 0.20f;
     size_t topologyMaxDocs = 64;
     size_t topologyMaxDocsPerCluster = 0;
     float topologyMedoidBoost = 0.05f;
@@ -477,6 +496,7 @@ struct SearchEngineConfig {
     /// relevance weight, so tuning must not silently reset it to Disabled.
     void applyTopologyPolicyFrom(const SearchEngineConfig& source) noexcept {
         topologyRoutingMode = source.topologyRoutingMode;
+        topologyVectorPolicy = source.topologyVectorPolicy;
         topologyRouteScoringMode = source.topologyRouteScoringMode;
         enableTopologyWeakQueryRouting = source.enableTopologyWeakQueryRouting;
         topologyMinClusters = source.topologyMinClusters;

@@ -808,6 +808,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.mode"); it != kv.end()) {
                 policy.mode = std::string(trimView(it->second));
             }
+            if (auto it = kv.find("search.topology.vector_policy"); it != kv.end()) {
+                policy.vectorPolicy = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
@@ -823,8 +826,7 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
                 policy.adaptiveProbeScoreGap = parseFloat(it->second);
             }
-            if (auto it = kv.find("search.topology.narrow_min_boundary_margin");
-                it != kv.end()) {
+            if (auto it = kv.find("search.topology.narrow_min_boundary_margin"); it != kv.end()) {
                 policy.narrowMinBoundaryMargin = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {

@@ -76,6 +76,19 @@ parseTopologyRouteScoringMode(std::string raw) {
     }
     return std::nullopt;
 }
+
+std::optional<yams::search::SearchEngineConfig::TopologyVectorPolicy>
+parseTopologyVectorPolicy(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Policy = yams::search::SearchEngineConfig::TopologyVectorPolicy;
+    if (raw == "augment" || raw == "augmentation" || raw == "union") {
+        return Policy::Augment;
+    }
+    if (raw == "narrow" || raw == "filter" || raw == "replace") {
+        return Policy::Narrow;
+    }
+    return std::nullopt;
+}
 } // namespace
 
 std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getCachedEngine() const {
@@ -380,9 +393,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
-
-    // Topology weak-query routing is opt-in. It routes weak lexical queries through
-    // published topology clusters before narrowing vector search.
+    // Topology routing is opt-in. It selects query-ranked cluster members before the
+    // vector stage; the typed vector policy decides whether they augment or narrow ANN.
     {
         auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
         if (tp.mode) {
@@ -392,6 +404,14 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     (*mode == yams::search::SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly);
             } else {
                 spdlog::warn("Ignoring unknown search.topology.mode='{}'", *tp.mode);
+            }
+        }
+        if (tp.vectorPolicy) {
+            if (auto policy = parseTopologyVectorPolicy(*tp.vectorPolicy); policy.has_value()) {
+                opts.config.topologyVectorPolicy = *policy;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.vector_policy='{}'",
+                             *tp.vectorPolicy);
             }
         }
         if (tp.enableWeakQueryRouting) {
@@ -481,7 +501,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
         }
     }
-
 
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
