@@ -1,0 +1,142 @@
+{
+  "name": "search_simeon_ann_attribution_multicorp",
+  "description": "Steady-state mixed-corpus attribution: isolate text, current Simeon PQ ANN, and exact vec0 retrieval over identical Simeon embeddings. The exact arm is a candidate-quality oracle, not an equal-distance-cost competitor.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 10800,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "hybrid_simeon_pq",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_VECTOR_MAX_RESULTS": "32"
+    },
+    "params": {
+      "datasets": ["scifact", "nfcorpus"],
+      "documents_per_dataset": 2000,
+      "queries_per_dataset": 50,
+      "topk": 10,
+      "require_steady_state": true
+    }
+  },
+  "arms": [
+    {
+      "name": "hybrid_simeon_pq",
+      "factors": {
+        "retrieval": "hybrid",
+        "vector_engine": "simeon_pq_adc"
+      },
+      "params": {"vector_search_engine": "simeon_pq_adc"}
+    },
+    {
+      "name": "text_only",
+      "factors": {
+        "retrieval": "text_only",
+        "vector": "off",
+        "vector_engine": "simeon_pq_adc"
+      },
+      "params": {"vector_search_engine": "simeon_pq_adc"}
+    },
+    {
+      "name": "vector_only_simeon_pq",
+      "factors": {
+        "retrieval": "vector_only",
+        "text": "off",
+        "simeon_text": "off",
+        "vector_engine": "simeon_pq_adc"
+      },
+      "params": {"vector_search_engine": "simeon_pq_adc"},
+      "env": {
+        "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
+        "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
+      }
+    },
+    {
+      "name": "vector_only_exact_vec0",
+      "factors": {
+        "retrieval": "vector_only",
+        "text": "off",
+        "simeon_text": "off",
+        "vector_engine": "vec0_l2"
+      },
+      "params": {"vector_search_engine": "vec0_l2"},
+      "env": {
+        "YAMS_VECTOR_VEC0_PHSS_ENABLED": "0",
+        "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
+        "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "recall_at_k",
+        "mixed_source_min_mrr",
+        "mixed_source_min_recall_at_k",
+        "candidate_pre_fusion_hit_rate",
+        "candidate_pre_fusion_recall",
+        "mixed_candidate_pre_fusion_recall_scifact",
+        "mixed_candidate_pre_fusion_recall_nfcorpus",
+        "mixed_ranking_loss_query_rate_scifact",
+        "mixed_ranking_loss_query_rate_nfcorpus",
+        "returned_trace_hit_rate",
+        "ranking_loss_query_rate",
+        "vector_unique_rescue_rate",
+        "recall_at_k_ceiling",
+        "ceiling_normalized_returned_recall",
+        "steady_state_query_rate",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "proc_maxrss_mb",
+        "vector_total_rows_visited_actual_avg",
+        "vector_total_exact_distance_evaluations_actual_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_metrics": [
+      "mrr",
+      "candidate_pre_fusion_hit_rate",
+      "returned_trace_hit_rate",
+      "steady_state_query_rate",
+      "search_latency_ms_p50"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "mixed_source_min_mrr",
+      "mixed_source_min_recall_at_k",
+      "candidate_pre_fusion_hit_rate",
+      "candidate_pre_fusion_recall",
+      "mixed_candidate_pre_fusion_recall_scifact",
+      "mixed_candidate_pre_fusion_recall_nfcorpus",
+      "mixed_ranking_loss_query_rate_scifact",
+      "mixed_ranking_loss_query_rate_nfcorpus",
+      "returned_trace_hit_rate",
+      "ranking_loss_query_rate",
+      "vector_unique_rescue_rate",
+      "recall_at_k_ceiling",
+      "ceiling_normalized_returned_recall",
+      "steady_state_query_rate",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95",
+      "proc_maxrss_mb",
+      "vector_total_rows_visited_actual_avg",
+      "vector_total_exact_distance_evaluations_actual_avg"
+    ],
+    "group_by": ["retrieval", "vector_engine"]
+  }
+}

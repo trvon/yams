@@ -26,6 +26,14 @@ def run_retrieval_load(ctx: WorkerContext) -> WorkerResult:
             "fanout_stage_ms": 0.0,
             "qps": 0.0,
             "total_searches": 0.0,
+            "backlog_peak": 0.0,
+            "post_ingest_inflight_peak": 0.0,
+            "write_queue_depth_peak": 0.0,
+            "write_in_flight_peak": 0.0,
+            "write_max_batch_apply_ms_peak": 0.0,
+            "write_max_batch_queue_wait_ms_peak": 0.0,
+            "write_max_batch_excess_queue_wait_ms_peak": 0.0,
+            "pressure_level_peak": 0.0,
         }
         result.status = "ok"
         result.message = "dry-run retrieval_load"
@@ -37,4 +45,12 @@ def run_retrieval_load(ctx: WorkerContext) -> WorkerResult:
     result.metrics.setdefault("search_rejected", 0.0)
     result.metrics.setdefault("fanout_stage_ms", 0.0)
     result.metrics.setdefault("qps", 0.0)
+    result.metrics.setdefault("backlog_peak", 0.0)
+    result.metrics.setdefault("post_ingest_inflight_peak", 0.0)
+    result.metrics.setdefault("write_queue_depth_peak", 0.0)
+    result.metrics.setdefault("write_in_flight_peak", 0.0)
+    result.metrics.setdefault("write_max_batch_apply_ms_peak", 0.0)
+    result.metrics.setdefault("write_max_batch_queue_wait_ms_peak", 0.0)
+    result.metrics.setdefault("write_max_batch_excess_queue_wait_ms_peak", 0.0)
+    result.metrics.setdefault("pressure_level_peak", 0.0)
     return result

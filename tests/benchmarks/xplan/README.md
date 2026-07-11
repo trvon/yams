@@ -70,6 +70,8 @@ tests/benchmarks/xplan/
 | `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
 | `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
 | `topology_purity_validate` / `topology_routing_budget_ablation` | Topology construction purity and routed-vs-global ANN budget gate (repeats=3) |
+| `search_generalized_memory_topology_gate` | SciFact + NF-Corpus in one index; per-source quality, cross-source interference, and topology-vs-global cost (repeats=3) |
+| `search_simeon_ann_attribution_multicorp` | Mixed-corpus text/current-PQ/exact-vec0 attribution over identical Simeon embeddings (repeats=3) |
 | `plans/archive/*` | Superseded plans (historical only) |
 
 Agent measurement loop and plan selection: repo `AGENTS.md` (Benchmarks & Experiments).
@@ -80,9 +82,27 @@ Agent measurement loop and plan selection: repo `AGENTS.md` (Benchmarks & Experi
 |------|---------|--------|
 | **BEIR scifact** (default for quality) | `search_component_*`, `topology_*`, `simeon_rerank*`, `leg_stage_*` | `~/.cache/yams/benchmarks/scifact`; auto-download on run |
 | **BEIR nfcorpus** | optional plan override `dataset=nfcorpus` | same cache layout |
+| **Mixed BEIR memory** | `search_generalized_memory_topology_gate` | one daemon/index containing namespaced SciFact + NF-Corpus documents and queries |
 | **synthetic** | ingest/load/ops throughput only | **not** for ranking ablations — opt-in via `"dataset": "synthetic"` |
 
 Default quality params: `dataset=scifact`, `corpus_size=2000`, `num_queries=50`.
+
+Plans with separate SciFact and NF-Corpus arms test transfer between isolated indexes; they do
+not model generalized memory. A retrieval-quality plan can set `datasets` to two or more BEIR
+names to materialize one content-deduplicated `local-manifest` for the entire run. The worker
+namespaces document/query IDs, remaps duplicate-content qrels, and reports per-source MRR/recall
+plus `mixed_cross_source_result_rate` and `mixed_cross_source_top1_rate` from the shared ranking.
+The benchmark also exports `topology_clusters.json` and derives `mixed_cluster_overlap.json`, which
+shows source counts, entropy, and purity for every cluster. Aggregate metrics distinguish the
+fraction of cross-source clusters from the fraction of documents exposed to those clusters;
+content duplicated across corpora is reported separately and excluded from partition purity.
+
+Evaluate ingestion changes in two lanes at the same code revision. Use
+`search_generalized_memory_topology_gate` after the index settles for mixed-memory quality and
+route purity. Use `retrieval_load` for concurrent adds/searches through the daemon; it reports
+post-ingest backlog plus WriteCoordinator queue depth, in-flight work, apply time, queue wait, and
+excess queue wait. Do not combine these into one score: promote an ingestion change only when it
+preserves the per-source quality floor and improves or holds the read-under-write pressure KPIs.
 
 ## Rules
 
@@ -92,3 +112,11 @@ Default quality params: `dataset=scifact`, `corpus_size=2000`, `num_queries=50`.
 - Topology claims need `debug.jsonl` counters / certificates.
 - Multi-client plans need a Catch2-enabled builddir.
 - Published numbers: `docs/benchmarks/README.md` (default system only).
+
+## Known infrastructure debt
+
+- `yams graph --explore` can fail with a local index `SQL logic error` for valid readiness
+  symbols (observed on `SearchEngineManager::getSnapshot` / `rebuildNow`). The fallback is a
+  targeted local read after YAMS retrieval identifies the files. Follow-up: capture `yams doctor`
+  diagnostics, verify graph/index schema integrity, and add a regression fixture before changing
+  graph-query behavior.

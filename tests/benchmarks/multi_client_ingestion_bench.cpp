@@ -1224,6 +1224,8 @@ struct DaemonSnapshot {
     uint64_t dbWritePoolWaiting{0};
     uint64_t dbReadPoolWaiting{0};
     uint64_t muxWriterBudgetBytes{0};
+    uint64_t writeQueueDepth{0};
+    uint64_t writeInFlight{0};
     uint64_t writeMaxBatchApplyMs{0};
     uint64_t writeMaxBatchQueueWaitMs{0};
     uint64_t writeMaxBatchExcessQueueWaitMs{0};
@@ -1348,6 +1350,8 @@ struct DaemonSnapshot {
             }
         };
         snap.writeMaxBatchApplyMs = getAdditionalUint("write_max_batch_apply_ms");
+        snap.writeQueueDepth = getAdditionalUint("write_queue_depth");
+        snap.writeInFlight = getAdditionalUint("write_in_flight");
         snap.writeMaxBatchQueueWaitMs = getAdditionalUint("write_max_batch_queue_wait_ms");
         snap.writeMaxBatchExcessQueueWaitMs =
             getAdditionalUint("write_max_batch_excess_queue_wait_ms");
@@ -1384,6 +1388,8 @@ struct DaemonSnapshot {
                     {"search_queued", searchQueued},
                     {"db_write_pool_waiting", dbWritePoolWaiting},
                     {"db_read_pool_waiting", dbReadPoolWaiting},
+                    {"write_queue_depth", writeQueueDepth},
+                    {"write_in_flight", writeInFlight},
                     {"write_max_batch_apply_ms", writeMaxBatchApplyMs},
                     {"write_max_batch_queue_wait_ms", writeMaxBatchQueueWaitMs},
                     {"write_max_batch_excess_queue_wait_ms", writeMaxBatchExcessQueueWaitMs},
@@ -1769,6 +1775,8 @@ struct ResourcePeaks {
     uint64_t peakDbWritePoolWaiting{0};
     uint64_t peakDbReadPoolWaiting{0};
     uint64_t peakMuxWriterBudgetBytes{0};
+    uint64_t peakWriteQueueDepth{0};
+    uint64_t peakWriteInFlight{0};
     uint64_t peakWriteMaxBatchApplyMs{0};
     uint64_t peakWriteMaxBatchQueueWaitMs{0};
     uint64_t peakWriteMaxBatchExcessQueueWaitMs{0};
@@ -1802,6 +1810,8 @@ struct ResourcePeaks {
             {"peak_db_write_pool_waiting", peakDbWritePoolWaiting},
             {"peak_db_read_pool_waiting", peakDbReadPoolWaiting},
             {"peak_mux_writer_budget_bytes", peakMuxWriterBudgetBytes},
+            {"peak_write_queue_depth", peakWriteQueueDepth},
+            {"peak_write_in_flight", peakWriteInFlight},
             {"peak_write_max_batch_apply_ms", peakWriteMaxBatchApplyMs},
             {"peak_write_max_batch_queue_wait_ms", peakWriteMaxBatchQueueWaitMs},
             {"peak_write_max_batch_excess_queue_wait_ms", peakWriteMaxBatchExcessQueueWaitMs},
@@ -1842,6 +1852,8 @@ ResourcePeaks summarizeResourcePeaks(const std::vector<TimeSeriesSampler::Sample
         peaks.peakDbReadPoolWaiting = std::max(peaks.peakDbReadPoolWaiting, snap.dbReadPoolWaiting);
         peaks.peakMuxWriterBudgetBytes =
             std::max(peaks.peakMuxWriterBudgetBytes, snap.muxWriterBudgetBytes);
+        peaks.peakWriteQueueDepth = std::max(peaks.peakWriteQueueDepth, snap.writeQueueDepth);
+        peaks.peakWriteInFlight = std::max(peaks.peakWriteInFlight, snap.writeInFlight);
         peaks.peakWriteMaxBatchApplyMs =
             std::max(peaks.peakWriteMaxBatchApplyMs, snap.writeMaxBatchApplyMs);
         peaks.peakWriteMaxBatchQueueWaitMs =
@@ -3146,6 +3158,8 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
 
     sampler.stop();
 
+    const auto resourcePeaks = summarizeResourcePeaks(sampler.getSamples());
+
     auto globalEnd = std::chrono::steady_clock::now();
     double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
 
@@ -3210,6 +3224,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"drain_metrics", drainObservation.toJson()},
         {"idle_probe", idleProbe.toJson()},
         {"recovery", recovery.toJson()},
+        {"resource_peaks", resourcePeaks.toJson()},
         {"tuning_profile", cfg.tuningProfile},
         {"drained", drained},
     };

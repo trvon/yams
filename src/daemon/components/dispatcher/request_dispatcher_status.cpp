@@ -1155,6 +1155,9 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 }
                 if (auto wc = serviceManager_->getWriteCoordinator()) {
                     auto stats = wc->getStats();
+                    response.additionalStats["write_queue_depth"] =
+                        std::to_string(wc->queuedBatches());
+                    response.additionalStats["write_in_flight"] = std::to_string(wc->inFlight());
                     response.additionalStats["kg_write_batches_enqueued"] =
                         std::to_string(stats.batchesEnqueued);
                     response.additionalStats["kg_write_batches_committed"] =

@@ -180,6 +180,7 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
     idle = record.get("idle_probe") or {}
     idle_base = idle.get("idle_baseline") if isinstance(idle, dict) else {}
     drain = record.get("drain_metrics") or {}
+    peaks = record.get("resource_peaks") or {}
 
     metrics: dict[str, Any] = {
         "elapsed_seconds": float(record.get("elapsed_seconds") or 0),
@@ -232,6 +233,28 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
             drain.get("peakPostIngestQueued") or drain.get("peak_post_ingest_queued") or 0
         )
         metrics["drain_elapsed_ms"] = float(drain.get("elapsedMs") or drain.get("elapsed_ms") or 0)
+    if isinstance(peaks, dict):
+        metrics["backlog_peak"] = max(
+            metrics.get("backlog_peak", 0.0),
+            float(peaks.get("peak_post_ingest_queued") or 0),
+        )
+        metrics["post_ingest_inflight_peak"] = float(
+            peaks.get("peak_post_ingest_inflight") or 0
+        )
+        metrics["write_queue_depth_peak"] = float(
+            peaks.get("peak_write_queue_depth") or 0
+        )
+        metrics["write_in_flight_peak"] = float(peaks.get("peak_write_in_flight") or 0)
+        metrics["write_max_batch_apply_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_apply_ms") or 0
+        )
+        metrics["write_max_batch_queue_wait_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_queue_wait_ms") or 0
+        )
+        metrics["write_max_batch_excess_queue_wait_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_excess_queue_wait_ms") or 0
+        )
+        metrics["pressure_level_peak"] = float(peaks.get("max_pressure_level") or 0)
 
     # Work-share proxies from final snapshot if present
     snap = record.get("daemon_snapshot_final") or record.get("daemon_snapshot") or {}

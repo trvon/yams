@@ -45,7 +45,15 @@
   "steps": [
     {
       "worker": "retrieval_load",
-      "metrics": ["search_p50_ms", "search_p95_ms", "search_rejected", "qps"]
+      "metrics": [
+        "search_p50_ms",
+        "search_p95_ms",
+        "search_rejected",
+        "qps",
+        "backlog_peak",
+        "write_queue_depth_peak",
+        "write_max_batch_queue_wait_ms_peak"
+      ]
     }
   ],
   "validate": {
@@ -59,6 +67,14 @@
       "search_p95_ms",
       "search_rejected",
       "qps",
+      "backlog_peak",
+      "post_ingest_inflight_peak",
+      "write_queue_depth_peak",
+      "write_in_flight_peak",
+      "write_max_batch_apply_ms_peak",
+      "write_max_batch_queue_wait_ms_peak",
+      "write_max_batch_excess_queue_wait_ms_peak",
+      "pressure_level_peak",
       "total_searches",
       "total_failures"
     ],

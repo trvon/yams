@@ -38,6 +38,7 @@
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
                                           Abstain when selected/excluded route margin is smaller
+    YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT=... Export evaluation-only cluster memberships as JSON
     YAMS_BENCH_TOPOLOGY_SOURCE=vector|fts5|keyphrase|segment_keyphrase|kg|gliner|header|theme
                                           Benchmark semantic_neighbor seeding source for topology
     YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING=1 - Legacy opt-in topology weak-query routing
@@ -98,6 +99,7 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/search/internal_benchmark.h>
+#include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/vector_database.h>
 
 #include <algorithm>
@@ -247,6 +249,64 @@ template <typename T, typename Rep, typename Period>
 static Result<T> benchRunSync(boost::asio::awaitable<Result<T>> aw,
                               const std::chrono::duration<Rep, Period>& timeout) {
     return yams::cli::run_sync<T, Rep, Period>(std::move(aw), timeout);
+}
+
+static Result<void> exportTopologyClusters(yams::daemon::ServiceManager& serviceManager,
+                                           std::string_view snapshotId) {
+    const char* rawOutput = std::getenv("YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT");
+    if (rawOutput == nullptr || *rawOutput == '\0') {
+        return {};
+    }
+
+    yams::topology::MetadataKgTopologyArtifactStore store(serviceManager.getMetadataRepo(),
+                                                          serviceManager.getKgStore());
+    auto loaded = store.loadLatest(snapshotId);
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value().has_value()) {
+        return Error{ErrorCode::NotFound, "topology snapshot unavailable for cluster export"};
+    }
+
+    const auto& snapshot = *loaded.value();
+    json memberships = json::array();
+    for (const auto& membership : snapshot.memberships) {
+        memberships.push_back({{"document_hash", membership.documentHash},
+                               {"cluster_id", membership.clusterId},
+                               {"overlap_cluster_ids", membership.overlapClusterIds}});
+    }
+
+    json clusters = json::array();
+    for (const auto& cluster : snapshot.clusters) {
+        clusters.push_back({{"cluster_id", cluster.clusterId},
+                            {"member_count", cluster.memberCount},
+                            {"overlap_cluster_ids", cluster.overlapClusterIds}});
+    }
+
+    const fs::path outputPath(rawOutput);
+    std::error_code ec;
+    if (!outputPath.parent_path().empty()) {
+        fs::create_directories(outputPath.parent_path(), ec);
+        if (ec) {
+            return Error{ErrorCode::WriteError,
+                         "failed to create topology cluster output directory: " + ec.message()};
+        }
+    }
+    std::ofstream output(outputPath, std::ios::trunc);
+    if (!output) {
+        return Error{ErrorCode::WriteError, "failed to open topology cluster output"};
+    }
+    output << json{{"algorithm", snapshot.algorithm},
+                   {"snapshot_id", snapshot.snapshotId},
+                   {"topology_epoch", snapshot.topologyEpoch},
+                   {"memberships", std::move(memberships)},
+                   {"clusters", std::move(clusters)}}
+                  .dump(2)
+           << '\n';
+    if (!output) {
+        return Error{ErrorCode::WriteError, "failed to write topology cluster output"};
+    }
+    return {};
 }
 
 // Helper to discover GLiNER model path for entity extraction
@@ -6511,19 +6571,20 @@ struct BenchFixture {
                         if (topologyModeEnv && *topologyModeEnv) {
                             configOut << "mode = \"" << topologyModeEnv << "\"\n";
                         }
+                        if (const char* policy = std::getenv("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY");
+                            policy && *policy) {
+                            configOut << "vector_policy = \"" << policy << "\"\n";
+                        }
                         configOut << "min_clusters = "
-                                  << parseSizeEnvOrDefault(
-                                         "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS", 1)
+                                  << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS", 1)
                                   << "\n";
                         configOut << "max_clusters = "
-                                  << parseSizeEnvOrFallback(
-                                         "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
-                                         "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", 2)
+                                  << parseSizeEnvOrFallback("YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
+                                                            "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", 2)
                                   << "\n";
                         configOut << "max_docs = "
-                                  << parseSizeEnvOrFallback(
-                                         "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
-                                         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
+                                  << parseSizeEnvOrFallback("YAMS_BENCH_TOPOLOGY_MAX_DOCS",
+                                                            "YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
                                   << "\n";
                         configOut << "max_docs_per_cluster = "
                                   << parseSizeEnvOrFallback(
@@ -6531,8 +6592,8 @@ struct BenchFixture {
                                          "YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", 0)
                                   << "\n";
                         configOut << "max_seed_documents = "
-                                  << parseSizeEnvOrDefault(
-                                         "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS", 32)
+                                  << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
+                                                           32)
                                   << "\n";
                         configOut << "adaptive_probe_score_gap = "
                                   << parseFloatEnvOrDefault(
@@ -8202,6 +8263,12 @@ struct BenchFixture {
                              : "vector",
                          rebuildResult.value().clustersBuilt,
                          rebuildResult.value().membershipsBuilt, rebuildResult.value().snapshotId);
+            auto exportResult =
+                exportTopologyClusters(*serviceManager, rebuildResult.value().snapshotId);
+            if (!exportResult) {
+                throw std::runtime_error("Failed to export topology cluster composition: " +
+                                         exportResult.error().message);
+            }
         }
 
         // Post-ingest status/stats snapshot + sanity searches.

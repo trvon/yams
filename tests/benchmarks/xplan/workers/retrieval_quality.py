@@ -27,6 +27,12 @@ from workers.beir_data import (
     ensure_beir_dataset,
     is_beir_dataset,
 )
+from workers.mixed_corpus import (
+    PreparedMixedCorpus,
+    analyze_mixed_cluster_overlap,
+    analyze_mixed_corpus_debug,
+    materialize_mixed_beir_manifest,
+)
 from workers.util import maybe_meson_compile, resolve_binary, run_captured
 
 _METRIC_RE = re.compile(
@@ -71,6 +77,7 @@ _NON_VECTOR_SOURCES = frozenset(
     {"fts5", "keyphrase", "segment_keyphrase", "kg", "gliner", "header", "theme"}
 )
 
+
 def _truthy(val: Any) -> bool:
     return str(val).lower() in {"1", "true", "yes", "on"}
 
@@ -80,6 +87,18 @@ def _as_int(val: Any) -> int:
         return int(float(str(val)))
     except (TypeError, ValueError):
         return 0
+
+
+def _mixed_dataset_names(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, list) else str(raw).split(",")
+    names = [str(value).strip().lower() for value in values if str(value).strip()]
+    if names and len(names) < 2:
+        raise ValueError("mixed corpus benchmarks require at least two datasets")
+    if len(set(names)) != len(names):
+        raise ValueError("mixed corpus dataset names must be unique")
+    return names
 
 
 def apply_expansion_preset(env: dict[str, str], arm: str | None) -> str | None:
@@ -128,7 +147,7 @@ def parse_quality_from_text(text: str) -> dict[str, float]:
     return out
 
 
-def parse_debug_jsonl(path: Path) -> dict[str, Any]:
+def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     if not path.is_file():
         return {}
     hybrid = 0
@@ -150,6 +169,7 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "added_post_fusion": 0,
         "added_fusion_dropped": 0,
         "sidecar_candidates": 0,
+        "augmentation_candidates": 0,
         "allowed_candidates": 0,
         "member_rerank_candidates": 0,
         "member_rerank_selected": 0,
@@ -170,6 +190,7 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     route_available_vals: list[int] = []
     route_boundary_score_margin_vals: list[float] = []
     sidecar_vals: list[int] = []
+    augmentation_vals: list[int] = []
     allowed_candidate_vals: list[int] = []
     member_rerank_candidate_vals: list[int] = []
     vector_candidate_budget_vals: list[int] = []
@@ -203,6 +224,24 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     vector_seed_probe_vals: list[float] = []
     path_medoid = 0
     path_seed_neighbors = 0
+    warming_queries = 0
+    search_ready_queries = 0
+    vector_ready_queries = 0
+    steady_state_queries = 0
+    short_query_budget_queries = 0
+    effective_vector_caps: list[float] = []
+    oracle_trace_queries = 0
+    pre_fusion_hit_queries = 0
+    post_fusion_hit_queries = 0
+    returned_trace_hit_queries = 0
+    ranking_loss_queries = 0
+    text_relevant_queries = 0
+    vector_relevant_queries = 0
+    vector_unique_rescue_queries = 0
+    pre_fusion_recall_sum = 0.0
+    post_fusion_recall_sum = 0.0
+    returned_trace_recall_sum = 0.0
+    recall_at_k_ceiling_sum = 0.0
 
     int_keys = {
         "added": "topology_weak_query_added_candidates",
@@ -215,6 +254,7 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "added_post_fusion": "topology_added_candidate_post_fusion_count",
         "added_fusion_dropped": "topology_added_candidate_fusion_dropped_count",
         "sidecar_candidates": "topology_sidecar_vector_candidates",
+        "augmentation_candidates": "topology_vector_augmentation_candidates",
         "allowed_candidates": "topology_weak_query_allowed_candidates",
         "member_rerank_candidates": "topology_member_rerank_candidates",
         "member_rerank_selected": "topology_member_rerank_selected",
@@ -251,7 +291,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
             if validation.get("ok") is True:
                 cert_ok += 1
             else:
-                cert_errors.append(validation.get("errors") or ["unknown certificate error"])
+                cert_errors.append(
+                    validation.get("errors") or ["unknown certificate error"]
+                )
             continue
 
         if obj.get("event") == "hybrid_summary":
@@ -270,6 +312,57 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         if not isinstance(stats, dict):
             continue
 
+        warming = _truthy(stats.get("corpus_warming"))
+        search_ready = _truthy(stats.get("search_engine_ready"))
+        vector_ready = _truthy(stats.get("vector_ready"))
+        if warming:
+            warming_queries += 1
+        if search_ready:
+            search_ready_queries += 1
+        if vector_ready:
+            vector_ready_queries += 1
+        if not warming and search_ready:
+            steady_state_queries += 1
+        if _truthy(stats.get("budget_short_query")):
+            short_query_budget_queries += 1
+        try:
+            effective_cap = stats.get("semantic_budget_vector_cap")
+            if effective_cap is not None and str(effective_cap) != "":
+                effective_vector_caps.append(float(effective_cap))
+        except (TypeError, ValueError):
+            pass
+
+        trace = obj.get("relevant_decision_trace") or {}
+        relevant_docs = trace.get("relevant_docs") if isinstance(trace, dict) else None
+        if isinstance(relevant_docs, list) and relevant_docs:
+            oracle_trace_queries += 1
+            pre_count = sum(bool(doc.get("in_pre_fusion")) for doc in relevant_docs)
+            post_count = sum(bool(doc.get("in_post_fusion")) for doc in relevant_docs)
+            returned_count = sum(bool(doc.get("in_returned_topk")) for doc in relevant_docs)
+            relevant_count = len(relevant_docs)
+            pre_hit = pre_count > 0
+            post_hit = post_count > 0
+            returned_hit = returned_count > 0
+            pre_fusion_hit_queries += int(pre_hit)
+            post_fusion_hit_queries += int(post_hit)
+            returned_trace_hit_queries += int(returned_hit)
+            ranking_loss_queries += int(pre_hit and not returned_hit)
+            pre_fusion_recall_sum += float(pre_count) / float(relevant_count)
+            post_fusion_recall_sum += float(post_count) / float(relevant_count)
+            returned_trace_recall_sum += float(returned_count) / float(relevant_count)
+            recall_at_k_ceiling_sum += float(min(max(top_k, 0), relevant_count)) / float(
+                relevant_count
+            )
+
+            stage_presence = trace.get("stage_relevant_presence") or {}
+            text_relevant = _truthy((stage_presence.get("text") or {}).get("any_relevant"))
+            vector_relevant = _truthy(
+                (stage_presence.get("vector") or {}).get("any_relevant")
+            )
+            text_relevant_queries += int(text_relevant)
+            vector_relevant_queries += int(vector_relevant)
+            vector_unique_rescue_queries += int(vector_relevant and not text_relevant)
+
         try:
             lat = stats.get("latency_ms")
             if lat is not None and str(lat) != "":
@@ -285,7 +378,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
                 rerank_applied += 1
             rr_reason = str(stats.get("cross_rerank_skip_reason", "") or "")
             if rr_reason:
-                rerank_skip_reasons[rr_reason] = rerank_skip_reasons.get(rr_reason, 0) + 1
+                rerank_skip_reasons[rr_reason] = (
+                    rerank_skip_reasons.get(rr_reason, 0) + 1
+                )
             try:
                 bw = stats.get("cross_rerank_blend_weight")
                 if bw is not None and str(bw) != "":
@@ -296,17 +391,23 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         fusion_summary = stats.get("trace_fusion_source_summary_json")
         if fusion_summary:
             try:
-                fs = json.loads(fusion_summary) if isinstance(fusion_summary, str) else fusion_summary
+                fs = (
+                    json.loads(fusion_summary)
+                    if isinstance(fusion_summary, str)
+                    else fusion_summary
+                )
                 sources = fs.get("sources", fs) if isinstance(fs, dict) else {}
-                for sname, sinfo in (sources.items() if isinstance(sources, dict) else []):
+                for sname, sinfo in (
+                    sources.items() if isinstance(sources, dict) else []
+                ):
                     if not isinstance(sinfo, dict):
                         continue
-                    fusion_source_mass[sname] = fusion_source_mass.get(sname, 0.0) + float(
-                        sinfo.get("final_score_mass", 0.0) or 0.0
-                    )
-                    fusion_source_docs[sname] = fusion_source_docs.get(sname, 0.0) + float(
-                        sinfo.get("final_top_doc_count", 0.0) or 0.0
-                    )
+                    fusion_source_mass[sname] = fusion_source_mass.get(
+                        sname, 0.0
+                    ) + float(sinfo.get("final_score_mass", 0.0) or 0.0)
+                    fusion_source_docs[sname] = fusion_source_docs.get(
+                        sname, 0.0
+                    ) + float(sinfo.get("final_top_doc_count", 0.0) or 0.0)
             except (ValueError, TypeError, AttributeError):
                 pass
 
@@ -339,6 +440,8 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
                 route_available_vals.append(v)
             elif dst == "sidecar_candidates":
                 sidecar_vals.append(v)
+            elif dst == "augmentation_candidates":
+                augmentation_vals.append(v)
             elif dst == "allowed_candidates":
                 allowed_candidate_vals.append(v)
             elif dst == "member_rerank_candidates":
@@ -427,9 +530,16 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         "topology_added_post_fusion_sum": float(counters["added_post_fusion"]),
         "topology_added_fusion_dropped_sum": float(counters["added_fusion_dropped"]),
         "topology_sidecar_sum": float(counters["sidecar_candidates"]),
+        "topology_vector_augmentation_sum": float(
+            counters["augmentation_candidates"]
+        ),
         "topology_allowed_candidates_sum": float(counters["allowed_candidates"]),
-        "topology_member_rerank_candidates_sum": float(counters["member_rerank_candidates"]),
-        "topology_member_rerank_selected_sum": float(counters["member_rerank_selected"]),
+        "topology_member_rerank_candidates_sum": float(
+            counters["member_rerank_candidates"]
+        ),
+        "topology_member_rerank_selected_sum": float(
+            counters["member_rerank_selected"]
+        ),
         "vector_candidate_budget_sum": float(counters["vector_candidate_budget"]),
         "vector_result_budget_sum": float(counters["vector_result_budget"]),
         "vector_distance_evaluation_budget_sum": float(
@@ -457,7 +567,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         metrics[f"hybrid_{mkey}"] = fv
-        metrics[mkey] = fv  # authoritative bare keys (fixes grep-clobber of stdout scrape)
+        metrics[mkey] = (
+            fv  # authoritative bare keys (fixes grep-clobber of stdout scrape)
+        )
     for mkey, mval in (keyword_summary_metrics or {}).items():
         try:
             metrics[f"keyword_{mkey}"] = float(mval)
@@ -466,15 +578,21 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     metrics["cross_rerank_configured_queries"] = float(rerank_configured)
     metrics["cross_rerank_applied_queries"] = float(rerank_applied)
     if rerank_configured:
-        metrics["cross_rerank_apply_rate"] = float(rerank_applied) / float(rerank_configured)
+        metrics["cross_rerank_apply_rate"] = float(rerank_applied) / float(
+            rerank_configured
+        )
     if rerank_blend_weights:
-        metrics["cross_rerank_blend_weight"] = float(statistics.mean(rerank_blend_weights))
+        metrics["cross_rerank_blend_weight"] = float(
+            statistics.mean(rerank_blend_weights)
+        )
     if latency_vals:
         metrics["search_latency_ms_avg"] = float(statistics.mean(latency_vals))
         metrics["search_latency_ms_p50"] = float(statistics.median(latency_vals))
         sorted_lat = sorted(latency_vals)
         # Nearest-rank p95: ceil(0.95 * n)th sample (1-indexed).
-        p95_idx = min(len(sorted_lat) - 1, max(0, math.ceil(0.95 * len(sorted_lat)) - 1))
+        p95_idx = min(
+            len(sorted_lat) - 1, max(0, math.ceil(0.95 * len(sorted_lat)) - 1)
+        )
         metrics["search_latency_ms_p95"] = float(sorted_lat[p95_idx])
     for sname, mass in fusion_source_mass.items():
         metrics[f"fusion_mass_{sname}"] = float(mass)
@@ -486,9 +604,15 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     if routed_docs:
         metrics["topology_routed_docs_avg"] = float(statistics.mean(routed_docs))
     if routed_clusters:
-        metrics["topology_routed_clusters_avg"] = float(statistics.mean(routed_clusters))
+        metrics["topology_routed_clusters_avg"] = float(
+            statistics.mean(routed_clusters)
+        )
     if sidecar_vals:
         metrics["topology_sidecar_avg"] = float(statistics.mean(sidecar_vals))
+    if augmentation_vals:
+        metrics["topology_vector_augmentation_avg"] = float(
+            statistics.mean(augmentation_vals)
+        )
     if allowed_candidate_vals:
         metrics["topology_allowed_candidates_avg"] = float(
             statistics.mean(allowed_candidate_vals)
@@ -502,7 +626,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
             statistics.mean(vector_candidate_budget_vals)
         )
     if vector_result_budget_vals:
-        metrics["vector_result_budget_avg"] = float(statistics.mean(vector_result_budget_vals))
+        metrics["vector_result_budget_avg"] = float(
+            statistics.mean(vector_result_budget_vals)
+        )
     if vector_distance_evaluation_budget_vals:
         metrics["vector_distance_evaluation_budget_avg"] = float(
             statistics.mean(vector_distance_evaluation_budget_vals)
@@ -536,6 +662,11 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
             statistics.mean(route_boundary_score_margin_vals)
         )
     if hybrid > 0:
+        metrics["corpus_warming_rate"] = float(warming_queries) / float(hybrid)
+        metrics["search_engine_ready_rate"] = float(search_ready_queries) / float(hybrid)
+        metrics["vector_ready_rate"] = float(vector_ready_queries) / float(hybrid)
+        metrics["steady_state_query_rate"] = float(steady_state_queries) / float(hybrid)
+        metrics["short_query_budget_rate"] = float(short_query_budget_queries) / float(hybrid)
         metrics["vector_candidate_work_budget_avg"] = float(
             counters["member_rerank_candidates"] + counters["vector_candidate_budget"]
         ) / float(hybrid)
@@ -550,8 +681,33 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["topology_vector_scores_reuse_rate"] = float(
             counters["topology_vector_scores_reused_queries"]
         ) / float(hybrid)
+    if effective_vector_caps:
+        metrics["effective_vector_cap_min"] = float(min(effective_vector_caps))
+        metrics["effective_vector_cap_max"] = float(max(effective_vector_caps))
+        metrics["effective_vector_cap_avg"] = float(statistics.mean(effective_vector_caps))
+    if oracle_trace_queries > 0:
+        trace_count = float(oracle_trace_queries)
+        returned_recall = returned_trace_recall_sum / trace_count
+        recall_ceiling = recall_at_k_ceiling_sum / trace_count
+        metrics["oracle_trace_coverage"] = trace_count / float(hybrid)
+        metrics["candidate_pre_fusion_hit_rate"] = float(pre_fusion_hit_queries) / trace_count
+        metrics["candidate_post_fusion_hit_rate"] = float(post_fusion_hit_queries) / trace_count
+        metrics["returned_trace_hit_rate"] = float(returned_trace_hit_queries) / trace_count
+        metrics["ranking_loss_query_rate"] = float(ranking_loss_queries) / trace_count
+        metrics["text_relevant_query_rate"] = float(text_relevant_queries) / trace_count
+        metrics["vector_relevant_query_rate"] = float(vector_relevant_queries) / trace_count
+        metrics["vector_unique_rescue_rate"] = float(vector_unique_rescue_queries) / trace_count
+        metrics["candidate_pre_fusion_recall"] = pre_fusion_recall_sum / trace_count
+        metrics["candidate_post_fusion_recall"] = post_fusion_recall_sum / trace_count
+        metrics["returned_trace_recall"] = returned_recall
+        metrics["recall_at_k_ceiling"] = recall_ceiling
+        metrics["ceiling_normalized_returned_recall"] = (
+            returned_recall / recall_ceiling if recall_ceiling > 0.0 else 0.0
+        )
     if hybrid > 0:
-        metrics["topology_narrow_rate"] = float(counters["narrow_applied"]) / float(hybrid)
+        metrics["topology_narrow_rate"] = float(counters["narrow_applied"]) / float(
+            hybrid
+        )
         metrics["topology_confidence_abstain_rate"] = float(
             counters["confidence_abstained"]
         ) / float(hybrid)
@@ -562,7 +718,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     # Path / seed-ANN mechanism rates (for quality×cost loops).
     if hybrid > 0:
         metrics["topology_path_medoid_rate"] = float(path_medoid) / float(hybrid)
-        metrics["topology_path_seed_neighbors_rate"] = float(path_seed_neighbors) / float(hybrid)
+        metrics["topology_path_seed_neighbors_rate"] = float(
+            path_seed_neighbors
+        ) / float(hybrid)
     if vector_seeds_added_vals:
         metrics["topology_vector_seeds_added_avg"] = float(
             statistics.mean(vector_seeds_added_vals)
@@ -576,7 +734,9 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
         metrics["topology_vector_seeds_added_max"] = 0.0
         metrics["topology_vector_seeds_nonzero_rate"] = 0.0
     if vector_seed_probe_vals:
-        metrics["topology_vector_seed_probe_avg"] = float(statistics.mean(vector_seed_probe_vals))
+        metrics["topology_vector_seed_probe_avg"] = float(
+            statistics.mean(vector_seed_probe_vals)
+        )
         metrics["topology_vector_seed_probe_max"] = float(max(vector_seed_probe_vals))
 
     return {
@@ -600,6 +760,44 @@ def parse_debug_jsonl(path: Path) -> dict[str, Any]:
     }
 
 
+def require_steady_state(path: Path, *, require_vector: bool) -> str | None:
+    """Return an experiment-identity error when hybrid queries ran while warming."""
+    if not path.is_file():
+        return f"missing debug log for steady-state validation: {path}"
+    hybrid = 0
+    not_steady = 0
+    warming = 0
+    search_not_ready = 0
+    vector_not_ready = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("search_type") != "hybrid":
+            continue
+        hybrid += 1
+        stats = event.get("search_stats") or {}
+        is_warming = _truthy(stats.get("corpus_warming"))
+        search_ready = _truthy(stats.get("search_engine_ready"))
+        vector_ready = _truthy(stats.get("vector_ready"))
+        warming += int(is_warming)
+        search_not_ready += int(not search_ready)
+        vector_not_ready += int(require_vector and not vector_ready)
+        not_steady += int(
+            is_warming or not search_ready or (require_vector and not vector_ready)
+        )
+    if hybrid == 0:
+        return "steady-state validation found no hybrid query traces"
+    if not_steady == 0:
+        return None
+    return (
+        f"{not_steady}/{hybrid} hybrid queries were not steady-state "
+        f"(warming={warming}, search_not_ready={search_not_ready}, "
+        f"vector_not_ready={vector_not_ready}, require_vector={require_vector})"
+    )
+
+
 def require_topology_certificate(
     *,
     source: str,
@@ -612,7 +810,9 @@ def require_topology_certificate(
     if not seed_enabled:
         return None
     if not debug_path.is_file():
-        return f"missing topology certificate debug log for source={source}: {debug_path}"
+        return (
+            f"missing topology certificate debug log for source={source}: {debug_path}"
+        )
     seen = 0
     bad: list[Any] = []
     for line in debug_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -626,11 +826,15 @@ def require_topology_certificate(
         certificate = event.get("certificate") or {}
         validation = certificate.get("validation") or {}
         if validation.get("ok") is not True:
-            bad.append(validation.get("errors") or ["unknown certificate validation error"])
+            bad.append(
+                validation.get("errors") or ["unknown certificate validation error"]
+            )
     if seen == 0:
         return f"missing topology construction certificate for source={source}"
     if bad:
-        return f"invalid topology construction certificate for source={source}: {bad[0]}"
+        return (
+            f"invalid topology construction certificate for source={source}: {bad[0]}"
+        )
     return None
 
 
@@ -675,6 +879,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     stdout_path = ctx.arm_dir / "stdout.log"
     stderr_path = ctx.arm_dir / "time.log"
     debug_path = ctx.arm_dir / "debug.jsonl"
+    topology_cluster_path = ctx.arm_dir / "topology_clusters.json"
 
     arm_factors = getattr(ctx.arm, "arm", None)
     arm_factors = getattr(arm_factors, "factors", None) or {}
@@ -683,6 +888,11 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         or ctx.params.get("arm")
         or arm_factors.get("expansion_arm")
     )
+
+    try:
+        mixed_dataset_names = _mixed_dataset_names(ctx.params.get("datasets"))
+    except ValueError as exc:
+        return WorkerResult(status="failed", exit_code=2, metrics={}, message=str(exc))
 
     if ctx.dry_run:
         write_json(
@@ -697,7 +907,44 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         stdout_path.write_text("# dry-run\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         debug_path.write_text("", encoding="utf-8")
+        write_json(topology_cluster_path, {"dry_run": True, "memberships": []})
         # Zero-fill KPIs listed in plan step.metrics so dry-run validation passes.
+        dry_run_metrics = {
+            f"mixed_{metric}_{dataset.replace('-', '_')}": 0.0
+            for dataset in mixed_dataset_names
+            for metric in (
+                "query_count",
+                "mrr",
+                "recall_at_k",
+                "hit_rate",
+                "topology_route_source_purity",
+                "topology_route_cross_source_rate",
+                "topology_relevant_fragment_coverage",
+                "topology_relevant_fragment_hit_rate",
+            )
+        }
+        dry_sources = sorted(
+            re.sub(r"[^a-z0-9]+", "_", dataset.lower()).strip("_")
+            for dataset in mixed_dataset_names
+        )
+        for source in dry_sources:
+            dry_run_metrics[f"mixed_cluster_count_{source}"] = 0.0
+            dry_run_metrics[f"mixed_cluster_exclusive_count_{source}"] = 0.0
+            dry_run_metrics[f"mixed_cluster_cross_source_exposure_{source}"] = 0.0
+            for metric in (
+                "candidate_pre_fusion_hit_rate",
+                "candidate_pre_fusion_recall",
+                "candidate_post_fusion_hit_rate",
+                "candidate_post_fusion_recall",
+                "returned_trace_hit_rate",
+                "returned_trace_recall",
+                "ranking_loss_query_rate",
+                "vector_unique_rescue_rate",
+            ):
+                dry_run_metrics[f"mixed_{metric}_{source}"] = 0.0
+        for left_index, left in enumerate(dry_sources):
+            for right in dry_sources[left_index + 1 :]:
+                dry_run_metrics[f"mixed_cluster_overlap_jaccard_{left}_{right}"] = 0.0
         return WorkerResult(
             status="ok",
             exit_code=0,
@@ -711,6 +958,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "search_latency_ms_avg": 0.0,
                 "search_latency_ms_p50": 0.0,
                 "search_latency_ms_p95": 0.0,
+                "proc_maxrss_mb": 0.0,
                 "topology_applied": 0.0,
                 "topology_added_avg": 0.0,
                 "topology_routed_docs_avg": 0.0,
@@ -722,6 +970,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "topology_vector_seeds_nonzero_rate": 0.0,
                 "topology_vector_seed_probe_avg": 0.0,
                 "topology_narrow_rate": 0.0,
+                "topology_vector_augmentation_avg": 0.0,
                 "topology_confidence_abstain_rate": 0.0,
                 "topology_route_available_avg": 0.0,
                 "topology_route_boundary_score_margin_avg": 0.0,
@@ -740,6 +989,50 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "vector_total_rows_visited_actual_avg": 0.0,
                 "vector_total_exact_distance_evaluations_actual_avg": 0.0,
                 "topology_vector_scores_reuse_rate": 0.0,
+                "corpus_warming_rate": 0.0,
+                "search_engine_ready_rate": 0.0,
+                "vector_ready_rate": 0.0,
+                "steady_state_query_rate": 0.0,
+                "short_query_budget_rate": 0.0,
+                "effective_vector_cap_min": 0.0,
+                "effective_vector_cap_max": 0.0,
+                "effective_vector_cap_avg": 0.0,
+                "oracle_trace_coverage": 0.0,
+                "candidate_pre_fusion_hit_rate": 0.0,
+                "candidate_post_fusion_hit_rate": 0.0,
+                "returned_trace_hit_rate": 0.0,
+                "ranking_loss_query_rate": 0.0,
+                "text_relevant_query_rate": 0.0,
+                "vector_relevant_query_rate": 0.0,
+                "vector_unique_rescue_rate": 0.0,
+                "candidate_pre_fusion_recall": 0.0,
+                "candidate_post_fusion_recall": 0.0,
+                "returned_trace_recall": 0.0,
+                "recall_at_k_ceiling": 0.0,
+                "ceiling_normalized_returned_recall": 0.0,
+                "mixed_cross_source_result_rate": 0.0,
+                "mixed_cross_source_top1_rate": 0.0,
+                "mixed_topology_route_source_purity": 0.0,
+                "mixed_topology_route_cross_source_rate": 0.0,
+                "mixed_topology_relevant_fragment_coverage": 0.0,
+                "mixed_topology_relevant_fragment_hit_rate": 0.0,
+                "mixed_post_fusion_cross_source_result_rate": 0.0,
+                "mixed_post_fusion_cross_source_top1_rate": 0.0,
+                "mixed_source_macro_mrr": 0.0,
+                "mixed_source_min_mrr": 0.0,
+                "mixed_source_macro_recall_at_k": 0.0,
+                "mixed_source_min_recall_at_k": 0.0,
+                "mixed_cluster_count": 0.0,
+                "mixed_cluster_analyzable_count": 0.0,
+                "mixed_cluster_singleton_rate": 0.0,
+                "mixed_cluster_intrinsic_shared_document_rate": 0.0,
+                "mixed_cluster_shared_count": 0.0,
+                "mixed_cluster_shared_rate": 0.0,
+                "mixed_cluster_shared_document_rate": 0.0,
+                "mixed_cluster_weighted_source_purity": 0.0,
+                "mixed_cluster_weighted_source_entropy_bits": 0.0,
+                "mixed_cluster_topology_overlap_membership_rate": 0.0,
+                **dry_run_metrics,
             },
             attributes={
                 "dry_run": True,
@@ -751,8 +1044,14 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
 
     # Skip mid-run rebuilds by default when the binary already exists (avoids
     # multi-arm/multi-rep link races). Force with YAMS_BENCH_FORCE_BUILD=1.
-    skip_build = bool(ctx.params.get("skip_build")) or os.environ.get("YAMS_BENCH_SKIP_BUILD") == "1"
-    force_build = bool(ctx.params.get("force_build")) or os.environ.get("YAMS_BENCH_FORCE_BUILD") == "1"
+    skip_build = (
+        bool(ctx.params.get("skip_build"))
+        or os.environ.get("YAMS_BENCH_SKIP_BUILD") == "1"
+    )
+    force_build = (
+        bool(ctx.params.get("force_build"))
+        or os.environ.get("YAMS_BENCH_FORCE_BUILD") == "1"
+    )
     maybe_meson_compile(
         ctx.repo_root,
         ctx.build_dir,
@@ -770,6 +1069,37 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=f"retrieval_quality_bench missing: {binary}",
         )
 
+    mixed_corpus: PreparedMixedCorpus | None = None
+    if mixed_dataset_names:
+        dataset_roots: dict[str, Path] = {}
+        try:
+            for dataset in mixed_dataset_names:
+                if not is_beir_dataset(dataset):
+                    raise ValueError(f"unknown BEIR dataset in mixed corpus: {dataset}")
+                dataset_roots[dataset] = ensure_beir_dataset(
+                    dataset,
+                    download=str(ctx.params.get("download_beir", "1")).lower()
+                    not in {"0", "false", "no", "off"},
+                )
+            mixed_corpus = materialize_mixed_beir_manifest(
+                dataset_roots,
+                ctx.arm.run_dir / "datasets" / "mixed_beir",
+                documents_per_dataset=_as_int(ctx.params.get("documents_per_dataset")),
+                queries_per_dataset=_as_int(ctx.params.get("queries_per_dataset")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return WorkerResult(
+                status="failed",
+                exit_code=2,
+                metrics={},
+                attributes={"datasets": mixed_dataset_names},
+                message=f"failed to prepare mixed corpus: {exc}",
+            )
+        ctx.params["dataset"] = "local-manifest"
+        ctx.params["dataset_path"] = str(mixed_corpus.manifest_path.parent)
+        ctx.params["corpus_size"] = 0
+        ctx.params["num_queries"] = 0
+
     param_env = {
         "corpus_size": "YAMS_BENCH_CORPUS_SIZE",
         "num_queries": "YAMS_BENCH_NUM_QUERIES",
@@ -777,6 +1107,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "dataset": "YAMS_BENCH_DATASET",
         "dataset_path": "YAMS_BENCH_DATASET_PATH",
         "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
+        "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
         "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
         "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
         "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
@@ -803,6 +1134,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
         "rerank_weight": "YAMS_SEARCH_RERANK_WEIGHT",
         "embed_backend": "YAMS_EMBED_BACKEND",
+        "vector_search_engine": "YAMS_VECTOR_SEARCH_ENGINE",
         "search_engine_variant": "YAMS_SEARCH_ENGINE_VARIANT",
         "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
         "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
@@ -824,13 +1156,26 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     env.setdefault("YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", "0")
 
     # Construction purity: mirror bench cert cap into TopologyManager build env.
-    if "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS" in env and "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS" not in env:
-        env["YAMS_TOPOLOGY_MAX_COMPONENT_DOCS"] = env["YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS"]
-    if "YAMS_BENCH_TOPOLOGY_MIN_EDGE_SCORE" in env and "YAMS_TOPOLOGY_MIN_EDGE_SCORE" not in env:
+    if (
+        "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS" in env
+        and "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS" not in env
+    ):
+        env["YAMS_TOPOLOGY_MAX_COMPONENT_DOCS"] = env[
+            "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS"
+        ]
+    if (
+        "YAMS_BENCH_TOPOLOGY_MIN_EDGE_SCORE" in env
+        and "YAMS_TOPOLOGY_MIN_EDGE_SCORE" not in env
+    ):
         env["YAMS_TOPOLOGY_MIN_EDGE_SCORE"] = env["YAMS_BENCH_TOPOLOGY_MIN_EDGE_SCORE"]
     # Search expansion_source also as typed SearchEngine overlay.
-    if "YAMS_BENCH_TOPOLOGY_EXPANSION" in env and "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE" not in env:
-        env["YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE"] = env["YAMS_BENCH_TOPOLOGY_EXPANSION"]
+    if (
+        "YAMS_BENCH_TOPOLOGY_EXPANSION" in env
+        and "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE" not in env
+    ):
+        env["YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE"] = env[
+            "YAMS_BENCH_TOPOLOGY_EXPANSION"
+        ]
 
     # Factors often carry topology_source / expansion_arm.
     if "topology_source" in arm_factors and "YAMS_BENCH_TOPOLOGY_SOURCE" not in env:
@@ -839,8 +1184,14 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # Shared ablation axes (component weights, topology, rerank, vectors, …).
     ablation = apply_ablation(env, factors=arm_factors, params=ctx.params)
 
-    applied_preset = apply_expansion_preset(env, str(expansion_arm) if expansion_arm else None)
-    if expansion_arm and not applied_preset and str(expansion_arm) not in EXPANSION_PRESETS:
+    applied_preset = apply_expansion_preset(
+        env, str(expansion_arm) if expansion_arm else None
+    )
+    if (
+        expansion_arm
+        and not applied_preset
+        and str(expansion_arm) not in EXPANSION_PRESETS
+    ):
         # Unknown named arm is only an error when it looks like a preset name.
         if re.fullmatch(r"[a-z0-9_]+", str(expansion_arm)):
             return WorkerResult(
@@ -858,9 +1209,15 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     env.setdefault("YAMS_BENCH_CORPUS_SIZE", str(ctx.params.get("corpus_size", 2000)))
     env.setdefault("YAMS_BENCH_NUM_QUERIES", str(ctx.params.get("num_queries", 50)))
     env.setdefault("YAMS_BENCH_TOPK", str(ctx.params.get("topk", 10)))
-    env.setdefault("YAMS_BENCH_TOPOLOGY_ENGINE", str(ctx.params.get("topology_engine", "connected")))
-    env.setdefault("YAMS_BENCH_TOPOLOGY_SOURCE", str(ctx.params.get("topology_source", "vector")))
+    env.setdefault(
+        "YAMS_BENCH_TOPOLOGY_ENGINE",
+        str(ctx.params.get("topology_engine", "connected")),
+    )
+    env.setdefault(
+        "YAMS_BENCH_TOPOLOGY_SOURCE", str(ctx.params.get("topology_source", "vector"))
+    )
     env["YAMS_BENCH_DEBUG_FILE"] = str(debug_path)
+    env["YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT"] = str(topology_cluster_path)
 
     # BEIR first-class: resolve cache path; auto-download when missing.
     dataset_name = env.get("YAMS_BENCH_DATASET", "scifact").lower()
@@ -915,7 +1272,9 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     bench_filter = str(ctx.params.get("benchmark_filter") or "BM_RetrievalQuality")
     cmd = [str(binary), f"--benchmark_filter={bench_filter}"]
 
-    timeout = ctx.step.timeout_sec or int(ctx.params.get("timeout_sec") or ctx.arm.plan.timeout_sec)
+    timeout = ctx.step.timeout_sec or int(
+        ctx.params.get("timeout_sec") or ctx.arm.plan.timeout_sec
+    )
     # Let the bench's own ingest-stall logic (PROGRESS_TIMEOUT) fire before we kill the process.
     progress_timeout = int(env.get("YAMS_BENCH_PROGRESS_TIMEOUT", "0") or "0")
     timeout = max(timeout, progress_timeout + 120)
@@ -947,13 +1306,23 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     rss_scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024
     proc_maxrss_mb = float(ru_after.ru_maxrss) * rss_scale
 
-    (ctx.arm_dir / "exit_code").write_text(str(proc.returncode) + "\n", encoding="utf-8")
-    combined = (stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else "")
+    (ctx.arm_dir / "exit_code").write_text(
+        str(proc.returncode) + "\n", encoding="utf-8"
+    )
+    combined = (
+        stdout_path.read_text(encoding="utf-8", errors="replace")
+        if stdout_path.exists()
+        else ""
+    )
     combined += "\n"
-    combined += stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    combined += (
+        stderr_path.read_text(encoding="utf-8", errors="replace")
+        if stderr_path.exists()
+        else ""
+    )
 
     quality = parse_quality_from_text(combined)
-    dbg = parse_debug_jsonl(debug_path)
+    dbg = parse_debug_jsonl(debug_path, top_k=_as_int(env.get("YAMS_BENCH_TOPK", "10")))
     metrics: dict[str, Any] = {
         "mrr": float(quality.get("mrr", 0.0)),
         "recall_at_k": float(quality.get("recall_at_k", 0.0)),
@@ -963,11 +1332,56 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     }
     metrics.update(quality)
     metrics.update(dbg.get("metrics") or {})
+    if mixed_corpus is not None:
+        metrics.update(
+            analyze_mixed_corpus_debug(
+                debug_path,
+                mixed_corpus.identity_path,
+                top_k=_as_int(env.get("YAMS_BENCH_TOPK", "10")),
+            )
+        )
+        cluster_report = analyze_mixed_cluster_overlap(
+            topology_cluster_path, mixed_corpus.identity_path
+        )
+        metrics.update(cluster_report.get("metrics") or {})
+        write_json(ctx.arm_dir / "mixed_cluster_overlap.json", cluster_report)
     metrics["proc_cpu_sec"] = float(proc_cpu_sec)
     metrics["proc_wall_sec"] = float(wall_sec)
     metrics["proc_maxrss_mb"] = float(proc_maxrss_mb)
 
     seed_enabled = _truthy(env.get("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "0"))
+    require_steady = _truthy(
+        ctx.params.get(
+            "require_steady_state", env.get("YAMS_BENCH_REQUIRE_STEADY_STATE", "1")
+        )
+    )
+    vectors_disabled = _truthy(env.get("YAMS_DISABLE_VECTORS", "0"))
+    steady_state_error = (
+        require_steady_state(debug_path, require_vector=not vectors_disabled)
+        if require_steady
+        else None
+    )
+    if steady_state_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "steady_state_error": steady_state_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "topology_source": source,
+                "steady_state_error": steady_state_error,
+            },
+            message=steady_state_error,
+            raw_path=str(debug_path),
+        )
     cert_err = require_topology_certificate(
         source=source, seed_enabled=seed_enabled, debug_path=debug_path
     )
@@ -999,11 +1413,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         ctx.arm_dir / "quality_parse.json",
         {
             "quality": quality,
-            "debug": {
-                k: v
-                for k, v in dbg.items()
-                if k != "metrics"
-            },
+            "debug": {k: v for k, v in dbg.items() if k != "metrics"},
             "expansion_arm": applied_preset or expansion_arm,
             "env_snapshot": {
                 k: env.get(k)
@@ -1014,6 +1424,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                     "YAMS_BENCH_TOPOLOGY_SOURCE",
                     "YAMS_BENCH_TOPOLOGY_ENGINE",
                     "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
+                    "YAMS_BENCH_REQUIRE_STEADY_STATE",
+                    "YAMS_VECTOR_SEARCH_ENGINE",
                     "YAMS_SEARCH_ENGINE_VARIANT",
                 )
             },
@@ -1027,6 +1439,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         attributes={
             "binary": str(binary),
             "debug_file": str(debug_path),
+            "topology_cluster_file": str(topology_cluster_path),
             "expansion_arm": applied_preset or expansion_arm,
             "topology_source": source,
             "ablation": ablation,
@@ -1036,7 +1449,20 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             "certificate": dbg.get("certificate"),
             "dataset": env.get("YAMS_BENCH_DATASET"),
             "corpus_size": env.get("YAMS_BENCH_CORPUS_SIZE"),
+            "mixed_corpus": (
+                {
+                    "sources": list(mixed_corpus.sources),
+                    "manifest": str(mixed_corpus.manifest_path),
+                    "identity": str(mixed_corpus.identity_path),
+                    "documents": mixed_corpus.document_count,
+                    "queries": mixed_corpus.query_count,
+                }
+                if mixed_corpus is not None
+                else None
+            ),
         },
-        message="retrieval_quality completed" if proc.returncode == 0 else f"exit {proc.returncode}",
+        message="retrieval_quality completed"
+        if proc.returncode == 0
+        else f"exit {proc.returncode}",
         raw_path=str(debug_path) if debug_path.exists() else str(stdout_path),
     )
