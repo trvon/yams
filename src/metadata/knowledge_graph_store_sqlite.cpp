@@ -183,7 +183,11 @@ public:
 
     // Construct with an external pool (non-owning)
     SqliteKnowledgeGraphStore(ConnectionPool& pool, KnowledgeGraphStoreConfig cfg)
-        : cfg_(cfg), pool_(&pool) {
+        : SqliteKnowledgeGraphStore(pool, nullptr, cfg) {}
+
+    SqliteKnowledgeGraphStore(ConnectionPool& pool, ConnectionPool* readPool,
+                              KnowledgeGraphStoreConfig cfg)
+        : cfg_(cfg), pool_(&pool), readPool_(readPool) {
         initializeEntityCountSnapshot();
     }
 
@@ -2560,28 +2564,44 @@ public:
                         std::optional<std::string_view> kind,
                         std::optional<std::string_view> namePattern, std::size_t limit,
                         std::size_t offset) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::vector<SymbolMetadata>> {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<SymbolMetadata>> {
             std::ostringstream sql;
-            sql << "SELECT symbol_id, document_hash, file_path, symbol_name, qualified_name, "
-                << "kind, start_line, end_line, start_offset, end_offset, "
-                << "return_type, parameters, documentation FROM symbol_metadata WHERE 1=1";
+            sql << "SELECT sm.symbol_id, sm.document_hash, sm.file_path, sm.symbol_name, "
+                << "sm.qualified_name, sm.kind, sm.start_line, sm.end_line, sm.start_offset, "
+                << "sm.end_offset, sm.return_type, sm.parameters, sm.documentation "
+                << "FROM symbol_metadata AS sm WHERE 1=1";
 
             std::vector<std::string> binds;
-            if (filePath.has_value()) {
-                sql << " AND file_path LIKE ?";
-                binds.push_back("%" + std::string(filePath.value()) + "%");
+            const bool indexedFilePath = filePath.has_value() && filePath->size() >= 3;
+            const bool indexedName = namePattern.has_value() && namePattern->size() >= 3;
+            if (indexedFilePath) {
+                sql << " AND sm.symbol_id IN ("
+                    << "SELECT rowid FROM symbol_metadata_fts WHERE file_path LIKE ?)";
+                binds.push_back("%" + std::string(*filePath) + "%");
+            }
+            if (indexedName) {
+                sql << " AND sm.symbol_id IN ("
+                    << "SELECT rowid FROM symbol_metadata_fts WHERE symbol_name LIKE ? "
+                    << "UNION SELECT rowid FROM symbol_metadata_fts WHERE qualified_name LIKE ?)";
+                const std::string pattern = "%" + std::string(*namePattern) + "%";
+                binds.push_back(pattern);
+                binds.push_back(pattern);
             }
             if (kind.has_value()) {
-                sql << " AND kind = ?";
+                sql << " AND sm.kind = ?";
                 binds.push_back(std::string(kind.value()));
             }
-            if (namePattern.has_value()) {
-                sql << " AND (symbol_name LIKE ? OR qualified_name LIKE ?)";
-                std::string pattern = "%" + std::string(namePattern.value()) + "%";
+            if (filePath.has_value() && !indexedFilePath) {
+                sql << " AND sm.file_path LIKE ?";
+                binds.push_back("%" + std::string(*filePath) + "%");
+            }
+            if (namePattern.has_value() && !indexedName) {
+                sql << " AND (sm.symbol_name LIKE ? OR sm.qualified_name LIKE ?)";
+                const std::string pattern = "%" + std::string(*namePattern) + "%";
                 binds.push_back(pattern);
                 binds.push_back(pattern);
             }
-            sql << " ORDER BY qualified_name LIMIT ? OFFSET ?";
+            sql << " ORDER BY sm.qualified_name LIMIT ? OFFSET ?";
 
             auto stmtR = db.prepare(sql.str());
             if (!stmtR)
@@ -2650,39 +2670,40 @@ public:
         if (!pool_) {
             return;
         }
-        auto result = pool_->withConnection([&](Database& db) -> Result<KGEntityCountSnapshot> {
-            auto stmtR = db.prepare(R"(
+        auto result =
+            readPool()->withConnection([&](Database& db) -> Result<KGEntityCountSnapshot> {
+                auto stmtR = db.prepare(R"(
                 SELECT COUNT(*),
                        SUM(CASE WHEN extractor = 'symbol_extractor_v1' THEN 1 ELSE 0 END),
                        SUM(CASE WHEN extractor LIKE 'gliner%' THEN 1 ELSE 0 END)
                 FROM kg_doc_entities
             )");
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-            const bool hasRow = stepResult.value();
-            if (!hasRow)
-                return KGEntityCountSnapshot{};
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                const bool hasRow = stepResult.value();
+                if (!hasRow)
+                    return KGEntityCountSnapshot{};
 
-            KGEntityCountSnapshot snap{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
+                KGEntityCountSnapshot snap{stmt.getInt64(0), stmt.getInt64(1), stmt.getInt64(2)};
 
-            // Edge count
-            if (auto eStmtR = db.prepare("SELECT COUNT(*) FROM kg_edges")) {
-                auto eStmt = std::move(eStmtR).value();
-                if (auto eStep = eStmt.step(); eStep && eStep.value())
-                    snap.edgeCount = eStmt.getInt64(0);
-            }
-            // Alias count
-            if (auto aStmtR = db.prepare("SELECT COUNT(*) FROM kg_aliases")) {
-                auto aStmt = std::move(aStmtR).value();
-                if (auto aStep = aStmt.step(); aStep && aStep.value())
-                    snap.aliasCount = aStmt.getInt64(0);
-            }
-            return snap;
-        });
+                // Edge count
+                if (auto eStmtR = db.prepare("SELECT COUNT(*) FROM kg_edges")) {
+                    auto eStmt = std::move(eStmtR).value();
+                    if (auto eStep = eStmt.step(); eStep && eStep.value())
+                        snap.edgeCount = eStmt.getInt64(0);
+                }
+                // Alias count
+                if (auto aStmtR = db.prepare("SELECT COUNT(*) FROM kg_aliases")) {
+                    auto aStmt = std::move(aStmtR).value();
+                    if (auto aStep = aStmt.step(); aStep && aStep.value())
+                        snap.aliasCount = aStmt.getInt64(0);
+                }
+                return snap;
+            });
         if (result) {
             entityCount_.store(
                 static_cast<std::uint64_t>(std::max<std::int64_t>(result.value().totalCount, 0)),
@@ -3375,6 +3396,14 @@ makeSqliteKnowledgeGraphStore(const std::string& dbPath, const KnowledgeGraphSto
 Result<std::unique_ptr<KnowledgeGraphStore>>
 makeSqliteKnowledgeGraphStore(ConnectionPool& pool, const KnowledgeGraphStoreConfig& cfg) {
     auto store = std::unique_ptr<KnowledgeGraphStore>(new SqliteKnowledgeGraphStore(pool, cfg));
+    return store;
+}
+
+Result<std::unique_ptr<KnowledgeGraphStore>>
+makeSqliteKnowledgeGraphStore(ConnectionPool& writePool, ConnectionPool& readPool,
+                              const KnowledgeGraphStoreConfig& cfg) {
+    auto store = std::unique_ptr<KnowledgeGraphStore>(
+        new SqliteKnowledgeGraphStore(writePool, &readPool, cfg));
     return store;
 }
 

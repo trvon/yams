@@ -373,7 +373,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createKgEdgesUniqueIndex(),
             createMetadataCompositeIndexes(),
             createKgEdgesSemanticNeighborOrderIndex(),
-            optimizeDocumentsPathFtsUpdateTrigger()};
+            optimizeDocumentsPathFtsUpdateTrigger(),
+            createSymbolMetadataTrigramFts()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2792,6 +2793,58 @@ Migration YamsMetadataMigrations::optimizeDocumentsPathFtsUpdateTrigger() {
     m.downFunc = [recreateTrigger](Database& db) -> Result<void> {
         return recreateTrigger(db, false);
     };
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSymbolMetadataTrigramFts() {
+    Migration m;
+    m.version = 36;
+    m.name = "Add trigram FTS for symbol metadata lookup";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE VIRTUAL TABLE IF NOT EXISTS symbol_metadata_fts USING fts5(
+            file_path,
+            symbol_name,
+            qualified_name,
+            content='symbol_metadata',
+            content_rowid='symbol_id',
+            tokenize='trigram'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_ai AFTER INSERT ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(rowid, file_path, symbol_name, qualified_name)
+            VALUES (new.symbol_id, new.file_path, new.symbol_name, new.qualified_name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_ad AFTER DELETE ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(
+                symbol_metadata_fts, rowid, file_path, symbol_name, qualified_name
+            ) VALUES (
+                'delete', old.symbol_id, old.file_path, old.symbol_name, old.qualified_name
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_au AFTER UPDATE ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(
+                symbol_metadata_fts, rowid, file_path, symbol_name, qualified_name
+            ) VALUES (
+                'delete', old.symbol_id, old.file_path, old.symbol_name, old.qualified_name
+            );
+            INSERT INTO symbol_metadata_fts(rowid, file_path, symbol_name, qualified_name)
+            VALUES (new.symbol_id, new.file_path, new.symbol_name, new.qualified_name);
+        END;
+
+        INSERT INTO symbol_metadata_fts(symbol_metadata_fts) VALUES('rebuild');
+    )";
+
+    m.downSQL = R"(
+        DROP TRIGGER IF EXISTS symbol_metadata_au;
+        DROP TRIGGER IF EXISTS symbol_metadata_ad;
+        DROP TRIGGER IF EXISTS symbol_metadata_ai;
+        DROP TABLE IF EXISTS symbol_metadata_fts;
+    )";
 
     return m;
 }

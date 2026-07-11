@@ -1228,6 +1228,74 @@ TEST_CASE("KG Store: healthCheck uses read pool instead of the write pool",
     std::filesystem::remove(dbPath, ec);
 }
 
+TEST_CASE("KG Store: symbol lookup and readiness snapshot use the read pool",
+          "[unit][metadata][kg][contention]") {
+    const auto dbPath = tempDbPath("kg_store_symbol_read_pool_");
+
+    auto bootstrap = makeSqliteKnowledgeGraphStore(dbPath.string(), KnowledgeGraphStoreConfig{});
+    REQUIRE((bootstrap.has_value()));
+    bootstrap.value().reset();
+
+    ConnectionPoolConfig writeCfg;
+    writeCfg.minConnections = 1;
+    writeCfg.maxConnections = 1;
+    auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
+    REQUIRE((writePool->initialize().has_value()));
+
+    ConnectionPoolConfig readCfg;
+    readCfg.minConnections = 1;
+    readCfg.maxConnections = 1;
+    readCfg.readOnly = true;
+    auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
+    REQUIRE((readPool->initialize().has_value()));
+
+    auto heldWriteConnResult = writePool->acquire();
+    REQUIRE((heldWriteConnResult.has_value()));
+    auto heldWriteConn = std::move(heldWriteConnResult.value());
+
+    auto storeFuture = std::async(std::launch::async, [&]() {
+        return makeSqliteKnowledgeGraphStore(*writePool, *readPool, KnowledgeGraphStoreConfig{});
+    });
+    const auto storeStatus = storeFuture.wait_for(std::chrono::milliseconds(500));
+    heldWriteConn.reset();
+    REQUIRE((storeStatus == std::future_status::ready));
+    auto storeResult = storeFuture.get();
+    REQUIRE((storeResult.has_value()));
+    auto store = std::move(storeResult.value());
+
+    auto heldWriteForSymbolResult = writePool->acquire();
+    REQUIRE((heldWriteForSymbolResult.has_value()));
+    auto heldWriteForSymbol = std::move(heldWriteForSymbolResult.value());
+
+    auto symbolFuture = std::async(std::launch::async, [&]() {
+        return store->querySymbolMetadata(std::nullopt, std::nullopt, "Coordinator", 10, 0);
+    });
+    const auto symbolStatus = symbolFuture.wait_for(std::chrono::milliseconds(500));
+    heldWriteForSymbol.reset();
+    REQUIRE((symbolStatus == std::future_status::ready));
+    REQUIRE((symbolFuture.get().has_value()));
+
+    auto heldWriteForSnapshotResult = writePool->acquire();
+    REQUIRE((heldWriteForSnapshotResult.has_value()));
+    auto heldWriteForSnapshot = std::move(heldWriteForSnapshotResult.value());
+    auto snapshotFuture = std::async(std::launch::async, [&]() {
+        store->initializeEntityCountSnapshot();
+        return true;
+    });
+    const auto snapshotStatus = snapshotFuture.wait_for(std::chrono::milliseconds(500));
+    heldWriteForSnapshot.reset();
+    REQUIRE((snapshotStatus == std::future_status::ready));
+    CHECK(snapshotFuture.get());
+
+    store.reset();
+    readPool->shutdown();
+    writePool->shutdown();
+    readPool.reset();
+    writePool.reset();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 TEST_CASE("KG Store: write batch cleanup helpers commit scoped deletions", "[unit][metadata][kg]") {
     KGStoreRepoFixture fix;
 
