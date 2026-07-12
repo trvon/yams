@@ -790,6 +790,23 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
     return result;
 }
 
+ConfigResolver::SearchPipelinePolicy ConfigResolver::resolveSearchPipelinePolicy() {
+    SearchPipelinePolicy policy;
+    try {
+        namespace fs = std::filesystem;
+        const fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            const auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("search.candidate_pipeline"); it != kv.end()) {
+                policy.variant = std::string(trimView(it->second));
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for search candidate pipeline: {}", e.what());
+    }
+    return policy;
+}
+
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
@@ -837,6 +854,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.evidence_weight"); it != kv.end()) {
+                policy.evidenceWeight = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.route_scoring"); it != kv.end()) {
                 policy.routeScoring = std::string(trimView(it->second));

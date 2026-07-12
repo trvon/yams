@@ -1218,6 +1218,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_evidence_search_pipeline_exe = executable('catch2_evidence_search_pipeline',
+    files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
   catch2_tuning_slot_exe = executable('catch2_tuning_slot',
     files('unit/search/tuning_slot_catch2_test.cpp'),
@@ -3297,6 +3306,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'yams-1yq'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  test('evidence_search_pipeline', catch2_evidence_search_pipeline_exe,
+    suite: ['catch2', 'unit', 'search', 'evidence_pipeline'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
 #TuningSlot provenance tests

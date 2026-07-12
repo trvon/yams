@@ -360,6 +360,114 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK((cachedResponse.value().debugStats.at("topology_snapshot_cache_hit") == "1"));
 }
 
+TEST_CASE("SearchEngine topology shadow records a narrow proposal without changing global results",
+          "[search][topology][shadow][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    auto globalConfig = topologyRoutingTestConfig(false);
+    SearchEngine globalEngine(fix.repo, fix.vectorDb, generator, fix.kgStore, globalConfig);
+
+    auto shadowConfig = topologyRoutingTestConfig(true);
+    shadowConfig.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    shadowConfig.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Shadow;
+    shadowConfig.topologySparseDenseAlpha = 0.0F;
+    shadowConfig.topologyNarrowMinBoundaryMargin = 0.0F;
+    SearchEngine shadowEngine(fix.repo, fix.vectorDb, generator, fix.kgStore, shadowConfig);
+
+    SearchParams params;
+    params.limit = 4;
+    auto global = globalEngine.searchWithResponse("unmatched query", params);
+    auto shadow = shadowEngine.searchWithResponse("unmatched query", params);
+    REQUIRE(global.has_value());
+    REQUIRE(shadow.has_value());
+    REQUIRE(shadow.value().results.size() == global.value().results.size());
+    for (std::size_t index = 0; index < global.value().results.size(); ++index) {
+        CHECK(shadow.value().results[index].document.sha256Hash ==
+              global.value().results[index].document.sha256Hash);
+        CHECK(shadow.value().results[index].score == global.value().results[index].score);
+    }
+
+    const auto& debug = shadow.value().debugStats;
+    CHECK(debug.at("topology_vector_policy") == "shadow");
+    CHECK(debug.at("topology_shadow_evaluated") == "1");
+    CHECK(debug.at("topology_shadow_proposed_action") == "narrow");
+    CHECK(debug.at("topology_shadow_retained_candidates") == "2");
+    CHECK(debug.at("topology_shadow_removed_candidates") == "2");
+    CHECK(debug.at("topology_shadow_retained_candidate_doc_ids") == "y1\ty2");
+    CHECK(debug.at("topology_shadow_removed_candidate_doc_ids") == "x1\tx2");
+    CHECK(debug.at("topology_weak_query_applied") == "0");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_weak_query_added_candidates") == "0");
+    CHECK(debug.at("topology_vector_filter_applied") == "0");
+    CHECK(debug.at("topology_vector_partition_ann_applied") == "0");
+}
+
+TEST_CASE("Evidence candidates keep topology non-destructive under a shadow policy",
+          "[search][topology][evidence_pipeline][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    auto globalConfig = topologyRoutingTestConfig(false);
+    globalConfig.candidatePipelineVariant = SearchEngineConfig::CandidatePipelineVariant::Evidence;
+    SearchEngine globalEngine(fix.repo, fix.vectorDb, generator, fix.kgStore, globalConfig);
+
+    auto evidenceConfig = topologyRoutingTestConfig(true);
+    evidenceConfig.candidatePipelineVariant =
+        SearchEngineConfig::CandidatePipelineVariant::Evidence;
+    evidenceConfig.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    evidenceConfig.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Shadow;
+    evidenceConfig.topologySparseDenseAlpha = 0.0F;
+    evidenceConfig.topologyNarrowMinBoundaryMargin = 0.0F;
+    SearchEngine evidenceEngine(fix.repo, fix.vectorDb, generator, fix.kgStore, evidenceConfig);
+
+    SearchParams params;
+    params.limit = 4;
+    auto global = globalEngine.searchWithResponse("unmatched query", params);
+    auto evidence = evidenceEngine.searchWithResponse("unmatched query", params);
+    REQUIRE(global.has_value());
+    REQUIRE(evidence.has_value());
+
+    std::vector<std::string> globalHashes;
+    std::vector<std::string> evidenceHashes;
+    for (const auto& result : global.value().results) {
+        globalHashes.push_back(result.document.sha256Hash);
+    }
+    for (const auto& result : evidence.value().results) {
+        evidenceHashes.push_back(result.document.sha256Hash);
+    }
+    std::ranges::sort(globalHashes);
+    std::ranges::sort(evidenceHashes);
+    CHECK(evidenceHashes == globalHashes);
+
+    const auto& debug = evidence.value().debugStats;
+    CHECK(debug.at("candidate_pipeline_variant") == "evidence");
+    CHECK(debug.at("topology_vector_policy") == "shadow");
+    CHECK(debug.at("topology_weak_query_applied") == "0");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_vector_filter_applied") == "0");
+    CHECK(debug.at("topology_vector_partition_ann_applied") == "0");
+    CHECK(std::stoull(debug.at("candidate_pipeline_topology_annotated_candidates")) > 0);
+}
+
 TEST_CASE("Hybrid topology routing does not copy unrelated lexical hits into vector narrowing",
           "[search][topology][narrowing][catch2]") {
     TopologySearchFixture fix;
@@ -701,6 +809,48 @@ TEST_CASE("SearchEngine stage trace reports reranker flags as booleans",
     CHECK((debug.at("trace_turboquant_rerank_applied") == "0"));
     REQUIRE(debug.contains("trace_rerank_guard_score_gap"));
     CHECK((debug.at("trace_rerank_guard_score_gap") == "0.000000"));
+}
+
+TEST_CASE("SearchEngine keeps classic frontend while opting into evidence candidates",
+          "[search][evidence_pipeline][catch2]") {
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.enableTieredExecution = false;
+    config.candidatePipelineVariant = SearchEngineConfig::CandidatePipelineVariant::Evidence;
+    config.textWeight = 1.0F;
+    config.simeonTextWeight = 0.0F;
+    config.pathTreeWeight = 0.0F;
+    config.kgWeight = 0.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.tagWeight = 0.0F;
+    config.metadataWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 2;
+    auto response = engine.searchWithResponse("alpha", params);
+
+    REQUIRE(response);
+    REQUIRE(response.value().results.size() == 2);
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("search_pipeline_name") == "classic");
+    CHECK(debug.at("candidate_pipeline_variant") == "evidence");
+    CHECK(std::stoull(debug.at("candidate_pipeline_input_components")) > 0);
+    CHECK(std::stoull(debug.at("candidate_pipeline_aggregated_candidates")) >=
+          response.value().results.size());
+    CHECK(debug.at("candidate_pipeline_topology_annotated_candidates") == "0");
 }
 
 TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",

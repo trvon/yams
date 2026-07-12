@@ -70,6 +70,11 @@ public:
         EmbeddingChunkingPolicy chunking{};
     };
 
+    struct SearchPipelinePolicy {
+        // classic | evidence
+        std::optional<std::string> variant;
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
         // augment | narrow
@@ -83,6 +88,7 @@ public:
         std::optional<std::size_t> maxDocs;
         std::optional<std::size_t> maxDocsPerCluster;
         std::optional<float> medoidBoost;
+        std::optional<float> evidenceWeight;
         std::optional<std::string> routeScoring;
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
@@ -413,6 +419,14 @@ public:
     static EmbeddingDispatchPolicy resolveEmbeddingDispatchPolicy();
 
     /**
+     * Resolve the opt-in candidate pipeline implementation.
+     *
+     * Config key: search.candidate_pipeline = classic|evidence
+     * Classic remains the product default. No environment overlay is provided.
+     */
+    static SearchPipelinePolicy resolveSearchPipelinePolicy();
+
+    /**
      * @brief Resolve topology-aware routing policy from config file.
      *
      * Reads [search.topology] keys. Callers apply these as defaults, then
@@ -421,7 +435,7 @@ public:
      *
      * Config keys:
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = augment|narrow
+     * - search.topology.vector_policy = augment|narrow|shadow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
@@ -429,6 +443,7 @@ public:
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
      * - search.topology.medoid_boost = float
+     * - search.topology.evidence_weight = float in [0,1]
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float

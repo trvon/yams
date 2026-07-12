@@ -339,7 +339,13 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyMaxSeedDocuments == 32U);
     CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
     CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
+              SearchEngineConfig::TopologyVectorPolicy::Shadow)) == "shadow");
+    CHECK(cfg.candidatePipelineVariant == SearchEngineConfig::CandidatePipelineVariant::Classic);
+    CHECK(std::string_view(SearchEngineConfig::candidatePipelineVariantToString(
+              SearchEngineConfig::CandidatePipelineVariant::Evidence)) == "evidence");
     CHECK(cfg.topologyMaxDocs == 64U);
+    CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
     CHECK(cfg.symbolRank == true);
@@ -349,13 +355,14 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.rerankBlendWeight == Approx(0.30f));
 }
 
-TEST_CASE("SearchEngineConfig preserves typed topology policy across tuning",
+TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
           "[search][config][topology][catch2]") {
     SearchEngineConfig tuned;
     tuned.textWeight = 0.25F;
 
     SearchEngineConfig configured;
     configured.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    configured.candidatePipelineVariant = SearchEngineConfig::CandidatePipelineVariant::Evidence;
     configured.enableTopologyWeakQueryRouting = true;
     configured.topologyMaxClusters = 3;
     configured.topologyMinClusters = 2;
@@ -379,10 +386,11 @@ TEST_CASE("SearchEngineConfig preserves typed topology policy across tuning",
     configured.topologySidecarFusionRescueMinScore = 0.3F;
     configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
 
-    tuned.applyTopologyPolicyFrom(configured);
+    tuned.applyExecutionPolicyFrom(configured);
 
     CHECK(tuned.textWeight == Approx(0.25F));
     CHECK(tuned.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(tuned.candidatePipelineVariant == SearchEngineConfig::CandidatePipelineVariant::Evidence);
     CHECK(tuned.enableTopologyWeakQueryRouting);
     CHECK(tuned.topologyMaxClusters == 3);
     CHECK(tuned.topologyMinClusters == 2);

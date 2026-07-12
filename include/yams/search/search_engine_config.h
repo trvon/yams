@@ -124,6 +124,24 @@ struct SearchEngineConfig {
     bool enableParallelExecution = true;
     std::chrono::milliseconds componentTimeout = std::chrono::milliseconds(0);
 
+    /// Candidate aggregation/fusion implementation. Classic remains the product baseline;
+    /// Evidence enables the staged, no-invent candidate pipeline for controlled evaluation.
+    enum class CandidatePipelineVariant {
+        Classic,
+        Evidence,
+    } candidatePipelineVariant = CandidatePipelineVariant::Classic;
+
+    [[nodiscard]] static constexpr const char*
+    candidatePipelineVariantToString(CandidatePipelineVariant variant) noexcept {
+        switch (variant) {
+            case CandidatePipelineVariant::Classic:
+                return "classic";
+            case CandidatePipelineVariant::Evidence:
+                return "evidence";
+        }
+        return "classic";
+    }
+
     bool enableTieredExecution = true;
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
@@ -158,10 +176,12 @@ struct SearchEngineConfig {
     /// How routed topology members interact with the global vector retriever.
     /// Augment preserves the bounded ANN leg and unions query-ranked routed members.
     /// Narrow filters Vec0 ANN traversal by routed cluster membership. Other vector engines
-    /// post-filter their bounded global results. Both paths preserve global vector fallback.
+    /// post-filter their bounded global results. Shadow records the proposed narrowing projection
+    /// while returning the unchanged global vector leg.
     enum class TopologyVectorPolicy {
         Augment,
         Narrow,
+        Shadow,
     } topologyVectorPolicy = TopologyVectorPolicy::Augment;
 
     [[nodiscard]] static constexpr const char*
@@ -171,6 +191,8 @@ struct SearchEngineConfig {
                 return "augment";
             case TopologyVectorPolicy::Narrow:
                 return "narrow";
+            case TopologyVectorPolicy::Shadow:
+                return "shadow";
         }
         return "augment";
     }
@@ -210,6 +232,9 @@ struct SearchEngineConfig {
     size_t topologyMaxDocs = 64;
     size_t topologyMaxDocsPerCluster = 0;
     float topologyMedoidBoost = 0.05f;
+    /// Maximum additive score evidence from an admitted topology membership. Used only by the
+    /// opt-in evidence candidate pipeline; classic medoid/routing behavior is unchanged.
+    float topologyEvidenceWeight = 0.02f;
     float topologySparseDenseAlpha = 0.5f;
     float topologyMinRouteScore = 0.0f;
     bool topologyMedoidOnlyExpansion = false;
@@ -508,6 +533,7 @@ struct SearchEngineConfig {
         topologyMaxDocs = source.topologyMaxDocs;
         topologyMaxDocsPerCluster = source.topologyMaxDocsPerCluster;
         topologyMedoidBoost = source.topologyMedoidBoost;
+        topologyEvidenceWeight = source.topologyEvidenceWeight;
         topologySparseDenseAlpha = source.topologySparseDenseAlpha;
         topologyMinRouteScore = source.topologyMinRouteScore;
         topologyMedoidOnlyExpansion = source.topologyMedoidOnlyExpansion;
@@ -517,6 +543,13 @@ struct SearchEngineConfig {
         topologyGraphVectorSeedProbe = source.topologyGraphVectorSeedProbe;
         topologySidecarFusionRescueSlots = source.topologySidecarFusionRescueSlots;
         topologySidecarFusionRescueMinScore = source.topologySidecarFusionRescueMinScore;
+    }
+
+    /// Reapply operator-selected execution policies after a corpus tuner replaces relevance
+    /// weights. These switches define which implementation runs and are not tuning outputs.
+    void applyExecutionPolicyFrom(const SearchEngineConfig& source) noexcept {
+        applyTopologyPolicyFrom(source);
+        candidatePipelineVariant = source.candidatePipelineVariant;
     }
 
     // Per-query multi-armed bandit arm selections. When non-empty, the

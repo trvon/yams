@@ -1,6 +1,7 @@
 #include <yams/search/search_engine.h>
 
 #include "../../include/yams/search/classic_search_pipeline.h"
+#include "../../include/yams/search/evidence_search_pipeline.h"
 #include <yams/search/bandit_reward.h>
 
 #include <spdlog/spdlog.h>
@@ -1222,6 +1223,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     vector::VectorSearchDiagnostics vectorSearchDiagnostics;
     vector::VectorSearchDiagnostics topologyMemberDiagnostics;
     std::vector<ComponentResult> topologyPrecomputedVectorResults;
+    TopologyEvidenceByCandidate topologyCandidateEvidence;
     bool weakQueryFanoutBoostApplied = false;
     size_t effectiveVectorMaxResults = 0;
     size_t effectiveEntityVectorMaxResults = 0;
@@ -1229,6 +1231,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (tuner_) {
         workingConfig = tuner_->getConfig();
+        workingConfig.applyExecutionPolicyFrom(config_);
     }
 
     // Snapshot the per-query search execution context once so the tuner
@@ -2041,7 +2044,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologyAssistReq.queryEmbedding = queryEmbedding;
             topologyAssistReq.metadataRepo = metadataRepo_;
             topologyAssistReq.kgStore = kgStore_;
-            topologyAssistReq.memberReranker = topologyMemberReranker;
+            topologyAssistReq.memberReranker =
+                workingConfig.candidatePipelineVariant ==
+                        SearchEngineConfig::CandidatePipelineVariant::Evidence
+                    ? TopologyMemberReranker{}
+                    : topologyMemberReranker;
             topologyAssistReq.snapshotCache = topologySnapshotCache_;
             topologyAssistReq.expectedTopologyEpoch = freshness.topologyEpoch;
             topologyAssistReq.vectorSeedHashes = std::move(vectorSeedHashes);
@@ -2053,13 +2060,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologySkipReason = topologyAssist.skipReason;
             topologyWeakQueryRoutedClusters = topologySession.routedClusters;
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
-            topologyMedoidHashes = topologySession.medoidHashes;
+            const bool topologyVectorShadow =
+                workingConfig.topologyVectorPolicy ==
+                    SearchEngineConfig::TopologyVectorPolicy::Shadow ||
+                workingConfig.candidatePipelineVariant ==
+                    SearchEngineConfig::CandidatePipelineVariant::Evidence;
+            if (workingConfig.candidatePipelineVariant ==
+                SearchEngineConfig::CandidatePipelineVariant::Evidence) {
+                topologyCandidateEvidence = deriveTopologyCandidateEvidence(
+                    topologySession, workingConfig.topologyEvidenceWeight);
+            }
+            if (!topologyVectorShadow) {
+                topologyMedoidHashes = topologySession.medoidHashes;
+            }
             const bool topologyVectorAugmentation =
-                topologySession.narrowApplied &&
+                !topologyVectorShadow && topologySession.narrowApplied &&
                 workingConfig.topologyVectorPolicy ==
                     SearchEngineConfig::TopologyVectorPolicy::Augment;
             const bool topologyVectorFilterEligible =
-                topologySession.narrowApplied &&
+                !topologyVectorShadow && topologySession.narrowApplied &&
                 workingConfig.topologyVectorPolicy ==
                     SearchEngineConfig::TopologyVectorPolicy::Narrow &&
                 !topologySession.routeAllowedDocumentHashes.empty();
@@ -2067,7 +2086,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 topologyVectorFilterEligible && vectorDb_ &&
                 vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::Vec0L2;
             topologyWeakQueryNarrowApplied = false;
-            topologyWeakQueryRoutingApplied = topologySession.applied;
+            topologyWeakQueryRoutingApplied = topologySession.applied && !topologyVectorShadow;
             setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
                      SearchEngineConfig::topologyVectorPolicyToString(
                          workingConfig.topologyVectorPolicy));
@@ -2077,8 +2096,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 response.debugStats["topology_vector_seeds_added"] =
                     std::to_string(topologyAssist.vectorSeedsAdded);
             }
-            for (const auto& hash : topologyWeakQueryAddedCandidateHashes) {
-                tier2Candidates.insert(hash);
+            if (!topologyVectorShadow) {
+                for (const auto& hash : topologyWeakQueryAddedCandidateHashes) {
+                    tier2Candidates.insert(hash);
+                }
             }
             auto topologyRouteAllowedDocuments =
                 std::make_shared<const std::unordered_set<std::string>>(
@@ -2172,7 +2193,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      std::to_string(vectorSearchDistanceEvaluationBudget));
 
             recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
-                                       topologySession, topologySkipReason, tier2Candidates.size());
+                                       topologySession, topologySkipReason, tier2Candidates.size(),
+                                       topologyVectorShadow);
             setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,
                          topologyWeakQueryNarrowApplied);
 
@@ -2206,6 +2228,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::size_t topologyVectorFilterRemoved = 0;
             bool topologyVectorPartitionAnnApplied = false;
             bool topologyVectorPartitionAnnFallback = false;
+            std::vector<std::string> topologyShadowRetainedDocIds;
+            std::vector<std::string> topologyShadowRemovedDocIds;
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
                 response.debugStats["topology_sidecar_vector_candidates"] = "0";
 
@@ -2219,9 +2243,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      effectiveVectorMaxResults, &queryVectorWithRelaxedRetry,
                      &vectorSearchDiagnostics, topologyAugmentation, topologyRouteAllowedDocuments,
                      topologyVectorFilterEligible, topologyVectorPartitionAnnEligible,
-                     &topologyVectorFilterApplied, &topologyVectorFilterFallback,
-                     &topologyVectorFilterMatched, &topologyVectorFilterRemoved,
-                     &topologyVectorPartitionAnnApplied, &topologyVectorPartitionAnnFallback]() {
+                     topologyVectorShadow, &topologyVectorFilterApplied,
+                     &topologyVectorFilterFallback, &topologyVectorFilterMatched,
+                     &topologyVectorFilterRemoved, &topologyVectorPartitionAnnApplied,
+                     &topologyVectorPartitionAnnFallback, &topologyShadowRetainedDocIds,
+                     &topologyShadowRemovedDocIds]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         Result<std::vector<ComponentResult>> results = [&]() {
                             if (topologyVectorPartitionAnnEligible) {
@@ -2249,6 +2275,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                                effectiveVectorMaxResults, nullptr,
                                                                &vectorSearchDiagnostics);
                         }();
+                        if (results && topologyVectorShadow &&
+                            !topologyRouteAllowedDocuments->empty()) {
+                            const auto globalDocIds = collectUniqueComponentDocIds(results.value());
+                            auto projected = detail::filterVectorResultsByAllowedDocuments(
+                                results.value(), *topologyRouteAllowedDocuments);
+                            topologyShadowRetainedDocIds =
+                                collectUniqueComponentDocIds(projected.results);
+                            topologyShadowRemovedDocIds =
+                                setDifferenceIds(globalDocIds, topologyShadowRetainedDocIds);
+                        }
                         if (results && topologyVectorFilterEligible &&
                             !topologyVectorPartitionAnnEligible) {
                             auto filtered = detail::filterVectorResultsByAllowedDocuments(
@@ -2312,6 +2348,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                          topologyVectorPartitionAnnApplied);
             setDebugBool(response.debugStats, metrics::kTopologyVectorPartitionAnnFallback,
                          topologyVectorPartitionAnnFallback);
+            setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidates,
+                     std::to_string(topologyShadowRetainedDocIds.size()));
+            setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidates,
+                     std::to_string(topologyShadowRemovedDocIds.size()));
+            setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidateDocIds,
+                     joinWithTab(topologyShadowRetainedDocIds));
+            setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidateDocIds,
+                     joinWithTab(topologyShadowRemovedDocIds));
             traceCollector.recordStageCounter("vector", "topology_filter_applied",
                                               topologyVectorFilterApplied ? 1 : 0);
             traceCollector.recordStageCounter("vector", "topology_filter_fallback",
@@ -2940,6 +2984,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     response.debugStats["fusion_strategy"] =
         SearchEngineConfig::fusionStrategyToString(workingConfig.fusionStrategy);
+    setDebug(response.debugStats, metrics::kCandidatePipelineVariant,
+             SearchEngineConfig::candidatePipelineVariantToString(
+                 workingConfig.candidatePipelineVariant));
     response.debugStats["fusion_adaptive_applied"] = adaptiveFusionApplied ? "1" : "0";
     response.debugStats["search_tuner_converged"] = tunerConvergedForFusion ? "1" : "0";
     // Joins per-query traces back to the active simeon encoder recipe (env
@@ -3023,9 +3070,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     ResultFusion fusion(workingConfig);
+    const auto fuseCandidatePool =
+        [&](const std::vector<ComponentResult>& components,
+            bool recordEvidenceTrace) -> Result<std::vector<yams::metadata::SearchResult>> {
+        if (workingConfig.candidatePipelineVariant !=
+            SearchEngineConfig::CandidatePipelineVariant::Evidence) {
+            return fusion.fuse(components);
+        }
+
+        EvidenceSearchPipeline evidencePipeline;
+        auto evidenceResult = evidencePipeline.execute(components, topologyCandidateEvidence,
+                                                       workingConfig, workingConfig.maxResults);
+        if (!evidenceResult) {
+            return Error{evidenceResult.error().code, evidenceResult.error().message};
+        }
+        if (recordEvidenceTrace) {
+            const auto& trace = evidenceResult.value().trace;
+            setDebug(response.debugStats, metrics::kCandidatePipelineInputComponents,
+                     std::to_string(trace.inputComponents));
+            setDebug(response.debugStats, metrics::kCandidatePipelineAggregatedCandidates,
+                     std::to_string(trace.aggregatedCandidates));
+            setDebug(response.debugStats, metrics::kCandidatePipelineFusedCandidates,
+                     std::to_string(trace.fusedCandidates));
+            setDebug(response.debugStats, metrics::kCandidatePipelineFinalCandidates,
+                     std::to_string(trace.finalCandidates));
+            setDebug(response.debugStats, metrics::kCandidatePipelineTopologyAnnotatedCandidates,
+                     std::to_string(trace.topologyAnnotatedCandidates));
+        }
+        return std::move(evidenceResult.value().results);
+    };
+
     {
-        YAMS_ZONE_SCOPED_N("fusion::results");
-        response.results = fusion.fuse(allComponentResults);
+        YAMS_ZONE_SCOPED_N("fusion::candidate_pipeline");
+        auto fused = fuseCandidatePool(allComponentResults, true);
+        if (!fused) {
+            return Error{fused.error().code, fused.error().message};
+        }
+        response.results = std::move(fused.value());
     }
     if (!response.results.empty()) {
         postFusionSnapshot = response.results;
@@ -3065,7 +3146,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             graphlessComponentResults.push_back(comp);
         }
         if (graphlessComponentResults.size() != allComponentResults.size()) {
-            graphlessPostFusionSnapshot = fusion.fuse(graphlessComponentResults);
+            auto graphlessFused = fuseCandidatePool(graphlessComponentResults, false);
+            if (!graphlessFused) {
+                return Error{graphlessFused.error().code, graphlessFused.error().message};
+            }
+            graphlessPostFusionSnapshot = std::move(graphlessFused.value());
         } else {
             graphlessPostFusionSnapshot = postFusionSnapshot;
         }

@@ -1,0 +1,92 @@
+{
+  "name": "search_evidence_pipeline_multicorp",
+  "description": "Single-index generalized-memory comparison of classic fusion, staged evidence fusion, and non-destructive topology membership evidence.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "classic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled"
+    },
+    "params": {
+      "datasets": ["scifact", "nfcorpus"],
+      "documents_per_dataset": 2000,
+      "queries_per_dataset": 50,
+      "topk": 10,
+      "topology_mode": "disabled",
+      "require_steady_state": true
+    }
+  },
+  "arms": [
+    {
+      "name": "classic",
+      "factors": { "candidate_pipeline": "classic" },
+      "params": { "candidate_pipeline": "classic" },
+      "env": { "YAMS_BENCH_CANDIDATE_PIPELINE": "classic" }
+    },
+    {
+      "name": "evidence",
+      "factors": { "candidate_pipeline": "evidence", "topology": "off" },
+      "params": { "candidate_pipeline": "evidence", "topology_mode": "disabled" },
+      "env": { "YAMS_BENCH_CANDIDATE_PIPELINE": "evidence" }
+    },
+    {
+      "name": "evidence_topology",
+      "factors": {
+        "candidate_pipeline": "evidence",
+        "topology": "candidate_evidence"
+      },
+      "params": {
+        "candidate_pipeline": "evidence",
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow"
+      },
+      "env": {
+        "YAMS_BENCH_CANDIDATE_PIPELINE": "evidence",
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "candidate_pre_fusion_recall",
+        "candidate_post_fusion_recall",
+        "returned_trace_recall",
+        "ranking_loss_query_rate",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_metrics": ["mrr", "candidate_pre_fusion_recall", "returned_trace_recall"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "candidate_pre_fusion_recall",
+      "candidate_post_fusion_recall",
+      "returned_trace_recall",
+      "ranking_loss_query_rate",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ]
+  }
+}

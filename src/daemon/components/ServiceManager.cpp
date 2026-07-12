@@ -14,11 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
-#include <sstream>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <yams/common/fs_utils.h>
@@ -3141,10 +3138,27 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
                      "successfully",
                      walSize);
     } else {
-        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; leaving WAL/SHM in "
-                     "place for a later retry",
-                     cpR.error().message);
+        const auto message = cpR.error().message;
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}", message);
         tempDb->close();
+        if (message.find("malformed") != std::string::npos ||
+            message.find("corrupt") != std::string::npos) {
+            spdlog::warn("[ServiceManager] Removing malformed stale WAL/SHM sidecars; "
+                         "metadata DB will continue from its last checkpoint");
+            for (const auto& suffix : {"-wal", "-shm"}) {
+                std::error_code sidecarEc;
+                const auto sidecarPath = std::filesystem::path(dbPath.string() + suffix);
+                if (std::filesystem::exists(sidecarPath, sidecarEc)) {
+                    std::filesystem::remove(sidecarPath, sidecarEc);
+                    if (sidecarEc) {
+                        spdlog::debug("[ServiceManager] stale SQLite sidecar cleanup failed: {}",
+                                      sidecarEc.message());
+                    }
+                }
+            }
+        } else {
+            spdlog::warn("[ServiceManager] Leaving WAL/SHM in place for a later retry");
+        }
         return;
     }
     tempDb->close();
@@ -3278,6 +3292,26 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
     const auto pageCount = readPragma("PRAGMA page_count");
     const auto freePageCount = readPragma("PRAGMA freelist_count");
     const auto pageSize = readPragma("PRAGMA page_size");
+
+    if (const auto logicalSize = sqliteLogicalFileSize(vacuumDb.rawHandle());
+        logicalSize && *logicalSize > 0 && *logicalSize < dbSize) {
+        std::error_code resizeEc;
+        std::filesystem::resize_file(dbPath, *logicalSize, resizeEc);
+        if (!resizeEc) {
+            spdlog::info("[ServiceManager] auto-VACUUM truncated trailing unused bytes: {} MB -> "
+                         "{} MB",
+                         dbSize / kMiB, *logicalSize / kMiB);
+            if (auto checkpointR = vacuumDb.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+                !checkpointR) {
+                spdlog::debug("[ServiceManager] post-truncate WAL checkpoint skipped: {}",
+                              checkpointR.error().message);
+            }
+            vacuumDb.close();
+            return;
+        }
+        spdlog::debug("[ServiceManager] auto-VACUUM tail truncate skipped: {}", resizeEc.message());
+    }
+
     if (!pageCount || !freePageCount || !pageSize ||
         !shouldAutoVacuum(dbSize, *pageCount, *freePageCount, *pageSize)) {
         const auto reclaimableBytes = freePageCount && pageSize ? (*freePageCount * *pageSize) : 0;
@@ -3608,7 +3642,7 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     if (auto policy = ConfigResolver::resolveRerankerBackendPolicy(config_); policy.backend) {
         rerankerBackend = *policy.backend;
     }
-    if (const char* env = std::getenv("YAMS_SEARCH_RERANKER_BACKEND"); env && *env) {
+    if (const std::string env = getenvCopy("YAMS_SEARCH_RERANKER_BACKEND"); !env.empty()) {
         rerankerBackend = env;
         std::transform(rerankerBackend.begin(), rerankerBackend.end(), rerankerBackend.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

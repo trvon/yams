@@ -83,10 +83,11 @@ int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
     try {
         yams::cli::YamsCLI cli;
         std::vector<char*> argv;
-        argv.reserve(effectiveArgs.size());
+        argv.reserve(effectiveArgs.size() + 1);
         for (const auto& arg : effectiveArgs) {
             argv.push_back(const_cast<char*>(arg.c_str()));
         }
+        argv.push_back(nullptr);
 
         CaptureStdout capture;
 
@@ -97,7 +98,7 @@ int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
             oldIn = std::cin.rdbuf(in.rdbuf());
         }
 
-        rc = cli.run(static_cast<int>(argv.size()), argv.data());
+        rc = cli.run(static_cast<int>(effectiveArgs.size()), argv.data());
 
         if (oldIn) {
             std::cin.rdbuf(oldIn);
@@ -131,6 +132,8 @@ struct SearchGraphUxFixture {
     fs::path externalFile{root / "corpus" / "external.txt"};
     std::string agentToken{"agentux-" + root.filename().string()};
     std::string globalToken{"globalcorpus-" + root.filename().string()};
+    yams::test::ScopedEnvVar stateEnv{"XDG_STATE_HOME", stateDir.string()};
+    yams::test::ScopedEnvVar currentSessionEnv{"YAMS_SESSION_CURRENT", std::nullopt};
     yams::test::ScopedEnvVar ipcTimeout{"YAMS_IPC_TIMEOUT_MS", std::to_string(kSmokeIpcTimeoutMs)};
     yams::test::ScopedEnvVar streamChunkTimeout{"YAMS_STREAM_CHUNK_TIMEOUT_MS",
                                                 std::to_string(kSmokeIpcTimeoutMs)};
@@ -143,10 +146,10 @@ struct SearchGraphUxFixture {
         yams::test::write_file(sourceFile, "#include <iostream>\n"
                                            "int main() {\n"
                                            "    std::cout << \"" +
-                                           agentToken +
-                                           "\" << std::endl;\n"
-                                           "    return 0;\n"
-                                           "}\n");
+                                               agentToken +
+                                               "\" << std::endl;\n"
+                                               "    return 0;\n"
+                                               "}\n");
         yams::test::write_file(externalFile, globalToken + "\n");
     }
 };
@@ -187,31 +190,30 @@ TEST_CASE("IntegrationSmoke.SearchAndGraphHumanOutputIsAgentFriendly",
     std::string out;
     int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
-    rc = run_cli({"yams", "search", fixture.agentToken, "--type", "keyword", "--limit", "5"},
-                 &out);
+    rc = run_cli({"yams", "search", fixture.agentToken, "--type", "keyword", "--limit", "5"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("src/example.cpp") != std::string::npos);
-    CHECK(out.find(fixture.worktree.string()) == std::string::npos);
-    CHECK(out.find("-r blob_at_path") == std::string::npos);
-    CHECK(out.find("yams graph --explore \"src/example.cpp\"") != std::string::npos);
-    CHECK(out.find("Next: yams graph --explore \"src/example.cpp\"") != std::string::npos);
-    CHECK(out.find("Alt: yams graph --search \"*example*\"") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("src/example.cpp") != std::string::npos));
+    CHECK((out.find(fixture.worktree.string()) == std::string::npos));
+    CHECK((out.find("-r blob_at_path") == std::string::npos));
+    CHECK((out.find("yams graph --explore \"src/example.cpp\"") != std::string::npos));
+    CHECK((out.find("Next: yams graph --explore \"src/example.cpp\"") != std::string::npos));
+    CHECK((out.find("Alt: yams graph --search \"*example*\"") != std::string::npos));
 
     out.clear();
     rc = run_cli({"yams", "graph", "--name", "src/example.cpp", "--depth", "2"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("Path: src/example.cpp") != std::string::npos);
-    CHECK(out.find(fixture.worktree.string()) == std::string::npos);
-    CHECK(out.find("Graph data unavailable") != std::string::npos);
-    CHECK(out.find("not indexed yet") != std::string::npos);
-    CHECK(out.find("yams add \"src/example.cpp\" --sync") != std::string::npos);
-    CHECK(out.find("yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos);
-    CHECK(out.find("yams graph --search \"*example*\"") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("Path: src/example.cpp") != std::string::npos));
+    CHECK((out.find(fixture.worktree.string()) == std::string::npos));
+    CHECK((out.find("Graph data unavailable") != std::string::npos));
+    CHECK((out.find("not indexed yet") != std::string::npos));
+    CHECK((out.find("yams add \"src/example.cpp\" --sync") != std::string::npos));
+    CHECK((out.find("yams graph --name \"src/example.cpp\" --depth 2") != std::string::npos));
+    CHECK((out.find("yams graph --search \"*example*\"") != std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.SearchNextHintMatchesFirstRenderedResult",
@@ -233,25 +235,25 @@ TEST_CASE("IntegrationSmoke.SearchNextHintMatchesFirstRenderedResult",
     std::string out;
     int rc = run_cli({"yams", "add", "src/alpha.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
     rc = run_cli({"yams", "add", "src/beta.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
     rc = run_cli({"yams", "search", "shared-token", "--type", "keyword", "--limit", "5"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     const auto nextPos = out.find("\nNext: yams graph --explore ");
-    REQUIRE(nextPos != std::string::npos);
+    REQUIRE((nextPos != std::string::npos));
     const auto rendered = out.substr(0, nextPos);
     const auto firstLineEnd = rendered.find('\n');
-    REQUIRE(firstLineEnd != std::string::npos);
+    REQUIRE((firstLineEnd != std::string::npos));
     const std::string firstPath = rendered.substr(0, firstLineEnd);
-    CHECK(out.find("Next: yams graph --explore \"" + firstPath + "\"") != std::string::npos);
+    CHECK((out.find("Next: yams graph --explore \"" + firstPath + "\"") != std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
@@ -271,18 +273,18 @@ TEST_CASE("IntegrationSmoke.SearchNoResultsSuggestsScopeGrepAndIndexing",
     std::string out;
     int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
     rc = run_cli(
         {"yams", "search", "missing-agent-ux-token", "--type", "keyword", "--limit", "5", "--cwd"},
         &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("(no results)") != std::string::npos);
-    CHECK(out.find("Try: yams grep -F \"missing-agent-ux-token\" --cwd .") != std::string::npos);
-    CHECK(out.find("yams add . -r --include \"*.cpp,*.h,*.hpp\"") != std::string::npos);
-    CHECK(out.find("yams graph --search \"*missing-agent-ux-token*\"") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("(no results)") != std::string::npos));
+    CHECK((out.find("Try: yams grep -F \"missing-agent-ux-token\" --cwd .") != std::string::npos));
+    CHECK((out.find("yams add . -r --include \"*.cpp,*.h,*.hpp\"") != std::string::npos));
+    CHECK((out.find("yams graph --search \"*missing-agent-ux-token*\"") != std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.GraphNotFoundSuggestsIndexAndRetry", "[smoke][integrationsmoke]") {
@@ -302,12 +304,12 @@ TEST_CASE("IntegrationSmoke.GraphNotFoundSuggestsIndexAndRetry", "[smoke][integr
     std::string out;
     int rc = run_cli({"yams", "graph", "--name", "src/new_file.cpp", "--depth", "2"}, &out);
     INFO(out);
-    CHECK(rc != 0);
+    CHECK((rc != 0));
     CHECK(out.find("If this file is new, run: yams add \"src/new_file.cpp\" --sync") !=
           std::string::npos);
     CHECK(out.find("Then retry: yams graph --name \"src/new_file.cpp\" --depth 2") !=
           std::string::npos);
-    CHECK(out.find("yams graph --search \"*new_file*\"") != std::string::npos);
+    CHECK((out.find("yams graph --search \"*new_file*\"") != std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
@@ -327,15 +329,15 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
     std::string out;
     int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
     rc = run_cli({"yams", "grep", fixture.agentToken, "--regex-only", "--line-numbers"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("src/example.cpp") != std::string::npos);
-    CHECK(out.find(fixture.worktree.string()) == std::string::npos);
-    CHECK(out.find("[hint: yams graph --explore \"src/example.cpp\"]") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("src/example.cpp") != std::string::npos));
+    CHECK((out.find(fixture.worktree.string()) == std::string::npos));
+    CHECK((out.find("[hint: yams graph --explore \"src/example.cpp\"]") != std::string::npos));
     CHECK(out.find("Tip: Explore relationships with `yams graph --explore <symbol-or-file>`") !=
           std::string::npos);
 }
@@ -358,7 +360,7 @@ TEST_CASE("IntegrationSmoke.GrepIgnoresUnrelatedActiveSessionSelectors",
     std::string out;
     int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     writeSessionSelectors(fixture.stateDir, "other-project",
                           {(fixture.root / "somewhere-else" / "**/*").string()});
@@ -366,9 +368,9 @@ TEST_CASE("IntegrationSmoke.GrepIgnoresUnrelatedActiveSessionSelectors",
     out.clear();
     rc = run_cli({"yams", "grep", fixture.agentToken, "--regex-only"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("src/example.cpp") != std::string::npos);
-    CHECK(out.find("(no results)") == std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("src/example.cpp") != std::string::npos));
+    CHECK((out.find("(no results)") == std::string::npos));
 }
 
 TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand",
@@ -389,41 +391,41 @@ TEST_CASE("IntegrationSmoke.SearchAndGrepAreGlobalByDefaultAndCwdScopedOnDemand"
     std::string out;
     int rc = run_cli({"yams", "add", "src/example.cpp", "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     out.clear();
     rc = run_cli({"yams", "add", fixture.externalFile.string(), "--sync"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
 
     writeSessionSelectors(fixture.stateDir, "repo-session", {(fixture.worktree / "**/*").string()});
 
     out.clear();
-    rc = run_cli({"yams", "search", fixture.globalToken, "--type", "keyword", "--limit", "5"},
-                 &out);
+    rc =
+        run_cli({"yams", "search", fixture.globalToken, "--type", "keyword", "--limit", "5"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("external.txt") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("external.txt") != std::string::npos));
 
     out.clear();
     rc = run_cli({"yams", "grep", fixture.globalToken, "--regex-only"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("external.txt") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("external.txt") != std::string::npos));
 
     out.clear();
     rc = run_cli(
         {"yams", "search", fixture.globalToken, "--type", "keyword", "--limit", "5", "--cwd"},
         &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("external.txt") == std::string::npos);
-    CHECK(out.find("(no results)") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("external.txt") == std::string::npos));
+    CHECK((out.find("(no results)") != std::string::npos));
 
     out.clear();
     rc = run_cli({"yams", "grep", fixture.globalToken, "--regex-only", "--cwd"}, &out);
     INFO(out);
-    REQUIRE(rc == 0);
-    CHECK(out.find("external.txt") == std::string::npos);
-    CHECK(out.find("(no results)") != std::string::npos);
+    REQUIRE((rc == 0));
+    CHECK((out.find("external.txt") == std::string::npos));
+    CHECK((out.find("(no results)") != std::string::npos));
 }

@@ -218,7 +218,8 @@ void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& deb
 void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
-                                const std::string& skipReason, std::size_t totalCandidates) {
+                                const std::string& skipReason, std::size_t totalCandidates,
+                                bool shadowEvaluation) {
     auto& debug = response.debugStats;
     setDebug(debug, metrics::kTopologyRoutingMode,
              SearchEngineConfig::topologyRoutingModeToString(mode));
@@ -233,8 +234,9 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadAttempted, session.loadAttempted);
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadSucceeded, session.loadSucceeded);
     setDebugBool(debug, metrics::kTopologyArtifactAdmitted, session.artifactAdmitted);
-    setDebugBool(debug, metrics::kTopologyWeakQueryApplied, session.applied);
-    setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied, session.narrowApplied);
+    setDebugBool(debug, metrics::kTopologyWeakQueryApplied, session.applied && !shadowEvaluation);
+    setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied,
+                 session.narrowApplied && !shadowEvaluation);
     setDebug(debug, metrics::kTopologyWeakQuerySkipReason, skipReason);
     setDebug(debug, metrics::kTopologyWeakQueryRoutesRejected,
              std::to_string(session.routesRejected));
@@ -246,17 +248,26 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained, session.confidenceAbstained);
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
-             std::to_string(session.addedCandidates));
+             std::to_string(shadowEvaluation ? 0 : session.addedCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryDuplicateCandidates,
-             std::to_string(session.duplicateCandidates));
+             std::to_string(shadowEvaluation ? 0 : session.duplicateCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryStaleCandidates,
              std::to_string(session.staleCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
-             joinWithTab(session.addedCandidateHashes));
+             shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
     const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
                                              ? session.routedCandidateHashes
                                              : session.routeAllowedDocumentHashes;
+    const bool shadowEvaluated = shadowEvaluation && session.loadAttempted;
+    const char* shadowAction = "global";
+    if (shadowEvaluated && session.narrowApplied && !allowedCandidateHashes.empty()) {
+        shadowAction = "narrow";
+    } else if (shadowEvaluated && session.applied) {
+        shadowAction = "augment";
+    }
+    setDebugBool(debug, metrics::kTopologyShadowEvaluated, shadowEvaluated);
+    setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
              std::to_string(allowedCandidateHashes.size()));
     std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),

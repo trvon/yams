@@ -63,7 +63,8 @@ void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& deb
 void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
-                                const std::string& skipReason, std::size_t totalCandidates);
+                                const std::string& skipReason, std::size_t totalCandidates,
+                                bool shadowEvaluation = false);
 
 void recordTopologySidecarSurvivalDebug(std::unordered_map<std::string, std::string>& debug,
                                         const TopologySidecarSurvival& survival);

@@ -166,25 +166,25 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.includeDebugInfo = options.config.includeDebugInfo;
             {
                 const auto& tp = runtimeTuner->getParams();
-                spdlog::info(
-                    "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
-                    "(zoom={}, k={}, "
-                    "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
-                    "kg={:.2f}[{}], "
-                    "fusion={}, semantic_rescue={}[{}]@{:.4f})",
-                    tuningStateToString(runtimeTuner->currentState()),
-                    statsResult.value().usedOnlineOverlay,
-                    statsResult.value().reconciledComputedAtMs,
-                    SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                    runtimeTuner->getRrfK(), tp.weights.text.value,
-                    tuningLayerToString(tp.weights.text.source), tp.weights.simeonText.value,
-                    tuningLayerToString(tp.weights.simeonText.source), tp.weights.vector.value,
-                    tuningLayerToString(tp.weights.vector.source), tp.weights.kg.value,
-                    tuningLayerToString(tp.weights.kg.source),
-                    SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                    tp.semanticRescueSlots.value,
-                    tuningLayerToString(tp.semanticRescueSlots.source),
-                    cfg.semanticRescueMinVectorScore);
+                spdlog::info("SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                             "(zoom={}, k={}, "
+                             "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
+                             "kg={:.2f}[{}], "
+                             "fusion={}, semantic_rescue={}[{}]@{:.4f})",
+                             tuningStateToString(runtimeTuner->currentState()),
+                             statsResult.value().usedOnlineOverlay,
+                             statsResult.value().reconciledComputedAtMs,
+                             SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
+                             runtimeTuner->getRrfK(), tp.weights.text.value,
+                             tuningLayerToString(tp.weights.text.source),
+                             tp.weights.simeonText.value,
+                             tuningLayerToString(tp.weights.simeonText.source),
+                             tp.weights.vector.value, tuningLayerToString(tp.weights.vector.source),
+                             tp.weights.kg.value, tuningLayerToString(tp.weights.kg.source),
+                             SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                             tp.semanticRescueSlots.value,
+                             tuningLayerToString(tp.semanticRescueSlots.source),
+                             cfg.semanticRescueMinVectorScore);
             }
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
@@ -195,7 +195,7 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // Tuning owns relevance weights and result budgets. The topology policy is
     // explicitly selected through typed config and must survive replacement of
     // cfg by SearchTuner::getConfig().
-    cfg.applyTopologyPolicyFrom(options.config);
+    cfg.applyExecutionPolicyFrom(options.config);
 
     // Allow environment variable overrides for individual weights (for benchmarking)
     // These take precedence over tuning state weights and are pinned so that

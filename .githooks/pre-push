@@ -19,7 +19,7 @@ if [ "${YAMS_SKIP_PREPUSH_CI_GATE:-0}" != "1" ]; then
     "$REPO_ROOT/scripts/local-ci/pre-push-ci-gate.sh"
   fi
 else
-  echo "[pre-push] YAMS_SKIP_PREPUSH_CI_GATE=1; skipping Linux+macOS CI gate" >&2
+  echo "[pre-push] YAMS_SKIP_PREPUSH_CI_GATE=1; skipping host sanitizer CI gate" >&2
 fi
 
 if [ "${YAMS_PREPUSH_COVERAGE:-0}" = "1" ]; then

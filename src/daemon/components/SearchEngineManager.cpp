@@ -87,6 +87,9 @@ parseTopologyVectorPolicy(std::string raw) {
     if (raw == "narrow" || raw == "filter" || raw == "replace") {
         return Policy::Narrow;
     }
+    if (raw == "shadow" || raw == "observe" || raw == "calibrate") {
+        return Policy::Shadow;
+    }
     return std::nullopt;
 }
 } // namespace
@@ -393,6 +396,22 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
+    {
+        const auto pipelinePolicy = ConfigResolver::resolveSearchPipelinePolicy();
+        if (pipelinePolicy.variant) {
+            const auto variant = normalizeTopologyToken(*pipelinePolicy.variant);
+            using Variant = yams::search::SearchEngineConfig::CandidatePipelineVariant;
+            if (variant == "classic") {
+                opts.config.candidatePipelineVariant = Variant::Classic;
+            } else if (variant == "evidence") {
+                opts.config.candidatePipelineVariant = Variant::Evidence;
+            } else {
+                spdlog::warn("Ignoring unknown search.candidate_pipeline='{}'",
+                             *pipelinePolicy.variant);
+            }
+        }
+    }
+
     // Topology routing is opt-in. It selects query-ranked cluster members before the
     // vector stage; the typed vector policy decides whether they augment or narrow ANN.
     {
@@ -450,6 +469,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.medoidBoost) {
             opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
+        }
+        if (tp.evidenceWeight) {
+            opts.config.topologyEvidenceWeight = std::clamp(*tp.evidenceWeight, 0.0f, 1.0f);
         }
         if (tp.routeScoring) {
             if (auto mode = parseTopologyRouteScoringMode(*tp.routeScoring); mode.has_value()) {

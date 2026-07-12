@@ -560,10 +560,14 @@ void applyDeadSourceGates(const storage::CorpusStats& stats, TuningState state, 
         params.graphTextWeight = 0.0f;
         params.graphVectorWeight = 0.0f;
     }
-    // Absent KG: zero the kg fusion leg unless the caller explicitly seeded a
-    // graph override package (seedRuntimeConfig preserveExplicitGraph).
-    // Scientific alone must not clobber an explicit graph seed.
-    if (!stats.hasKnowledgeGraph() && !preserveExplicitGraph) {
+    // Absent KG, and SCIENTIFIC corpora without rich topology, zero the KG
+    // fusion leg unless the caller explicitly seeded a graph override package
+    // (seedRuntimeConfig preserveExplicitGraph). SCIENTIFIC is the flat
+    // BEIR-style text/vector profile; NER-only entity density must not
+    // implicitly resurrect graph scoring, but measured rich KG edge topology
+    // should still activate graph reranking.
+    if ((!stats.hasKnowledgeGraph() || (scientific && !stats.hasRichGraphTopology())) &&
+        !preserveExplicitGraph) {
         pinWeightZero(params.weights.kg);
         params.graphTextWeight = 0.0f;
         params.graphVectorWeight = 0.0f;

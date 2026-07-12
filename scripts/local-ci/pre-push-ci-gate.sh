@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # yams/scripts/local-ci/pre-push-ci-gate.sh
 #
-# Blocking pre-push CI gate. Requires Linux build+tests in smolvm and native
-# macOS build+tests on Darwin hosts before push proceeds. Use --self-test to
-# prove dispatch/host wiring without running the expensive build/test work.
+# Blocking pre-push CI gate. Runs host sanitizer builds (ASan+UBSan and TSan)
+# before push proceeds. Use --self-test to prove dispatch/host wiring without
+# running the expensive build/test work.
 
 set -euo pipefail
 
@@ -14,8 +14,8 @@ LOG_ROOT_DEFAULT="${REPO_ROOT}/build/local-ci/pre-push-ci-gate"
 LOG_ROOT="${LOG_ROOT_DEFAULT}"
 SELF_TEST=0
 DRY_RUN=0
-LINUX_ONLY=0
-MACOS_ONLY=0
+ASAN_ONLY=0
+TSAN_ONLY=0
 RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 usage() {
@@ -23,14 +23,14 @@ usage() {
 Usage: pre-push-ci-gate.sh [options]
 
 Runs the blocking pre-push CI gate:
-  1. Linux Debug build + unit/integration tests in smolvm.
-  2. Native macOS Debug build + unit/integration tests on Darwin hosts.
+  1. Native macOS ASan+UBSan Debug build + unit/integration tests.
+  2. Native macOS TSan Debug build + unit/integration tests.
 
 Options:
   --self-test    Verify gate dispatch without expensive builds.
   --dry-run      Print commands without executing them.
-  --linux-only   Run only the Linux smolvm lane.
-  --macos-only   Run only the native macOS lane.
+  --asan-only    Run only the ASan+UBSan host lane.
+  --tsan-only    Run only the TSan host lane.
   --log-root DIR Log directory (default: build/local-ci/pre-push-ci-gate)
   -h, --help     Show this help
 USAGE
@@ -50,12 +50,12 @@ while [ "$#" -gt 0 ]; do
 		DRY_RUN=1
 		shift
 		;;
-	--linux-only)
-		LINUX_ONLY=1
+	--asan-only)
+		ASAN_ONLY=1
 		shift
 		;;
-	--macos-only)
-		MACOS_ONLY=1
+	--tsan-only)
+		TSAN_ONLY=1
 		shift
 		;;
 	--log-root)
@@ -74,8 +74,8 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-if [ "${LINUX_ONLY}" -eq 1 ] && [ "${MACOS_ONLY}" -eq 1 ]; then
-	fail "--linux-only and --macos-only are mutually exclusive"
+if [ "${ASAN_ONLY}" -eq 1 ] && [ "${TSAN_ONLY}" -eq 1 ]; then
+	fail "--asan-only and --tsan-only are mutually exclusive"
 	exit 2
 fi
 
@@ -127,23 +127,22 @@ record_summary "- Host: $(uname -s)/$(uname -m)"
 record_summary "- Self-test: ${SELF_TEST}"
 record_summary ""
 
-linux_profile="linux-ci"
-macos_profile="ci"
+asan_profile="asan"
+tsan_profile="tsan"
 if [ "${SELF_TEST}" -eq 1 ]; then
-	linux_profile="smoke"
-	macos_profile="self-test"
+	asan_profile="self-test"
+	tsan_profile="self-test"
 fi
 
-if [ "${MACOS_ONLY}" -ne 1 ]; then
-	run_step "linux-smolvm-${linux_profile}" bash "${SCRIPT_DIR}/smolvm-lane.sh" --profile "${linux_profile}" --log-root "${LOG_ROOT}/smolvm"
-fi
-
-if [ "${LINUX_ONLY}" -ne 1 ]; then
-	if [ "$(uname -s)" != "Darwin" ]; then
-		fail "native macOS gate requires a Darwin host; rerun on macOS or pass --linux-only intentionally"
-		FAILURES+=("native-macos-unavailable (2)")
-	else
-		run_step "native-macos-${macos_profile}" bash "${SCRIPT_DIR}/native-macos-lane.sh" --profile "${macos_profile}" --log-root "${LOG_ROOT}/macos"
+if [ "$(uname -s)" != "Darwin" ]; then
+	fail "host sanitizer pre-push gate currently requires a Darwin host"
+	FAILURES+=("host-sanitizer-unavailable (2)")
+else
+	if [ "${TSAN_ONLY}" -ne 1 ]; then
+		run_step "native-macos-${asan_profile}" bash "${SCRIPT_DIR}/native-macos-lane.sh" --profile "${asan_profile}" --log-root "${LOG_ROOT}/asan"
+	fi
+	if [ "${ASAN_ONLY}" -ne 1 ]; then
+		run_step "native-macos-${tsan_profile}" bash "${SCRIPT_DIR}/native-macos-lane.sh" --profile "${tsan_profile}" --log-root "${LOG_ROOT}/tsan"
 	fi
 fi
 

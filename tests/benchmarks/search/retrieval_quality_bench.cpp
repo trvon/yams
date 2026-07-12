@@ -18,6 +18,7 @@
     YAMS_BENCH_ENABLE_GLINT=1         - Opt into Glint/GLiNER entity extraction on simeon runs
     YAMS_BENCH_ENABLE_ONNX_RERANK=1   - Opt into ONNX reranker on simeon runs
     YAMS_BENCH_TOPOLOGY_MODE=disabled|weak_query_only|hybrid_assist|rerank_only
+    YAMS_BENCH_CANDIDATE_PIPELINE=classic|evidence
                                           Write typed topology routing mode into isolated config
     YAMS_BENCH_TOPOLOGY_EXPANSION=clusters|graph_neighbors
                                           Cluster partition vs pure semantic_neighbor expansion
@@ -6313,6 +6314,7 @@ struct BenchFixture {
             bool useIsolatedBenchmarkConfig = true;
             const char* topologyModeEnv = std::getenv("YAMS_BENCH_TOPOLOGY_MODE");
             const char* topologyEngineEnv = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE");
+            const char* candidatePipelineEnv = std::getenv("YAMS_BENCH_CANDIDATE_PIPELINE");
             const bool writeTopologyEngineConfig = topologyEngineEnv && *topologyEngineEnv;
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
@@ -6565,6 +6567,10 @@ struct BenchFixture {
                         configOut << "embedding_dim = 768\n\n";
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    }
+                    if (candidatePipelineEnv && *candidatePipelineEnv) {
+                        configOut << "\n[search]\n";
+                        configOut << "candidate_pipeline = \"" << candidatePipelineEnv << "\"\n";
                     }
                     if ((topologyModeEnv && *topologyModeEnv) || writeTopologyRouteConfig) {
                         configOut << "\n[search.topology]\n";
@@ -8245,14 +8251,32 @@ struct BenchFixture {
             if (const char* raw = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE"); raw && *raw) {
                 topologyEngine = raw;
             }
-            auto rebuildResult = serviceManager->getTopologyManager().rebuildArtifacts(
-                "benchmark_topology_source_seed", false, {}, topologyEngine);
-            if (!rebuildResult) {
-                throw std::runtime_error("Failed to rebuild topology after benchmark source "
-                                         "seeding: " +
-                                         rebuildResult.error().message);
+            auto& topologyManager = serviceManager->getTopologyManager();
+            const auto rebuildDeadline = std::chrono::steady_clock::now() + 60s;
+            std::optional<yams::daemon::TopologyManager::RebuildStats> rebuildStats;
+            do {
+                if (topologyManager.isRebuildInProgress()) {
+                    std::this_thread::sleep_for(50ms);
+                    continue;
+                }
+                auto attempt = topologyManager.rebuildArtifacts("benchmark_topology_source_seed",
+                                                                false, {}, topologyEngine);
+                if (!attempt) {
+                    throw std::runtime_error("Failed to rebuild topology after benchmark source "
+                                             "seeding: " +
+                                             attempt.error().message);
+                }
+                if (!attempt.value().skipped) {
+                    rebuildStats = std::move(attempt.value());
+                    break;
+                }
+                std::this_thread::sleep_for(50ms);
+            } while (std::chrono::steady_clock::now() < rebuildDeadline);
+            if (!rebuildStats.has_value()) {
+                throw std::runtime_error(
+                    "Timed out waiting to publish benchmark topology snapshot");
             }
-            if (rebuildResult.value().skipped || !rebuildResult.value().stored) {
+            if (!rebuildStats->stored) {
                 throw std::runtime_error(
                     "Topology source benchmark rebuild did not publish a stored snapshot");
             }
@@ -8261,10 +8285,9 @@ struct BenchFixture {
                          std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
                              ? std::getenv("YAMS_BENCH_TOPOLOGY_SOURCE")
                              : "vector",
-                         rebuildResult.value().clustersBuilt,
-                         rebuildResult.value().membershipsBuilt, rebuildResult.value().snapshotId);
-            auto exportResult =
-                exportTopologyClusters(*serviceManager, rebuildResult.value().snapshotId);
+                         rebuildStats->clustersBuilt, rebuildStats->membershipsBuilt,
+                         rebuildStats->snapshotId);
+            auto exportResult = exportTopologyClusters(*serviceManager, rebuildStats->snapshotId);
             if (!exportResult) {
                 throw std::runtime_error("Failed to export topology cluster composition: " +
                                          exportResult.error().message);

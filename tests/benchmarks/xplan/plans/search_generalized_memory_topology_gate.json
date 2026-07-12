@@ -1,6 +1,6 @@
 {
   "name": "search_generalized_memory_topology_gate",
-  "description": "Single-index generalized-memory gate: SciFact and NF-Corpus coexist in one daemon; compare global ANN, topology-filtered ANN traversal at the same budget, and additive exact topology-vector augmentation with per-cluster overlap and explicit quality/cost accounting.",
+  "description": "Single-index generalized-memory gate: SciFact and NF-Corpus coexist in one daemon; compare global ANN, non-mutating topology shadow proposals, topology-filtered ANN traversal at the same budget, and additive exact topology-vector augmentation with per-cluster overlap and explicit quality/cost accounting.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -45,6 +45,34 @@
       "env": {
         "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
         "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "32"
+      }
+    },
+    {
+      "name": "shadow_margin020_min1",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "ann_candidate_budget": 32,
+        "vector_result_budget": 32,
+        "adaptive_routing": true,
+        "confidence_margin": 0.2,
+        "min_clusters": 1
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
+        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "32"
+      },
+      "params": {
+        "topology_vector_policy": "shadow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 16,
+        "max_docs_per_cluster": 8,
+        "max_seed_documents": 16,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.2,
+        "min_route_score": 0.15
       }
     },
     {
@@ -157,6 +185,10 @@
         "topology_vector_filter_removed_avg",
         "topology_vector_partition_ann_rate",
         "topology_vector_partition_ann_fallback_rate",
+        "topology_shadow_evaluation_rate",
+        "topology_shadow_narrow_proposal_rate",
+        "topology_shadow_retained_candidates_avg",
+        "topology_shadow_removed_candidates_avg",
         "vector_candidate_work_budget_avg",
         "vector_distance_evaluation_budget_avg",
         "vector_ann_candidate_budget_actual_avg",
@@ -247,6 +279,10 @@
       "topology_vector_filter_removed_avg",
       "topology_vector_partition_ann_rate",
       "topology_vector_partition_ann_fallback_rate",
+      "topology_shadow_evaluation_rate",
+      "topology_shadow_narrow_proposal_rate",
+      "topology_shadow_retained_candidates_avg",
+      "topology_shadow_removed_candidates_avg",
       "vector_candidate_work_budget_avg",
       "vector_distance_evaluation_budget_avg",
       "vector_ann_candidate_budget_actual_avg",

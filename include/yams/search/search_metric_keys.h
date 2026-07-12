@@ -11,6 +11,17 @@ constexpr std::string_view kSearchPipelineInterface = "search_pipeline_interface
 constexpr std::string_view kSearchPipelineName = "search_pipeline_name";
 constexpr std::string_view kSearchEngineVariant = "search_engine_variant";
 constexpr std::string_view kSearchPipelineVariant = "search_pipeline_variant";
+constexpr std::string_view kCandidatePipelineVariant = "candidate_pipeline_variant";
+constexpr std::string_view kCandidatePipelineInputComponents =
+    "candidate_pipeline_input_components";
+constexpr std::string_view kCandidatePipelineAggregatedCandidates =
+    "candidate_pipeline_aggregated_candidates";
+constexpr std::string_view kCandidatePipelineFusedCandidates =
+    "candidate_pipeline_fused_candidates";
+constexpr std::string_view kCandidatePipelineFinalCandidates =
+    "candidate_pipeline_final_candidates";
+constexpr std::string_view kCandidatePipelineTopologyAnnotatedCandidates =
+    "candidate_pipeline_topology_annotated_candidates";
 
 constexpr std::string_view kSearchEngineReady = "search_engine_ready";
 constexpr std::string_view kVectorReady = "vector_ready";
@@ -84,6 +95,15 @@ constexpr std::string_view kTopologyVectorPartitionAnnApplied =
     "topology_vector_partition_ann_applied";
 constexpr std::string_view kTopologyVectorPartitionAnnFallback =
     "topology_vector_partition_ann_fallback";
+constexpr std::string_view kTopologyShadowEvaluated = "topology_shadow_evaluated";
+constexpr std::string_view kTopologyShadowProposedAction = "topology_shadow_proposed_action";
+constexpr std::string_view kTopologyShadowRetainedCandidates =
+    "topology_shadow_retained_candidates";
+constexpr std::string_view kTopologyShadowRemovedCandidates = "topology_shadow_removed_candidates";
+constexpr std::string_view kTopologyShadowRetainedCandidateDocIds =
+    "topology_shadow_retained_candidate_doc_ids";
+constexpr std::string_view kTopologyShadowRemovedCandidateDocIds =
+    "topology_shadow_removed_candidate_doc_ids";
 
 constexpr std::string_view kTimingTopologyWeakQuery = "topology_weak_query";
 constexpr std::string_view kTimingTopologyLoad = "topology_load";

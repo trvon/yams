@@ -9,6 +9,7 @@ import Yams.Topology.Storage
 import Yams.Topology.SearchImpact
 import Yams.Topology.SearchEngine
 import Yams.Topology.TopologyInfluence
+import Yams.Topology.SelectiveRouting
 import Yams.Topology.ClusterObjective
 import Yams.Topology.Bridge
 import Yams.Topology.SystemContract

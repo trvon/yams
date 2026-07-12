@@ -171,11 +171,17 @@ void DatabaseManager::shutdown() {
         }
     }
 
+    std::string dbPath;
+    bool cleanupMalformedSidecars = false;
     if (database_ && database_->isOpen()) {
+        dbPath = database_->path();
         auto checkpointResult = database_->execute("PRAGMA wal_checkpoint(TRUNCATE)");
         if (!checkpointResult) {
+            const auto message = checkpointResult.error().message;
+            cleanupMalformedSidecars = message.find("malformed") != std::string::npos ||
+                                       message.find("corrupt") != std::string::npos;
             spdlog::warn("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) failed: {}",
-                         checkpointResult.error().message);
+                         message);
         } else {
             spdlog::info("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) completed");
         }
@@ -190,6 +196,22 @@ void DatabaseManager::shutdown() {
             spdlog::debug("[DatabaseManager] database close failed: unknown exception");
         }
         database_.reset();
+    }
+
+    if (cleanupMalformedSidecars && !dbPath.empty()) {
+        spdlog::warn("[DatabaseManager] Removing malformed SQLite WAL/SHM sidecars after all "
+                     "database connections closed");
+        for (const auto& suffix : {"-wal", "-shm"}) {
+            std::error_code sidecarEc;
+            const auto sidecarPath = std::filesystem::path(dbPath + suffix);
+            if (std::filesystem::exists(sidecarPath, sidecarEc)) {
+                std::filesystem::remove(sidecarPath, sidecarEc);
+                if (sidecarEc) {
+                    spdlog::debug("[DatabaseManager] stale SQLite sidecar cleanup failed: {}",
+                                  sidecarEc.message());
+                }
+            }
+        }
     }
 }
 

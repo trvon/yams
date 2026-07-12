@@ -472,6 +472,7 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     auto configPath = writeToml("config.toml", R"TOML(
 [search.topology]
 enable_weak_query_routing = true
+vector_policy = shadow
 min_clusters = 1
 max_clusters = 3
 max_seed_documents = 24
@@ -488,6 +489,8 @@ rrf_k = 33
 
     REQUIRE(policy.enableWeakQueryRouting.has_value());
     CHECK(*policy.enableWeakQueryRouting == true);
+    REQUIRE(policy.vectorPolicy.has_value());
+    CHECK(*policy.vectorPolicy == "shadow");
     REQUIRE(policy.maxClusters.has_value());
     CHECK(*policy.maxClusters == 3U);
     REQUIRE(policy.minClusters.has_value());
@@ -507,6 +510,28 @@ rrf_k = 33
     CHECK(*policy.medoidBoost < 0.21f);
     REQUIRE(policy.rrfK.has_value());
     CHECK(*policy.rrfK == 33.0f);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveSearchPipelinePolicy reads evidence pipeline",
+                 "[daemon][components][config][search_pipeline][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[search]
+candidate_pipeline = "evidence"
+
+[search.topology]
+evidence_weight = 0.03
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveSearchPipelinePolicy();
+
+    REQUIRE(policy.variant.has_value());
+    CHECK(*policy.variant == "evidence");
+
+    auto topology = ConfigResolver::resolveTopologyRoutingPolicy();
+    REQUIRE(topology.evidenceWeight.has_value());
+    CHECK(*topology.evidenceWeight == Catch::Approx(0.03F));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,

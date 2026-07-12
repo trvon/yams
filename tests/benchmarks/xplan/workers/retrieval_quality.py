@@ -189,6 +189,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_filter_removed": 0,
         "topology_vector_partition_ann_applied_queries": 0,
         "topology_vector_partition_ann_fallback_queries": 0,
+        "topology_shadow_evaluated_queries": 0,
+        "topology_shadow_narrow_proposed_queries": 0,
+        "topology_shadow_retained_candidates": 0,
+        "topology_shadow_removed_candidates": 0,
     }
     added_vals: list[int] = []
     routed_docs: list[int] = []
@@ -281,6 +285,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_scores_reused_count": "topology_vector_scores_reused_count",
         "topology_vector_filter_matched": "topology_vector_filter_matched",
         "topology_vector_filter_removed": "topology_vector_filter_removed",
+        "topology_shadow_retained_candidates": "topology_shadow_retained_candidates",
+        "topology_shadow_removed_candidates": "topology_shadow_removed_candidates",
     }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -445,6 +451,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["topology_vector_partition_ann_applied_queries"] += 1
         if _truthy(stats.get("topology_vector_partition_ann_fallback")):
             counters["topology_vector_partition_ann_fallback_queries"] += 1
+        if _truthy(stats.get("topology_shadow_evaluated")):
+            counters["topology_shadow_evaluated_queries"] += 1
+            if stats.get("topology_shadow_proposed_action") == "narrow":
+                counters["topology_shadow_narrow_proposed_queries"] += 1
         for dst, key in int_keys.items():
             v = _as_int(stats.get(key))
             counters[dst] += v
@@ -567,6 +577,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "topology_vector_filter_removed_sum": float(
             counters["topology_vector_filter_removed"]
+        ),
+        "topology_shadow_retained_candidates_sum": float(
+            counters["topology_shadow_retained_candidates"]
+        ),
+        "topology_shadow_removed_candidates_sum": float(
+            counters["topology_shadow_removed_candidates"]
         ),
         "vector_candidate_budget_sum": float(counters["vector_candidate_budget"]),
         "vector_result_budget_sum": float(counters["vector_result_budget"]),
@@ -729,6 +745,24 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_vector_partition_ann_fallback_rate"] = float(
             counters["topology_vector_partition_ann_fallback_queries"]
         ) / float(hybrid)
+        metrics["topology_shadow_evaluation_rate"] = float(
+            counters["topology_shadow_evaluated_queries"]
+        ) / float(hybrid)
+    shadow_evaluated = counters["topology_shadow_evaluated_queries"]
+    if shadow_evaluated > 0:
+        metrics["topology_shadow_narrow_proposal_rate"] = float(
+            counters["topology_shadow_narrow_proposed_queries"]
+        ) / float(shadow_evaluated)
+        metrics["topology_shadow_retained_candidates_avg"] = float(
+            counters["topology_shadow_retained_candidates"]
+        ) / float(shadow_evaluated)
+        metrics["topology_shadow_removed_candidates_avg"] = float(
+            counters["topology_shadow_removed_candidates"]
+        ) / float(shadow_evaluated)
+    else:
+        metrics["topology_shadow_narrow_proposal_rate"] = 0.0
+        metrics["topology_shadow_retained_candidates_avg"] = 0.0
+        metrics["topology_shadow_removed_candidates_avg"] = 0.0
     if effective_vector_caps:
         metrics["effective_vector_cap_min"] = float(min(effective_vector_caps))
         metrics["effective_vector_cap_max"] = float(max(effective_vector_caps))
@@ -844,6 +878,31 @@ def require_steady_state(path: Path, *, require_vector: bool) -> str | None:
         f"(warming={warming}, search_not_ready={search_not_ready}, "
         f"vector_not_ready={vector_not_ready}, require_vector={require_vector})"
     )
+
+
+def require_candidate_pipeline(path: Path, *, expected: str) -> str | None:
+    """Return an identity error unless every hybrid query used the requested pipeline."""
+    if not path.is_file():
+        return f"missing debug log for candidate-pipeline validation: {path}"
+    observed: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("search_type") != "hybrid":
+            continue
+        stats = event.get("search_stats") or {}
+        variant = str(stats.get("candidate_pipeline_variant") or "").strip().lower()
+        if variant:
+            observed[variant] = observed.get(variant, 0) + 1
+    if not observed:
+        return "candidate-pipeline validation found no variant-bearing hybrid traces"
+    normalized = expected.strip().lower()
+    unexpected = {name: count for name, count in observed.items() if name != normalized}
+    if not unexpected:
+        return None
+    return f"expected candidate pipeline {normalized!r}, observed {observed}"
 
 
 def require_topology_certificate(
@@ -1043,6 +1102,10 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "topology_vector_filter_removed_avg": 0.0,
                 "topology_vector_partition_ann_rate": 0.0,
                 "topology_vector_partition_ann_fallback_rate": 0.0,
+                "topology_shadow_evaluation_rate": 0.0,
+                "topology_shadow_narrow_proposal_rate": 0.0,
+                "topology_shadow_retained_candidates_avg": 0.0,
+                "topology_shadow_removed_candidates_avg": 0.0,
                 "corpus_warming_rate": 0.0,
                 "search_engine_ready_rate": 0.0,
                 "vector_ready_rate": 0.0,
@@ -1160,6 +1223,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "topk": "YAMS_BENCH_TOPK",
         "dataset": "YAMS_BENCH_DATASET",
         "dataset_path": "YAMS_BENCH_DATASET_PATH",
+        "candidate_pipeline": "YAMS_BENCH_CANDIDATE_PIPELINE",
         "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
         "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
         "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
@@ -1436,6 +1500,32 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=steady_state_error,
             raw_path=str(debug_path),
         )
+    expected_candidate_pipeline = str(ctx.params.get("candidate_pipeline") or "").strip()
+    candidate_pipeline_error = (
+        require_candidate_pipeline(debug_path, expected=expected_candidate_pipeline)
+        if expected_candidate_pipeline
+        else None
+    )
+    if candidate_pipeline_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "candidate_pipeline_error": candidate_pipeline_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "candidate_pipeline_error": candidate_pipeline_error,
+            },
+            message=candidate_pipeline_error,
+            raw_path=str(debug_path),
+        )
     cert_err = require_topology_certificate(
         source=source, seed_enabled=seed_enabled, debug_path=debug_path
     )
@@ -1481,6 +1571,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                     "YAMS_BENCH_REQUIRE_STEADY_STATE",
                     "YAMS_VECTOR_SEARCH_ENGINE",
                     "YAMS_SEARCH_ENGINE_VARIANT",
+                    "YAMS_BENCH_CANDIDATE_PIPELINE",
                 )
             },
         },

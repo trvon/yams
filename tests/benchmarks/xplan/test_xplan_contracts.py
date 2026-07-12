@@ -14,7 +14,11 @@ XPLAN_ROOT = Path(__file__).resolve().parent
 if str(XPLAN_ROOT) not in sys.path:
     sys.path.insert(0, str(XPLAN_ROOT))
 
-from analyze_query_class import load_by_type  # noqa: E402
+from analyze_query_class import (  # noqa: E402
+    load_by_type,
+    paired_route_risk,
+    shadow_route_risk,
+)
 from report import _baseline_row  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
@@ -25,6 +29,7 @@ from workers.mixed_corpus import (  # noqa: E402
 from workers.retrieval_quality import (  # noqa: E402
     _merge_benchmark_env,
     parse_debug_jsonl,
+    require_candidate_pipeline,
     require_steady_state,
 )
 
@@ -66,10 +71,145 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             self.assertEqual(arm["factors"].get("text"), "off")
             self.assertEqual(arm["factors"].get("simeon_text"), "off")
 
+    def test_evidence_pipeline_plan_is_a_repeated_mixed_corpus_gate(self) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "search_evidence_pipeline_multicorp.json")
+            .read_text(encoding="utf-8")
+        )
+
+        self.assertGreaterEqual(plan["repeats"], 3)
+        self.assertEqual(plan["baseline"], "classic")
+        self.assertEqual(plan["fixed"]["params"]["datasets"], ["scifact", "nfcorpus"])
+        self.assertEqual(plan["fixed"]["params"]["topology_mode"], "disabled")
+        arms = {arm["name"]: arm for arm in plan["arms"]}
+        self.assertEqual(set(arms), {"classic", "evidence", "evidence_topology"})
+        self.assertEqual(arms["classic"]["params"]["candidate_pipeline"], "classic")
+        self.assertEqual(arms["evidence"]["params"]["topology_mode"], "disabled")
+        self.assertEqual(
+            arms["evidence_topology"]["params"]["topology_vector_policy"],
+            "shadow",
+        )
+
     def test_query_class_loader_ignores_missing_or_directory_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(load_by_type(Path(tmp)), {})
             self.assertEqual(load_by_type(Path(tmp) / "missing.jsonl"), {})
+
+    def test_paired_route_risk_counts_protected_global_candidates_lost_by_narrowing(
+        self,
+    ) -> None:
+        def event(
+            *, pre_fusion: list[str], returned: list[str], narrow: bool, exact: int
+        ):
+            relevant = ["nfcorpus__a", "nfcorpus__b"]
+            return {
+                "search_type": "hybrid",
+                "query": "shared query",
+                "relevant_doc_ids": relevant,
+                "returned_doc_ids": returned,
+                "relevant_decision_trace": {
+                    "relevant_docs": [
+                        {
+                            "doc_id": doc,
+                            "in_pre_fusion": doc in pre_fusion,
+                            "component_top_hits": ["vector"]
+                            if doc in pre_fusion
+                            else [],
+                        }
+                        for doc in relevant
+                    ]
+                },
+                "search_stats": {
+                    "topology_weak_query_narrow_applied": "1" if narrow else "0",
+                    "topology_route_boundary_score_margin": "0.42",
+                    "topology_seed_coverage_count": "2",
+                    "topology_member_rerank_distance_evaluations_actual": "0",
+                    "vector_search_exact_distance_evaluations_actual": str(exact),
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline_path = root / "baseline.jsonl"
+            routed_path = root / "routed.jsonl"
+            baseline_path.write_text(
+                json.dumps(
+                    event(
+                        pre_fusion=["nfcorpus__a", "nfcorpus__b"],
+                        returned=["nfcorpus__a", "nfcorpus__b"],
+                        narrow=False,
+                        exact=20,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            routed_path.write_text(
+                json.dumps(
+                    event(
+                        pre_fusion=["nfcorpus__a"],
+                        returned=["irrelevant", "nfcorpus__a"],
+                        narrow=True,
+                        exact=8,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = paired_route_risk(
+                load_by_type(baseline_path).get("hybrid", []),
+                load_by_type(routed_path).get("hybrid", []),
+            )
+
+        self.assertEqual(summary["all"]["calibration_queries"], 1)
+        self.assertEqual(summary["all"]["protected_candidates"], 2)
+        self.assertEqual(summary["all"]["missed_protected_candidates"], 1)
+        self.assertEqual(summary["all"]["misses_per_thousand"], 500.0)
+        self.assertEqual(summary["all"]["mean_exact_work_delta"], -12.0)
+        self.assertEqual(summary["nfcorpus"], summary["all"])
+
+    def test_shadow_route_risk_uses_projected_removals_without_a_routed_arm(self) -> None:
+        event = {
+            "search_type": "hybrid",
+            "query": "shared query",
+            "relevant_doc_ids": ["nfcorpus__a", "nfcorpus__b"],
+            "returned_doc_ids": ["nfcorpus__a", "nfcorpus__b"],
+            "relevant_decision_trace": {
+                "relevant_docs": [
+                    {
+                        "doc_id": "nfcorpus__a",
+                        "in_pre_fusion": True,
+                        "component_top_hits": ["vector"],
+                    },
+                    {
+                        "doc_id": "nfcorpus__b",
+                        "in_pre_fusion": True,
+                        "component_top_hits": ["vector"],
+                    },
+                ]
+            },
+            "search_stats": {
+                "topology_shadow_evaluated": "1",
+                "topology_shadow_proposed_action": "narrow",
+                "topology_shadow_retained_candidate_doc_ids": "nfcorpus__a",
+                "topology_shadow_removed_candidate_doc_ids": "nfcorpus__b\tirrelevant",
+                "topology_route_boundary_score_margin": "0.42",
+                "topology_seed_coverage_count": "2",
+                "vector_search_exact_distance_evaluations_actual": "8",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            summary = shadow_route_risk(load_by_type(debug_path).get("hybrid", []))
+
+        self.assertEqual(summary["all"]["calibration_queries"], 1)
+        self.assertEqual(summary["all"]["protected_candidates"], 2)
+        self.assertEqual(summary["all"]["missed_protected_candidates"], 1)
+        self.assertEqual(summary["all"]["misses_per_thousand"], 500.0)
+        self.assertEqual(summary["nfcorpus"], summary["all"])
 
     def test_declared_params_override_ambient_and_arm_env_wins(self) -> None:
         merged = _merge_benchmark_env(
@@ -200,6 +340,44 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
         self.assertEqual(metrics["topology_vector_filter_removed_avg"], 5.0)
         self.assertEqual(metrics["topology_vector_partition_ann_rate"], 0.5)
         self.assertEqual(metrics["topology_vector_partition_ann_fallback_rate"], 0.5)
+
+    def test_shadow_projection_metrics_are_aggregated_without_counting_application(
+        self,
+    ) -> None:
+        events = [
+            {
+                "search_type": "hybrid",
+                "search_stats": {
+                    "topology_shadow_evaluated": "1",
+                    "topology_shadow_proposed_action": "narrow",
+                    "topology_shadow_retained_candidates": "3",
+                    "topology_shadow_removed_candidates": "5",
+                    "topology_weak_query_applied": "0",
+                },
+            },
+            {
+                "search_type": "hybrid",
+                "search_stats": {
+                    "topology_shadow_evaluated": "1",
+                    "topology_shadow_proposed_action": "global",
+                    "topology_shadow_retained_candidates": "0",
+                    "topology_shadow_removed_candidates": "0",
+                    "topology_weak_query_applied": "0",
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["topology_shadow_evaluation_rate"], 1.0)
+        self.assertEqual(metrics["topology_shadow_narrow_proposal_rate"], 0.5)
+        self.assertEqual(metrics["topology_shadow_retained_candidates_avg"], 1.5)
+        self.assertEqual(metrics["topology_shadow_removed_candidates_avg"], 2.5)
+        self.assertEqual(metrics["topology_applied"], 0.0)
 
     def test_disabled_topology_zero_fills_vector_seed_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,6 +513,26 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             )
 
             self.assertIsNone(require_steady_state(debug_path, require_vector=False))
+
+    def test_candidate_pipeline_validation_rejects_a_misidentified_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                json.dumps(
+                    {
+                        "search_type": "hybrid",
+                        "search_stats": {"candidate_pipeline_variant": "classic"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(require_candidate_pipeline(debug_path, expected="classic"))
+            self.assertIn(
+                "expected candidate pipeline 'evidence'",
+                require_candidate_pipeline(debug_path, expected="evidence") or "",
+            )
 
 
 class MultiClientMetricTests(unittest.TestCase):
