@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
@@ -40,6 +41,7 @@ class VectorDatabase;
 }
 
 namespace yams::daemon {
+template <typename Task> struct PressureLimitedPollerConfig;
 class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
@@ -407,6 +409,13 @@ public:
     [[nodiscard]] bool hasTitleExtractor() const;
 
 private:
+    template <typename Task>
+    PressureLimitedPollerConfig<Task> makePollerConfig(
+        Stage stage, std::string stageName, std::function<GradientLimiter*()> getLimiter,
+        std::function<std::size_t()> maxConcurrent, boost::asio::any_io_executor executor,
+        std::function<std::string(const Task&)> getHash,
+        std::shared_ptr<boost::asio::steady_timer> wakeTimer);
+
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();

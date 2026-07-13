@@ -32,9 +32,9 @@ namespace {
 /// so it immediately enters the capability-sleep branch (250ms timer loop).
 /// Fields that the poller never reaches in this path are left as no-op stubs.
 template <typename Task>
-PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& stopFlag,
-                                                            std::atomic<bool>& startedFlag,
-                                                            std::atomic<bool>& pauseFlag) {
+PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(
+    std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag, std::atomic<bool>& pauseFlag,
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer, std::mutex& wakeMutex) {
     PressureLimitedPollerConfig<Task> cfg;
     cfg.stageName = "test-capability-sleep";
     cfg.stopFlag = &stopFlag;
@@ -54,6 +54,8 @@ PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& s
     thread_local std::atomic<std::size_t> tlsInFlight{0};
     cfg.wasActiveFlag = &tlsWasActive;
     cfg.inFlightCounter = &tlsInFlight;
+    cfg.wakeTimer = std::move(wakeTimer);
+    cfg.wakeTimerMutex = &wakeMutex;
     return cfg;
 }
 
@@ -102,8 +104,11 @@ TEST_CASE("PressureLimitedPoller exits on stop while sleeping in capability chec
     std::atomic<bool> stopFlag{false};
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
@@ -141,8 +146,11 @@ TEST_CASE("PressureLimitedPoller stop before start is safe", "[daemon][poller][s
     std::atomic<bool> stopFlag{true}; // already stopped
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
@@ -253,8 +261,11 @@ TEST_CASE("PressureLimitedPoller survives start-stop-restart cycle",
     std::atomic<bool> stopFlag{false};
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     // Cycle 1
