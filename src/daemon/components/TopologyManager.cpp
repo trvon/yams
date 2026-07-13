@@ -569,6 +569,13 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
+    buildConfig.routingRepresentativeCount = routingRepresentativeCount();
+    buildConfig.allowOverlap = boundarySpillEnabled_.load(std::memory_order_acquire);
+    buildConfig.overlapLimit = boundarySpillLimit_.load(std::memory_order_acquire);
+    buildConfig.overlapBoundaryDistanceRatio =
+        boundarySpillDistanceRatio_.load(std::memory_order_acquire);
+    buildConfig.overlapResidualPenalty =
+        boundarySpillResidualPenalty_.load(std::memory_order_acquire);
     applyConstructionPurityDefaults(buildConfig);
 
     topology::TopologyExtractionStats extractionStats;

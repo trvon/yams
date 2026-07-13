@@ -27,26 +27,8 @@ std::vector<std::string>
 collectUniqueComponentDocIds(const std::vector<ComponentResult>& componentResults);
 
 std::vector<std::string>
-collectTopologySidecarCandidateDocIds(const std::vector<ComponentResult>& componentResults);
-
-std::vector<std::string>
 collectRankedResultDocIds(const std::vector<SearchResult>& results,
                           size_t maxCount = std::numeric_limits<size_t>::max());
-
-struct TopologySidecarSurvival {
-    std::vector<std::string> candidateDocIds;
-    std::vector<std::string> postFusionDocIds;
-    std::vector<std::string> finalDocIds;
-    std::vector<std::string> newPostFusionDocIds;
-    std::vector<std::string> duplicatePostFusionDocIds;
-    std::vector<std::string> fusionDroppedDocIds;
-};
-
-TopologySidecarSurvival
-analyzeTopologySidecarSurvival(const std::vector<ComponentResult>& componentResults,
-                               const std::vector<SearchResult>& postFusionResults,
-                               const std::vector<SearchResult>& graphlessPostFusionResults,
-                               const std::vector<SearchResult>& finalResults);
 
 std::vector<std::string> setDifferenceIds(const std::vector<std::string>& lhs,
                                           const std::vector<std::string>& rhs);
@@ -65,9 +47,6 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
                                 bool shadowEvaluation = false);
-
-void recordTopologySidecarSurvivalDebug(std::unordered_map<std::string, std::string>& debug,
-                                        const TopologySidecarSurvival& survival);
 
 std::string joinWithTab(const std::vector<std::string>& values);
 
@@ -124,11 +103,6 @@ private:
 };
 
 nlohmann::json buildFusionTopSummaryJson(const std::vector<SearchResult>& results, size_t maxDocs);
-
-nlohmann::json buildTopologySidecarTraceJson(const std::vector<ComponentResult>& componentResults,
-                                             const std::vector<SearchResult>& postFusionResults,
-                                             const std::vector<SearchResult>& postGraphResults,
-                                             const std::vector<SearchResult>& finalResults);
 
 std::optional<std::int64_t>
 resolveKgDocumentId(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,

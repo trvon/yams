@@ -1198,7 +1198,6 @@ if catch2_dep.found()
       'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_concept_extractor_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
-      'unit/search/result_fusion_catch2_test.cpp',
       'unit/search/result_ranker_catch2_test.cpp',
       'unit/search/search_engine_config_catch2_test.cpp',
       'unit/search/search_tracing_catch2_test.cpp',

@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/evidence_search_pipeline.h>
@@ -14,6 +15,7 @@ using yams::search::deriveTopologyCandidateEvidence;
 using yams::search::EvidenceSearchPipeline;
 using yams::search::SearchEngineConfig;
 using yams::search::TopologyCandidateEvidence;
+using yams::search::TopologyCandidateStructureEvidence;
 using yams::search::TopologyEvidenceByCandidate;
 using yams::search::TopologyRoutingSessionResult;
 
@@ -53,6 +55,13 @@ TEST_CASE("Topology membership becomes bounded candidate-only evidence",
     route.routeAllowedDocumentHashes = {"member", "medoid"};
     route.routedCandidateHashes = {"medoid"};
     route.medoidHashes = {"medoid"};
+    route.candidateStructureEvidence.emplace(
+        "member", TopologyCandidateStructureEvidence{.scaleAgreement = 0.75F,
+                                                     .overlapSupport = 0.50F,
+                                                     .persistenceSupport = 0.80F,
+                                                     .cohesionSupport = 0.70F,
+                                                     .bridgeSupport = 0.40F,
+                                                     .densitySupport = 0.60F});
 
     const auto evidence = deriveTopologyCandidateEvidence(route, 0.02F);
 
@@ -61,6 +70,13 @@ TEST_CASE("Topology membership becomes bounded candidate-only evidence",
     CHECK(evidence.at("member").confidence <= 1.0F);
     CHECK(evidence.at("member").scoreAdjustment <= 0.02F);
     CHECK(evidence.at("medoid").scoreAdjustment > evidence.at("member").scoreAdjustment);
+    CHECK(evidence.at("member").scaleAgreement == Catch::Approx(0.75F));
+    CHECK(evidence.at("member").overlapSupport == Catch::Approx(0.50F));
+    CHECK(evidence.at("member").persistenceSupport == Catch::Approx(0.80F));
+    CHECK(evidence.at("member").cohesionSupport == Catch::Approx(0.70F));
+    CHECK(evidence.at("member").bridgeSupport == Catch::Approx(0.40F));
+    CHECK(evidence.at("member").densitySupport == Catch::Approx(0.60F));
+    CHECK(evidence.at("member").densityPenalty == Catch::Approx(0.40F));
 
     route.confidenceAbstained = true;
     CHECK(deriveTopologyCandidateEvidence(route, 0.02F).empty());

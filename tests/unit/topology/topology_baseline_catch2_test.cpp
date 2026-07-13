@@ -18,6 +18,7 @@
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
 #include <yams/topology/topology_offline_analyzer.h>
+#include <yams/topology/topology_representatives.h>
 #include <yams/vector/vector_database.h>
 
 #include "tests/common/test_helpers_catch2.h"
@@ -103,11 +104,13 @@ void requireWellFormedBatch(const TopologyArtifactBatch& batch) {
     for (const auto& cluster : batch.clusters) {
         for (const auto& hash : cluster.memberDocumentHashes) {
             CAPTURE(cluster.clusterId, hash);
-            const auto it = std::find_if(batch.memberships.begin(), batch.memberships.end(),
-                                         [&](const DocumentClusterMembership& membership) {
-                                             return membership.documentHash == hash &&
-                                                    membership.clusterId == cluster.clusterId;
-                                         });
+            const auto it = std::find_if(
+                batch.memberships.begin(), batch.memberships.end(),
+                [&](const DocumentClusterMembership& membership) {
+                    return membership.documentHash == hash &&
+                           (membership.clusterId == cluster.clusterId ||
+                            containsHash(membership.overlapClusterIds, cluster.clusterId));
+                });
             CHECK((it != batch.memberships.end()));
         }
     }
@@ -180,6 +183,7 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     REQUIRE(pairClusterIt->medoid.has_value());
     CHECK((pairClusterIt->medoid->documentHash == "aaa"));
     CHECK((pairClusterIt->persistenceScore == Catch::Approx(0.9)));
+    CHECK((pairClusterIt->densityScore == Catch::Approx(1.0)));
 
     const auto outlierMembershipIt =
         std::find_if(batch.memberships.begin(), batch.memberships.end(),
@@ -469,6 +473,193 @@ TEST_CASE("Sparse-guided topology routing reuses a prepared membership index",
     CHECK(work.queryNormEvaluations == 1);
 }
 
+TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",
+          "[unit][topology][routing][representatives]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = false;
+    config.routingRepresentativeCount = 3;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{.documentHash = "a",
+                              .embedding = {1.0F, 0.0F},
+                              .neighbors = {{.documentHash = "b", .score = 1.0F}}},
+        TopologyDocumentInput{.documentHash = "b",
+                              .embedding = {0.8F, 0.2F},
+                              .neighbors = {{.documentHash = "c", .score = 1.0F}}},
+        TopologyDocumentInput{.documentHash = "c",
+                              .embedding = {0.0F, 1.0F},
+                              .neighbors = {{.documentHash = "d", .score = 1.0F}}},
+        TopologyDocumentInput{.documentHash = "d",
+                              .embedding = {-0.8F, 0.2F},
+                              .neighbors = {{.documentHash = "a", .score = 1.0F}}},
+    };
+
+    auto first = engine.buildArtifacts(docs, config);
+    auto second = engine.buildArtifacts(docs, config);
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(first.value().clusters.size() == 1);
+    REQUIRE(second.value().clusters.size() == 1);
+    const auto& firstReps = first.value().clusters.front().routingRepresentatives;
+    const auto& secondReps = second.value().clusters.front().routingRepresentatives;
+    REQUIRE(firstReps.size() == 2);
+    REQUIRE(secondReps.size() == firstReps.size());
+    for (std::size_t index = 0; index < firstReps.size(); ++index) {
+        CHECK(firstReps[index].documentHash == secondReps[index].documentHash);
+        CHECK(firstReps[index].embedding == secondReps[index].embedding);
+        CHECK(firstReps[index].embedding.size() == 2);
+    }
+    CHECK(firstReps[0].documentHash != firstReps[1].documentHash);
+}
+
+TEST_CASE("SOAR boundary spill chooses a complementary secondary residual",
+          "[unit][topology][construction][overlap][soar]") {
+    const std::vector<TopologyDocumentInput> documents{
+        TopologyDocumentInput{.documentHash = "x", .embedding = {2.0F, 2.0F}},
+        TopologyDocumentInput{.documentHash = "near", .embedding = {0.9F, 2.0F}},
+        TopologyDocumentInput{.documentHash = "orthogonal", .embedding = {2.0F, 0.8F}},
+    };
+    TopologyArtifactBatch artifacts;
+    artifacts.clusters = {
+        ClusterArtifact{.clusterId = "primary",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"x"},
+                        .centroidEmbedding = {1.0F, 2.0F}},
+        ClusterArtifact{.clusterId = "near",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"near"},
+                        .centroidEmbedding = {0.9F, 2.0F}},
+        ClusterArtifact{.clusterId = "orthogonal",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"orthogonal"},
+                        .centroidEmbedding = {2.0F, 0.8F}},
+    };
+    artifacts.memberships = {
+        DocumentClusterMembership{.documentHash = "x", .clusterId = "primary"},
+        DocumentClusterMembership{.documentHash = "near", .clusterId = "near"},
+        DocumentClusterMembership{.documentHash = "orthogonal", .clusterId = "orthogonal"},
+    };
+
+    TopologyBuildConfig config;
+    config.allowOverlap = true;
+    config.overlapLimit = 1;
+    config.overlapBoundaryDistanceRatio = 1.25;
+    config.overlapResidualPenalty = 1.0;
+
+    TopologyRouteRequest routeRequest;
+    routeRequest.seedDocumentHashes = {"x"};
+    routeRequest.sparseDenseAlpha = 1.0F;
+    SparseGuidedClusterRouter router;
+    const auto primaryRoutes = router.route(routeRequest, artifacts);
+    REQUIRE(primaryRoutes);
+    REQUIRE_FALSE(primaryRoutes.value().empty());
+    REQUIRE(primaryRoutes.value().front().clusterId == "primary");
+
+    CHECK(applyOrthogonalBoundarySpill(documents, config, artifacts) == 1);
+    CHECK(artifacts.memberships.front().overlapClusterIds ==
+          std::vector<std::string>{"orthogonal"});
+    CHECK(containsHash(artifacts.clusters[2].memberDocumentHashes, "x"));
+    CHECK_FALSE(containsHash(artifacts.clusters[1].memberDocumentHashes, "x"));
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(artifacts);
+    REQUIRE(routeIndex.clustersByDocumentHash.contains("x"));
+    CHECK(routeIndex.clustersByDocumentHash.at("x").size() == 1);
+    const auto spilledRoutes = router.route(routeRequest, artifacts, routeIndex);
+    REQUIRE(spilledRoutes);
+    REQUIRE_FALSE(spilledRoutes.value().empty());
+    CHECK(spilledRoutes.value().front().clusterId == primaryRoutes.value().front().clusterId);
+
+    auto naive = artifacts;
+    naive.clusters[2].memberDocumentHashes = {"orthogonal"};
+    naive.clusters[2].memberCount = 1;
+    naive.memberships.front().overlapClusterIds.clear();
+    config.overlapResidualPenalty = 0.0;
+    CHECK(applyOrthogonalBoundarySpill(documents, config, naive) == 1);
+    CHECK(naive.memberships.front().overlapClusterIds == std::vector<std::string>{"near"});
+}
+
+TEST_CASE("Sparse-guided routing scores the closest bounded cluster representative",
+          "[unit][topology][routing][representatives]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{
+            .clusterId = "centroid-winner",
+            .memberCount = 2,
+            .memberDocumentHashes = {"a", "b"},
+            .centroidEmbedding = {0.8F, 0.2F},
+        },
+        ClusterArtifact{
+            .clusterId = "cover-winner",
+            .memberCount = 2,
+            .memberDocumentHashes = {"c", "d"},
+            .centroidEmbedding = {0.0F, 1.0F},
+            .routingRepresentatives =
+                {
+                    ClusterRoutingRepresentative{.documentHash = "d", .embedding = {1.0F, 0.0F}},
+                },
+        },
+    };
+
+    TopologyRouteRequest request;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.limit = 1;
+
+    const auto index = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    SparseRouteWork work;
+    SparseGuidedClusterRouter router;
+    auto routed = router.route(request, batch, index, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1);
+    CHECK(routed.value().front().clusterId == "cover-winner");
+    CHECK(work.representativeDistanceEvaluations == 3);
+}
+
+TEST_CASE("Sparse-guided routing limits a prebuilt representative cover at query time",
+          "[unit][topology][routing][representatives]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{
+            .clusterId = "centroid-winner",
+            .memberCount = 2,
+            .memberDocumentHashes = {"a", "b"},
+            .centroidEmbedding = {0.8F, 0.2F},
+        },
+        ClusterArtifact{
+            .clusterId = "cover-winner",
+            .memberCount = 2,
+            .memberDocumentHashes = {"c", "d"},
+            .centroidEmbedding = {0.0F, 1.0F},
+            .routingRepresentatives =
+                {
+                    ClusterRoutingRepresentative{.documentHash = "d", .embedding = {1.0F, 0.0F}},
+                },
+        },
+    };
+    const auto index = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    SparseGuidedClusterRouter router;
+
+    TopologyRouteRequest centroidOnly;
+    centroidOnly.queryEmbedding = {1.0F, 0.0F};
+    centroidOnly.sparseDenseAlpha = 0.0F;
+    centroidOnly.limit = 1;
+    centroidOnly.maxRoutingRepresentatives = 1;
+    SparseRouteWork centroidWork;
+    auto centroidRoute = router.route(centroidOnly, batch, index, &centroidWork);
+    REQUIRE(centroidRoute.has_value());
+    CHECK(centroidRoute.value().front().clusterId == "centroid-winner");
+    CHECK(centroidWork.representativeDistanceEvaluations == 2);
+
+    auto covered = centroidOnly;
+    covered.maxRoutingRepresentatives = 2;
+    SparseRouteWork coveredWork;
+    auto coveredRoute = router.route(covered, batch, index, &coveredWork);
+    REQUIRE(coveredRoute.has_value());
+    CHECK(coveredRoute.value().front().clusterId == "cover-winner");
+    CHECK(coveredWork.representativeDistanceEvaluations == 3);
+}
+
 TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
           "[unit][topology][store]") {
     TopologyFixture fix;
@@ -482,14 +673,21 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
         TopologyDocumentInput{
             .documentHash = "aaa",
             .filePath = "/repo/a.md",
+            .embedding = {1.0F, 0.0F},
             .neighbors = {{.documentHash = "bbb", .score = 0.9F, .reciprocal = true}}},
         TopologyDocumentInput{
             .documentHash = "bbb",
             .filePath = "/repo/b.md",
+            .embedding = {0.0F, 1.0F},
             .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
-        TopologyDocumentInput{.documentHash = "ccc", .filePath = "/repo/c.md", .neighbors = {}},
+        TopologyDocumentInput{.documentHash = "ccc",
+                              .filePath = "/repo/c.md",
+                              .embedding = {-1.0F, 0.0F},
+                              .neighbors = {}},
     };
-    auto batchResult = engine.buildArtifacts(docs, TopologyBuildConfig{});
+    TopologyBuildConfig buildConfig;
+    buildConfig.routingRepresentativeCount = 2;
+    auto batchResult = engine.buildArtifacts(docs, buildConfig);
     REQUIRE(batchResult.has_value());
 
     MetadataKgTopologyArtifactStore store(fix.repository, fix.kgStore);
@@ -500,6 +698,14 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     REQUIRE(loadedBatchResult.value().has_value());
     CHECK((loadedBatchResult.value()->snapshotId == batchResult.value().snapshotId));
     CHECK((loadedBatchResult.value()->clusters.size() == batchResult.value().clusters.size()));
+    REQUIRE_FALSE(loadedBatchResult.value()->clusters.empty());
+    CHECK(loadedBatchResult.value()->clusters.front().densityScore ==
+          Catch::Approx(batchResult.value().clusters.front().densityScore));
+    REQUIRE(loadedBatchResult.value()->clusters.front().routingRepresentatives.size() == 1);
+    CHECK(loadedBatchResult.value()->clusters.front().routingRepresentatives.front().documentHash ==
+          batchResult.value().clusters.front().routingRepresentatives.front().documentHash);
+    CHECK(loadedBatchResult.value()->clusters.front().routingRepresentatives.front().embedding ==
+          batchResult.value().clusters.front().routingRepresentatives.front().embedding);
 
     auto membershipsResult =
         store.loadMemberships(std::vector<std::string>{"aaa", "ccc", "missing"});

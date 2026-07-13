@@ -31,7 +31,6 @@ struct TopologyAssistStageRequest {
     std::optional<std::vector<float>> queryEmbedding;
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore;
-    TopologyMemberReranker memberReranker;
     std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
     std::uint64_t expectedTopologyEpoch{0};
     /// Extra vector hits to mix into graph-neighbor seeds (already ranked preferred).

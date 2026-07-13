@@ -176,7 +176,6 @@ struct TunedParams {
         SearchEngineConfig::ChunkAggregation::MAX;
     size_t chunkAggregationTopK = 3;
     float chunkAggregationWeightDecay = 0.6f;
-    bool enableTieredExecution = true;
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
     size_t textMaxResults = 300;
@@ -347,7 +346,6 @@ struct TunedParams {
         config.graphVectorWeight = graphVectorWeight;
         config.chunkAggregationTopK = chunkAggregationTopK;
         config.chunkAggregationWeightDecay = chunkAggregationWeightDecay;
-        config.enableTieredExecution = enableTieredExecution;
         config.tieredNarrowVectorSearch = tieredNarrowVectorSearch;
         config.tieredMinCandidates = tieredMinCandidates;
     }

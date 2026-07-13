@@ -1,4 +1,5 @@
 #include <yams/topology/topology_alternate_engines.h>
+#include <yams/topology/topology_representatives.h>
 
 #include <algorithm>
 #include <chrono>
@@ -138,7 +139,8 @@ makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
 TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentInput> documents,
                                                const std::vector<std::int64_t>& assignment,
                                                const PairWeightMap& pairWeights,
-                                               std::string algorithm, const TimeStamps& ts) {
+                                               std::string algorithm, const TimeStamps& ts,
+                                               const TopologyBuildConfig& config) {
     TopologyArtifactBatch batch;
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
     batch.algorithm = std::move(algorithm);
@@ -228,6 +230,12 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
         cluster.memberCount = members.size();
         cluster.persistenceScore = persistence;
         cluster.cohesionScore = cohesion;
+        const double possibleEdges = members.size() > 1
+                                         ? static_cast<double>(members.size()) *
+                                               static_cast<double>(members.size() - 1) / 2.0
+                                         : 0.0;
+        cluster.densityScore =
+            possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
         cluster.bridgeMass =
             members.empty() ? 0.0 : static_cast<double>(bridgeCount) / members.size();
         cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
@@ -235,6 +243,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
         cluster.centroidEmbedding = meanEmbedding(documents, members);
+        cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
+            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount);
         cluster.memberDocumentHashes.reserve(members.size());
         for (std::size_t idx : members) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);
@@ -276,6 +286,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
               [](const DocumentClusterMembership& lhs, const DocumentClusterMembership& rhs) {
                   return lhs.documentHash < rhs.documentHash;
               });
+
+    (void)applyOrthogonalBoundarySpill(documents, config, batch);
 
     return batch;
 }
@@ -632,7 +644,8 @@ LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
     auto pairWeights = buildPairWeights(documents, indexByHash, config);
     auto adjacency = makeAdjacency(documents.size(), pairWeights);
     auto assignment = runLouvain(documents, adjacency);
-    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts);
+    auto batch =
+        buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts, config);
     batch.inputKind = config.inputKind;
     return batch;
 }
@@ -679,7 +692,8 @@ KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> docu
     }
     auto pairWeights = buildPairWeights(documents, indexByHash, config);
     auto assignment = runKMeans(documents, config.kmeansK, config.kmeansMaxIterations);
-    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "kmeans_v1", ts);
+    auto batch =
+        buildBatchFromAssignment(documents, assignment, pairWeights, "kmeans_v1", ts, config);
     batch.inputKind = config.inputKind;
     return batch;
 }

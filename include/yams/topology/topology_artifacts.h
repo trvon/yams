@@ -59,7 +59,14 @@ struct TopologyBuildConfig {
     std::size_t maxDirtyRegionDepth{2};
     std::size_t maxDirtySeedCount{64};
     std::size_t maxLevels{3};
-    std::size_t overlapLimit{2};
+    /// Maximum secondary cluster assignments per boundary document.
+    std::size_t overlapLimit{1};
+    /// Admit a secondary assignment only when its residual distance is within this multiple of
+    /// the primary residual distance.
+    double overlapBoundaryDistanceRatio{1.05};
+    /// SOAR lambda: penalty for the candidate residual component parallel to the primary residual.
+    /// Zero reduces to nearest-centroid spilling.
+    double overlapResidualPenalty{1.0};
     std::size_t rollingWindowDocuments{0};
     std::size_t fullRebuildDocThreshold{4096};
     Duration coalesceWindow{Duration{250}};
@@ -71,7 +78,7 @@ struct TopologyBuildConfig {
     // TopologyManager defaults this to 64 so oversized CC components are split.
     std::size_t maxComponentDocs{0};
     bool reciprocalOnly{true};
-    bool allowOverlap{true};
+    bool allowOverlap{false};
     bool emitBridgeAnnotations{true};
     bool emitOutliers{true};
     DirtyRegionExpansionMode dirtyRegionExpansion{
@@ -85,6 +92,9 @@ struct TopologyBuildConfig {
     std::size_t kmeansK{0};
     std::size_t kmeansMaxIterations{10};
     float minSimilarityToJoin{0.45F};
+    // Total dense route representatives per cluster, including the centroid. Values above one
+    // add deterministic diverse member embeddings. The default preserves centroid-only routing.
+    std::size_t routingRepresentativeCount{1};
 };
 
 struct TopologyDirtyRegion {
@@ -117,6 +127,11 @@ struct ClusterRepresentative {
     double representativeScore{0.0};
 };
 
+struct ClusterRoutingRepresentative {
+    std::string documentHash;
+    std::vector<float> embedding;
+};
+
 struct ClusterArtifact {
     std::string clusterId;
     std::optional<std::string> parentClusterId;
@@ -124,6 +139,9 @@ struct ClusterArtifact {
     std::size_t memberCount{0};
     double persistenceScore{0.0};
     double cohesionScore{0.0};
+    /// Undirected density of the primary construction core in [0,1]. Boundary-spill replicas are
+    /// retrieval postings and do not alter this structural statistic.
+    double densityScore{0.0};
     double bridgeMass{0.0};
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
@@ -131,6 +149,8 @@ struct ClusterArtifact {
     // Phase S: optional running-mean centroid for online KMeans engine.
     // Empty for engines that don't compute it (Connected/Louvain).
     std::vector<float> centroidEmbedding;
+    // Additional bounded representatives; centroidEmbedding is always the implicit first one.
+    std::vector<ClusterRoutingRepresentative> routingRepresentatives;
 };
 
 struct TopologyArtifactBatch {
@@ -188,6 +208,9 @@ struct TopologyRouteRequest {
     // Blend factor for SparseGuidedClusterRouter: score = alpha · bm25_mass +
     // (1-alpha) · centroid_cosine. 0.0 = pure dense; 1.0 = pure sparse.
     float sparseDenseAlpha{0.5F};
+    /// Maximum total dense representatives evaluated per cluster, including the centroid.
+    /// Zero evaluates the complete prebuilt cover.
+    std::size_t maxRoutingRepresentatives{0};
 };
 
 struct ClusterRoute {

@@ -467,6 +467,36 @@ socket_path = "/tmp/test.sock"
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads routing representatives",
+                 "[daemon][components][config][topology][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+engine = "connected"
+routing_representatives = 4
+boundary_spill = true
+boundary_spill_limit = 1
+boundary_spill_distance_ratio = 1.2
+boundary_spill_residual_penalty = 1.5
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+
+    REQUIRE(policy.engine.has_value());
+    CHECK(*policy.engine == "connected");
+    REQUIRE(policy.routingRepresentativeCount.has_value());
+    CHECK(*policy.routingRepresentativeCount == 4);
+    REQUIRE(policy.boundarySpillEnabled.has_value());
+    CHECK(*policy.boundarySpillEnabled);
+    REQUIRE(policy.boundarySpillLimit.has_value());
+    CHECK(*policy.boundarySpillLimit == 1);
+    REQUIRE(policy.boundarySpillDistanceRatio.has_value());
+    CHECK(*policy.boundarySpillDistanceRatio == Catch::Approx(1.2));
+    REQUIRE(policy.boundarySpillResidualPenalty.has_value());
+    CHECK(*policy.boundarySpillResidualPenalty == Catch::Approx(1.5));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
                  "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(
@@ -476,10 +506,10 @@ vector_policy = shadow
 min_clusters = 1
 max_clusters = 3
 max_seed_documents = 24
+representative_limit = 2
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
-max_docs_per_cluster = 12
 medoid_boost = 0.2
 rrf_k = 33
 )TOML");
@@ -497,14 +527,14 @@ rrf_k = 33
     CHECK(*policy.minClusters == 1U);
     REQUIRE(policy.maxSeedDocuments.has_value());
     CHECK(*policy.maxSeedDocuments == 24U);
+    REQUIRE(policy.representativeLimit.has_value());
+    CHECK(*policy.representativeLimit == 2U);
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
     CHECK(*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F));
     REQUIRE(policy.narrowMinBoundaryMargin.has_value());
     CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
     REQUIRE(policy.maxDocs.has_value());
     CHECK(*policy.maxDocs == 42U);
-    REQUIRE(policy.maxDocsPerCluster.has_value());
-    CHECK(*policy.maxDocsPerCluster == 12U);
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.19f);
     CHECK(*policy.medoidBoost < 0.21f);
@@ -512,23 +542,14 @@ rrf_k = 33
     CHECK(*policy.rrfK == 33.0f);
 }
 
-TEST_CASE_METHOD(ConfigResolverFixture,
-                 "ConfigResolver::resolveSearchPipelinePolicy reads evidence pipeline",
-                 "[daemon][components][config][search_pipeline][catch2]") {
+TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver reads topology evidence weight",
+                 "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(
-[search]
-candidate_pipeline = "evidence"
-
 [search.topology]
 evidence_weight = 0.03
 )TOML");
 
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-    auto policy = ConfigResolver::resolveSearchPipelinePolicy();
-
-    REQUIRE(policy.variant.has_value());
-    CHECK(*policy.variant == "evidence");
-
     auto topology = ConfigResolver::resolveTopologyRoutingPolicy();
     REQUIRE(topology.evidenceWeight.has_value());
     CHECK(*topology.evidenceWeight == Catch::Approx(0.03F));

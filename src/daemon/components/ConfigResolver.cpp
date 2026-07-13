@@ -790,23 +790,6 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
     return result;
 }
 
-ConfigResolver::SearchPipelinePolicy ConfigResolver::resolveSearchPipelinePolicy() {
-    SearchPipelinePolicy policy;
-    try {
-        namespace fs = std::filesystem;
-        const fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            const auto kv = parseSimpleTomlFlat(cfgPath);
-            if (auto it = kv.find("search.candidate_pipeline"); it != kv.end()) {
-                policy.variant = std::string(trimView(it->second));
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for search candidate pipeline: {}", e.what());
-    }
-    return policy;
-}
-
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
@@ -840,6 +823,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.max_seed_documents"); it != kv.end()) {
                 policy.maxSeedDocuments = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.representative_limit"); it != kv.end()) {
+                policy.representativeLimit = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
                 policy.adaptiveProbeScoreGap = parseFloat(it->second);
             }
@@ -848,9 +834,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             }
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
-            }
-            if (auto it = kv.find("search.topology.max_docs_per_cluster"); it != kv.end()) {
-                policy.maxDocsPerCluster = parseSize(it->second);
             }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
@@ -867,9 +850,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.min_route_score"); it != kv.end()) {
                 policy.minRouteScore = parseFloat(it->second);
             }
-            if (auto it = kv.find("search.topology.medoid_only_expansion"); it != kv.end()) {
-                policy.medoidOnlyExpansion = parseBoolValue(it->second);
-            }
             if (auto it = kv.find("search.topology.expansion_source"); it != kv.end()) {
                 policy.expansionSource = std::string(trimView(it->second));
             }
@@ -882,13 +862,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             }
             if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
                 policy.graphVectorSeedProbe = parseSize(it->second);
-            }
-            if (auto it = kv.find("search.topology.sidecar_fusion_rescue_slots"); it != kv.end()) {
-                policy.topologySidecarFusionRescueSlots = parseSize(it->second);
-            }
-            if (auto it = kv.find("search.topology.sidecar_fusion_rescue_min_score");
-                it != kv.end()) {
-                policy.topologySidecarFusionRescueMinScore = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
@@ -940,11 +913,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE float");
         }
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MEDOID_ONLY_EXPANSION")) {
-        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
-            policy.medoidOnlyExpansion = *parsed;
-        }
-    }
     if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
         if (*env) {
             policy.expansionSource = std::string(trimView(env));
@@ -968,20 +936,6 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             policy.graphVectorSeedProbe = *parsed;
         }
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.topologySidecarFusionRescueSlots = *parsed;
-        }
-    }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE")) {
-        try {
-            policy.topologySidecarFusionRescueMinScore = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug(
-                "config: failed to parse YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE "
-                "float");
-        }
-    }
 
     return policy;
 }
@@ -1002,6 +956,21 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
             if (!it->second.empty()) {
                 policy.engine = it->second;
             }
+        }
+        if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
+            policy.routingRepresentativeCount = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill"); it != kv.end()) {
+            policy.boundarySpillEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_limit"); it != kv.end()) {
+            policy.boundarySpillLimit = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_distance_ratio"); it != kv.end()) {
+            policy.boundarySpillDistanceRatio = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
+            policy.boundarySpillResidualPenalty = parseDouble(it->second);
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());

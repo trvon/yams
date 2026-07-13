@@ -360,7 +360,7 @@ TEST_CASE("TopologyTuner: restored state drops retired engine arms",
     mabArms[0]["pulls"] = 1;
     mabArms[0]["reward_sum"] = 0.5;
     mabArms.push_back({
-        {"id", "hdbscan_minc8_minp8_hops0"},
+        {"id", "retired_engine_arm"},
         {"value", 8.0},
         {"pulls", 100},
         {"reward_sum", 100.0},

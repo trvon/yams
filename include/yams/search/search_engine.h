@@ -2,7 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/search/query_concept_extractor.h>
-#include <yams/search/search_result_fusion.h>
+#include <yams/search/search_models.h>
 #include <yams/search/search_statistics.h>
 
 #include <atomic>

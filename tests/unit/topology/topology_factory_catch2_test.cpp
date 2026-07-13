@@ -56,7 +56,6 @@ TEST_CASE("topology::resolveFactoryKey normalizes unknown inputs",
     CHECK(resolveFactoryKey("connected") == std::string_view{"connected"});
     CHECK(resolveFactoryKey("") == std::string_view{"connected"});
     CHECK(resolveFactoryKey("not_registered") == std::string_view{"connected"});
-    CHECK(resolveFactoryKey("hdbscan") == std::string_view{"connected"});
 }
 
 TEST_CASE("topology::makeEngine resolves the kmeans key to the k-means engine",
@@ -78,7 +77,6 @@ TEST_CASE("topology::listAlgorithms includes the default key",
     const bool hasConnected =
         std::find(algos.begin(), algos.end(), std::string{"connected"}) != algos.end();
     CHECK(hasConnected);
-    CHECK(std::find(algos.begin(), algos.end(), std::string{"hdbscan"}) == algos.end());
 }
 
 namespace {

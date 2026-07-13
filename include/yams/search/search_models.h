@@ -147,6 +147,44 @@ inline double componentSourceScoreInResult(const SearchResult& r,
     return 0.0;
 }
 
+inline void accumulateComponentScore(SearchResult& result, ComponentResult::Source source,
+                                     double contribution) noexcept {
+    switch (source) {
+        case ComponentResult::Source::Vector:
+        case ComponentResult::Source::EntityVector:
+            result.vectorScore = result.vectorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::GraphVector:
+            result.graphVectorScore = result.graphVectorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Text:
+            result.keywordScore = result.keywordScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::SimeonText:
+        case ComponentResult::Source::GraphText:
+            result.graphTextScore = result.graphTextScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::KnowledgeGraph:
+            result.kgScore = result.kgScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::PathTree:
+            result.pathScore = result.pathScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Tag:
+        case ComponentResult::Source::Metadata:
+            result.tagScore = result.tagScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Symbol:
+            result.symbolScore = result.symbolScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Anchor:
+            result.anchorScore = result.anchorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Unknown:
+            break;
+    }
+}
+
 inline std::string documentIdFromComponent(const ComponentResult& comp) noexcept {
     if (!comp.filePath.empty()) {
         return comp.filePath;

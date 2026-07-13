@@ -462,7 +462,6 @@ struct SearchResult {
     std::optional<double> tagScore;         ///< Contribution from tag matching
     std::optional<double> symbolScore;      ///< Contribution from symbol search
     std::optional<double> anchorScore;      ///< Contribution from topology anchor (medoid affinity)
-    bool topologySidecar = false;           ///< Result includes topology sidecar graph-vector hit
 };
 
 /**

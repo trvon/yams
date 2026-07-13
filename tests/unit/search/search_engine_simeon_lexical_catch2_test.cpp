@@ -88,7 +88,6 @@ SearchEngineConfig makeLexicalOnlyConfig() {
     cfg.tagWeight = 0.0f;
     cfg.metadataWeight = 0.0f;
     cfg.enableParallelExecution = false;
-    cfg.enableTieredExecution = false;
     cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
     cfg.maxResults = 20;
     return cfg;

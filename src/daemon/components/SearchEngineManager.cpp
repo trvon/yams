@@ -81,9 +81,6 @@ std::optional<yams::search::SearchEngineConfig::TopologyVectorPolicy>
 parseTopologyVectorPolicy(std::string raw) {
     raw = normalizeTopologyToken(std::move(raw));
     using Policy = yams::search::SearchEngineConfig::TopologyVectorPolicy;
-    if (raw == "augment" || raw == "augmentation" || raw == "union") {
-        return Policy::Augment;
-    }
     if (raw == "narrow" || raw == "filter" || raw == "replace") {
         return Policy::Narrow;
     }
@@ -396,24 +393,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
-    {
-        const auto pipelinePolicy = ConfigResolver::resolveSearchPipelinePolicy();
-        if (pipelinePolicy.variant) {
-            const auto variant = normalizeTopologyToken(*pipelinePolicy.variant);
-            using Variant = yams::search::SearchEngineConfig::CandidatePipelineVariant;
-            if (variant == "classic") {
-                opts.config.candidatePipelineVariant = Variant::Classic;
-            } else if (variant == "evidence") {
-                opts.config.candidatePipelineVariant = Variant::Evidence;
-            } else {
-                spdlog::warn("Ignoring unknown search.candidate_pipeline='{}'",
-                             *pipelinePolicy.variant);
-            }
-        }
-    }
-
-    // Topology routing is opt-in. It selects query-ranked cluster members before the
-    // vector stage; the typed vector policy decides whether they augment or narrow ANN.
+    // Topology routing selects query-ranked cluster members before the vector stage; the typed
+    // vector policy decides whether to observe or apply route-restricted ANN.
     {
         auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
         if (tp.mode) {
@@ -454,6 +435,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.maxSeedDocuments) {
             opts.config.topologyMaxSeedDocuments = *tp.maxSeedDocuments;
         }
+        if (tp.representativeLimit) {
+            opts.config.topologyRoutingRepresentativeLimit = *tp.representativeLimit;
+        }
         if (tp.adaptiveProbeScoreGap) {
             opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
         }
@@ -463,9 +447,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.maxDocs) {
             opts.config.topologyMaxDocs = *tp.maxDocs;
-        }
-        if (tp.maxDocsPerCluster) {
-            opts.config.topologyMaxDocsPerCluster = *tp.maxDocsPerCluster;
         }
         if (tp.medoidBoost) {
             opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
@@ -487,9 +468,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.minRouteScore) {
             opts.config.topologyMinRouteScore = std::max(0.0f, *tp.minRouteScore);
         }
-        if (tp.medoidOnlyExpansion) {
-            opts.config.topologyMedoidOnlyExpansion = *tp.medoidOnlyExpansion;
-        }
         if (tp.expansionSource) {
             const auto s = *tp.expansionSource;
             if (s == "graph_neighbors" || s == "graph" || s == "neighbors" || s == "relations") {
@@ -510,13 +488,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.graphVectorSeedProbe) {
             opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;
-        }
-        if (tp.topologySidecarFusionRescueSlots) {
-            opts.config.topologySidecarFusionRescueSlots = *tp.topologySidecarFusionRescueSlots;
-        }
-        if (tp.topologySidecarFusionRescueMinScore) {
-            opts.config.topologySidecarFusionRescueMinScore =
-                std::max(0.0f, *tp.topologySidecarFusionRescueMinScore);
         }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);

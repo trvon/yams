@@ -124,7 +124,6 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     config.topologyRouteScoringMode = SearchEngineConfig::TopologyRouteScoringMode::SizeWeighted;
     config.topologySparseDenseAlpha = 0.25f;
     config.topologyMinRouteScore = 0.5f;
-    config.topologyMedoidOnlyExpansion = true;
 
     yams::search::TopologyRoutingSessionResult session;
     session.loadAttempted = true;
@@ -134,6 +133,7 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.narrowApplied = false;
     session.artifactsFresh = true;
     session.topologyEpoch = 7;
+    session.constructionFingerprint = "0123456789abcdef";
     session.routedClusters = 2;
     session.availableRoutes = 3;
     session.routedDocs = 5;
@@ -143,8 +143,28 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.staleCandidates = 1;
     session.routeBoundaryScoreMargin = 0.17F;
     session.confidenceAbstained = true;
+    session.routeRepresentativeDistanceEvaluations = 7;
+    session.routeRepresentativeCountMax = 4;
     session.addedCandidateHashes = {"hash-a", "hash-b"};
     session.routedCandidateHashes = {"hash-c", "hash-a"};
+    session.candidateStructureEvidence.emplace("hash-a",
+                                               yams::search::TopologyCandidateStructureEvidence{
+                                                   .scaleAgreement = 0.8F,
+                                                   .overlapSupport = 0.4F,
+                                                   .persistenceSupport = 0.6F,
+                                                   .cohesionSupport = 0.9F,
+                                                   .bridgeSupport = 0.3F,
+                                                   .densitySupport = 0.7F,
+                                               });
+    session.candidateStructureEvidence.emplace("hash-c",
+                                               yams::search::TopologyCandidateStructureEvidence{
+                                                   .scaleAgreement = 0.2F,
+                                                   .overlapSupport = 0.2F,
+                                                   .persistenceSupport = 0.8F,
+                                                   .cohesionSupport = 0.3F,
+                                                   .bridgeSupport = 0.2F,
+                                                   .densitySupport = 0.6F,
+                                               });
     session.timings.totalMicros = 100;
     session.timings.loadMicros = 10;
     session.timings.validateMicros = 20;
@@ -164,7 +184,6 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_route_scoring_mode") == "size_weighted");
     CHECK(debug.at("topology_sparse_dense_alpha") == std::to_string(0.25f));
     CHECK(debug.at("topology_min_route_score") == std::to_string(0.5f));
-    CHECK(debug.at("topology_medoid_only_expansion") == "1");
     CHECK(debug.at("topology_weak_query_enabled") == "1");
     CHECK(debug.at("topology_weak_query_load_attempted") == "1");
     CHECK(debug.at("topology_weak_query_load_succeeded") == "1");
@@ -177,6 +196,8 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_route_available_count") == "3");
     CHECK(debug.at("topology_route_boundary_score_margin") == std::to_string(0.17F));
     CHECK(debug.at("topology_route_confidence_abstained") == "1");
+    CHECK(debug.at("topology_route_representative_distance_evaluations") == "7");
+    CHECK(debug.at("topology_route_representative_count_max") == "4");
     CHECK(debug.at("topology_weak_query_routed_docs") == "5");
     CHECK(debug.at("topology_weak_query_added_candidates") == "4");
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
@@ -184,9 +205,18 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_weak_query_added_candidate_hashes") == "hash-a\thash-b");
     CHECK(debug.at("topology_weak_query_allowed_candidate_hashes") == "hash-a\thash-c");
     CHECK(debug.at("topology_weak_query_total_candidates") == "42");
+    CHECK(debug.at("topology_structure_candidate_count") == "2");
+    CHECK(std::stof(debug.at("topology_structure_scale_agreement_mean")) == Catch::Approx(0.5F));
+    CHECK(std::stof(debug.at("topology_structure_overlap_support_mean")) == Catch::Approx(0.3F));
+    CHECK(std::stof(debug.at("topology_structure_persistence_support_mean")) ==
+          Catch::Approx(0.7F));
+    CHECK(std::stof(debug.at("topology_structure_cohesion_support_mean")) == Catch::Approx(0.6F));
+    CHECK(std::stof(debug.at("topology_structure_bridge_support_mean")) == Catch::Approx(0.25F));
+    CHECK(std::stof(debug.at("topology_structure_density_support_mean")) == Catch::Approx(0.65F));
     CHECK(debug.at("topology_ready") == "1");
     CHECK(debug.at("topology_artifacts_fresh") == "1");
     CHECK(debug.at("topology_epoch") == "7");
+    CHECK(debug.at("topology_construction_fingerprint") == "0123456789abcdef");
 
     const auto& timing = response.componentTimingMicros;
     CHECK(timing.at("topology_weak_query") == 100);
@@ -219,28 +249,6 @@ TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not a
     CHECK(response.componentTimingMicros.empty());
 }
 
-TEST_CASE("recordTopologySidecarSurvivalDebug matches legacy sidecar keys",
-          "[search][tracing][topology][catch2]") {
-    yams::search::TopologySidecarSurvival survival;
-    survival.postFusionDocIds = {"a", "b"};
-    survival.finalDocIds = {"a"};
-    survival.newPostFusionDocIds = {"b"};
-    survival.duplicatePostFusionDocIds = {"a"};
-
-    std::unordered_map<std::string, std::string> debug;
-    yams::search::recordTopologySidecarSurvivalDebug(debug, survival);
-
-    CHECK(debug.at("topology_sidecar_post_fusion_count") == "2");
-    CHECK(debug.at("topology_sidecar_final_count") == "1");
-    CHECK(debug.at("topology_new_post_fusion_count") == "1");
-    CHECK(debug.at("topology_duplicate_post_fusion_count") == "1");
-    CHECK(debug.at("topology_sidecar_post_fusion_doc_ids") == "a\tb");
-    CHECK(debug.at("topology_sidecar_final_doc_ids") == "a");
-    CHECK(debug.at("topology_new_post_fusion_doc_ids") == "b");
-    CHECK(debug.at("topology_duplicate_post_fusion_doc_ids") == "a");
-    CHECK(debug.size() == 8);
-}
-
 TEST_CASE("recordIndexReadinessDebug emits readiness flags for both pipelines",
           "[search][tracing][catch2]") {
     yams::search::IndexFreshnessSnapshot freshness;
@@ -265,19 +273,12 @@ TEST_CASE("recordIndexReadinessDebug emits readiness flags for both pipelines",
 
 TEST_CASE("metric key constants are stable strings", "[search][tracing][catch2]") {
     namespace metrics = yams::search::metrics;
-    CHECK(metrics::kSearchEngineVariant == "search_engine_variant");
-    CHECK(metrics::kSearchPipelineVariant == "search_pipeline_variant");
-    CHECK(metrics::kSearchPipelineInterface == "search_pipeline_interface");
     CHECK(metrics::kSearchPipelineName == "search_pipeline_name");
     CHECK(metrics::kTopologyArtifactAdmitted == "topology_artifact_admitted");
     CHECK(metrics::kTopologyWeakQueryApplied == "topology_weak_query_applied");
     CHECK(metrics::kTopologyWeakQueryAddedCandidates == "topology_weak_query_added_candidates");
     CHECK(metrics::kTopologyWeakQueryDuplicateCandidates ==
           "topology_weak_query_duplicate_candidates");
-    CHECK(metrics::kTopologySidecarVectorCandidates == "topology_sidecar_vector_candidates");
-    CHECK(metrics::kTopologySidecarFinalCount == "topology_sidecar_final_count");
-    CHECK(metrics::kTopologyNewPostFusionCount == "topology_new_post_fusion_count");
-    CHECK(metrics::kTopologyDuplicatePostFusionCount == "topology_duplicate_post_fusion_count");
     CHECK(metrics::kTopologyRouteBestScore == "topology_route_best_score");
     CHECK(metrics::kTopologyRouteMeanAcceptedScore == "topology_route_mean_accepted_score");
     CHECK(metrics::kTopologyRouteAcceptedCount == "topology_route_accepted_count");

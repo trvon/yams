@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/search/evidence_search_pipeline.h>
-#include <yams/search/search_result_fusion.h>
 
 #include <algorithm>
 #include <cmath>
@@ -98,15 +97,35 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
     for (const auto& candidate : route.routeAllowedDocumentHashes) {
         const float localSupport = route.routedCandidateHashes.contains(candidate) ? 1.0F : 0.0F;
         const float medoidSupport = route.medoidHashes.contains(candidate) ? 1.0F : 0.0F;
-        const float support = 0.65F + 0.20F * localSupport + 0.15F * medoidSupport;
-        evidence.emplace(candidate, TopologyCandidateEvidence{
-                                        .scoreAdjustment = boundedAdjustment * support,
-                                        .confidence = confidence,
-                                        .localSupport = localSupport,
-                                        .boundarySupport = relativeBoundary,
-                                        .scaleAgreement = 0.0F,
-                                        .densityPenalty = 0.0F,
-                                    });
+        const float baseSupport = 0.65F + 0.20F * localSupport + 0.15F * medoidSupport;
+        TopologyCandidateStructureEvidence structure;
+        const auto structureIt = route.candidateStructureEvidence.find(candidate);
+        const bool hasStructure = structureIt != route.candidateStructureEvidence.end();
+        if (hasStructure) {
+            structure = structureIt->second;
+        }
+        const float structuralSupport = std::clamp(
+            0.20F * structure.scaleAgreement + 0.15F * structure.overlapSupport +
+                0.20F * structure.persistenceSupport + 0.20F * structure.cohesionSupport +
+                0.10F * structure.bridgeSupport + 0.15F * structure.densitySupport,
+            0.0F, 1.0F);
+        const float support =
+            hasStructure ? std::clamp(0.75F * baseSupport + 0.25F * structuralSupport, 0.0F, 1.0F)
+                         : baseSupport;
+        evidence.emplace(
+            candidate, TopologyCandidateEvidence{
+                           .scoreAdjustment = boundedAdjustment * support,
+                           .confidence = confidence,
+                           .localSupport = localSupport,
+                           .boundarySupport = relativeBoundary,
+                           .scaleAgreement = structure.scaleAgreement,
+                           .overlapSupport = structure.overlapSupport,
+                           .persistenceSupport = structure.persistenceSupport,
+                           .cohesionSupport = structure.cohesionSupport,
+                           .bridgeSupport = structure.bridgeSupport,
+                           .densitySupport = structure.densitySupport,
+                           .densityPenalty = hasStructure ? 1.0F - structure.densitySupport : 0.0F,
+                       });
     }
     return evidence;
 }

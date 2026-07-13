@@ -1,7 +1,7 @@
 /**
  * @file search_engine_config_catch2_test.cpp
  * @brief Tests for SearchEngineConfig, CorpusProfile, ComponentResult helpers,
- *        and accumulateComponentScore (search_result_fusion.h)
+ *        and score attribution helpers (search_models.h)
  *
  * These are header-only or inline functions at 0% coverage. Tests here
  * exercise forProfile(), detectProfile(), fusionStrategyToString(),
@@ -12,7 +12,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/search/search_result_fusion.h>
+#include <yams/search/search_models.h>
 
 #include <string>
 #include <unordered_map>
@@ -331,9 +331,10 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.maxResults == 100);
     CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
-    CHECK(cfg.enableTieredExecution == true);
     CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
     CHECK(cfg.enableTopologyWeakQueryRouting == false);
+    CHECK(cfg.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(cfg.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
     CHECK(cfg.topologyMaxClusters == 2U);
     CHECK(cfg.topologyMinClusters == 1U);
     CHECK(cfg.topologyMaxSeedDocuments == 32U);
@@ -341,9 +342,6 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
     CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
               SearchEngineConfig::TopologyVectorPolicy::Shadow)) == "shadow");
-    CHECK(cfg.candidatePipelineVariant == SearchEngineConfig::CandidatePipelineVariant::Classic);
-    CHECK(std::string_view(SearchEngineConfig::candidatePipelineVariantToString(
-              SearchEngineConfig::CandidatePipelineVariant::Evidence)) == "evidence");
     CHECK(cfg.topologyMaxDocs == 64U);
     CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
@@ -362,7 +360,6 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
 
     SearchEngineConfig configured;
     configured.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    configured.candidatePipelineVariant = SearchEngineConfig::CandidatePipelineVariant::Evidence;
     configured.enableTopologyWeakQueryRouting = true;
     configured.topologyMaxClusters = 3;
     configured.topologyMinClusters = 2;
@@ -370,27 +367,22 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     configured.topologyAdaptiveProbeScoreGap = 0.08F;
     configured.topologyNarrowMinBoundaryMargin = 0.12F;
     configured.topologyMaxDocs = 48;
-    configured.topologyMaxDocsPerCluster = 12;
     configured.topologyMedoidBoost = 0.17F;
     configured.topologyRouteScoringMode =
         SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage;
     configured.topologySparseDenseAlpha = 0.7F;
     configured.topologyMinRouteScore = 0.2F;
-    configured.topologyMedoidOnlyExpansion = true;
     configured.topologyExpansionSource =
         SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
     configured.topologyGraphNeighborMinScore = 0.4F;
     configured.topologyGraphNeighborReciprocalOnly = false;
     configured.topologyGraphVectorSeedProbe = 16;
-    configured.topologySidecarFusionRescueSlots = 2;
-    configured.topologySidecarFusionRescueMinScore = 0.3F;
     configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
 
     tuned.applyExecutionPolicyFrom(configured);
 
     CHECK(tuned.textWeight == Approx(0.25F));
     CHECK(tuned.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
-    CHECK(tuned.candidatePipelineVariant == SearchEngineConfig::CandidatePipelineVariant::Evidence);
     CHECK(tuned.enableTopologyWeakQueryRouting);
     CHECK(tuned.topologyMaxClusters == 3);
     CHECK(tuned.topologyMinClusters == 2);
@@ -398,20 +390,16 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     CHECK(tuned.topologyAdaptiveProbeScoreGap == Approx(0.08F));
     CHECK(tuned.topologyNarrowMinBoundaryMargin == Approx(0.12F));
     CHECK(tuned.topologyMaxDocs == 48);
-    CHECK(tuned.topologyMaxDocsPerCluster == 12);
     CHECK(tuned.topologyMedoidBoost == Approx(0.17F));
     CHECK(tuned.topologyRouteScoringMode ==
           SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage);
     CHECK(tuned.topologySparseDenseAlpha == Approx(0.7F));
     CHECK(tuned.topologyMinRouteScore == Approx(0.2F));
-    CHECK(tuned.topologyMedoidOnlyExpansion);
     CHECK(tuned.topologyExpansionSource ==
           SearchEngineConfig::TopologyExpansionSource::GraphNeighbors);
     CHECK(tuned.topologyGraphNeighborMinScore == Approx(0.4F));
     CHECK_FALSE(tuned.topologyGraphNeighborReciprocalOnly);
     CHECK(tuned.topologyGraphVectorSeedProbe == 16);
-    CHECK(tuned.topologySidecarFusionRescueSlots == 2);
-    CHECK(tuned.topologySidecarFusionRescueMinScore == Approx(0.3F));
     CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow);
 }
 

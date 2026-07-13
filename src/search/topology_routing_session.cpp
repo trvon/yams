@@ -5,17 +5,63 @@
 #include <yams/topology/topology_metadata_store.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <iterator>
 #include <ranges>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace yams::search {
+
+namespace {
+
+void fingerprintByte(std::uint64_t& hash, std::uint8_t value) {
+    constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+    hash ^= value;
+    hash *= kFnvPrime;
+}
+
+template <typename T> void fingerprintIntegral(std::uint64_t& hash, T value) {
+    using Unsigned = std::make_unsigned_t<T>;
+    auto bits = static_cast<std::uint64_t>(static_cast<Unsigned>(value));
+    for (std::size_t byte = 0; byte < sizeof(Unsigned); ++byte) {
+        fingerprintByte(hash, static_cast<std::uint8_t>(bits & 0xFFU));
+        bits >>= 8U;
+    }
+}
+
+void fingerprintString(std::uint64_t& hash, std::string_view value) {
+    fingerprintIntegral(hash, value.size());
+    for (const auto byte : value) {
+        fingerprintByte(hash, static_cast<std::uint8_t>(byte));
+    }
+}
+
+void fingerprintFloat(std::uint64_t& hash, float value) {
+    fingerprintIntegral(hash, std::bit_cast<std::uint32_t>(value));
+}
+
+void fingerprintDouble(std::uint64_t& hash, double value) {
+    fingerprintIntegral(hash, std::bit_cast<std::uint64_t>(value));
+}
+
+std::string fingerprintHex(std::uint64_t hash) {
+    constexpr std::string_view kHex = "0123456789abcdef";
+    std::string result(16, '0');
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        const auto shift = (result.size() - index - 1) * 4;
+        result[index] = kHex[(hash >> shift) & 0x0FU];
+    }
+    return result;
+}
+
+} // namespace
 
 TopologyRouteSelection
 selectTopologyRoutesForNarrowing(const std::vector<yams::topology::ClusterRoute>& routes,
@@ -207,6 +253,18 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.artifactsFresh = request.expectedTopologyEpoch == 0 ||
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
+    result.constructionFingerprint = snapshot->constructionFingerprint;
+    for (const auto& cluster : snapshot->artifacts->clusters) {
+        const auto availableRepresentativeCount =
+            (cluster.centroidEmbedding.empty() ? std::size_t{0} : std::size_t{1}) +
+            cluster.routingRepresentatives.size();
+        const auto representativeCount =
+            request.representativeLimit == 0
+                ? availableRepresentativeCount
+                : std::min(availableRepresentativeCount, request.representativeLimit);
+        result.routeRepresentativeCountMax =
+            std::max(result.routeRepresentativeCountMax, representativeCount);
+    }
     return true;
 }
 
@@ -237,12 +295,15 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
         request.routingMode == SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
     routeRequest.scoringMode = topologyRouteScoringMode(request.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
+    routeRequest.maxRoutingRepresentatives = request.representativeLimit;
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
 
     yams::topology::SparseGuidedClusterRouter router;
-    auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex);
+    yams::topology::SparseRouteWork routeWork;
+    auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex, &routeWork);
+    result.routeRepresentativeDistanceEvaluations += routeWork.representativeDistanceEvaluations;
     if (!routes) {
         return out;
     }
@@ -281,7 +342,10 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
                            const std::vector<std::string>& ranked) {
     result.artifactAdmitted = true;
     result.routedDocs = ranked.size();
-    std::unordered_set<std::string> candidateHashes = request.existingCandidateHashes;
+    std::unordered_set<std::string> candidateHashes;
+    if (!request.collectRouteMembership) {
+        candidateHashes = request.existingCandidateHashes;
+    }
     candidateHashes.reserve(candidateHashes.size() + ranked.size());
 
     for (const auto& hash : ranked) {
@@ -370,22 +434,7 @@ bool tryRunGraphNeighborExpansion(
     return true;
 }
 
-std::vector<std::string> selectClusterExpansionHashes(
-    const yams::topology::ClusterArtifact& cluster, const yams::topology::ClusterRoute& route,
-    const TopologyRoutingSessionRequest& request, const TopologyMemberReranker& memberReranker) {
-    if (request.medoidOnlyExpansion && route.medoidDocumentHash.has_value()) {
-        return {*route.medoidDocumentHash};
-    }
-    if (memberReranker) {
-        const std::size_t limit =
-            request.perClusterLimit > 0
-                ? request.perClusterLimit
-                : (request.maxDocs > 0 ? request.maxDocs : cluster.memberDocumentHashes.size());
-        auto expansionHashes = memberReranker(cluster.memberDocumentHashes, limit);
-        if (!expansionHashes.empty()) {
-            return expansionHashes;
-        }
-    }
+std::vector<std::string> selectClusterExpansionHashes(const yams::topology::ClusterRoute& route) {
     if (route.medoidDocumentHash.has_value()) {
         return {*route.medoidDocumentHash};
     }
@@ -405,12 +454,89 @@ void coverSeedsInCluster(const yams::topology::ClusterArtifact& cluster,
     }
 }
 
+struct CandidateStructureAccumulator {
+    std::uint64_t scaleMask{0};
+    std::size_t clusterSamples{0};
+    std::size_t selectedOverlapReferences{0};
+    double persistenceSum{0.0};
+    double cohesionSum{0.0};
+    double densitySum{0.0};
+    double bridgeMax{0.0};
+    bool membershipObserved{false};
+};
+
+std::uint64_t topologyScaleBit(std::size_t level) {
+    constexpr std::size_t kMaxRepresentedLevel = 63;
+    return std::uint64_t{1} << std::min(level, kMaxRepresentedLevel);
+}
+
+void accumulateCandidateStructure(CandidateStructureAccumulator& accumulator,
+                                  const std::string& documentHash,
+                                  const yams::topology::ClusterArtifact& cluster,
+                                  const TopologyRoutingSnapshot& snapshot,
+                                  const std::unordered_set<std::string>& selectedClusterIds) {
+    accumulator.scaleMask |= topologyScaleBit(cluster.level);
+    ++accumulator.clusterSamples;
+    accumulator.persistenceSum += std::clamp(cluster.persistenceScore, 0.0, 1.0);
+    accumulator.cohesionSum += std::clamp(cluster.cohesionScore, 0.0, 1.0);
+    accumulator.densitySum += std::clamp(cluster.densityScore, 0.0, 1.0);
+    accumulator.bridgeMax =
+        std::max(accumulator.bridgeMax, std::clamp(cluster.bridgeMass, 0.0, 1.0));
+
+    if (accumulator.membershipObserved) {
+        return;
+    }
+    const auto membershipIt = snapshot.membershipsByDocumentHash.find(documentHash);
+    if (membershipIt == snapshot.membershipsByDocumentHash.end()) {
+        return;
+    }
+    accumulator.membershipObserved = true;
+    const auto& membership = snapshot.artifacts->memberships[membershipIt->second];
+    accumulator.bridgeMax =
+        std::max(accumulator.bridgeMax, std::clamp(membership.bridgeScore, 0.0, 1.0));
+    for (const auto& overlapClusterId : membership.overlapClusterIds) {
+        if (selectedClusterIds.contains(overlapClusterId)) {
+            ++accumulator.selectedOverlapReferences;
+        }
+    }
+}
+
+TopologyCandidateStructureEvidence
+finalizeCandidateStructure(const CandidateStructureAccumulator& accumulator,
+                           std::uint64_t selectedScaleMask, std::size_t acceptedRoutes) {
+    TopologyCandidateStructureEvidence evidence;
+    if (accumulator.clusterSamples == 0) {
+        return evidence;
+    }
+
+    const auto selectedScales = std::popcount(selectedScaleMask);
+    const auto candidateScales = std::popcount(accumulator.scaleMask);
+    evidence.scaleAgreement =
+        selectedScales > 1
+            ? std::clamp(static_cast<float>(candidateScales) / static_cast<float>(selectedScales),
+                         0.0F, 1.0F)
+            : 0.0F;
+    const std::size_t repeatedMemberships = accumulator.clusterSamples - 1;
+    evidence.overlapSupport =
+        std::clamp(static_cast<float>(repeatedMemberships + accumulator.selectedOverlapReferences) /
+                       static_cast<float>(std::max<std::size_t>(1, acceptedRoutes)),
+                   0.0F, 1.0F);
+    const double sampleCount = static_cast<double>(accumulator.clusterSamples);
+    evidence.persistenceSupport =
+        static_cast<float>(std::clamp(accumulator.persistenceSum / sampleCount, 0.0, 1.0));
+    evidence.cohesionSupport =
+        static_cast<float>(std::clamp(accumulator.cohesionSum / sampleCount, 0.0, 1.0));
+    evidence.bridgeSupport = static_cast<float>(std::clamp(accumulator.bridgeMax, 0.0, 1.0));
+    evidence.densitySupport =
+        static_cast<float>(std::clamp(accumulator.densitySum / sampleCount, 0.0, 1.0));
+    return evidence;
+}
+
 TopologyRoutingSessionResult
 runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                             const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                             const std::shared_ptr<TopologyRoutingSnapshotCache>& snapshotCache,
-                            const TopologyMemberReranker& memberReranker, bool mayExpand,
-                            TopologyRoutingSessionResult result,
+                            bool mayExpand, TopologyRoutingSessionResult result,
                             std::chrono::steady_clock::time_point totalStart) {
     std::shared_ptr<const TopologyRoutingSnapshot> snapshot;
     if (!loadRoutingSnapshot(request, snapshotCache, result, snapshot)) {
@@ -433,6 +559,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         request.routingMode == SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
     routeRequest.scoringMode = topologyRouteScoringMode(request.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
+    routeRequest.maxRoutingRepresentatives = request.representativeLimit;
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -440,7 +567,9 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
 
     yams::topology::SparseGuidedClusterRouter router;
     const auto sparseRouteStart = std::chrono::steady_clock::now();
-    auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex);
+    yams::topology::SparseRouteWork routeWork;
+    auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex, &routeWork);
+    result.routeRepresentativeDistanceEvaluations += routeWork.representativeDistanceEvaluations;
     result.timings.routeMicros = microsSince(sparseRouteStart);
     if (!routes) {
         result.skipReason = std::string{"route_failed:"} + routes.error().message;
@@ -475,6 +604,20 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     const std::unordered_set<std::string> seedSet(request.seedDocumentHashes.begin(),
                                                   request.seedDocumentHashes.end());
     std::unordered_set<std::string> seedsCovered;
+    std::unordered_set<std::string> selectedClusterIds;
+    selectedClusterIds.reserve(selection.routes.size());
+    std::uint64_t selectedScaleMask = 0;
+    for (const auto& route : selection.routes) {
+        selectedClusterIds.insert(route.clusterId);
+        const auto clusterIt = snapshot->clustersById.find(route.clusterId);
+        if (clusterIt != snapshot->clustersById.end()) {
+            selectedScaleMask |= topologyScaleBit(topology.clusters[clusterIt->second].level);
+        }
+    }
+    std::unordered_map<std::string, CandidateStructureAccumulator> structureByCandidate;
+    if (request.collectRouteMembership && mayExpand) {
+        structureByCandidate.reserve(request.maxDocs > 0 ? request.maxDocs : 64);
+    }
     double acceptedRouteScoreSum = 0.0;
     result.seedCount = seedSet.size();
     for (const auto& route : selection.routes) {
@@ -498,23 +641,22 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             for (const auto& hash : cluster.memberDocumentHashes) {
                 if (!hash.empty()) {
                     result.routeAllowedDocumentHashes.insert(hash);
+                    accumulateCandidateStructure(structureByCandidate[hash], hash, cluster,
+                                                 *snapshot, selectedClusterIds);
                 }
             }
         }
 
-        if (memberReranker && !request.medoidOnlyExpansion) {
-            result.memberRerankCandidates += cluster.memberDocumentHashes.size();
-        }
-        const auto expansionHashes =
-            selectClusterExpansionHashes(cluster, route, request, memberReranker);
-        if (memberReranker && !request.medoidOnlyExpansion) {
-            result.memberRerankSelected += expansionHashes.size();
-        }
+        const auto expansionHashes = selectClusterExpansionHashes(route);
         for (const auto& hash : expansionHashes) {
             if (request.maxDocs > 0 && result.routedDocs >= request.maxDocs) {
                 break;
             }
             ++result.routedDocs;
+            if (request.collectRouteMembership) {
+                result.routedCandidateHashes.insert(hash);
+                continue;
+            }
             const auto docLookupStart = std::chrono::steady_clock::now();
             auto docLookup = metadataRepo->getDocumentByHash(hash);
             result.timings.docLookupMicros += microsSince(docLookupStart);
@@ -546,6 +688,12 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     if (result.acceptedRoutes > 0) {
         result.meanAcceptedRouteScore =
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
+    }
+    result.candidateStructureEvidence.reserve(structureByCandidate.size());
+    for (const auto& [documentHash, accumulator] : structureByCandidate) {
+        result.candidateStructureEvidence.emplace(
+            documentHash,
+            finalizeCandidateStructure(accumulator, selectedScaleMask, result.acceptedRoutes));
     }
     result.narrowApplied =
         mayExpand && (request.collectRouteMembership ? !result.routeAllowedDocumentHashes.empty()
@@ -718,6 +866,18 @@ validateTopologyArtifactBatchForRouting(const yams::topology::TopologyArtifactBa
         if (cluster.medoid.has_value() && !members.contains(cluster.medoid->documentHash)) {
             return "medoid_not_cluster_member";
         }
+        for (const auto& representative : cluster.routingRepresentatives) {
+            if (representative.documentHash.empty()) {
+                return "empty_routing_representative_hash";
+            }
+            if (!members.contains(representative.documentHash)) {
+                return "routing_representative_not_cluster_member";
+            }
+            if (representative.embedding.empty() ||
+                representative.embedding.size() != cluster.centroidEmbedding.size()) {
+                return "routing_representative_dimension_mismatch";
+            }
+        }
     }
 
     for (const auto& membership : batch.memberships) {
@@ -728,9 +888,100 @@ validateTopologyArtifactBatchForRouting(const yams::topology::TopologyArtifactBa
         if (!clusterIt->second.contains(membership.documentHash)) {
             return "membership_not_in_cluster_members";
         }
+        std::unordered_set<std::string> overlapIds;
+        overlapIds.reserve(membership.overlapClusterIds.size());
+        for (const auto& overlapClusterId : membership.overlapClusterIds) {
+            if (overlapClusterId.empty() || overlapClusterId == membership.clusterId) {
+                return "invalid_overlap_cluster";
+            }
+            if (!overlapIds.insert(overlapClusterId).second) {
+                return "duplicate_overlap_cluster";
+            }
+            const auto overlapIt = clusterMembersById.find(overlapClusterId);
+            if (overlapIt == clusterMembersById.end()) {
+                return "overlap_without_cluster";
+            }
+            if (!overlapIt->second.contains(membership.documentHash)) {
+                return "overlap_not_in_cluster_members";
+            }
+        }
     }
 
     return std::nullopt;
+}
+
+std::string
+topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBatch& batch) {
+    constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+    std::uint64_t hash = kFnvOffset;
+    fingerprintString(hash, batch.algorithm);
+    fingerprintIntegral(hash, static_cast<std::uint8_t>(batch.inputKind));
+
+    std::vector<const yams::topology::ClusterArtifact*> clusters;
+    clusters.reserve(batch.clusters.size());
+    for (const auto& cluster : batch.clusters) {
+        clusters.push_back(&cluster);
+    }
+    std::ranges::sort(clusters, {}, [](const auto* cluster) { return cluster->clusterId; });
+    fingerprintIntegral(hash, clusters.size());
+    for (const auto* cluster : clusters) {
+        fingerprintString(hash, cluster->clusterId);
+        fingerprintString(hash, cluster->parentClusterId.value_or(""));
+        fingerprintIntegral(hash, cluster->level);
+        fingerprintIntegral(hash, cluster->memberCount);
+        fingerprintDouble(hash, cluster->persistenceScore);
+        fingerprintDouble(hash, cluster->cohesionScore);
+        fingerprintDouble(hash, cluster->densityScore);
+        fingerprintDouble(hash, cluster->bridgeMass);
+        fingerprintString(hash, cluster->medoid.has_value() ? cluster->medoid->documentHash : "");
+
+        auto members = cluster->memberDocumentHashes;
+        std::ranges::sort(members);
+        fingerprintIntegral(hash, members.size());
+        for (const auto& member : members) {
+            fingerprintString(hash, member);
+        }
+        auto overlaps = cluster->overlapClusterIds;
+        std::ranges::sort(overlaps);
+        fingerprintIntegral(hash, overlaps.size());
+        for (const auto& overlap : overlaps) {
+            fingerprintString(hash, overlap);
+        }
+        fingerprintIntegral(hash, cluster->centroidEmbedding.size());
+        for (const auto value : cluster->centroidEmbedding) {
+            fingerprintFloat(hash, value);
+        }
+    }
+
+    std::vector<const yams::topology::DocumentClusterMembership*> memberships;
+    memberships.reserve(batch.memberships.size());
+    for (const auto& membership : batch.memberships) {
+        memberships.push_back(&membership);
+    }
+    std::ranges::sort(memberships, [](const auto* lhs, const auto* rhs) {
+        if (lhs->documentHash != rhs->documentHash) {
+            return lhs->documentHash < rhs->documentHash;
+        }
+        return lhs->clusterId < rhs->clusterId;
+    });
+    fingerprintIntegral(hash, memberships.size());
+    for (const auto* membership : memberships) {
+        fingerprintString(hash, membership->documentHash);
+        fingerprintString(hash, membership->clusterId);
+        fingerprintString(hash, membership->parentClusterId.value_or(""));
+        fingerprintIntegral(hash, membership->clusterLevel);
+        fingerprintDouble(hash, membership->persistenceScore);
+        fingerprintDouble(hash, membership->cohesionScore);
+        fingerprintDouble(hash, membership->bridgeScore);
+        fingerprintIntegral(hash, static_cast<std::uint8_t>(membership->role));
+        auto overlaps = membership->overlapClusterIds;
+        std::ranges::sort(overlaps);
+        fingerprintIntegral(hash, overlaps.size());
+        for (const auto& overlap : overlaps) {
+            fingerprintString(hash, overlap);
+        }
+    }
+    return fingerprintHex(hash);
 }
 
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader)
@@ -767,11 +1018,18 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch) {
 
     auto snapshot = std::make_shared<TopologyRoutingSnapshot>();
     snapshot->artifacts = std::move(artifacts);
+    snapshot->constructionFingerprint =
+        topologyRoutingConstructionFingerprint(*snapshot->artifacts);
     snapshot->sparseRouteIndex =
         yams::topology::SparseGuidedClusterRouter::buildRouteIndex(*snapshot->artifacts);
     snapshot->clustersById.reserve(snapshot->artifacts->clusters.size());
     for (std::size_t index = 0; index < snapshot->artifacts->clusters.size(); ++index) {
         snapshot->clustersById.emplace(snapshot->artifacts->clusters[index].clusterId, index);
+    }
+    snapshot->membershipsByDocumentHash.reserve(snapshot->artifacts->memberships.size());
+    for (std::size_t index = 0; index < snapshot->artifacts->memberships.size(); ++index) {
+        snapshot->membershipsByDocumentHash.emplace(
+            snapshot->artifacts->memberships[index].documentHash, index);
     }
     cached_ = std::move(snapshot);
     return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = false};
@@ -780,8 +1038,7 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch) {
 TopologyRoutingSessionResult
 runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,
                           const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-                          const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
-                          const TopologyMemberReranker& memberReranker) {
+                          const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore) {
     TopologyRoutingSessionResult result;
     result.enabled = request.routingMode != SearchEngineConfig::TopologyRoutingMode::Disabled;
     result.loadAttempted = topologyRoutingMayLoad(request.routingMode, request.weakTier1Query);
@@ -804,8 +1061,8 @@ runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,
         return result;
     }
 
-    return runClusterArtifactExpansion(request, metadataRepo, snapshotCache, memberReranker,
-                                       mayExpand, std::move(result), totalStart);
+    return runClusterArtifactExpansion(request, metadataRepo, snapshotCache, mayExpand,
+                                       std::move(result), totalStart);
 }
 
 } // namespace yams::search

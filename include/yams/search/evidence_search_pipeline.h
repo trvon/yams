@@ -35,6 +35,11 @@ struct TopologyCandidateEvidence {
     float localSupport{0.0F};
     float boundarySupport{0.0F};
     float scaleAgreement{0.0F};
+    float overlapSupport{0.0F};
+    float persistenceSupport{0.0F};
+    float cohesionSupport{0.0F};
+    float bridgeSupport{0.0F};
+    float densitySupport{0.0F};
     float densityPenalty{0.0F};
 };
 
@@ -80,7 +85,7 @@ using EvidenceReranker =
 /// Pure candidate pipeline implementing the formulation boundary:
 /// component candidates -> typed evidence -> soft fusion -> no-invent rerank -> top-k.
 ///
-/// Candidate generation stays outside this class. This makes the classic engine a stable reference
+/// Candidate generation stays outside this class. This keeps the search engine a stable reference
 /// while the new ranking formulation can be tested and benchmarked against identical candidate
 /// pools.
 class EvidenceSearchPipeline {

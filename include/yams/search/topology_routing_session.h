@@ -22,9 +22,23 @@ class MetadataRepository;
 
 namespace yams::search {
 
+/// Bounded structural evidence for one candidate within the query-selected route cover.
+/// Values are normalized to [0,1] while the immutable snapshot is traversed; consumers do not
+/// need to re-read topology artifacts or inspect cluster membership at ranking time.
+struct TopologyCandidateStructureEvidence {
+    float scaleAgreement{0.0F};
+    float overlapSupport{0.0F};
+    float persistenceSupport{0.0F};
+    float cohesionSupport{0.0F};
+    float bridgeSupport{0.0F};
+    float densitySupport{0.0F};
+};
+
 struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
+    std::string constructionFingerprint;
     std::unordered_map<std::string, std::size_t> clustersById;
+    std::unordered_map<std::string, std::size_t> membershipsByDocumentHash;
     yams::topology::SparseRouteIndex sparseRouteIndex;
 };
 
@@ -75,13 +89,12 @@ struct TopologyRoutingSessionRequest {
     bool weakTier1Query = false;
     std::size_t minClusters = 1;
     std::size_t maxClusters = 0;
+    std::size_t representativeLimit = 0;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
     std::size_t maxDocs = 0;
-    std::size_t perClusterLimit = 0;
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
-    bool medoidOnlyExpansion = false;
     /// Materialize full membership for confidently selected clusters so callers can gate an
     /// existing candidate stream without query-scoring every member.
     bool collectRouteMembership = false;
@@ -101,6 +114,7 @@ struct TopologyRoutingSessionResult {
     bool artifactsFresh = false;
     bool snapshotCacheHit = false;
     std::uint64_t topologyEpoch = 0;
+    std::string constructionFingerprint;
     std::string skipReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;
@@ -116,12 +130,13 @@ struct TopologyRoutingSessionResult {
     std::size_t addedCandidates = 0;
     std::size_t duplicateCandidates = 0;
     std::size_t staleCandidates = 0;
-    std::size_t memberRerankCandidates = 0;
-    std::size_t memberRerankSelected = 0;
+    std::size_t routeRepresentativeDistanceEvaluations = 0;
+    std::size_t routeRepresentativeCountMax = 0;
     std::vector<std::string> addedCandidateHashes;
     std::unordered_set<std::string> routedCandidateHashes;
     std::unordered_set<std::string> routeAllowedDocumentHashes;
     std::unordered_set<std::string> medoidHashes;
+    std::unordered_map<std::string, TopologyCandidateStructureEvidence> candidateStructureEvidence;
     TopologyRoutingTimings timings;
 };
 
@@ -155,8 +170,10 @@ topologyRouteScoringMode(SearchEngineConfig::TopologyRouteScoringMode mode) noex
 std::optional<std::string>
 validateTopologyArtifactBatchForRouting(const yams::topology::TopologyArtifactBatch& batch);
 
-using TopologyMemberReranker = std::function<std::vector<std::string>(
-    const std::vector<std::string>& members, std::size_t limit)>;
+/// Stable identity of topology construction inputs/outputs, excluding publication time, epoch,
+/// and the experimental routing representative set.
+[[nodiscard]] std::string
+topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBatch& batch);
 
 /// Rank pure graph-neighbor candidates from seed adjacency (testable without KG).
 /// `seedNeighbors[seedHash]` is a list of (neighborHash, score, reciprocal).
@@ -170,7 +187,6 @@ using TopologyMemberReranker = std::function<std::vector<std::string>(
 TopologyRoutingSessionResult
 runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,
                           const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-                          const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
-                          const TopologyMemberReranker& memberReranker = {});
+                          const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore);
 
 } // namespace yams::search

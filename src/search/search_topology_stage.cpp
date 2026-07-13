@@ -158,25 +158,19 @@ TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageReques
     sessionRequest.weakTier1Query = request.weakTier1Query;
     sessionRequest.minClusters = request.config.topologyMinClusters;
     sessionRequest.maxClusters = request.config.topologyMaxClusters;
+    sessionRequest.representativeLimit = request.config.topologyRoutingRepresentativeLimit;
     sessionRequest.adaptiveProbeScoreGap = request.config.topologyAdaptiveProbeScoreGap;
     sessionRequest.narrowMinBoundaryMargin = request.config.topologyNarrowMinBoundaryMargin;
     sessionRequest.maxDocs = request.config.topologyMaxDocs;
-    sessionRequest.perClusterLimit = request.config.topologyMaxDocsPerCluster;
     sessionRequest.sparseDenseAlpha = request.config.topologySparseDenseAlpha;
     sessionRequest.minRouteScore = request.config.topologyMinRouteScore;
-    sessionRequest.medoidOnlyExpansion = request.config.topologyMedoidOnlyExpansion;
-    sessionRequest.collectRouteMembership =
-        request.config.candidatePipelineVariant ==
-            SearchEngineConfig::CandidatePipelineVariant::Evidence ||
-        request.config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow ||
-        request.config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow;
+    sessionRequest.collectRouteMembership = true;
     sessionRequest.graphNeighborMinScore = request.config.topologyGraphNeighborMinScore;
     sessionRequest.graphNeighborReciprocalOnly = request.config.topologyGraphNeighborReciprocalOnly;
     sessionRequest.expectedTopologyEpoch = request.expectedTopologyEpoch;
     sessionRequest.snapshotCache = request.snapshotCache;
 
-    out.session = runTopologyRoutingSession(sessionRequest, request.metadataRepo, request.kgStore,
-                                            request.memberReranker);
+    out.session = runTopologyRoutingSession(sessionRequest, request.metadataRepo, request.kgStore);
     out.skipReason = out.session.skipReason;
 
     fillTopologySkipReason(

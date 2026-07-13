@@ -610,12 +610,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.graphHopDecay);
         }
 
-        if (auto tieredExecution = getEnvBool("YAMS_SEARCH_ENABLE_TIERED_EXECUTION")) {
-            cfg.enableTieredExecution = *tieredExecution;
-            spdlog::info("SearchEngine enableTieredExecution overridden to {} via env",
-                         cfg.enableTieredExecution);
-        }
-
         if (auto tieredNarrow = getEnvBool("YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH")) {
             cfg.tieredNarrowVectorSearch = *tieredNarrow;
             spdlog::info("SearchEngine tieredNarrowVectorSearch overridden to {} via env",
@@ -662,21 +656,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.fusionEvidenceRescueMinScore = std::max(0.0f, *evidenceRescueMinScore);
             spdlog::info("SearchEngine fusionEvidenceRescueMinScore overridden to {:.3f} via env",
                          cfg.fusionEvidenceRescueMinScore);
-        }
-        if (auto topologySidecarRescueSlots =
-                getEnvInt("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS")) {
-            cfg.topologySidecarFusionRescueSlots =
-                static_cast<size_t>(std::max(0, *topologySidecarRescueSlots));
-            spdlog::info("SearchEngine topologySidecarFusionRescueSlots overridden to {} via env",
-                         cfg.topologySidecarFusionRescueSlots);
-        }
-        if (auto topologySidecarRescueMinScore =
-                getEnvFloat("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE")) {
-            cfg.topologySidecarFusionRescueMinScore =
-                std::max(0.0f, *topologySidecarRescueMinScore);
-            spdlog::info(
-                "SearchEngine topologySidecarFusionRescueMinScore overridden to {:.3f} via env",
-                cfg.topologySidecarFusionRescueMinScore);
         }
         if (auto graphQueryExpansion = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_QUERY_EXPANSION")) {
             cfg.enableGraphQueryExpansion = *graphQueryExpansion;

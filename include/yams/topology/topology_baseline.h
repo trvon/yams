@@ -9,12 +9,14 @@ namespace yams::topology {
 struct SparseRouteIndex {
     std::unordered_map<std::string, std::vector<std::size_t>> clustersByDocumentHash;
     std::vector<float> centroidNorms;
+    std::vector<std::vector<float>> routingRepresentativeNorms;
 };
 
 struct SparseRouteWork {
     std::size_t seedClusterLookups{0};
     std::size_t clusterMemberHashesScanned{0};
     std::size_t queryNormEvaluations{0};
+    std::size_t representativeDistanceEvaluations{0};
 };
 
 class ConnectedComponentTopologyEngine final : public ITopologyEngine {
@@ -46,10 +48,11 @@ public:
 //
 //     score(c) = alpha * normalized_bm25_mass(c) + (1-alpha) * cosine(query_emb, centroid(c))
 //
-// where bm25_mass(c) = count of request.seedDocumentHashes that fall within
-// cluster c's memberDocumentHashes. Falls back gracefully when queryEmbedding
-// is empty (degrades to pure seed scoring) or when cluster.centroidEmbedding
-// is empty (skips dense leg for that cluster).
+// where bm25_mass(c) = count of request.seedDocumentHashes whose primary or
+// hierarchical membership is c. Secondary boundary-spill postings do not vote
+// for routes; they enlarge retrieval only after a route is selected. Falls back
+// gracefully when queryEmbedding is empty (degrades to pure seed scoring) or
+// when cluster.centroidEmbedding is empty (skips dense leg for that cluster).
 class SparseGuidedClusterRouter final : public ITopologyRouter {
 public:
     [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts);

@@ -370,6 +370,20 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("Topology engine applied via config: {} (resolved={})",
                          *enginePolicy.engine, resolved);
         }
+        if (enginePolicy.routingRepresentativeCount) {
+            topologyManager_.setRoutingRepresentativeCount(
+                *enginePolicy.routingRepresentativeCount);
+            spdlog::info("Topology routing representatives applied via config: {}",
+                         topologyManager_.routingRepresentativeCount());
+        }
+        if (enginePolicy.boundarySpillEnabled) {
+            topologyManager_.setBoundarySpillPolicy(
+                *enginePolicy.boundarySpillEnabled, enginePolicy.boundarySpillLimit.value_or(1),
+                enginePolicy.boundarySpillDistanceRatio.value_or(1.05),
+                enginePolicy.boundarySpillResidualPenalty.value_or(1.0));
+            spdlog::info("Topology SOAR boundary spill applied via config: enabled={}",
+                         topologyManager_.boundarySpillEnabled());
+        }
     }
 
     // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest

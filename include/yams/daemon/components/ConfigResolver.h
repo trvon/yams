@@ -70,42 +70,39 @@ public:
         EmbeddingChunkingPolicy chunking{};
     };
 
-    struct SearchPipelinePolicy {
-        // classic | evidence
-        std::optional<std::string> variant;
-    };
-
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
-        // augment | narrow
+        // shadow | narrow
         std::optional<std::string> vectorPolicy;
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
         std::optional<std::size_t> maxSeedDocuments;
+        std::optional<std::size_t> representativeLimit;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
-        std::optional<std::size_t> maxDocsPerCluster;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
         std::optional<std::string> routeScoring;
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
-        std::optional<bool> medoidOnlyExpansion;
         // clusters | graph_neighbors
         std::optional<std::string> expansionSource;
         std::optional<float> graphNeighborMinScore;
         std::optional<bool> graphNeighborReciprocalOnly;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
-        std::optional<std::size_t> topologySidecarFusionRescueSlots;
-        std::optional<float> topologySidecarFusionRescueMinScore;
         std::optional<float> rrfK;
     };
 
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
+        std::optional<std::size_t> routingRepresentativeCount;
+        std::optional<bool> boundarySpillEnabled;
+        std::optional<std::size_t> boundarySpillLimit;
+        std::optional<double> boundarySpillDistanceRatio;
+        std::optional<double> boundarySpillResidualPenalty;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
@@ -419,14 +416,6 @@ public:
     static EmbeddingDispatchPolicy resolveEmbeddingDispatchPolicy();
 
     /**
-     * Resolve the opt-in candidate pipeline implementation.
-     *
-     * Config key: search.candidate_pipeline = classic|evidence
-     * Classic remains the product default. No environment overlay is provided.
-     */
-    static SearchPipelinePolicy resolveSearchPipelinePolicy();
-
-    /**
      * @brief Resolve topology-aware routing policy from config file.
      *
      * Reads [search.topology] keys. Callers apply these as defaults, then
@@ -435,7 +424,7 @@ public:
      *
      * Config keys:
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = augment|narrow|shadow
+     * - search.topology.vector_policy = narrow|shadow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
@@ -447,12 +436,9 @@ public:
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float
-     * - search.topology.medoid_only_expansion = true|false
      * - search.topology.expansion_source = clusters|graph_neighbors
      * - search.topology.graph_neighbor_min_score = float
      * - search.topology.graph_neighbor_reciprocal_only = true|false
-     * - search.topology.sidecar_fusion_rescue_slots = int
-     * - search.topology.sidecar_fusion_rescue_min_score = float
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
@@ -466,6 +452,11 @@ public:
      *
      * Config keys:
      * - topology.engine = connected|louvain|kmeans
+     * - topology.routing_representatives = int
+     * - topology.boundary_spill = bool
+     * - topology.boundary_spill_limit = int
+     * - topology.boundary_spill_distance_ratio = float
+     * - topology.boundary_spill_residual_penalty = float
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 

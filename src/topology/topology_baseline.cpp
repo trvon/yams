@@ -1,4 +1,5 @@
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_representatives.h>
 
 #include <algorithm>
 #include <chrono>
@@ -157,7 +158,8 @@ splitOversizedComponent(std::vector<std::size_t> component, std::size_t maxCompo
 }
 
 void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>& component,
-                   const Adjacency& adjacency, std::span<const TopologyDocumentInput> documents) {
+                   const Adjacency& adjacency, std::span<const TopologyDocumentInput> documents,
+                   std::size_t routingRepresentativeCount) {
     if (component.empty()) {
         return;
     }
@@ -215,12 +217,20 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     cluster.memberCount = component.size();
     cluster.persistenceScore = persistence;
     cluster.cohesionScore = cohesion;
+    const double possibleEdges = component.size() > 1
+                                     ? static_cast<double>(component.size()) *
+                                           static_cast<double>(component.size() - 1) / 2.0
+                                     : 0.0;
+    cluster.densityScore =
+        possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
     cluster.bridgeMass = static_cast<double>(bridgeCount) / static_cast<double>(component.size());
     cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
                                            .documentHash = documents[medoidIdx].documentHash,
                                            .filePath = documents[medoidIdx].filePath,
                                            .representativeScore = std::max(0.0, medoidScore)};
     cluster.centroidEmbedding = meanEmbedding(documents, component);
+    cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
+        documents, component, cluster.centroidEmbedding, routingRepresentativeCount);
     cluster.memberDocumentHashes.reserve(component.size());
     std::ranges::transform(component, std::back_inserter(cluster.memberDocumentHashes),
                            [&](std::size_t idx) { return documents[idx].documentHash; });
@@ -347,11 +357,12 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
 
     batch.memberships.reserve(documents.size());
     for (const auto& component : components) {
-        emitComponent(batch, component, adjacency, documents);
+        emitComponent(batch, component, adjacency, documents, config.routingRepresentativeCount);
     }
 
     std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
     std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
+    (void)applyOrthogonalBoundarySpill(documents, config, batch);
 
     return batch;
 }
@@ -761,11 +772,44 @@ SparseRouteIndex
 SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts) {
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
+    index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
+    std::unordered_map<std::string, std::size_t> clusterIndexById;
+    clusterIndexById.reserve(artifacts.clusters.size());
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
         const auto& cluster = artifacts.clusters[clusterIndex];
+        clusterIndexById.emplace(cluster.clusterId, clusterIndex);
         index.centroidNorms.push_back(vectorNorm(cluster.centroidEmbedding));
-        for (const auto& hash : cluster.memberDocumentHashes) {
-            index.clustersByDocumentHash[hash].push_back(clusterIndex);
+        auto& representativeNorms = index.routingRepresentativeNorms.emplace_back();
+        representativeNorms.reserve(cluster.routingRepresentatives.size());
+        for (const auto& representative : cluster.routingRepresentatives) {
+            representativeNorms.push_back(vectorNorm(representative.embedding));
+        }
+    }
+
+    auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
+        const auto clusterIt = clusterIndexById.find(clusterId);
+        if (hash.empty() || clusterIt == clusterIndexById.end()) {
+            return;
+        }
+        auto& clusters = index.clustersByDocumentHash[hash];
+        if (std::ranges::find(clusters, clusterIt->second) == clusters.end()) {
+            clusters.push_back(clusterIt->second);
+        }
+    };
+    if (!artifacts.memberships.empty()) {
+        for (const auto& membership : artifacts.memberships) {
+            addMembership(membership.documentHash, membership.clusterId);
+            if (membership.parentClusterId.has_value()) {
+                addMembership(membership.documentHash, *membership.parentClusterId);
+            }
+        }
+    } else {
+        // Compatibility for lightweight callers that construct cluster-only artifacts.
+        for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
+             ++clusterIndex) {
+            for (const auto& hash : artifacts.clusters[clusterIndex].memberDocumentHashes) {
+                index.clustersByDocumentHash[hash].push_back(clusterIndex);
+            }
         }
     }
     return index;
@@ -775,7 +819,8 @@ Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts,
                                  const SparseRouteIndex& index, SparseRouteWork* work) const {
-    if (index.centroidNorms.size() != artifacts.clusters.size()) {
+    if (index.centroidNorms.size() != artifacts.clusters.size() ||
+        index.routingRepresentativeNorms.size() != artifacts.clusters.size()) {
         return Error{ErrorCode::InvalidArgument,
                      "sparse route index does not match topology clusters"};
     }
@@ -848,6 +893,37 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                          (queryNorm * centroidNorm);
             // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
             signals[clusterIndex].dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
+            if (work != nullptr) {
+                ++work->representativeDistanceEvaluations;
+            }
+        }
+        const auto& representativeNorms = index.routingRepresentativeNorms[clusterIndex];
+        if (representativeNorms.size() != cluster.routingRepresentatives.size()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "sparse route index does not match routing representatives"};
+        }
+        const auto extraRepresentativeLimit =
+            request.maxRoutingRepresentatives == 0
+                ? cluster.routingRepresentatives.size()
+                : std::min(cluster.routingRepresentatives.size(),
+                           request.maxRoutingRepresentatives > 0
+                               ? request.maxRoutingRepresentatives - 1
+                               : std::size_t{0});
+        for (std::size_t representativeIndex = 0; representativeIndex < extraRepresentativeLimit;
+             ++representativeIndex) {
+            const auto& representative = cluster.routingRepresentatives[representativeIndex];
+            const auto representativeNorm = representativeNorms[representativeIndex];
+            if (queryNorm <= 0.0F || representativeNorm <= 0.0F ||
+                representative.embedding.size() != request.queryEmbedding.size()) {
+                continue;
+            }
+            const auto cosine = dotProduct(request.queryEmbedding, representative.embedding) /
+                                (queryNorm * representativeNorm);
+            const auto dense = std::clamp((cosine + 1.0F) * 0.5F, 0.0F, 1.0F);
+            signals[clusterIndex].dense = std::max(signals[clusterIndex].dense, dense);
+            if (work != nullptr) {
+                ++work->representativeDistanceEvaluations;
+            }
         }
     }
 

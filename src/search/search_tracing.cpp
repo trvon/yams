@@ -38,42 +38,6 @@ std::string documentIdForTrace(const std::string& filePath, const std::string& d
     return documentHash;
 }
 
-namespace {
-
-bool isTopologySidecarComponent(const ComponentResult& comp) {
-    return (comp.source == ComponentResult::Source::GraphVector &&
-            comp.debugInfo.contains("topology_sidecar")) ||
-           (comp.source == ComponentResult::Source::Vector &&
-            comp.debugInfo.contains("topology_augmentation"));
-}
-
-std::unordered_set<std::string> toIdSet(const std::vector<std::string>& ids) {
-    std::unordered_set<std::string> out;
-    out.reserve(ids.size());
-    for (const auto& id : ids) {
-        out.insert(id);
-    }
-    return out;
-}
-
-std::vector<std::string> filterIdsInSet(const std::vector<std::string>& orderedIds,
-                                        const std::unordered_set<std::string>& filterSet,
-                                        bool includeMatches) {
-    std::vector<std::string> out;
-    out.reserve(orderedIds.size());
-    std::unordered_set<std::string> seen;
-    seen.reserve(orderedIds.size());
-    for (const auto& id : orderedIds) {
-        const bool matched = filterSet.find(id) != filterSet.end();
-        if (matched == includeMatches && seen.insert(id).second) {
-            out.push_back(id);
-        }
-    }
-    return out;
-}
-
-} // namespace
-
 void setDebug(std::unordered_map<std::string, std::string>& debug, std::string_view key,
               std::string value) {
     debug[std::string(key)] = std::move(value);
@@ -105,25 +69,6 @@ collectUniqueComponentDocIds(const std::vector<ComponentResult>& componentResult
     return out;
 }
 
-std::vector<std::string>
-collectTopologySidecarCandidateDocIds(const std::vector<ComponentResult>& componentResults) {
-    std::vector<std::string> out;
-    out.reserve(componentResults.size());
-    std::unordered_set<std::string> seen;
-    seen.reserve(componentResults.size());
-
-    for (const auto& comp : componentResults) {
-        if (!isTopologySidecarComponent(comp)) {
-            continue;
-        }
-        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
-        if (!docId.empty() && seen.insert(docId).second) {
-            out.push_back(docId);
-        }
-    }
-    return out;
-}
-
 std::vector<std::string> collectRankedResultDocIds(const std::vector<SearchResult>& results,
                                                    size_t maxCount) {
     const size_t count = std::min(results.size(), maxCount);
@@ -134,33 +79,6 @@ std::vector<std::string> collectRankedResultDocIds(const std::vector<SearchResul
             documentIdForTrace(results[i].document.filePath, results[i].document.sha256Hash));
     }
     return out;
-}
-
-TopologySidecarSurvival
-analyzeTopologySidecarSurvival(const std::vector<ComponentResult>& componentResults,
-                               const std::vector<SearchResult>& postFusionResults,
-                               const std::vector<SearchResult>& graphlessPostFusionResults,
-                               const std::vector<SearchResult>& finalResults) {
-    TopologySidecarSurvival survival;
-    survival.candidateDocIds = collectTopologySidecarCandidateDocIds(componentResults);
-
-    const auto candidateSet = toIdSet(survival.candidateDocIds);
-    const auto postFusionIds = collectRankedResultDocIds(postFusionResults);
-    const auto graphlessPostFusionIds = collectRankedResultDocIds(graphlessPostFusionResults);
-    const auto finalIds = collectRankedResultDocIds(finalResults);
-    const auto graphlessPostFusionSet = toIdSet(graphlessPostFusionIds);
-
-    survival.postFusionDocIds = filterIdsInSet(postFusionIds, candidateSet, true);
-    survival.finalDocIds = filterIdsInSet(finalIds, candidateSet, true);
-    survival.newPostFusionDocIds =
-        filterIdsInSet(survival.postFusionDocIds, graphlessPostFusionSet, false);
-    survival.duplicatePostFusionDocIds =
-        filterIdsInSet(survival.postFusionDocIds, graphlessPostFusionSet, true);
-
-    const auto postFusionSidecarSet = toIdSet(survival.postFusionDocIds);
-    survival.fusionDroppedDocIds =
-        filterIdsInSet(survival.candidateDocIds, postFusionSidecarSet, false);
-    return survival;
 }
 
 std::vector<std::string> setDifferenceIds(const std::vector<std::string>& lhs,
@@ -228,7 +146,6 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologySparseDenseAlpha,
              std::to_string(config.topologySparseDenseAlpha));
     setDebug(debug, metrics::kTopologyMinRouteScore, std::to_string(config.topologyMinRouteScore));
-    setDebugBool(debug, metrics::kTopologyMedoidOnlyExpansion, config.topologyMedoidOnlyExpansion);
     setDebugBool(debug, metrics::kTopologyWeakQueryEnabled,
                  mode != SearchEngineConfig::TopologyRoutingMode::Disabled);
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadAttempted, session.loadAttempted);
@@ -246,6 +163,10 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyRouteBoundaryScoreMargin,
              std::to_string(session.routeBoundaryScoreMargin));
     setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained, session.confidenceAbstained);
+    setDebug(debug, metrics::kTopologyRouteRepresentativeDistanceEvaluations,
+             std::to_string(session.routeRepresentativeDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteRepresentativeCountMax,
+             std::to_string(session.routeRepresentativeCountMax));
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
              std::to_string(shadowEvaluation ? 0 : session.addedCandidates));
@@ -263,8 +184,6 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     const char* shadowAction = "global";
     if (shadowEvaluated && session.narrowApplied && !allowedCandidateHashes.empty()) {
         shadowAction = "narrow";
-    } else if (shadowEvaluated && session.applied) {
-        shadowAction = "augment";
     }
     setDebugBool(debug, metrics::kTopologyShadowEvaluated, shadowEvaluated);
     setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
@@ -276,10 +195,37 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
              joinWithTab(routedCandidateHashes));
     setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
-    setDebug(debug, metrics::kTopologyMemberRerankCandidates,
-             std::to_string(session.memberRerankCandidates));
-    setDebug(debug, metrics::kTopologyMemberRerankSelected,
-             std::to_string(session.memberRerankSelected));
+    float scaleAgreementSum = 0.0F;
+    float overlapSupportSum = 0.0F;
+    float persistenceSupportSum = 0.0F;
+    float cohesionSupportSum = 0.0F;
+    float bridgeSupportSum = 0.0F;
+    float densitySupportSum = 0.0F;
+    for (const auto& [_, evidence] : session.candidateStructureEvidence) {
+        scaleAgreementSum += evidence.scaleAgreement;
+        overlapSupportSum += evidence.overlapSupport;
+        persistenceSupportSum += evidence.persistenceSupport;
+        cohesionSupportSum += evidence.cohesionSupport;
+        bridgeSupportSum += evidence.bridgeSupport;
+        densitySupportSum += evidence.densitySupport;
+    }
+    const auto structureCandidateCount = session.candidateStructureEvidence.size();
+    const float structureDenominator =
+        structureCandidateCount == 0 ? 1.0F : static_cast<float>(structureCandidateCount);
+    setDebug(debug, metrics::kTopologyStructureCandidateCount,
+             std::to_string(structureCandidateCount));
+    setDebug(debug, metrics::kTopologyStructureScaleAgreementMean,
+             std::to_string(scaleAgreementSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureOverlapSupportMean,
+             std::to_string(overlapSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructurePersistenceSupportMean,
+             std::to_string(persistenceSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureCohesionSupportMean,
+             std::to_string(cohesionSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureBridgeSupportMean,
+             std::to_string(bridgeSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureDensitySupportMean,
+             std::to_string(densitySupportSum / structureDenominator));
     setDebug(debug, metrics::kTopologyRouteBestScore, std::to_string(session.bestRouteScore));
     setDebug(debug, metrics::kTopologyRouteMeanAcceptedScore,
              std::to_string(session.meanAcceptedRouteScore));
@@ -291,6 +237,7 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
         setDebugBool(debug, metrics::kTopologyReady, true);
         setDebugBool(debug, metrics::kTopologyArtifactsFresh, session.artifactsFresh);
         setDebug(debug, metrics::kTopologyEpoch, std::to_string(session.topologyEpoch));
+        setDebug(debug, metrics::kTopologyConstructionFingerprint, session.constructionFingerprint);
     }
     if (session.loadAttempted) {
         auto& timing = response.componentTimingMicros;
@@ -306,25 +253,6 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
         timing[std::string(metrics::kTimingTopologyCandidateInsert)] =
             session.timings.candidateInsertMicros;
     }
-}
-
-void recordTopologySidecarSurvivalDebug(std::unordered_map<std::string, std::string>& debug,
-                                        const TopologySidecarSurvival& survival) {
-    setDebug(debug, metrics::kTopologySidecarPostFusionCount,
-             std::to_string(survival.postFusionDocIds.size()));
-    setDebug(debug, metrics::kTopologySidecarFinalCount,
-             std::to_string(survival.finalDocIds.size()));
-    setDebug(debug, metrics::kTopologyNewPostFusionCount,
-             std::to_string(survival.newPostFusionDocIds.size()));
-    setDebug(debug, metrics::kTopologyDuplicatePostFusionCount,
-             std::to_string(survival.duplicatePostFusionDocIds.size()));
-    setDebug(debug, metrics::kTopologySidecarPostFusionDocIds,
-             joinWithTab(survival.postFusionDocIds));
-    setDebug(debug, metrics::kTopologySidecarFinalDocIds, joinWithTab(survival.finalDocIds));
-    setDebug(debug, metrics::kTopologyNewPostFusionDocIds,
-             joinWithTab(survival.newPostFusionDocIds));
-    setDebug(debug, metrics::kTopologyDuplicatePostFusionDocIds,
-             joinWithTab(survival.duplicatePostFusionDocIds));
 }
 
 nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
@@ -606,63 +534,6 @@ nlohmann::json buildFusionTopSummaryJson(const std::vector<SearchResult>& result
         });
     }
     return out;
-}
-
-nlohmann::json buildTopologySidecarTraceJson(const std::vector<ComponentResult>& componentResults,
-                                             const std::vector<SearchResult>& postFusionResults,
-                                             const std::vector<SearchResult>& postGraphResults,
-                                             const std::vector<SearchResult>& finalResults) {
-    const auto resultRankTrace = [](const std::vector<SearchResult>& results,
-                                    const std::string& docId) -> nlohmann::json {
-        for (size_t i = 0; i < results.size(); ++i) {
-            const auto& result = results[i];
-            if (documentIdForTrace(result.document.filePath, result.document.sha256Hash) != docId) {
-                continue;
-            }
-            return nlohmann::json{{"rank", i + 1},
-                                  {"score", result.score},
-                                  {"vector_score", result.vectorScore.value_or(0.0)},
-                                  {"graph_vector_score", result.graphVectorScore.value_or(0.0)},
-                                  {"keyword_score", result.keywordScore.value_or(0.0)},
-                                  {"graph_text_score", result.graphTextScore.value_or(0.0)},
-                                  {"topology_sidecar", result.topologySidecar}};
-        }
-        return nullptr;
-    };
-
-    nlohmann::json trace = nlohmann::json::array();
-    std::unordered_set<std::string> tracedDocIds;
-    tracedDocIds.reserve(componentResults.size());
-    for (const auto& comp : componentResults) {
-        if (!isTopologySidecarComponent(comp)) {
-            continue;
-        }
-        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
-        if (docId.empty() || !tracedDocIds.insert(docId).second) {
-            continue;
-        }
-        const nlohmann::json postFusion = resultRankTrace(postFusionResults, docId);
-        const nlohmann::json postGraph = resultRankTrace(postGraphResults, docId);
-        const nlohmann::json finalWindow = resultRankTrace(finalResults, docId);
-        std::string droppedStage = "survived_final";
-        if (postFusion.is_null()) {
-            droppedStage = "fusion_window";
-        } else if (postGraph.is_null()) {
-            droppedStage = "graph_rerank";
-        } else if (finalWindow.is_null()) {
-            droppedStage = "final_window";
-        }
-        trace.push_back(nlohmann::json{{"doc_id", docId},
-                                       {"document_hash", comp.documentHash},
-                                       {"source", "topology_vector"},
-                                       {"source_rank", comp.rank + 1},
-                                       {"source_score", comp.score},
-                                       {"post_fusion", postFusion},
-                                       {"post_graph", postGraph},
-                                       {"final_window", finalWindow},
-                                       {"dropped_stage", droppedStage}});
-    }
-    return trace;
 }
 
 std::optional<std::int64_t>
