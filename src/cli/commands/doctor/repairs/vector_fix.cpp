@@ -1,5 +1,5 @@
-#include <yams/cli/doctor/repairs/vector_fix.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/doctor/repairs/vector_fix.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -13,8 +13,7 @@
 
 namespace yams::cli::doctor {
 
-VectorFixRepair::VectorFixRepair(YamsCLI* cli, bool jsonOutput)
-    : cli_(cli), jsonOutput_(jsonOutput) {}
+VectorFixRepair::VectorFixRepair(YamsCLI* cli) : cli_(cli) {}
 
 VectorFixRepair::Result VectorFixRepair::execute(const DoctorContext& ctx) {
     namespace fs = std::filesystem;
