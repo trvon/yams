@@ -1524,13 +1524,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             auto embEnd = std::chrono::steady_clock::now();
             componentTiming["embedding"] =
                 std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
-            std::vector<ComponentResult> embeddingMarker;
-            if (queryEmbedding.has_value()) {
-                embeddingMarker.push_back(ComponentResult{.score = 1.0f});
+            if (!embeddingFailed) {
+                traceCollector.markValueStageResult("embedding", queryEmbedding.has_value(),
+                                                    componentTiming["embedding"]);
             }
-            traceCollector.markStageResult("embedding", embeddingMarker,
-                                           componentTiming["embedding"],
-                                           queryEmbedding.has_value());
         }
     };
 
@@ -1620,6 +1617,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             return;
         }
 
+        bool conceptTimedOut = false;
         if (conceptFuture.valid()) {
             std::future_status conceptStatus = std::future_status::deferred;
             if (waitIfConfigured) {
@@ -1655,6 +1653,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             } else if (waitIfConfigured && conceptStatus == std::future_status::timeout) {
                 timedOut.push_back("concepts");
                 conceptsMaterialized = true;
+                conceptTimedOut = true;
                 traceCollector.markStageTimeout("concepts");
             }
         } else {
@@ -1667,13 +1666,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             enrichWithFallbackConcepts(query, concepts, workingConfig.conceptMaxCount);
         }
 
-        if (conceptsMaterialized) {
-            std::vector<ComponentResult> conceptMarker;
-            if (!concepts.empty()) {
-                conceptMarker.push_back(ComponentResult{.score = 1.0f});
-            }
-            traceCollector.markStageResult("concepts", conceptMarker, componentTiming["concepts"],
-                                           !concepts.empty());
+        if (conceptsMaterialized && !conceptTimedOut) {
+            traceCollector.markValueStageResult("concepts", !concepts.empty(),
+                                                componentTiming["concepts"]);
         }
     };
 

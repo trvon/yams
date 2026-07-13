@@ -385,6 +385,24 @@ void SearchTraceCollector::markStageResult(const std::string& name,
     }
 }
 
+void SearchTraceCollector::markValueStageResult(const std::string& name, bool producedValue,
+                                                std::int64_t durationMicros) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.failed = false;
+    stage.timedOut = false;
+    stage.skipped = false;
+    stage.skipReason.clear();
+    stage.contributed = producedValue;
+    stage.durationMicros = durationMicros;
+    stage.rawHitCount = producedValue ? 1 : 0;
+    stage.uniqueDocCount = 0;
+    stage.uniqueDocIds.clear();
+    stage.scoreStatsValid = producedValue;
+    stage.minScore = producedValue ? 1.0 : 0.0;
+    stage.maxScore = producedValue ? 1.0 : 0.0;
+}
+
 void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {
     auto& stage = stages_[name];
     stage.attempted = true;

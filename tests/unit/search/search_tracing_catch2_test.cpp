@@ -139,6 +139,32 @@ TEST_CASE("SearchTraceCollector only retains document identifiers for explicit t
     CHECK(traced.at("unique_doc_ids") == nlohmann::json::array({"a", "b"}));
 }
 
+TEST_CASE("SearchTraceCollector records non-document stage outcomes without fake hits",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    SearchTraceCollector collector(config);
+
+    collector.markValueStageResult("embedding", true, 2500);
+    collector.markValueStageResult("concepts", false, 1000);
+
+    const auto summary = collector.buildStageSummaryJson();
+    const auto& embedding = summary.at("embedding");
+    CHECK(embedding.at("attempted").get<bool>());
+    CHECK(embedding.at("contributed").get<bool>());
+    CHECK(embedding.at("raw_hit_count").get<std::size_t>() == 1);
+    CHECK(embedding.at("unique_doc_count").get<std::size_t>() == 0);
+    CHECK(embedding.at("score_stats_valid").get<bool>());
+    CHECK(embedding.at("min_score").get<double>() == Catch::Approx(1.0));
+    CHECK(embedding.at("max_score").get<double>() == Catch::Approx(1.0));
+    CHECK(embedding.at("duration_ms").get<double>() == Catch::Approx(2.5));
+
+    const auto& concepts = summary.at("concepts");
+    CHECK(concepts.at("attempted").get<bool>());
+    CHECK_FALSE(concepts.at("contributed").get<bool>());
+    CHECK(concepts.at("raw_hit_count").get<std::size_t>() == 0);
+    CHECK_FALSE(concepts.at("score_stats_valid").get<bool>());
+}
+
 TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
           "[search][tracing][topology][catch2]") {
     SearchEngineConfig config;

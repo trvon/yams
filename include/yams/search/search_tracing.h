@@ -87,6 +87,8 @@ public:
     void markStageAttempted(const std::string& name);
     void markStageResult(const std::string& name, const std::vector<ComponentResult>& results,
                          std::int64_t durationMicros, bool contributed);
+    void markValueStageResult(const std::string& name, bool producedValue,
+                              std::int64_t durationMicros);
     void markStageTimeout(const std::string& name, std::int64_t durationMicros = 0);
     void markStageFailure(const std::string& name, std::int64_t durationMicros = 0);
     void markStageSkipped(const std::string& name, std::string reason);
