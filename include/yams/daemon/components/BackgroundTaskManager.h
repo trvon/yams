@@ -110,10 +110,6 @@ public:
      */
     bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
-    // Test-only accounting probe declared unconditionally so production daemon
-    // libraries still satisfy test callers compiled with -DYAMS_TESTING=1.
-    [[nodiscard]] std::size_t testingActiveCoroutineCount() const noexcept;
-
 private:
     /**
      * @brief Launches the Fts5Job consumer coroutine.

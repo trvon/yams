@@ -242,14 +242,6 @@ public:
                      .isRunning = isRunning()};
     }
 
-    /// Cancellation slot for single-consumer cases. Long-lived daemon pollers
-    /// should prefer spawnDetached(), which allocates a dedicated cancellation
-    /// signal per coroutine and fans cancellation out during stop().
-    /// NOTE: boost::asio::cancellation_signal::slot() is not const.
-    [[nodiscard]] boost::asio::cancellation_slot cancellationSlot() noexcept {
-        return cancelSignal_.slot();
-    }
-
     template <typename Executor, typename Awaitable>
     void spawnDetached(Executor&& executor, Awaitable&& awaitable) {
         auto signal = std::make_shared<boost::asio::cancellation_signal>();
@@ -320,9 +312,6 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> highPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> backgroundPriorityStrand_;
-
-    /// Cancellation signal emitted in stop() for legacy single-consumer flows.
-    boost::asio::cancellation_signal cancelSignal_;
 
     /// Registry of per-coroutine cancellation signals used by spawnDetached().
     std::shared_ptr<DetachedCancellationState> detachedCancellationState_;

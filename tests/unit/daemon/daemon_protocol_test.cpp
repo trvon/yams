@@ -357,7 +357,7 @@ TEST_CASE("MessageFramer: Header validation", "[daemon][protocol][framing][valid
         std::vector<uint8_t> badFrame(sizeof(MessageFramer::FrameHeader) + 100);
         auto* header = reinterpret_cast<MessageFramer::FrameHeader*>(badFrame.data());
         header->magic = htonl(0xDEADBEEF); // Wrong magic
-        header->version = htonl(MessageFramer::FRAME_VERSION);
+        header->version = htonl(MessageFramer::VERSION);
         header->payload_size = htonl(100);
         header->checksum = htonl(0);
 
@@ -369,7 +369,7 @@ TEST_CASE("MessageFramer: Header validation", "[daemon][protocol][framing][valid
     SECTION("Version mismatch") {
         std::vector<uint8_t> badFrame(sizeof(MessageFramer::FrameHeader) + 100);
         auto* header = reinterpret_cast<MessageFramer::FrameHeader*>(badFrame.data());
-        header->magic = htonl(MessageFramer::FRAME_MAGIC);
+        header->magic = htonl(MessageFramer::MAGIC);
         header->version = htonl(99); // Wrong version
         header->payload_size = htonl(100);
         header->checksum = htonl(0);
