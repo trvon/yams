@@ -2,7 +2,7 @@
 
 Internalizes topology expansion-arm presets formerly encoded only in
 ``topology_expansion_fusion_ablation.sh``:
-  full64, medoid64, cap8, cap2, rerank_only
+  full64, medoid64, cap8, cap2
 """
 
 from __future__ import annotations
@@ -65,11 +65,6 @@ EXPANSION_PRESETS: dict[str, dict[str, str]] = {
     "cap2": {
         "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "2",
-        "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION": "0",
-    },
-    "rerank_only": {
-        "YAMS_BENCH_TOPOLOGY_MODE": "rerank_only",
-        "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "64",
         "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION": "0",
     },
 }

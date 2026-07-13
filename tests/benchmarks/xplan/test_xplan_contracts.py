@@ -9,8 +9,9 @@ import io
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 XPLAN_ROOT = Path(__file__).resolve().parent
 if str(XPLAN_ROOT) not in sys.path:
@@ -24,6 +25,7 @@ from analyze_query_class import (  # noqa: E402
 )
 from model import ExperimentPlan  # noqa: E402
 from report import _baseline_row  # noqa: E402
+import runner as xplan_runner  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_cluster_overlap,
@@ -43,6 +45,90 @@ from workers.retrieval_quality import (  # noqa: E402
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_report_replays_resolved_plan_instead_of_mutated_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "plan.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "name": "identity",
+                        "repeats": 3,
+                        "baseline": "original",
+                        "arms": [{"name": "original"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            original = ExperimentPlan.load(source)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "plan.resolved.json").write_text(
+                json.dumps(
+                    original.resolved_dict(stamp="test", repo_root=root, git_sha="abc")
+                ),
+                encoding="utf-8",
+            )
+
+            source.write_text(
+                json.dumps(
+                    {
+                        "name": "identity",
+                        "repeats": 1,
+                        "baseline": "mutated",
+                        "arms": [{"name": "mutated"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            replayed = xplan_runner.load_resolved_report_plan(run_dir)
+
+            self.assertEqual(replayed.repeats, 3)
+            self.assertEqual(replayed.baseline, "original")
+            self.assertEqual([arm.name for arm in replayed.arms], ["original"])
+
+    def test_run_rejects_nonempty_output_directory_before_reusing_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "identity",
+                        "arms": [{"name": "control"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_dir = root / "existing-run"
+            stale_seed = run_dir / "shared_state" / "corpus" / "seed_ready"
+            stale_seed.parent.mkdir(parents=True)
+            stale_seed.write_text("ready\n", encoding="utf-8")
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = xplan_runner.cmd_run(
+                    SimpleNamespace(
+                        plan=str(plan_path),
+                        arm=[],
+                        stamp="",
+                        build_dir="",
+                        out_dir=str(run_dir),
+                        dry_run=True,
+                        continue_on_failure=False,
+                        skip_summary=True,
+                    )
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("refusing to reuse nonempty xplan run directory", stderr.getvalue())
+            self.assertEqual(stale_seed.read_text(encoding="utf-8"), "ready\n")
+            self.assertFalse((run_dir / "plan.resolved.json").exists())
+
     def test_retrieval_quality_uses_one_google_benchmark_iteration(self) -> None:
         command = _benchmark_command(Path("retrieval_quality_bench"), "BM_RetrievalQuality")
         self.assertEqual(

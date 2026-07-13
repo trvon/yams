@@ -59,7 +59,8 @@ tests/benchmarks/xplan/
 
 - Search components: `YAMS_SEARCH_*_WEIGHT=0` + `YAMS_ENABLE_ENV_OVERRIDES=1`
 - Ingest: `YAMS_BENCH_DISABLE_KG`, `YAMS_DISABLE_VECTORS`, GLiNER
-- Topology mode / expansion presets (`full64`…`rerank_only`) in `retrieval_quality`
+- Topology mode / expansion presets (`full64`, `medoid64`, `cap8`, `cap2`) in
+  `retrieval_quality`
 
 ## Plans (engineering)
 

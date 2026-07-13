@@ -127,6 +127,27 @@ def resolve_build_dir(repo_root: Path, plan: ExperimentPlan, override: str | Non
     return path.resolve()
 
 
+def prepare_fresh_run_dir(run_dir: Path) -> None:
+    """Create a new run directory, refusing to mix with existing artifacts."""
+    if run_dir.exists():
+        if not run_dir.is_dir():
+            raise FileExistsError(f"xplan run path is not a directory: {run_dir}")
+        if any(run_dir.iterdir()):
+            raise FileExistsError(
+                f"refusing to reuse nonempty xplan run directory: {run_dir}"
+            )
+    else:
+        run_dir.mkdir(parents=True)
+
+
+def load_resolved_report_plan(run_dir: Path) -> ExperimentPlan:
+    """Load the immutable plan snapshot recorded by an xplan run."""
+    plan_path = run_dir / "plan.resolved.json"
+    if not plan_path.is_file():
+        raise FileNotFoundError(f"missing plan.resolved.json in {run_dir}")
+    return ExperimentPlan.load(plan_path)
+
+
 def cmd_list_workers(_: argparse.Namespace) -> int:
     for name in sorted(REGISTRY):
         print(name)
@@ -262,7 +283,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not root.is_absolute():
             root = repo_root / root
         run_dir = (root / plan.name / stamp).resolve()
-    ensure_dir(run_dir)
+    try:
+        prepare_fresh_run_dir(run_dir)
+    except FileExistsError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     ensure_dir(run_dir / "arms")
 
     git_sha = try_git_sha(repo_root)
@@ -537,34 +562,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"missing plan.resolved.json in {run_dir}", file=sys.stderr)
         return 2
     resolved = json.loads(plan_path.read_text(encoding="utf-8"))
-    # Rebuild a minimal ExperimentPlan from resolved JSON via source path if present.
-    src = resolved.get("source_path")
-    if src and Path(src).is_file():
-        plan = ExperimentPlan.load(Path(src))
-    else:
-        # Fallback: synthesize from resolved dict fields.
-        tmp = {
-            "name": resolved.get("name") or run_dir.parent.name,
-            "description": resolved.get("description") or "",
-            "mode": resolved.get("mode") or "unknown",
-            "steps": resolved.get("steps") or [{"worker": "ingestion_e2e"}],
-            "arms": [
-                {
-                    "name": a.get("name"),
-                    "factors": a.get("factors") or {},
-                    "env": a.get("env") or {},
-                    "params": a.get("params") or {},
-                }
-                for a in (resolved.get("arms") or [])
-                if a.get("name")
-            ],
-            "summarize": resolved.get("summarize") or {},
-            "validate": resolved.get("validate") or {},
-        }
-        # Write temp plan next to run for load
-        tmp_path = run_dir / ".plan_for_report.json"
-        tmp_path.write_text(json.dumps(tmp), encoding="utf-8")
-        plan = ExperimentPlan.load(tmp_path)
+    plan = load_resolved_report_plan(run_dir)
     summary = write_summary(
         plan,
         run_dir,
