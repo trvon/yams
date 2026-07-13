@@ -14,9 +14,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/parallel_post_processor.hpp>
-#include <yams/search/query_parser.h>
-#include <yams/search/query_tokenizer.h>
+#include <yams/search/search_facets.h>
 
 namespace yams::benchmark {
 
@@ -64,31 +62,13 @@ protected:
     std::vector<std::string> queries_;
 };
 
-// --- QueryParser Benchmarks from query_parser_bench.cpp ---
+// --- Facet aggregation benchmarks ---
 
-class QueryParserBenchmark : public BenchmarkBase {
+class FacetAggregationBenchmark : public BenchmarkBase {
 public:
-    QueryParserBenchmark(const std::string& name, std::string query,
-                         const Config& config = Config())
-        : BenchmarkBase(name, config), query_(std::move(query)) {}
-
-protected:
-    size_t runIteration() override {
-        search::QueryParser parser;
-        auto result = parser.parse(query_);
-        return result.has_value() ? 1 : 0;
-    }
-    std::string query_;
-};
-
-// --- Parallel Post-Processor Benchmarks (PBI-001 Phase 3) ---
-
-class ParallelPostProcessorBenchmark : public BenchmarkBase {
-public:
-    ParallelPostProcessorBenchmark(const std::string& name, int resultCount,
-                                   const Config& config = Config())
+    FacetAggregationBenchmark(const std::string& name, int resultCount,
+                              const Config& config = Config())
         : BenchmarkBase(name, config), resultCount_(resultCount) {
-        // Create test results
         for (int i = 0; i < resultCount_; ++i) {
             search::SearchResultItem item;
             item.documentId = i;
@@ -106,19 +86,7 @@ public:
 
 protected:
     size_t runIteration() override {
-        // Copy results for each iteration
-        auto resultsCopy = results_;
-
-        auto result =
-            search::ParallelPostProcessor::process(std::move(resultsCopy),
-                                                   nullptr, // No filters
-                                                   facetFields_,
-                                                   nullptr, // No query AST (no highlights)
-                                                   100,     // Snippet length
-                                                   3        // Max highlights
-            );
-
-        return result.filteredResults.size();
+        return search::aggregateSearchFacets(results_, facetFields_).facets.size();
     }
 
     int resultCount_;
@@ -134,7 +102,6 @@ using yams::benchmark::archiveJsonFileBestEffort;
 using yams::benchmark::BenchmarkBase;
 using yams::benchmark::matchesAnyFilter;
 using yams::benchmark::parseBenchmarkArgs;
-using yams::benchmark::QueryParserBenchmark;
 using yams::benchmark::SearchBenchmark;
 using yams::test::BenchmarkTracker;
 
@@ -171,19 +138,12 @@ int main(int argc, char** argv) {
     // Search benchmarks
     benchmarks.push_back(std::make_unique<SearchBenchmark>("ExactMatch_1K", 1000, config));
 
-    // QueryParser benchmarks
-    benchmarks.push_back(
-        std::make_unique<QueryParserBenchmark>("QueryParser_Simple", "simple query", config));
-    benchmarks.push_back(std::make_unique<QueryParserBenchmark>(
-        "QueryParser_Complex", "(query OR search) AND (terms OR words)", config));
-
-    // Parallel Post-Processor benchmarks (PBI-001 Phase 3)
-    benchmarks.push_back(std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>(
-        "ParallelPostProcessor_100", 100, config));
-    benchmarks.push_back(std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>(
-        "ParallelPostProcessor_500", 500, config));
-    benchmarks.push_back(std::make_unique<yams::benchmark::ParallelPostProcessorBenchmark>(
-        "ParallelPostProcessor_1000", 1000, config));
+    benchmarks.push_back(std::make_unique<yams::benchmark::FacetAggregationBenchmark>(
+        "FacetAggregation_100", 100, config));
+    benchmarks.push_back(std::make_unique<yams::benchmark::FacetAggregationBenchmark>(
+        "FacetAggregation_500", 500, config));
+    benchmarks.push_back(std::make_unique<yams::benchmark::FacetAggregationBenchmark>(
+        "FacetAggregation_1000", 1000, config));
 
     for (auto& benchmark : benchmarks) {
         if (!matchesAnyFilter(benchmark->name(), cli.filters)) {

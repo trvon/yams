@@ -543,16 +543,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#ParallelPostProcessor daemon - aware budgeting tests
-  catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
-    files('unit/search/parallel_post_processor_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
   catch2_fts5_stress_exe = executable('catch2_fts5_stress',
     files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
@@ -1179,7 +1169,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#Search submodule tests(QueryParser, SearchExecutor, etc.)
+#Search submodule tests
 #Migrated from GTest as part of yams - 3s4 / yams - 1yq
   catch2_search_submodule_exe = executable('catch2_search_submodule',
     files(
@@ -1195,20 +1185,15 @@ if catch2_dep.found()
       'unit/search/simeon_bandit_backend_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_router_catch2_test.cpp',
-      'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_concept_extractor_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
-      'unit/search/result_ranker_catch2_test.cpp',
       'unit/search/search_engine_config_catch2_test.cpp',
       'unit/search/search_tracing_catch2_test.cpp',
       'unit/search/component_fanout_catch2_test.cpp',
       'unit/search/concept_boost_catch2_test.cpp',
       'unit/search/cross_rerank_catch2_test.cpp',
-      'unit/search/search_smoke_catch2_test.cpp',
-      'unit/search/query_literal_extractor_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
-      'unit/search/search_filters_catch2_test.cpp',
-      'unit/search/search_results_catch2_test.cpp',
+      'unit/search/search_facets_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

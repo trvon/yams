@@ -17,12 +17,12 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/resource/plugin_host.h>
 #endif
-#include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/query_qualifiers.hpp>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
+#include <yams/search/search_facets.h>
 #include <yams/search/symbol_enrichment.h>
 
 #include <algorithm>
@@ -304,9 +304,9 @@ void applyExtensionFacets(SearchResponse& resp) {
         return;
     }
     constexpr size_t kMaxFacetValues = 10;
-    auto items = toPostProcessItems(resp.results);
-    auto processed = search::ParallelPostProcessor::process(std::move(items), nullptr,
-                                                            {"extension"}, nullptr, 0, 0);
+    const auto items = toPostProcessItems(resp.results);
+    const std::vector<std::string> facetFields{"extension"};
+    auto processed = search::aggregateSearchFacets(items, facetFields);
     resp.searchStats["facet_workers_used"] = std::to_string(processed.workersUsed);
     resp.searchStats["facet_input_count"] = std::to_string(processed.facetInputCount);
     resp.searchStats["facet_sample_count"] = std::to_string(processed.facetSampleCount);
