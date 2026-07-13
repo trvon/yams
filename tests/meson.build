@@ -1188,6 +1188,7 @@ if catch2_dep.found()
       'unit/search/query_concept_extractor_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
       'unit/search/search_engine_config_catch2_test.cpp',
+      'unit/search/search_config_environment_catch2_test.cpp',
       'unit/search/search_tracing_catch2_test.cpp',
       'unit/search/component_fanout_catch2_test.cpp',
       'unit/search/concept_boost_catch2_test.cpp',
