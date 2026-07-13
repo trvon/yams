@@ -91,19 +91,17 @@ std::vector<std::string> mergeTopologySeedHashes(const std::vector<std::string>&
     return out;
 }
 
-void fillTopologySkipReason(std::string& skipReason,
-                            SearchEngineConfig::TopologyRoutingMode routingMode,
-                            bool weakTier1Query, bool routingEnabled, bool hasStores,
-                            bool sessionApplied, bool loadSucceeded, std::size_t routedClusters) {
+void fillTopologySkipReason(std::string& skipReason, const TopologyRoutingOptions& options,
+                            bool hasStores, const TopologyRoutingSessionResult& session) {
     if (!skipReason.empty()) {
         return;
     }
     using Mode = SearchEngineConfig::TopologyRoutingMode;
-    if (!routingEnabled) {
+    if (options.routingMode == Mode::Disabled) {
         skipReason = "disabled";
         return;
     }
-    if (routingMode == Mode::WeakQueryOnly && !weakTier1Query) {
+    if (options.routingMode == Mode::WeakQueryOnly && !options.weakTier1Query) {
         skipReason = "strong_tier1_query";
         return;
     }
@@ -111,24 +109,25 @@ void fillTopologySkipReason(std::string& skipReason,
         skipReason = "missing_store";
         return;
     }
-    if (sessionApplied) {
+    if (session.applied) {
         return;
     }
-    if (loadSucceeded && routedClusters > 0) {
+    if (session.loadSucceeded && session.routedClusters > 0) {
         skipReason = "no_added_candidates";
         return;
     }
-    skipReason = loadSucceeded ? "no_routes" : "not_loaded";
+    skipReason = session.loadSucceeded ? "no_routes" : "not_loaded";
 }
 
 TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageRequest& request) {
     TopologyAssistStageResult out;
-    const bool routingEnabled =
-        request.routingMode != SearchEngineConfig::TopologyRoutingMode::Disabled;
+    const auto options =
+        makeTopologyRoutingOptions(request.config, request.routingMode, request.weakTier1Query,
+                                   /*collectRouteMembership=*/true);
 
-    const bool useVectorSeeds = request.config.topologyExpansionSource ==
-                                    SearchEngineConfig::TopologyExpansionSource::GraphNeighbors &&
-                                !request.vectorSeedHashes.empty();
+    const bool useVectorSeeds =
+        options.expansionSource == SearchEngineConfig::TopologyExpansionSource::GraphNeighbors &&
+        !request.vectorSeedHashes.empty();
 
     out.enrichedSeedHashes =
         useVectorSeeds ? mergeTopologySeedHashes(request.tier1SeedHashes, request.vectorSeedHashes,
@@ -148,31 +147,15 @@ TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageReques
     sessionRequest.weightedSeedDocuments = request.tier1SeedEvidence;
     sessionRequest.existingCandidateHashes = request.existingCandidateHashes;
     sessionRequest.queryEmbedding = request.queryEmbedding;
-    sessionRequest.routingMode = request.routingMode;
-    sessionRequest.routeScoringMode = request.config.topologyRouteScoringMode;
-    sessionRequest.expansionSource = request.config.topologyExpansionSource;
-    sessionRequest.weakTier1Query = request.weakTier1Query;
-    sessionRequest.minClusters = request.config.topologyMinClusters;
-    sessionRequest.maxClusters = request.config.topologyMaxClusters;
-    sessionRequest.representativeLimit = request.config.topologyRoutingRepresentativeLimit;
-    sessionRequest.adaptiveProbeScoreGap = request.config.topologyAdaptiveProbeScoreGap;
-    sessionRequest.narrowMinBoundaryMargin = request.config.topologyNarrowMinBoundaryMargin;
-    sessionRequest.maxDocs = request.config.topologyMaxDocs;
-    sessionRequest.sparseDenseAlpha = request.config.topologySparseDenseAlpha;
-    sessionRequest.minRouteScore = request.config.topologyMinRouteScore;
-    sessionRequest.collectRouteMembership = true;
-    sessionRequest.graphNeighborMinScore = request.config.topologyGraphNeighborMinScore;
-    sessionRequest.graphNeighborReciprocalOnly = request.config.topologyGraphNeighborReciprocalOnly;
+    sessionRequest.options = options;
     sessionRequest.expectedTopologyEpoch = request.expectedTopologyEpoch;
     sessionRequest.snapshotCache = request.snapshotCache;
 
     out.session = runTopologyRoutingSession(sessionRequest, request.metadataRepo, request.kgStore);
     out.skipReason = out.session.skipReason;
 
-    fillTopologySkipReason(
-        out.skipReason, request.routingMode, request.weakTier1Query, routingEnabled,
-        static_cast<bool>(request.metadataRepo && request.kgStore), out.session.applied,
-        out.session.loadSucceeded, out.session.routedClusters);
+    fillTopologySkipReason(out.skipReason, options,
+                           static_cast<bool>(request.metadataRepo && request.kgStore), out.session);
     return out;
 }
 

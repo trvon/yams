@@ -74,12 +74,9 @@ struct TopologyRoutingTimings {
     std::int64_t candidateInsertMicros = 0;
 };
 
-struct TopologyRoutingSessionRequest {
-    std::string query;
-    std::vector<std::string> seedDocumentHashes;
-    std::vector<yams::topology::WeightedDocumentSeed> weightedSeedDocuments;
-    std::unordered_set<std::string> existingCandidateHashes;
-    std::optional<std::vector<float>> queryEmbedding;
+/// Typed routing policy shared by the product assist stage and the routing session.
+/// Execution inputs (query, seeds, stores, snapshot epoch/cache) remain on their owning request.
+struct TopologyRoutingOptions {
     SearchEngineConfig::TopologyRoutingMode routingMode =
         SearchEngineConfig::TopologyRoutingMode::Disabled;
     SearchEngineConfig::TopologyRouteScoringMode routeScoringMode =
@@ -102,6 +99,21 @@ struct TopologyRoutingSessionRequest {
     bool collectRouteMembership = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
+};
+
+/// Snapshot the topology fields from SearchEngineConfig at the stage/session boundary.
+[[nodiscard]] TopologyRoutingOptions
+makeTopologyRoutingOptions(const SearchEngineConfig& config,
+                           SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
+                           bool collectRouteMembership = false) noexcept;
+
+struct TopologyRoutingSessionRequest {
+    std::string query;
+    std::vector<std::string> seedDocumentHashes;
+    std::vector<yams::topology::WeightedDocumentSeed> weightedSeedDocuments;
+    std::unordered_set<std::string> existingCandidateHashes;
+    std::optional<std::vector<float>> queryEmbedding;
+    TopologyRoutingOptions options;
     std::uint64_t expectedTopologyEpoch = 0;
     std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
 };

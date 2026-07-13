@@ -58,10 +58,8 @@ mergeTopologySeedHashes(const std::vector<std::string>& tier1Seeds,
 rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds);
 
 /// Fill skipReason when the session did not apply expansion (stable product diagnostics).
-void fillTopologySkipReason(std::string& skipReason,
-                            SearchEngineConfig::TopologyRoutingMode routingMode,
-                            bool weakTier1Query, bool routingEnabled, bool hasStores,
-                            bool sessionApplied, bool loadSucceeded, std::size_t routedClusters);
+void fillTopologySkipReason(std::string& skipReason, const TopologyRoutingOptions& options,
+                            bool hasStores, const TopologyRoutingSessionResult& session);
 
 /// Run topology routing for tiered search and return session + diagnostics.
 [[nodiscard]] TopologyAssistStageResult

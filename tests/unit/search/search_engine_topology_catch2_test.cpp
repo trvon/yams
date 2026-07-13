@@ -857,6 +857,43 @@ TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
 
 // NOLINTEND(cppcoreguidelines-avoid-do-while, readability-function-cognitive-complexity)
 
+TEST_CASE("Topology routing options preserve the typed product configuration",
+          "[search][topology][options][catch2]") {
+    SearchEngineConfig config;
+    config.topologyRouteScoringMode = SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage;
+    config.topologyExpansionSource = SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    config.topologyMinClusters = 2;
+    config.topologyMaxClusters = 5;
+    config.topologyRoutingRepresentativeLimit = 3;
+    config.topologyAdaptiveProbeScoreGap = 0.07F;
+    config.topologyNarrowMinBoundaryMargin = 0.11F;
+    config.topologyMaxDocs = 17;
+    config.topologySparseDenseAlpha = 0.65F;
+    config.topologyMinRouteScore = 0.22F;
+    config.topologyGraphNeighborMinScore = 0.31F;
+    config.topologyGraphNeighborReciprocalOnly = false;
+
+    const auto options =
+        makeTopologyRoutingOptions(config, SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly,
+                                   /*weakTier1Query=*/true, /*collectRouteMembership=*/true);
+
+    CHECK(options.routingMode == SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly);
+    CHECK(options.routeScoringMode == SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage);
+    CHECK(options.expansionSource == SearchEngineConfig::TopologyExpansionSource::GraphNeighbors);
+    CHECK(options.weakTier1Query);
+    CHECK(options.minClusters == 2U);
+    CHECK(options.maxClusters == 5U);
+    CHECK(options.representativeLimit == 3U);
+    CHECK(options.adaptiveProbeScoreGap == Catch::Approx(0.07F));
+    CHECK(options.narrowMinBoundaryMargin == Catch::Approx(0.11F));
+    CHECK(options.maxDocs == 17U);
+    CHECK(options.sparseDenseAlpha == Catch::Approx(0.65F));
+    CHECK(options.minRouteScore == Catch::Approx(0.22F));
+    CHECK(options.collectRouteMembership);
+    CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
+    CHECK_FALSE(options.graphNeighborReciprocalOnly);
+}
+
 TEST_CASE("Topology routing session reports route confidence and seed coverage",
           "[search][topology][catch2]") {
     TopologySearchFixture fix;
@@ -867,11 +904,11 @@ TEST_CASE("Topology routing session reports route confidence and seed coverage",
     request.query = "omega";
     request.seedDocumentHashes = {"y1", "not-in-any-cluster"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
-    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    request.weakTier1Query = true;
-    request.maxClusters = 2;
-    request.maxDocs = 8;
-    request.minRouteScore = 0.0F;
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 8;
+    request.options.minRouteScore = 0.0F;
 
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
@@ -894,11 +931,11 @@ TEST_CASE("Topology routing session excludes min-score-rejected routes from conf
     request.query = "omega";
     request.seedDocumentHashes = {"y1"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
-    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    request.weakTier1Query = true;
-    request.maxClusters = 2;
-    request.maxDocs = 8;
-    request.minRouteScore = 1000000.0F;
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 8;
+    request.options.minRouteScore = 1000000.0F;
 
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
@@ -920,10 +957,10 @@ TEST_CASE("Topology routing expands through query-independent medoids",
     request.query = "omega";
     request.seedDocumentHashes = {"y1"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
-    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    request.weakTier1Query = true;
-    request.maxClusters = 2;
-    request.maxDocs = 16;
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 16;
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     REQUIRE(session.artifactAdmitted);
     CHECK((session.addedCandidates <= session.acceptedRoutes));
@@ -940,11 +977,11 @@ TEST_CASE("Topology routing caps selected membership while preserving seed ancho
     request.query = "omega";
     request.seedDocumentHashes = {"y2"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
-    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    request.weakTier1Query = true;
-    request.maxClusters = 1;
-    request.maxDocs = 1;
-    request.collectRouteMembership = true;
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 1;
+    request.options.maxDocs = 1;
+    request.options.collectRouteMembership = true;
 
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
@@ -961,7 +998,7 @@ TEST_CASE("Topology routing caps selected membership while preserving seed ancho
     REQUIRE(session.candidateStructureEvidence.contains("y2"));
     CHECK(session.candidateStructureEvidence.at("y2").scaleAgreement == Catch::Approx(0.0F));
 
-    request.maxDocs = 0;
+    request.options.maxDocs = 0;
     const auto unbounded = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     REQUIRE(unbounded.narrowApplied);
     CHECK(unbounded.routeAllowedDocumentHashes.size() == 2U);
@@ -980,11 +1017,11 @@ TEST_CASE("Topology routing exposes selected multiscale structural evidence from
     request.query = "omega";
     request.seedDocumentHashes = {"y1"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
-    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    request.weakTier1Query = true;
-    request.maxClusters = 2;
-    request.maxDocs = 1;
-    request.collectRouteMembership = true;
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 1;
+    request.options.collectRouteMembership = true;
     request.snapshotCache = std::make_shared<TopologyRoutingSnapshotCache>([batch]() mutable {
         return Result<std::optional<yams::topology::TopologyArtifactBatch>>{
             std::optional<yams::topology::TopologyArtifactBatch>{std::move(batch)}};
@@ -1170,16 +1207,24 @@ TEST_CASE("selectTopologyRoutesForNarrowing adapts probes and abstains at an uns
 TEST_CASE("fillTopologySkipReason preserves session reason and fills product defaults",
           "[unit][search][topology]") {
     using Mode = SearchEngineConfig::TopologyRoutingMode;
+    TopologyRoutingOptions options;
+    TopologyRoutingSessionResult session;
+
+    options.routingMode = Mode::HybridAssist;
     std::string reason = "graph_medoid_neighbors";
-    fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 0);
+    fillTopologySkipReason(reason, options, /*hasStores=*/true, session);
     CHECK((reason == "graph_medoid_neighbors"));
 
+    options.routingMode = Mode::Disabled;
     reason.clear();
-    fillTopologySkipReason(reason, Mode::Disabled, false, false, true, false, false, 0);
+    fillTopologySkipReason(reason, options, /*hasStores=*/true, session);
     CHECK((reason == "disabled"));
 
+    options.routingMode = Mode::HybridAssist;
+    session.loadSucceeded = true;
+    session.routedClusters = 2;
     reason.clear();
-    fillTopologySkipReason(reason, Mode::HybridAssist, false, true, true, false, true, 2);
+    fillTopologySkipReason(reason, options, /*hasStores=*/true, session);
     CHECK((reason == "no_added_candidates"));
 }
 
