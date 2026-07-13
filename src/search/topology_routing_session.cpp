@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <ranges>
 #include <string_view>
 #include <type_traits>
@@ -291,8 +292,6 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.seedDocumentHashes = request.seedDocumentHashes;
     routeRequest.weightedSeedDocuments = request.weightedSeedDocuments;
     routeRequest.limit = request.maxClusters > 0 ? request.maxClusters : 2;
-    routeRequest.weakQueryOnly =
-        request.routingMode == SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
     routeRequest.scoringMode = topologyRouteScoringMode(request.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
     routeRequest.maxRoutingRepresentatives = request.representativeLimit;
@@ -465,6 +464,15 @@ struct CandidateStructureAccumulator {
     bool membershipObserved{false};
 };
 
+struct RoutedMemberAccumulator {
+    CandidateStructureAccumulator structure;
+    float seedWeight{0.0F};
+    double bestRouteScore{-std::numeric_limits<double>::infinity()};
+    std::size_t firstRoute{std::numeric_limits<std::size_t>::max()};
+    bool seed{false};
+    bool medoid{false};
+};
+
 std::uint64_t topologyScaleBit(std::size_t level) {
     constexpr std::size_t kMaxRepresentedLevel = 63;
     return std::uint64_t{1} << std::min(level, kMaxRepresentedLevel);
@@ -532,6 +540,57 @@ finalizeCandidateStructure(const CandidateStructureAccumulator& accumulator,
     return evidence;
 }
 
+void materializeAllowedRouteMembers(
+    const std::unordered_map<std::string, RoutedMemberAccumulator>& routedMembers,
+    std::size_t maxDocs, std::uint64_t selectedScaleMask, std::size_t acceptedRoutes,
+    TopologyRoutingSessionResult& result) {
+    using Entry = std::pair<const std::string, RoutedMemberAccumulator>;
+    std::vector<const Entry*> ranked;
+    ranked.reserve(routedMembers.size());
+    for (const auto& entry : routedMembers) {
+        ranked.push_back(&entry);
+    }
+
+    // Lexical/vector seeds are recall anchors. Within the anchored and unanchored groups, the
+    // query-ranked route score leads, medoids break same-route ties, and the hash is the stable
+    // final tie-breaker. The allowed-set ANN performs the final member-level query ranking.
+    std::ranges::sort(ranked, [](const Entry* lhs, const Entry* rhs) {
+        const auto& left = lhs->second;
+        const auto& right = rhs->second;
+        if (left.seed != right.seed) {
+            return left.seed > right.seed;
+        }
+        if (left.seedWeight != right.seedWeight) {
+            return left.seedWeight > right.seedWeight;
+        }
+        if (left.bestRouteScore != right.bestRouteScore) {
+            return left.bestRouteScore > right.bestRouteScore;
+        }
+        if (left.medoid != right.medoid) {
+            return left.medoid > right.medoid;
+        }
+        if (left.firstRoute != right.firstRoute) {
+            return left.firstRoute < right.firstRoute;
+        }
+        return lhs->first < rhs->first;
+    });
+
+    // maxDocs=0 is the explicit unbounded mode used by callers that want full route membership.
+    const auto take = maxDocs == 0 ? ranked.size() : std::min(maxDocs, ranked.size());
+    result.routeAllowedDocumentHashes.reserve(take);
+    result.candidateStructureEvidence.reserve(take);
+    for (const auto* entry : ranked | std::views::take(take)) {
+        result.routeAllowedDocumentHashes.insert(entry->first);
+        if (entry->second.medoid) {
+            result.routedCandidateHashes.insert(entry->first);
+        }
+        result.candidateStructureEvidence.emplace(
+            entry->first,
+            finalizeCandidateStructure(entry->second.structure, selectedScaleMask, acceptedRoutes));
+    }
+    result.routedDocs = take;
+}
+
 TopologyRoutingSessionResult
 runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                             const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
@@ -555,8 +614,6 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.limit = request.maxClusters > 0 && needsBoundaryRoute
                              ? request.maxClusters + static_cast<std::size_t>(1)
                              : request.maxClusters;
-    routeRequest.weakQueryOnly =
-        request.routingMode == SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
     routeRequest.scoringMode = topologyRouteScoringMode(request.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
     routeRequest.maxRoutingRepresentatives = request.representativeLimit;
@@ -600,9 +657,23 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         return result;
     }
 
-    std::unordered_set<std::string> candidateHashes = request.existingCandidateHashes;
+    std::unordered_set<std::string> candidateHashes;
+    if (!request.collectRouteMembership) {
+        candidateHashes = request.existingCandidateHashes;
+    }
     const std::unordered_set<std::string> seedSet(request.seedDocumentHashes.begin(),
                                                   request.seedDocumentHashes.end());
+    std::unordered_map<std::string, float> seedWeights;
+    seedWeights.reserve(request.weightedSeedDocuments.size());
+    for (const auto& seed : request.weightedSeedDocuments) {
+        if (seed.documentHash.empty() || !std::isfinite(seed.weight) || seed.weight <= 0.0F) {
+            continue;
+        }
+        auto [it, inserted] = seedWeights.emplace(seed.documentHash, seed.weight);
+        if (!inserted) {
+            it->second = std::max(it->second, seed.weight);
+        }
+    }
     std::unordered_set<std::string> seedsCovered;
     std::unordered_set<std::string> selectedClusterIds;
     selectedClusterIds.reserve(selection.routes.size());
@@ -614,13 +685,14 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             selectedScaleMask |= topologyScaleBit(topology.clusters[clusterIt->second].level);
         }
     }
-    std::unordered_map<std::string, CandidateStructureAccumulator> structureByCandidate;
+    std::unordered_map<std::string, RoutedMemberAccumulator> routedMembers;
     if (request.collectRouteMembership && mayExpand) {
-        structureByCandidate.reserve(request.maxDocs > 0 ? request.maxDocs : 64);
+        routedMembers.reserve(request.maxDocs > 0 ? request.maxDocs : 64);
     }
     double acceptedRouteScoreSum = 0.0;
     result.seedCount = seedSet.size();
-    for (const auto& route : selection.routes) {
+    for (std::size_t routeOrdinal = 0; routeOrdinal < selection.routes.size(); ++routeOrdinal) {
+        const auto& route = selection.routes[routeOrdinal];
         ++result.acceptedRoutes;
         acceptedRouteScoreSum += route.routeScore;
         result.bestRouteScore =
@@ -636,27 +708,39 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             continue;
         }
         const auto& cluster = topology.clusters[clusterIt->second];
-        coverSeedsInCluster(cluster, seedSet, seedsCovered);
         if (request.collectRouteMembership && mayExpand) {
             for (const auto& hash : cluster.memberDocumentHashes) {
-                if (!hash.empty()) {
-                    result.routeAllowedDocumentHashes.insert(hash);
-                    accumulateCandidateStructure(structureByCandidate[hash], hash, cluster,
-                                                 *snapshot, selectedClusterIds);
+                if (hash.empty()) {
+                    continue;
                 }
+                auto& candidate = routedMembers[hash];
+                candidate.seed = candidate.seed || seedSet.contains(hash);
+                if (candidate.seed) {
+                    seedsCovered.insert(hash);
+                }
+                if (const auto weightIt = seedWeights.find(hash); weightIt != seedWeights.end()) {
+                    candidate.seedWeight = std::max(candidate.seedWeight, weightIt->second);
+                }
+                candidate.bestRouteScore = std::max(candidate.bestRouteScore, route.routeScore);
+                candidate.firstRoute = std::min(candidate.firstRoute, routeOrdinal);
+                candidate.medoid = candidate.medoid || (route.medoidDocumentHash.has_value() &&
+                                                        *route.medoidDocumentHash == hash);
+                accumulateCandidateStructure(candidate.structure, hash, cluster, *snapshot,
+                                             selectedClusterIds);
             }
+        } else {
+            coverSeedsInCluster(cluster, seedSet, seedsCovered);
         }
 
+        if (request.collectRouteMembership) {
+            continue;
+        }
         const auto expansionHashes = selectClusterExpansionHashes(route);
         for (const auto& hash : expansionHashes) {
             if (request.maxDocs > 0 && result.routedDocs >= request.maxDocs) {
                 break;
             }
             ++result.routedDocs;
-            if (request.collectRouteMembership) {
-                result.routedCandidateHashes.insert(hash);
-                continue;
-            }
             const auto docLookupStart = std::chrono::steady_clock::now();
             auto docLookup = metadataRepo->getDocumentByHash(hash);
             result.timings.docLookupMicros += microsSince(docLookupStart);
@@ -678,8 +762,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 ++result.duplicateCandidates;
             }
         }
-        if (!request.collectRouteMembership && request.maxDocs > 0 &&
-            result.routedDocs >= request.maxDocs) {
+        if (request.maxDocs > 0 && result.routedDocs >= request.maxDocs) {
             break;
         }
     }
@@ -689,11 +772,9 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         result.meanAcceptedRouteScore =
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
     }
-    result.candidateStructureEvidence.reserve(structureByCandidate.size());
-    for (const auto& [documentHash, accumulator] : structureByCandidate) {
-        result.candidateStructureEvidence.emplace(
-            documentHash,
-            finalizeCandidateStructure(accumulator, selectedScaleMask, result.acceptedRoutes));
+    if (request.collectRouteMembership && mayExpand) {
+        materializeAllowedRouteMembers(routedMembers, request.maxDocs, selectedScaleMask,
+                                       result.acceptedRoutes, result);
     }
     result.narrowApplied =
         mayExpand && (request.collectRouteMembership ? !result.routeAllowedDocumentHashes.empty()
@@ -768,11 +849,7 @@ std::vector<std::string> rankGraphNeighborCandidates(
 
 SearchEngineConfig::TopologyRoutingMode
 resolveTopologyRoutingMode(const SearchEngineConfig& config) noexcept {
-    using Mode = SearchEngineConfig::TopologyRoutingMode;
-    if (config.topologyRoutingMode != Mode::Disabled) {
-        return config.topologyRoutingMode;
-    }
-    return config.enableTopologyWeakQueryRouting ? Mode::WeakQueryOnly : Mode::Disabled;
+    return config.topologyRoutingMode;
 }
 
 bool topologyRoutingMayLoad(SearchEngineConfig::TopologyRoutingMode mode,
@@ -784,7 +861,6 @@ bool topologyRoutingMayLoad(SearchEngineConfig::TopologyRoutingMode mode,
         case Mode::WeakQueryOnly:
             return weakTier1Query;
         case Mode::HybridAssist:
-        case Mode::RerankOnly:
             return true;
     }
     return false;
@@ -795,7 +871,6 @@ bool topologyRoutingMayExpand(SearchEngineConfig::TopologyRoutingMode mode,
     using Mode = SearchEngineConfig::TopologyRoutingMode;
     switch (mode) {
         case Mode::Disabled:
-        case Mode::RerankOnly:
             return false;
         case Mode::WeakQueryOnly:
             return weakTier1Query;

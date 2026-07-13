@@ -138,16 +138,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         spdlog::info(
             "SearchEngine using override state={} (zoom={}, k={}, text={:.2f}, "
             "simeon_text={:.2f}, vector={:.2f}, "
-            "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
-            "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f}, "
+            "vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
+            "lexical_tiebreak={}, semantic_rescue={}@{:.4f}, "
             "concept_backend={})",
             tuningStateToString(overrideState),
             SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), params.rrfK,
-            cfg.textWeight, cfg.simeonTextWeight, cfg.vectorWeight,
-            SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy), cfg.vectorOnlyThreshold,
+            cfg.textWeight, cfg.simeonTextWeight, cfg.vectorWeight, cfg.vectorOnlyThreshold,
             cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN, cfg.lexicalFloorBoost,
-            cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak, cfg.semanticRescueSlots,
-            cfg.semanticRescueMinVectorScore,
+            cfg.enableLexicalTieBreak, cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore,
             SearchEngineConfig::conceptExtractionBackendToString(cfg.conceptExtractionBackend));
     } else if (options.autoTune && metadataRepo_) {
         // Always materialize a SearchTuner from corpus stats. Skipping when
@@ -166,25 +164,23 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.includeDebugInfo = options.config.includeDebugInfo;
             {
                 const auto& tp = runtimeTuner->getParams();
-                spdlog::info("SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
-                             "(zoom={}, k={}, "
-                             "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
-                             "kg={:.2f}[{}], "
-                             "fusion={}, semantic_rescue={}[{}]@{:.4f})",
-                             tuningStateToString(runtimeTuner->currentState()),
-                             statsResult.value().usedOnlineOverlay,
-                             statsResult.value().reconciledComputedAtMs,
-                             SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel),
-                             runtimeTuner->getRrfK(), tp.weights.text.value,
-                             tuningLayerToString(tp.weights.text.source),
-                             tp.weights.simeonText.value,
-                             tuningLayerToString(tp.weights.simeonText.source),
-                             tp.weights.vector.value, tuningLayerToString(tp.weights.vector.source),
-                             tp.weights.kg.value, tuningLayerToString(tp.weights.kg.source),
-                             SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
-                             tp.semanticRescueSlots.value,
-                             tuningLayerToString(tp.semanticRescueSlots.source),
-                             cfg.semanticRescueMinVectorScore);
+                spdlog::info(
+                    "SearchEngine auto-tuned to state={} overlay={} reconciled_at={} "
+                    "(zoom={}, k={}, "
+                    "text={:.2f}[{}], simeon_text={:.2f}[{}], vector={:.2f}[{}], "
+                    "kg={:.2f}[{}], "
+                    "semantic_rescue={}[{}]@{:.4f})",
+                    tuningStateToString(runtimeTuner->currentState()),
+                    statsResult.value().usedOnlineOverlay,
+                    statsResult.value().reconciledComputedAtMs,
+                    SearchEngineConfig::navigationZoomLevelToString(cfg.zoomLevel), tp.rrfK,
+                    tp.weights.text.value, tuningLayerToString(tp.weights.text.source),
+                    tp.weights.simeonText.value, tuningLayerToString(tp.weights.simeonText.source),
+                    tp.weights.vector.value, tuningLayerToString(tp.weights.vector.source),
+                    tp.weights.kg.value, tuningLayerToString(tp.weights.kg.source),
+                    tp.semanticRescueSlots.value,
+                    tuningLayerToString(tp.semanticRescueSlots.source),
+                    cfg.semanticRescueMinVectorScore);
             }
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
@@ -326,29 +322,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         }
     }
 
-    // Allow fusion strategy override for benchmarking
-    if (allowEnvOverrides) {
-        if (auto fusionEnv = getEnvString("YAMS_FUSION_STRATEGY")) {
-            if (*fusionEnv == "WEIGHTED_SUM") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
-            } else if (*fusionEnv == "RECIPROCAL_RANK") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
-            } else if (*fusionEnv == "WEIGHTED_RECIPROCAL") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
-            } else if (*fusionEnv == "COMB_MNZ") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
-            } else if (*fusionEnv == "CONVEX") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
-            } else if (*fusionEnv == "WEIGHTED_LINEAR_ZSCORE") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE;
-            } else {
-                spdlog::warn("Unknown YAMS_FUSION_STRATEGY value '{}', ignoring", *fusionEnv);
-            }
-            spdlog::info("SearchEngine fusionStrategy overridden to {} via env",
-                         SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
-        }
-    }
-
     // Allow semantic rescue, rerank, and chunk aggregation overrides
     if (allowEnvOverrides) {
         if (auto slots = getEnvInt("YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS")) {
@@ -423,12 +396,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.enableIntentAdaptiveWeighting);
         }
 
-        if (auto fieldAware = getEnvBool("YAMS_SEARCH_FIELD_AWARE_WEIGHTING")) {
-            cfg.enableFieldAwareWeightedRrf = *fieldAware;
-            spdlog::info("SearchEngine enableFieldAwareWeightedRrf overridden to {} via env",
-                         cfg.enableFieldAwareWeightedRrf);
-        }
-
         if (auto lexicalExpansion = getEnvBool("YAMS_SEARCH_ENABLE_LEXICAL_EXPANSION")) {
             cfg.enableLexicalExpansion = *lexicalExpansion;
             spdlog::info("SearchEngine enableLexicalExpansion overridden to {} via env",
@@ -445,12 +412,6 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.lexicalExpansionScorePenalty = std::clamp(*lexicalPenalty, 0.1f, 1.0f);
             spdlog::info("SearchEngine lexicalExpansionScorePenalty overridden to {:.2f} via env",
                          cfg.lexicalExpansionScorePenalty);
-        }
-
-        if (auto dedupByPath = getEnvBool("YAMS_SEARCH_ENABLE_PATH_DEDUP")) {
-            cfg.enablePathDedupInFusion = *dedupByPath;
-            spdlog::info("SearchEngine enablePathDedupInFusion overridden to {} via env",
-                         cfg.enablePathDedupInFusion);
         }
 
         if (auto lexicalFloorTopN = getEnvInt("YAMS_SEARCH_LEXICAL_FLOOR_TOPN")) {

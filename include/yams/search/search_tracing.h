@@ -46,7 +46,7 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
-                                bool shadowEvaluation = false);
+                                bool shadowEvaluation = false, bool includeDocumentIds = false);
 
 std::string joinWithTab(const std::vector<std::string>& values);
 
@@ -80,7 +80,8 @@ struct TraceStageSummary {
 
 class SearchTraceCollector {
 public:
-    explicit SearchTraceCollector(const SearchEngineConfig& config);
+    explicit SearchTraceCollector(const SearchEngineConfig& config,
+                                  bool captureDocumentIds = false);
 
     void markStageConfigured(const std::string& name, bool enabled);
     void markStageAttempted(const std::string& name);
@@ -99,6 +100,7 @@ public:
 
 private:
     const SearchEngineConfig& config_;
+    bool captureDocumentIds_ = false;
     std::map<std::string, TraceStageSummary> stages_;
 };
 

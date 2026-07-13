@@ -36,12 +36,6 @@ public:
                     TopologyUpdateStats* stats = nullptr) override;
 };
 
-class StableClusterTopologyRouter final : public ITopologyRouter {
-public:
-    Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
-                                            const TopologyArtifactBatch& artifacts) const override;
-};
-
 // Phase S: multi-modal router. Combines BM25-hit overlap with cluster
 // membership (the "sparse signal") and cosine similarity to cluster centroids
 // (the "dense signal") into a single cluster score:
@@ -53,12 +47,12 @@ public:
 // for routes; they enlarge retrieval only after a route is selected. Falls back
 // gracefully when queryEmbedding is empty (degrades to pure seed scoring) or
 // when cluster.centroidEmbedding is empty (skips dense leg for that cluster).
-class SparseGuidedClusterRouter final : public ITopologyRouter {
+class SparseGuidedClusterRouter final {
 public:
     [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts);
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
-                                            const TopologyArtifactBatch& artifacts) const override;
+                                            const TopologyArtifactBatch& artifacts) const;
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts,

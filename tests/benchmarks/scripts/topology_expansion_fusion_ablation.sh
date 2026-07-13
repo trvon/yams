@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Compatibility wrapper → xplan plan topology_expansion.
-# Expansion-arm presets (full64/medoid64/cap8/cap2/rerank_only) live in
+# Expansion-arm presets (full64/medoid64/cap8/cap2) live in
 # tests/benchmarks/xplan/workers/retrieval_quality.py (EXPANSION_PRESETS).
 # Canonical plan: tests/benchmarks/xplan/plans/topology_expansion.json
 #

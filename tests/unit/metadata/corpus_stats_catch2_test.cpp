@@ -801,7 +801,6 @@ TEST_CASE("SearchTuner: biomedical prose corpus selects SCIENTIFIC profile",
     auto config = tuner.getConfig();
     CHECK(config.similarityThreshold == Approx(0.05f).margin(0.01f));
     CHECK(config.enableSubPhraseRescoring == false);
-    CHECK(config.rerankAnchoredMinRelativeScore == Approx(0.0f).margin(0.01f));
     CHECK(config.pathTreeWeight == Approx(0.0f).margin(0.001f));
     CHECK(config.kgWeight == Approx(0.0f).margin(0.001f));
     CHECK(config.tagWeight == Approx(0.0f).margin(0.001f));

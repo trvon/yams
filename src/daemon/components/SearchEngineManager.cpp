@@ -55,9 +55,6 @@ parseTopologyRoutingMode(std::string raw) {
     if (raw == "hybrid_assist" || raw == "hybrid" || raw == "assist") {
         return Mode::HybridAssist;
     }
-    if (raw == "rerank_only" || raw == "rerank") {
-        return Mode::RerankOnly;
-    }
     return std::nullopt;
 }
 
@@ -400,8 +397,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.mode) {
             if (auto mode = parseTopologyRoutingMode(*tp.mode); mode.has_value()) {
                 opts.config.topologyRoutingMode = *mode;
-                opts.config.enableTopologyWeakQueryRouting =
-                    (*mode == yams::search::SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly);
             } else {
                 spdlog::warn("Ignoring unknown search.topology.mode='{}'", *tp.mode);
             }
@@ -414,17 +409,11 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                              *tp.vectorPolicy);
             }
         }
-        if (tp.enableWeakQueryRouting) {
-            opts.config.enableTopologyWeakQueryRouting = *tp.enableWeakQueryRouting;
-            if (*tp.enableWeakQueryRouting &&
-                opts.config.topologyRoutingMode ==
-                    yams::search::SearchEngineConfig::TopologyRoutingMode::Disabled) {
-                opts.config.topologyRoutingMode =
-                    yams::search::SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
-            } else if (!*tp.enableWeakQueryRouting && !tp.mode) {
-                opts.config.topologyRoutingMode =
-                    yams::search::SearchEngineConfig::TopologyRoutingMode::Disabled;
-            }
+        if (tp.enableWeakQueryRouting && !tp.mode) {
+            opts.config.topologyRoutingMode =
+                *tp.enableWeakQueryRouting
+                    ? yams::search::SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly
+                    : yams::search::SearchEngineConfig::TopologyRoutingMode::Disabled;
         }
         if (tp.minClusters) {
             opts.config.topologyMinClusters = std::max<std::size_t>(1, *tp.minClusters);

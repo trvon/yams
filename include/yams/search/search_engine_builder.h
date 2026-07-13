@@ -3,14 +3,12 @@
 #include <yams/core/types.h>
 #include <yams/search/search_engine.h>
 
-#include <yams/search/simeon_lexical_backend.h>
 #include <yams/search/search_tuner.h>
+#include <yams/search/simeon_lexical_backend.h>
 
-#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <optional>
-#include <string>
 
 // Forward declarations
 namespace yams::storage {
@@ -40,28 +38,10 @@ namespace yams::search {
  * - Optional KG scorer injection when a KnowledgeGraphStore is available
  * - Conservative, enabled-by-default settings
  *
- * Remote/hybrid failover is scoped via Mode and RemoteConfig (client implementation
- * can be provided separately).
  */
 class SearchEngineBuilder {
 public:
-    enum class Mode {
-        Embedded, // Always use in-process SearchEngine
-        Remote,   // Always call remote search service
-        Hybrid    // Prefer embedded; fail over to remote
-    };
-
-    struct RemoteConfig {
-        std::string base_url = "http://127.0.0.1:8081";
-        std::string health_path = "/health";
-        std::chrono::milliseconds timeout{1500};
-        bool enable_failover = true;
-    };
-
     struct BuildOptions {
-        Mode mode = Mode::Embedded;
-        RemoteConfig remote{};
-
         // SearchEngine configuration with conservative defaults
         SearchEngineConfig config{};
 
@@ -136,15 +116,6 @@ public:
     // Build embedded engine only (no remote fallback)
     Result<std::shared_ptr<SearchEngine>>
     buildEmbedded(const BuildOptions& options = BuildOptions::makeDefault());
-
-    // Build according to requested mode. For Remote/Hybrid, returns an embedded engine when
-    // possible. A remote client/facade can be layered on top by the caller if desired.
-    Result<std::shared_ptr<SearchEngine>>
-    buildWithMode(const BuildOptions& options = BuildOptions::makeDefault()) {
-        // For now, builder returns the embedded engine even in Hybrid/Remote modes.
-        // The remote facade/client is composed at a higher layer.
-        return buildEmbedded(options);
-    }
 
 private:
     std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase_;

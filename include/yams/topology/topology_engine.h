@@ -42,12 +42,4 @@ public:
                       const TopologyBuildConfig& config) const = 0;
 };
 
-class ITopologyRouter {
-public:
-    virtual ~ITopologyRouter() = default;
-
-    virtual Result<std::vector<ClusterRoute>>
-    route(const TopologyRouteRequest& request, const TopologyArtifactBatch& artifacts) const = 0;
-};
-
 } // namespace yams::topology

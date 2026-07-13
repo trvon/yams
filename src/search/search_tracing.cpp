@@ -137,7 +137,7 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
-                                bool shadowEvaluation) {
+                                bool shadowEvaluation, bool includeDocumentIds) {
     auto& debug = response.debugStats;
     setDebug(debug, metrics::kTopologyRoutingMode,
              SearchEngineConfig::topologyRoutingModeToString(mode));
@@ -174,8 +174,10 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(shadowEvaluation ? 0 : session.duplicateCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryStaleCandidates,
              std::to_string(session.staleCandidates));
-    setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
-             shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
+    if (includeDocumentIds) {
+        setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
+                 shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
+    }
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
     const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
                                              ? session.routedCandidateHashes
@@ -189,11 +191,13 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
              std::to_string(allowedCandidateHashes.size()));
-    std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
-                                                   allowedCandidateHashes.end());
-    std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
-    setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
-             joinWithTab(routedCandidateHashes));
+    if (includeDocumentIds) {
+        std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
+                                                       allowedCandidateHashes.end());
+        std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
+        setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
+                 joinWithTab(routedCandidateHashes));
+    }
     setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
     float scaleAgreementSum = 0.0F;
     float overlapSupportSum = 0.0F;
@@ -317,7 +321,9 @@ nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& 
     return out;
 }
 
-SearchTraceCollector::SearchTraceCollector(const SearchEngineConfig& config) : config_(config) {}
+SearchTraceCollector::SearchTraceCollector(const SearchEngineConfig& config,
+                                           bool captureDocumentIds)
+    : config_(config), captureDocumentIds_(captureDocumentIds) {}
 
 void SearchTraceCollector::markStageConfigured(const std::string& name, bool enabled) {
     stages_[name].enabled = enabled;
@@ -352,8 +358,12 @@ void SearchTraceCollector::markStageResult(const std::string& name,
         }
     }
     stage.uniqueDocCount = uniqueDocs.size();
-    stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
-    std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+    if (captureDocumentIds_) {
+        stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
+        std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+    } else {
+        stage.uniqueDocIds.clear();
+    }
 
     if (!results.empty()) {
         double minScore = std::numeric_limits<double>::infinity();

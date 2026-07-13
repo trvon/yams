@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -93,21 +92,8 @@ struct TunedParams {
     // Backend filter path is preserved for users who explicitly set threshold > 0.
     TuningSlot<float> similarityThreshold{0.0f};
 
-    // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
-    // Higher values = stronger vector influence in text-anchored results
-    // Default 1.0 means full vectorWeight is used; lower values reduce vector impact
-    float vectorBoostFactor = 1.0f;
     float graphTextWeight = 0.12f;
     float graphVectorWeight = 0.08f;
-
-    // Fusion strategy is tracked through the TuningSlot pipeline so that the
-    // SearchEngineConfig default is preserved when no profile, mode, or env
-    // layer explicitly overrides it. Default mirrors SearchEngineConfig.
-    TuningSlot<SearchEngineConfig::FusionStrategy> fusionStrategy{
-        SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL, TuningLayer::Default};
-    size_t weightedLinearZScorePoolSize = 500;
-    float weightedLinearZScoreAlpha = 0.75f;
-    bool weightedLinearZScoreUseZScore = true;
 
     // Pre-fusion result pool sizing
     size_t vectorMaxResults = 150;
@@ -123,7 +109,6 @@ struct TunedParams {
     float strongVectorOnlyMinScore = 0.97f;
     size_t strongVectorOnlyTopRank = 0;
     float strongVectorOnlyPenalty = 0.95f;
-    bool enablePathDedupInFusion = false;
     size_t lexicalFloorTopN = 0;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
@@ -161,9 +146,6 @@ struct TunedParams {
 
     // Cross-reranker controls
     size_t rerankTopK = 5;
-    // Minimum relative score (vs. rank-1) for a multi-source doc to count as "competitive
-    // anchored evidence" and override the score-gap guard. 0.0 = any doc counts (default).
-    float rerankAnchoredMinRelativeScore = 0.0f;
     bool enableReranking = true;
     bool rerankReplaceScores = false;
     size_t fusionCandidateLimit = 0;
@@ -242,9 +224,7 @@ struct TunedParams {
         config.tagWeight = weights.tag.value;
         config.metadataWeight = weights.metadata.value;
         config.similarityThreshold = similarityThreshold.value;
-        config.vectorBoostFactor = vectorBoostFactor;
         config.rrfK = static_cast<float>(rrfK);
-        config.fusionStrategy = fusionStrategy.value;
         config.enableGraphRerank = enableGraphRerank;
         config.graphRerankTopN = graphRerankTopN;
         config.graphRerankWeight = graphRerankWeight;
@@ -301,7 +281,6 @@ struct TunedParams {
         config.strongVectorOnlyMinScore = strongVectorOnlyMinScore;
         config.strongVectorOnlyTopRank = strongVectorOnlyTopRank;
         config.strongVectorOnlyPenalty = strongVectorOnlyPenalty;
-        config.enablePathDedupInFusion = enablePathDedupInFusion;
         config.lexicalFloorTopN = lexicalFloorTopN;
         config.lexicalFloorBoost = lexicalFloorBoost;
         config.enableLexicalTieBreak = enableLexicalTieBreak;
@@ -331,7 +310,6 @@ struct TunedParams {
         config.conceptMaxScanResults = conceptMaxScanResults;
         config.conceptExtractionBackend = conceptExtractionBackend;
         config.rerankTopK = rerankTopK;
-        config.rerankAnchoredMinRelativeScore = rerankAnchoredMinRelativeScore;
         config.enableReranking = enableReranking;
         config.rerankReplaceScores = rerankReplaceScores;
         config.fusionCandidateLimit = fusionCandidateLimit;
@@ -339,9 +317,6 @@ struct TunedParams {
         config.multiVectorMaxPhrases = multiVectorMaxPhrases;
         config.multiVectorScoreDecay = multiVectorScoreDecay;
         config.chunkAggregation = chunkAggregation;
-        config.weightedLinearZScorePoolSize = weightedLinearZScorePoolSize;
-        config.weightedLinearZScoreAlpha = weightedLinearZScoreAlpha;
-        config.weightedLinearZScoreUseZScore = weightedLinearZScoreUseZScore;
         config.graphTextWeight = graphTextWeight;
         config.graphVectorWeight = graphVectorWeight;
         config.chunkAggregationTopK = chunkAggregationTopK;
@@ -375,7 +350,6 @@ struct TunedParams {
             {"metadata_weight_source", tuningLayerToString(weights.metadata.source)},
             {"similarity_threshold", similarityThreshold.value},
             {"similarity_threshold_source", tuningLayerToString(similarityThreshold.source)},
-            {"vector_boost_factor", vectorBoostFactor},
             {"enable_graph_rerank", enableGraphRerank},
             {"graph_rerank_topn", graphRerankTopN},
             {"graph_rerank_weight", graphRerankWeight},
@@ -396,7 +370,6 @@ struct TunedParams {
             {"vector_only_near_miss_reserve", vectorOnlyNearMissReserve},
             {"vector_only_near_miss_slack", vectorOnlyNearMissSlack},
             {"vector_only_near_miss_penalty", vectorOnlyNearMissPenalty},
-            {"enable_path_dedup_in_fusion", enablePathDedupInFusion},
             {"lexical_floor_topn", lexicalFloorTopN},
             {"lexical_floor_boost", lexicalFloorBoost},
             {"enable_lexical_tie_break", enableLexicalTieBreak},
@@ -410,8 +383,7 @@ struct TunedParams {
             {"weak_query_min_top_text_score", weakQueryMinTopTextScore},
             {"enable_sub_phrase_rescoring", enableSubPhraseRescoring},
             {"sub_phrase_scoring_penalty", subPhraseScoringPenalty},
-            {"rerank_top_k", rerankTopK},
-            {"rerank_anchored_min_relative_score", rerankAnchoredMinRelativeScore}};
+            {"rerank_top_k", rerankTopK}};
     }
 };
 
@@ -512,7 +484,6 @@ struct TunedParams {
             params.vectorOnlyNearMissReserve = 2;
             params.vectorOnlyNearMissSlack = 0.04f;
             params.vectorOnlyNearMissPenalty = 0.55f;
-            params.enablePathDedupInFusion = true;
             params.lexicalFloorTopN = 12;
             params.lexicalFloorBoost = 0.20f;
             params.enableLexicalTieBreak = true;
@@ -707,38 +678,7 @@ inline void fillQueryTokenFeature(TuningContext& ctx, std::string_view query) no
     ctx.queryTokenCountLog2 = tokens > 0 ? std::log2(static_cast<double>(tokens)) : 0.0;
 }
 
-/**
- * @brief Abstract base for search-tuning policies.
- *
- * R1 extracts this interface with `SearchTuner` as the only
- * implementation (the "rules / cold-start" policy). R4+ adds a
- * contextual-bandit policy alongside; R5 composes them behind an
- * orchestrator. All methods must be safe to call concurrently with
- * query traffic — implementations own any internal locking.
- */
-class ITuningPolicy {
-public:
-    virtual ~ITuningPolicy() = default;
-
-    [[nodiscard]] virtual TunedParams getParams(const TuningContext& ctx) const = 0;
-
-    virtual void observe(const TuningContext& ctx, const RuntimeTelemetry& telemetry) = 0;
-
-    virtual void observeRelevanceFeedback(const RelevanceSession& session) = 0;
-
-    [[nodiscard]] virtual bool hasConverged() const noexcept = 0;
-
-    virtual Result<void> loadState(const std::filesystem::path& path) = 0;
-
-    [[nodiscard]] virtual Result<void> saveState(const std::filesystem::path& path) const = 0;
-};
-
-// Reserved for R5 orchestrator (rules-vs-contextual handoff). Kept as a
-// forward-declared alias so R5 can land without another round of call-site
-// churn through SearchEngine / ServiceManager. Dead-code scans can skip.
-using TuningPolicyPtr = std::shared_ptr<ITuningPolicy>;
-
-class SearchTuner : public ITuningPolicy {
+class SearchTuner {
 public:
     // Backward-compat type aliases — the nested names were the public API
     // before R1 extracted them to namespace scope. Preserved so every call
@@ -773,7 +713,10 @@ public:
     /**
      * @brief Get the tuned parameter set for the current state.
      */
-    [[nodiscard]] const TunedParams& getParams() const noexcept { return params_; }
+    [[nodiscard]] TunedParams getParams() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return params_;
+    }
 
     /**
      * @brief The corpus statistics snapshot this tuner was built from.
@@ -811,18 +754,18 @@ public:
      *
      * The per-query reward (position-discounted precision) is aggregated into
      * a second EWMA channel that sits alongside the runtime-telemetry EWMAs.
-     * This lets downstream consumers (MAB tuner, convex fusion) see "is the
-     * user happy with what we're returning" as a first-class signal.
+     * This lets downstream consumers see "is the user happy with what we're
+     * returning" as a first-class signal.
      *
      * Empty sessions are ignored.
      */
-    void observeRelevanceFeedback(const RelevanceSession& session) override;
+    void observeRelevanceFeedback(const RelevanceSession& session);
 
     /**
      * @brief Whether the adaptive EWMA state has stabilized.
      *
-     * Used to gate opt-in features (P6 MAB, P7 convex fusion) that should only
-     * engage once the rule-based tuner has settled. The default threshold of
+     * Used to gate opt-in adaptive behavior that should only engage once the
+     * rule-based tuner has settled. The default threshold of
      * 200 observations roughly corresponds to a few thousand queries of real
      * traffic; callers can pass a lower bound for short-lived sessions.
      *
@@ -852,7 +795,10 @@ public:
      * The k value controls how much weight is given to top-ranked results
      * in Reciprocal Rank Fusion. Lower k means top ranks dominate more.
      */
-    [[nodiscard]] int getRrfK() const noexcept { return params_.rrfK; }
+    [[nodiscard]] int getRrfK() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return params_.rrfK;
+    }
 
     /**
      * @brief Serialize tuner state to JSON for logging/debugging.
@@ -902,30 +848,9 @@ public:
     [[nodiscard]] static TuningState computeState(const storage::CorpusStats& stats,
                                                   std::string& outReason);
 
-    // ---- ITuningPolicy overrides --------------------------------------
-    //
-    // R1: context is ignored; the rules policy runs on the corpus-stats
-    // snapshot captured at construction time, exactly as before. R2 will
-    // start consuming fields from `ctx`.
+    Result<void> loadState(const std::filesystem::path& path) { return loadAdaptiveState(path); }
 
-    [[nodiscard]] TunedParams getParams(const TuningContext& /*ctx*/) const override {
-        return params_;
-    }
-
-    void observe(const TuningContext& /*ctx*/, const RuntimeTelemetry& telemetry) override {
-        observe(telemetry);
-    }
-
-    // Inherits `observeRelevanceFeedback(const RelevanceSession&)` from the
-    // non-virtual signature defined above; it already matches the interface.
-
-    [[nodiscard]] bool hasConverged() const noexcept override { return hasConverged(200); }
-
-    Result<void> loadState(const std::filesystem::path& path) override {
-        return loadAdaptiveState(path);
-    }
-
-    [[nodiscard]] Result<void> saveState(const std::filesystem::path& path) const override {
+    [[nodiscard]] Result<void> saveState(const std::filesystem::path& path) const {
         return saveAdaptiveState(path);
     }
 

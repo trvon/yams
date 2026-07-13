@@ -86,14 +86,11 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
                           config.tagWeight, config.metadataWeight, TuningLayer::Default);
     params.similarityThreshold =
         TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
-    params.vectorBoostFactor = config.vectorBoostFactor;
-    params.fusionStrategy.value = config.fusionStrategy;
     params.vectorOnlyThreshold = config.vectorOnlyThreshold;
     params.vectorOnlyPenalty = config.vectorOnlyPenalty;
     params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
     params.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
     params.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
-    params.enablePathDedupInFusion = config.enablePathDedupInFusion;
     params.lexicalFloorTopN = config.lexicalFloorTopN;
     params.lexicalFloorBoost = config.lexicalFloorBoost;
     params.enableLexicalTieBreak = config.enableLexicalTieBreak;
@@ -108,7 +105,6 @@ TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
     params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
     params.rerankTopK = config.rerankTopK;
-    params.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
     params.enableReranking = config.enableReranking;
     params.rerankReplaceScores = config.rerankReplaceScores;
     params.chunkAggregation = config.chunkAggregation;
@@ -402,8 +398,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     params.semanticRescueMinVectorScore =
         lerpValue(params.semanticRescueMinVectorScore, target.semanticRescueMinVectorScore, kBlend);
     params.rerankTopK = lerpValue(params.rerankTopK, target.rerankTopK, kBlend);
-    params.rerankAnchoredMinRelativeScore = lerpValue(
-        params.rerankAnchoredMinRelativeScore, target.rerankAnchoredMinRelativeScore, kBlend);
     params.lexicalFloorTopN = lerpValue(params.lexicalFloorTopN, target.lexicalFloorTopN, kBlend);
     params.lexicalFloorBoost =
         lerpValue(params.lexicalFloorBoost, target.lexicalFloorBoost, kBlend);
@@ -433,11 +427,9 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
         params.enableSubPhraseRescoring || target.enableSubPhraseRescoring;
     params.enableLexicalTieBreak = params.enableLexicalTieBreak || target.enableLexicalTieBreak;
 
-    // Enums/strategy: adopt target profile's strategy
+    // Profile-level ranking controls.
     params.rrfK = target.rrfK;
-    params.fusionStrategy = target.fusionStrategy;
     params.chunkAggregation = target.chunkAggregation;
-    params.vectorBoostFactor = target.vectorBoostFactor;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +437,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 // ---------------------------------------------------------------------------
 
 void applySemanticOnlyLayer(TunedParams& params) {
-    params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_SUM,
-                                   TuningLayer::Mode);
     params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);

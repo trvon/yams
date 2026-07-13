@@ -193,13 +193,10 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     REQUIRE((outlierMembershipIt != batch.memberships.end()));
     CHECK((outlierMembershipIt->role == DocumentTopologyRole::Outlier));
 
-    StableClusterTopologyRouter router;
-    auto routes = router.route(TopologyRouteRequest{.queryText = "find b",
-                                                    .seedDocumentHashes = {"bbb"},
-                                                    .limit = 1,
-                                                    .preferStableClusters = true,
-                                                    .weakQueryOnly = true},
-                               batch);
+    SparseGuidedClusterRouter router;
+    auto routes = router.route(
+        TopologyRouteRequest{.queryText = "find b", .seedDocumentHashes = {"bbb"}, .limit = 1},
+        batch);
     REQUIRE(routes.has_value());
     REQUIRE((routes.value().size() == 1));
     CHECK((routes.value().front().clusterId == pairClusterIt->clusterId));
@@ -280,7 +277,7 @@ TEST_CASE("Topology baseline satisfies connected component and router contracts"
     CHECK((clusterOf.at("ccc") == clusterOf.at("ddd")));
     CHECK((clusterOf.at("aaa") != clusterOf.at("ccc")));
 
-    StableClusterTopologyRouter router;
+    SparseGuidedClusterRouter router;
     TopologyRouteRequest request;
     request.seedDocumentHashes = {"bbb", "missing"};
     request.limit = 1;
@@ -392,8 +389,6 @@ TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
     auto routes = router.route(TopologyRouteRequest{.queryText = "find y-axis docs",
                                                     .seedDocumentHashes = {},
                                                     .limit = 1,
-                                                    .preferStableClusters = true,
-                                                    .weakQueryOnly = true,
                                                     .scoringMode = RouteScoringMode::Current,
                                                     .queryEmbedding = {0.0F, 1.0F},
                                                     .sparseDenseAlpha = 0.0F},

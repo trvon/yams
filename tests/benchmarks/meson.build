@@ -221,21 +221,6 @@ if benchmark_dep.found()
 
   alias_target('bench_simeon_arm_quality', simeon_arm_quality_bench)
 
-  # Fusion strategy experiment - compares different fusion approaches
-  fusion_experiment = executable('fusion_strategy_experiment',
-    files(
-      'search/fusion_strategy_experiment.cpp',
-      'search/retrieval_benchmark_support.cpp',
-    ),
-    include_directories: incs,
-    dependencies: retrieval_quality_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
-
-  alias_target('bench_fusion_experiment', fusion_experiment)
-
-
   entity_extraction_bench = executable('entity_extraction_bench',
     files('entity_extraction_bench.cpp'),
     include_directories: incs,

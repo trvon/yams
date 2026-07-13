@@ -23,7 +23,7 @@ if [[ -n "${YAMS_TOPOLOGY_SOURCE_OUT:-}" ]]; then
 fi
 
 # Default plan matrix: topology_source × expansion_arm
-# (vector,fts5,kg) × (cap2,medoid64,rerank_only).
+# (vector,fts5,kg) × (cap2,medoid64).
 # Override with a custom plan if you need the old YAMS_TOPOLOGY_SOURCE_ARMS lists.
 
 exec python3 "$XPLAN" run topology_source --build-dir "$BUILD_DIR" "${EXTRA[@]}" "$@"

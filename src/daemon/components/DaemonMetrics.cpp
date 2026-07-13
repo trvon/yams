@@ -2181,8 +2181,6 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             newParams["metadata_weight"] = static_cast<double>(cfg.metadataWeight);
                             newParams["similarity_threshold"] =
                                 static_cast<double>(cfg.similarityThreshold);
-                            newParams["vector_boost_factor"] =
-                                static_cast<double>(cfg.vectorBoostFactor);
                             newParams["enable_graph_rerank"] = cfg.enableGraphRerank ? 1.0 : 0.0;
                             newParams["graph_rerank_topn"] =
                                 static_cast<double>(cfg.graphRerankTopN);
@@ -2215,8 +2213,6 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                                 static_cast<double>(p.weights.metadata.value);
                             newParams["similarity_threshold"] =
                                 static_cast<double>(p.similarityThreshold);
-                            newParams["vector_boost_factor"] =
-                                static_cast<double>(p.vectorBoostFactor);
                             newParams["enable_graph_rerank"] = p.enableGraphRerank ? 1.0 : 0.0;
                             newParams["graph_rerank_topn"] = static_cast<double>(p.graphRerankTopN);
                             newParams["graph_rerank_weight"] =
@@ -2265,8 +2261,6 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             static_cast<double>(cfg.metadataWeight);
                         out.searchTuningParams["similarity_threshold"] =
                             static_cast<double>(cfg.similarityThreshold);
-                        out.searchTuningParams["vector_boost_factor"] =
-                            static_cast<double>(cfg.vectorBoostFactor);
                         out.searchTuningParams["enable_graph_rerank"] =
                             cfg.enableGraphRerank ? 1.0 : 0.0;
                         out.searchTuningParams["graph_rerank_topn"] =

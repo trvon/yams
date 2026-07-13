@@ -199,8 +199,6 @@ struct TopologyRouteRequest {
     std::vector<std::string> seedDocumentHashes;
     std::vector<WeightedDocumentSeed> weightedSeedDocuments;
     std::size_t limit{8};
-    bool preferStableClusters{true};
-    bool weakQueryOnly{true};
     RouteScoringMode scoringMode{RouteScoringMode::Current};
     // Phase S: optional dense signal for sparse-guided routing.
     // Empty queryEmbedding falls back to seed-only scoring (current behaviour).

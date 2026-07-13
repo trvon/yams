@@ -269,7 +269,6 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
     config.vectorOnlyThreshold = 0.0F;
     config.vectorOnlyPenalty = 1.0F;
     config.vectorMaxResults = 4;
-    config.enableTopologyWeakQueryRouting = enabled;
     config.topologyRoutingMode = enabled ? SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly
                                          : SearchEngineConfig::TopologyRoutingMode::Disabled;
     config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
@@ -335,7 +334,6 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     config.vectorOnlyThreshold = 0.0F;
     config.vectorOnlyPenalty = 1.0F;
     config.vectorMaxResults = 4;
-    config.enableTopologyWeakQueryRouting = true;
     config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
     config.topologyMaxClusters = 1;
     config.topologyMaxDocs = 2;
@@ -388,6 +386,8 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
 
 TEST_CASE("SearchEngine topology shadow annotates global results without removing candidates",
           "[search][topology][shadow][catch2]") {
+    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
+
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
@@ -490,6 +490,10 @@ TEST_CASE("Evidence candidates keep topology non-destructive under a shadow poli
     CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
     CHECK(debug.at("topology_vector_filter_applied") == "0");
     CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "0");
+    CHECK_FALSE(debug.contains("topology_shadow_retained_candidate_doc_ids"));
+    CHECK_FALSE(debug.contains("topology_shadow_removed_candidate_doc_ids"));
+    CHECK_FALSE(debug.contains("trace_stage_summary_json"));
+    CHECK_FALSE(debug.contains("trace_fusion_source_summary_json"));
     CHECK(std::stoull(debug.at("candidate_pipeline_topology_annotated_candidates")) > 0);
 }
 
@@ -715,38 +719,6 @@ TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without v
     CHECK_FALSE(hasTopologyVectorScore);
 }
 
-TEST_CASE("SearchEngine rerank-only topology routing loads but does not add candidates",
-          "[search][topology][catch2]") {
-    TopologySearchFixture fix;
-    seedTopologyDocuments(fix);
-    seedTwoClusterTopology(fix);
-    auto generator = makeFixedGenerator({0.0F, 1.0F});
-
-    SearchEngineConfig config = topologyRoutingTestConfig(true);
-    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::RerankOnly;
-
-    SearchExecutionContext context = defaultSearchExecutionContext();
-    context.freshness.lexicalReady = true;
-    context.freshness.vectorReady = true;
-    context.freshness.kgReady = true;
-    SearchExecutionContextGuard contextGuard(context);
-
-    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
-    SearchParams params;
-    params.limit = 4;
-    auto response = engine.searchWithResponse("zz", params);
-    REQUIRE(response.has_value());
-
-    const auto& debug = response.value().debugStats;
-    CHECK((debug.at("topology_routing_mode") == "rerank_only"));
-    CHECK((debug.at("topology_weak_query_load_attempted") == "1"));
-    CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
-    CHECK((debug.at("topology_weak_query_skip_reason") == "rerank_only_no_expansion"));
-    CHECK((debug.at("topology_weak_query_applied") == "0"));
-    CHECK((debug.at("topology_weak_query_narrow_applied") == "0"));
-    CHECK((debug.at("topology_weak_query_added_candidates") == "0"));
-}
-
 TEST_CASE("SearchEngine stage trace reports reranker flags as booleans",
           "[search][trace][rerank][catch2]") {
     yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
@@ -787,9 +759,9 @@ TEST_CASE("SearchEngine stage trace reports reranker flags as booleans",
     CHECK((debug.at("trace_enabled") == "1"));
     REQUIRE(debug.contains("trace_cross_rerank_applied"));
     CHECK((debug.at("trace_cross_rerank_applied") == "0"));
-    REQUIRE(debug.contains("trace_turboquant_rerank_applied"));
-    CHECK((debug.at("trace_turboquant_rerank_applied") == "0"));
     REQUIRE(debug.contains("trace_rerank_guard_score_gap"));
+    REQUIRE(debug.contains("trace_stage_summary_json"));
+    REQUIRE(debug.contains("trace_fusion_source_summary_json"));
     CHECK((debug.at("trace_rerank_guard_score_gap") == "0.000000"));
 }
 
@@ -841,7 +813,6 @@ TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
     SearchEngineConfig config;
     config.includeDebugInfo = true;
     config.enableParallelExecution = false;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
     config.textWeight = 1.0F;
     config.simeonTextWeight = 0.0F;
     config.pathTreeWeight = 0.0F;
@@ -959,7 +930,7 @@ TEST_CASE("Topology routing expands through query-independent medoids",
     CHECK((session.routedCandidateHashes.size() <= session.acceptedRoutes));
 }
 
-TEST_CASE("Topology routing can expose full selected-cluster membership without reranking",
+TEST_CASE("Topology routing caps selected membership while preserving seed anchors",
           "[search][topology][narrowing][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
@@ -967,7 +938,7 @@ TEST_CASE("Topology routing can expose full selected-cluster membership without 
 
     TopologyRoutingSessionRequest request;
     request.query = "omega";
-    request.seedDocumentHashes = {"y1"};
+    request.seedDocumentHashes = {"y2"};
     request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
     request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
     request.weakTier1Query = true;
@@ -979,14 +950,24 @@ TEST_CASE("Topology routing can expose full selected-cluster membership without 
 
     REQUIRE(session.artifactAdmitted);
     REQUIRE(session.narrowApplied);
-    CHECK(session.routedCandidateHashes.size() == 1U);
-    CHECK(session.routeAllowedDocumentHashes.size() == 2U);
+    CHECK(session.routedCandidateHashes.empty());
+    CHECK(session.routedDocs == 1U);
+    CHECK(session.routeAllowedDocumentHashes.size() == 1U);
     CHECK(session.addedCandidates == 0U);
     CHECK(session.addedCandidateHashes.empty());
-    CHECK(session.routeAllowedDocumentHashes.contains("y1"));
     CHECK(session.routeAllowedDocumentHashes.contains("y2"));
-    REQUIRE(session.candidateStructureEvidence.contains("y1"));
-    CHECK(session.candidateStructureEvidence.at("y1").scaleAgreement == Catch::Approx(0.0F));
+    CHECK_FALSE(session.routeAllowedDocumentHashes.contains("y1"));
+    CHECK(session.candidateStructureEvidence.size() == 1U);
+    REQUIRE(session.candidateStructureEvidence.contains("y2"));
+    CHECK(session.candidateStructureEvidence.at("y2").scaleAgreement == Catch::Approx(0.0F));
+
+    request.maxDocs = 0;
+    const auto unbounded = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+    REQUIRE(unbounded.narrowApplied);
+    CHECK(unbounded.routeAllowedDocumentHashes.size() == 2U);
+    CHECK(unbounded.routeAllowedDocumentHashes.contains("y1"));
+    CHECK(unbounded.routeAllowedDocumentHashes.contains("y2"));
+    CHECK(unbounded.routedCandidateHashes.contains("y1"));
 }
 
 TEST_CASE("Topology routing exposes selected multiscale structural evidence from the snapshot",

@@ -88,7 +88,6 @@ struct SearchEngineConfig {
     size_t vectorOnlyNearMissReserve = 0;
     float vectorOnlyNearMissSlack = 0.05f;
     float vectorOnlyNearMissPenalty = 0.60f;
-    float vectorBoostFactor = 0.10f;
     float entityVectorWeight = 0.05f;
     float tagWeight = 0.05f;
     float metadataWeight = 0.05f;
@@ -136,7 +135,6 @@ struct SearchEngineConfig {
         Disabled,
         WeakQueryOnly,
         HybridAssist,
-        RerankOnly,
     } topologyRoutingMode = TopologyRoutingMode::HybridAssist;
 
     [[nodiscard]] static constexpr const char*
@@ -148,8 +146,6 @@ struct SearchEngineConfig {
                 return "weak_query_only";
             case TopologyRoutingMode::HybridAssist:
                 return "hybrid_assist";
-            case TopologyRoutingMode::RerankOnly:
-                return "rerank_only";
         }
         return "disabled";
     }
@@ -193,8 +189,6 @@ struct SearchEngineConfig {
         return "current";
     }
 
-    // Legacy compatibility switch. Prefer topologyRoutingMode for new code.
-    bool enableTopologyWeakQueryRouting = false;
     /// Minimum and maximum cluster probes. Adaptive probing is disabled when
     /// topologyAdaptiveProbeScoreGap is zero, preserving fixed maxClusters behavior.
     size_t topologyMinClusters = 1;
@@ -245,20 +239,6 @@ struct SearchEngineConfig {
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;
-    bool enableProfiling = false;
-
-    enum class FusionStrategy {
-        WEIGHTED_SUM,
-        RECIPROCAL_RANK,
-        WEIGHTED_RECIPROCAL,
-        COMB_MNZ,
-        CONVEX,
-        WEIGHTED_LINEAR_ZSCORE
-    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
-
-    size_t weightedLinearZScorePoolSize = 500;
-    float weightedLinearZScoreAlpha = 0.75f;
-    bool weightedLinearZScoreUseZScore = true;
     bool enableAdaptiveFusion = false;
 
     enum class ChunkAggregation {
@@ -271,11 +251,9 @@ struct SearchEngineConfig {
     float chunkAggregationWeightDecay = 0.6f;
 
     bool enableIntentAdaptiveWeighting = true;
-    bool enableFieldAwareWeightedRrf = true;
     bool enableLexicalExpansion = false;
     size_t lexicalExpansionMinHits = 3;
     float lexicalExpansionScorePenalty = 0.65f;
-    bool enablePathDedupInFusion = false;
     size_t lexicalFloorTopN = 0;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
@@ -312,25 +290,6 @@ struct SearchEngineConfig {
     float graphExpansionFtsPenalty = 0.78f;
     float graphExpansionVectorPenalty = 0.82f;
 
-    [[nodiscard]] static constexpr const char*
-    fusionStrategyToString(FusionStrategy strategy) noexcept {
-        switch (strategy) {
-            case FusionStrategy::WEIGHTED_SUM:
-                return "WEIGHTED_SUM";
-            case FusionStrategy::RECIPROCAL_RANK:
-                return "RECIPROCAL_RANK";
-            case FusionStrategy::WEIGHTED_RECIPROCAL:
-                return "WEIGHTED_RECIPROCAL";
-            case FusionStrategy::COMB_MNZ:
-                return "COMB_MNZ";
-            case FusionStrategy::CONVEX:
-                return "CONVEX";
-            case FusionStrategy::WEIGHTED_LINEAR_ZSCORE:
-                return "WEIGHTED_LINEAR_ZSCORE";
-        }
-        return "UNKNOWN";
-    }
-
     size_t textMaxResults = 300;
     size_t pathTreeMaxResults = 150;
     size_t kgMaxResults = 100;
@@ -341,15 +300,12 @@ struct SearchEngineConfig {
     size_t semanticBudgetVectorMaxResults = 32;
     size_t semanticBudgetEntityVectorMaxResults = 16;
 
-    bool useConnectionPriority = true;
     size_t minChunkSizeForParallel = 50;
-    bool symbolRank = true;
     bool includeDebugInfo = false;
     bool includeComponentTiming = false;
 
     bool enableReranking = true;
     size_t rerankTopK = 5;
-    float rerankAnchoredMinRelativeScore = 0.0f;
     bool rerankReplaceScores = false;
     float rerankBlendWeight = 0.30f;
     float rerankScoreGapThreshold = 0.0f;
@@ -483,7 +439,6 @@ struct SearchEngineConfig {
     /// vectorMaxResults, etc.) per query based on signal strength.
     /// Narrow queries (1-2 terms) get reduced vector/graph budget;
     /// complex queries (4+ terms) get expanded fusion budget.
-    /// Requires enableAdaptiveFusion to be true as well for budget-aware fusion.
     bool enableAdaptiveBudgeting = false;
 
     /// Scaling factors for adaptive per-query budgets.
@@ -499,7 +454,6 @@ struct SearchEngineConfig {
         topologyRoutingMode = source.topologyRoutingMode;
         topologyVectorPolicy = source.topologyVectorPolicy;
         topologyRouteScoringMode = source.topologyRouteScoringMode;
-        enableTopologyWeakQueryRouting = source.enableTopologyWeakQueryRouting;
         topologyMinClusters = source.topologyMinClusters;
         topologyMaxClusters = source.topologyMaxClusters;
         topologyMaxSeedDocuments = source.topologyMaxSeedDocuments;
@@ -522,15 +476,6 @@ struct SearchEngineConfig {
     void applyExecutionPolicyFrom(const SearchEngineConfig& source) noexcept {
         applyTopologyPolicyFrom(source);
     }
-
-    // Per-query multi-armed bandit arm selections. When non-empty, the
-    // tuning pipeline overrides the corresponding static config value with
-    // the MAB-selected arm. These extend the existing simeonBanditArm pattern
-    // to fusion strategy, vector-only threshold, and rerank top-K.
-    // Empty = use the static config value (no MAB override active).
-    std::string mabFusionStrategyArm;
-    std::string mabVectorOnlyThresholdArm;
-    std::string mabRerankTopKArm;
 };
 
 } // namespace yams::search

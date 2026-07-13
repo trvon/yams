@@ -66,7 +66,6 @@ yams_search = static_library('yams_search',
     'relevance_label_store.cpp',
     'symspell_search.cpp',
     'query_concept_extractor.cpp',
-    'turboquant_packed_reranker.cpp',
     'simeon_lexical_backend.cpp',
   ],
   include_directories: [

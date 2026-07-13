@@ -539,7 +539,7 @@ integration = "boost"
 recall_expand_per_cluster = 0
 # RRF k applied when integration = rrf / both (falls back to [search].rrf_k otherwise)
 rrf_k = 60.0
-# Cluster-route scoring rule for StableClusterTopologyRouter.
+# Cluster-route scoring rule for SparseGuidedClusterRouter.
 #   "current"        — persistence + 0.5*cohesion + matchedSeed + memberCount/40 (default)
 #   "size_weighted"  — current * 1/(1+log(size)); de-emphasizes giant clusters
 #   "seed_coverage"  — rank by fraction of query seeds covered by each cluster

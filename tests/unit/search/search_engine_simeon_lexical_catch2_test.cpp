@@ -88,7 +88,6 @@ SearchEngineConfig makeLexicalOnlyConfig() {
     cfg.tagWeight = 0.0f;
     cfg.metadataWeight = 0.0f;
     cfg.enableParallelExecution = false;
-    cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
     cfg.maxResults = 20;
     return cfg;
 }
@@ -257,8 +256,8 @@ TEST_CASE("SearchEngine surfaces simeon lexical timing and cache statistics",
     params.limit = 10;
     auto response = engine->searchWithResponse("beta", params);
     REQUIRE(response.has_value());
-    CHECK(response.value().componentTimingMicros.contains(
-        std::string(kSimeonLexicalScoreTimingKey)));
+    CHECK(
+        response.value().componentTimingMicros.contains(std::string(kSimeonLexicalScoreTimingKey)));
 
     const auto& stats = engine->getStatistics();
     CHECK(stats.simeonLexicalScoreCalls.load() >= 1);

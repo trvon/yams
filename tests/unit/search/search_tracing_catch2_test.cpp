@@ -118,6 +118,27 @@ TEST_CASE("SearchTraceCollector emits empty counters object when none recorded",
     CHECK(summary.at("embedding").at("counters").empty());
 }
 
+TEST_CASE("SearchTraceCollector only retains document identifiers for explicit traces",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    const std::vector<ComponentResult> results{
+        makeComponent("/tmp/b.txt", 0.8F, ComponentResult::Source::Vector, 0),
+        makeComponent("/tmp/a.txt", 0.7F, ComponentResult::Source::Vector, 1),
+    };
+
+    SearchTraceCollector compactCollector(config, false);
+    compactCollector.markStageResult("vector", results, 10, true);
+    const auto compact = compactCollector.buildStageSummaryJson().at("vector");
+    CHECK(compact.at("unique_doc_count").get<std::size_t>() == 2);
+    CHECK(compact.at("unique_doc_ids").empty());
+
+    SearchTraceCollector tracedCollector(config, true);
+    tracedCollector.markStageResult("vector", results, 10, true);
+    const auto traced = tracedCollector.buildStageSummaryJson().at("vector");
+    CHECK(traced.at("unique_doc_count").get<std::size_t>() == 2);
+    CHECK(traced.at("unique_doc_ids") == nlohmann::json::array({"a", "b"}));
+}
+
 TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
           "[search][tracing][topology][catch2]") {
     SearchEngineConfig config;
@@ -177,7 +198,7 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     yams::search::SearchResponse response;
     yams::search::recordTopologyRoutingDebug(response, config,
                                              SearchEngineConfig::TopologyRoutingMode::HybridAssist,
-                                             session, "skip-reason", 42);
+                                             session, "skip-reason", 42, false, true);
 
     const auto& debug = response.debugStats;
     CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
@@ -246,6 +267,8 @@ TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not a
     CHECK(debug.at("topology_weak_query_skip_reason") == "disabled");
     CHECK_FALSE(debug.contains("topology_ready"));
     CHECK_FALSE(debug.contains("topology_epoch"));
+    CHECK_FALSE(debug.contains("topology_weak_query_added_candidate_hashes"));
+    CHECK_FALSE(debug.contains("topology_weak_query_allowed_candidate_hashes"));
     CHECK(response.componentTimingMicros.empty());
 }
 

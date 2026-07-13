@@ -216,35 +216,4 @@ struct SearchResponse {
     }
 };
 
-namespace detail {
-
-template <typename T> std::string makeFusionDedupKey(const T& item, bool enablePathDedup) {
-    const auto& filePath = [&]() -> const std::string& {
-        if constexpr (requires { item.filePath; }) {
-            return item.filePath;
-        } else {
-            return item.document.filePath;
-        }
-    }();
-    const auto& hash = [&]() -> const std::string& {
-        if constexpr (requires { item.documentHash; }) {
-            return item.documentHash;
-        } else {
-            return item.document.sha256Hash;
-        }
-    }();
-    if (enablePathDedup && !filePath.empty()) {
-        return "path:" + filePath;
-    }
-    if (!hash.empty()) {
-        return "hash:" + hash;
-    }
-    if (!filePath.empty()) {
-        return "path:" + filePath;
-    }
-    return "unknown:";
-}
-
-} // namespace detail
-
 } // namespace yams::search

@@ -114,10 +114,6 @@ void fillTopologySkipReason(std::string& skipReason,
     if (sessionApplied) {
         return;
     }
-    if (routingMode == Mode::RerankOnly) {
-        skipReason = loadSucceeded ? "rerank_only_no_expansion" : "not_loaded";
-        return;
-    }
     if (loadSucceeded && routedClusters > 0) {
         skipReason = "no_added_candidates";
         return;

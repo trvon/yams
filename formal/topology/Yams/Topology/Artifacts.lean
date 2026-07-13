@@ -154,8 +154,6 @@ structure TopologyRouteRequest where
   queryText : String := ""
   seedDocumentHashes : List DocumentHash := []
   limit : Nat := 8
-  preferStableClusters : Bool := true
-  weakQueryOnly : Bool := true
   scoringMode : RouteScoringMode := .current
   queryEmbedding : Embedding := []
   sparseDenseAlpha : Rat := 1 / 2

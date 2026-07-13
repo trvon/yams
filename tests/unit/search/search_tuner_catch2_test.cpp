@@ -17,10 +17,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <type_traits>
+#include <utility>
 
 #include <yams/compat/unistd.h>
 #include <yams/search/search_engine_builder.h>
@@ -30,6 +34,42 @@
 using namespace yams::search;
 using namespace yams::storage;
 using Catch::Approx;
+
+static_assert(!std::is_reference_v<decltype(std::declval<const SearchTuner&>().getParams())>,
+              "SearchTuner parameter reads must return a concurrency-safe snapshot");
+
+TEST_CASE("SearchTuner parameter snapshots are safe during observation",
+          "[unit][search_tuner][concurrency]") {
+    CorpusStats stats;
+    SearchTuner tuner(stats);
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 1.0;
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> snapshotsValid{true};
+    std::jthread writer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 1000; ++i) {
+            tuner.observe(telemetry);
+        }
+    });
+    std::jthread reader([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 1000; ++i) {
+            const auto snapshot = tuner.getParams();
+            if (snapshot.rrfK <= 0 || tuner.getRrfK() <= 0) {
+                snapshotsValid.store(false, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+    CHECK(snapshotsValid.load(std::memory_order_relaxed));
+}
 
 // =============================================================================
 // TuningState enum and string conversion tests
@@ -160,7 +200,6 @@ TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][param
     CHECK((params.vectorOnlyThreshold == Approx(0.94f)));
     CHECK((params.vectorOnlyPenalty == Approx(0.70f)));
     CHECK((params.vectorOnlyNearMissReserve == 2));
-    CHECK(params.enablePathDedupInFusion);
     CHECK((params.lexicalFloorTopN == 12));
     CHECK((params.lexicalFloorBoost == Approx(0.20f)));
     CHECK(params.enableLexicalTieBreak);
@@ -426,7 +465,6 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     CHECK((config.pathTreeWeight == Approx(0.00f)));
     CHECK((config.kgWeight == Approx(0.00f)));
     CHECK((config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM));
-    CHECK((config.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL));
 }
 
 TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
@@ -537,7 +575,6 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides"
     config.enableReranking = true;
     config.rerankTopK = 50;
     config.rerankReplaceScores = false;
-    config.rerankAnchoredMinRelativeScore = 0.37f;
 
     tuner.seedRuntimeConfig(config);
     const auto seeded = tuner.getConfig();
@@ -545,7 +582,6 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides"
     CHECK((seeded.enableReranking == true));
     CHECK((seeded.rerankTopK == 50));
     CHECK((seeded.rerankReplaceScores == false));
-    CHECK((seeded.rerankAnchoredMinRelativeScore == Approx(0.37f)));
 }
 
 TEST_CASE("SearchTuner: dead-source gates pin structure weights on SCIENTIFIC",
@@ -720,10 +756,8 @@ TEST_CASE("SearchEngineBuilder: default options align with MIXED_PRECISION fallb
     CHECK((opts.config.tagWeight == Approx(expectedConfig.tagWeight)));
     CHECK((opts.config.metadataWeight == Approx(expectedConfig.metadataWeight)));
     CHECK((opts.config.rrfK == Approx(expectedConfig.rrfK)));
-    CHECK((opts.config.fusionStrategy == expectedConfig.fusionStrategy));
     CHECK((opts.config.vectorOnlyThreshold == Approx(expectedConfig.vectorOnlyThreshold)));
     CHECK((opts.config.vectorOnlyPenalty == Approx(expectedConfig.vectorOnlyPenalty)));
-    CHECK((opts.config.enablePathDedupInFusion == expectedConfig.enablePathDedupInFusion));
     CHECK((opts.config.lexicalFloorTopN == expectedConfig.lexicalFloorTopN));
     CHECK((opts.config.lexicalFloorBoost == Approx(expectedConfig.lexicalFloorBoost)));
     CHECK((opts.config.enableLexicalTieBreak == expectedConfig.enableLexicalTieBreak));
@@ -876,15 +910,12 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.tagWeight = 0.05f;
     config.metadataWeight = 0.30f;
     config.similarityThreshold = 0.47f;
-    config.vectorBoostFactor = 1.35f;
     config.rrfK = 17.0f;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
     config.vectorOnlyThreshold = 0.81f;
     config.vectorOnlyPenalty = 0.66f;
     config.vectorOnlyNearMissReserve = 3;
     config.vectorOnlyNearMissSlack = 0.07f;
     config.vectorOnlyNearMissPenalty = 0.44f;
-    config.enablePathDedupInFusion = true;
     config.lexicalFloorTopN = 9;
     config.lexicalFloorBoost = 0.23f;
     config.enableLexicalTieBreak = true;
@@ -900,7 +931,6 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.enableReranking = false;
     config.rerankTopK = 11;
     config.rerankReplaceScores = false;
-    config.rerankAnchoredMinRelativeScore = 0.29f;
     config.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
     config.enableGraphRerank = true;
     config.graphRerankTopN = 33;
@@ -931,9 +961,7 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     CHECK((roundTrip.tagWeight == Approx(config.tagWeight)));
     CHECK((roundTrip.metadataWeight == Approx(config.metadataWeight)));
     CHECK((roundTrip.similarityThreshold == Approx(config.similarityThreshold)));
-    CHECK((roundTrip.vectorBoostFactor == Approx(config.vectorBoostFactor)));
     CHECK((roundTrip.rrfK == Approx(config.rrfK)));
-    CHECK((roundTrip.fusionStrategy == config.fusionStrategy));
     CHECK((roundTrip.semanticRescueSlots == config.semanticRescueSlots));
     CHECK((roundTrip.semanticRescueMinVectorScore == Approx(config.semanticRescueMinVectorScore)));
     CHECK((roundTrip.fusionEvidenceRescueSlots == config.fusionEvidenceRescueSlots));
@@ -943,8 +971,6 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     CHECK((roundTrip.enableReranking == config.enableReranking));
     CHECK((roundTrip.rerankTopK == config.rerankTopK));
     CHECK((roundTrip.rerankReplaceScores == config.rerankReplaceScores));
-    CHECK(roundTrip.rerankAnchoredMinRelativeScore ==
-          Approx(config.rerankAnchoredMinRelativeScore));
     CHECK((roundTrip.chunkAggregation == config.chunkAggregation));
     CHECK((roundTrip.graphEnablePathEnumeration == config.graphEnablePathEnumeration));
     CHECK((roundTrip.enableGraphQueryExpansion == config.enableGraphQueryExpansion));
@@ -1023,9 +1049,6 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     // Both profiles leave sub-phrase rescoring off by default.
     CHECK((params.enableSubPhraseRescoring == false));
 
-    // fusionStrategy stays WEIGHTED_RECIPROCAL on both profiles.
-    CHECK((params.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL));
-
     // similarityThreshold: both profiles use the unfiltered default (0.0).
     CHECK((params.similarityThreshold.value == Approx(0.0f).epsilon(0.01)));
 }
@@ -1040,7 +1063,6 @@ TEST_CASE("applyCommunityLayer: no-op when already in target state",
     // Nothing should change
     CHECK((params.weights.text.value == Approx(before.weights.text.value)));
     CHECK((params.weights.vector.value == Approx(before.weights.vector.value)));
-    CHECK((params.fusionStrategy == before.fusionStrategy));
     CHECK((params.semanticRescueSlots.value == before.semanticRescueSlots.value));
 }
 
@@ -1080,7 +1102,6 @@ TEST_CASE("applyCommunityLayer: nullopt is no-op", "[unit][search_tuner][communi
     applyCommunityLayer(std::nullopt, TuningState::MIXED, params);
 
     CHECK((params.weights.text.value == Approx(before.weights.text.value)));
-    CHECK((params.fusionStrategy == before.fusionStrategy));
 }
 
 TEST_CASE("lerpValue: float and integral types", "[unit][search_tuner][community]") {
@@ -1587,7 +1608,6 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     CHECK((p.weights.tag.value == Approx(0.0f)));
     CHECK((p.weights.metadata.value == Approx(0.0f)));
     CHECK((p.lexicalFloorTopN == 12));
-    CHECK((p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL));
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
@@ -1999,7 +2019,6 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     // SCIENTIFIC profile characteristics preserved
     CHECK((p.weights.vector.value > 0.30f));
     CHECK((p.weights.text.value > 0.35f));
-    CHECK((p.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL));
 }
 
 TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",

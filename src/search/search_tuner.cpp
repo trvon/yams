@@ -437,8 +437,6 @@ bool applyResultPoolAdjustments(TunedParams& candidate, const RuntimeTelemetry& 
 
 constexpr size_t kMaxRerankTopK = 30;
 constexpr size_t kRerankTopKStep = 2;
-constexpr float kRerankAnchoredMinStep = 0.05f;
-constexpr float kMinRerankAnchoredScore = 0.30f;
 
 bool applyRerankerAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
                               std::vector<std::string>& reasons) {
@@ -457,13 +455,6 @@ bool applyRerankerAdjustments(TunedParams& candidate, const RuntimeTelemetry& te
     const size_t nextRerankTopK = std::min(kMaxRerankTopK, candidate.rerankTopK + kRerankTopKStep);
     if (nextRerankTopK > candidate.rerankTopK) {
         candidate.rerankTopK = nextRerankTopK;
-        changed = true;
-    }
-
-    const float nextAnchoredScore = std::max(
-        kMinRerankAnchoredScore, candidate.rerankAnchoredMinRelativeScore - kRerankAnchoredMinStep);
-    if (nextAnchoredScore + 1e-6f < candidate.rerankAnchoredMinRelativeScore) {
-        candidate.rerankAnchoredMinRelativeScore = nextAnchoredScore;
         changed = true;
     }
 
@@ -624,9 +615,7 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.weights.entityVector.unpin();
     params_.weights.metadata.unpin();
     params_.similarityThreshold.value = config.similarityThreshold;
-    params_.vectorBoostFactor = config.vectorBoostFactor;
     params_.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params_.fusionStrategy.value = config.fusionStrategy;
     params_.vectorMaxResults = config.vectorMaxResults;
     params_.bm25NormDivisor = config.bm25NormDivisor;
     params_.vectorOnlyThreshold = config.vectorOnlyThreshold;
@@ -638,7 +627,6 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.strongVectorOnlyMinScore = config.strongVectorOnlyMinScore;
     params_.strongVectorOnlyTopRank = config.strongVectorOnlyTopRank;
     params_.strongVectorOnlyPenalty = config.strongVectorOnlyPenalty;
-    params_.enablePathDedupInFusion = config.enablePathDedupInFusion;
     params_.lexicalFloorTopN = config.lexicalFloorTopN;
     params_.lexicalFloorBoost = config.lexicalFloorBoost;
     params_.enableLexicalTieBreak = config.enableLexicalTieBreak;
@@ -654,7 +642,6 @@ void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     params_.weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
     params_.weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
     params_.rerankTopK = config.rerankTopK;
-    params_.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
     params_.enableReranking = config.enableReranking;
     params_.rerankReplaceScores = config.rerankReplaceScores;
     params_.enableGraphRerank = config.enableGraphRerank;
@@ -703,7 +690,6 @@ SearchEngineConfig SearchTuner::buildConfigFromParamsLocked() const {
     SearchEngineConfig config = baseConfig_;
     params_.applyTo(config);
     config.corpusProfile = SearchEngineConfig::CorpusProfile::CUSTOM;
-    config.enableProfiling = false;
     return config;
 }
 

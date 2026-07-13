@@ -2,9 +2,7 @@
   "corpus_scope": "/work/tools/yams/",
   "notes": "Judged relevance set over the live global corpus, scoped to the yams repo. relevant = path substrings; a returned result counts as relevant if any substring is contained in its path. Edit/extend freely; keep ground-truth files canonical for each query.",
   "queries": [
-    {"query": "where is the search fusion strategy enum defined", "relevant": ["include/yams/search/search_engine_config.h"]},
     {"query": "weighted reciprocal source evidence scoring implementation", "relevant": ["src/search/evidence_search_pipeline.cpp"]},
-    {"query": "parse YAMS_FUSION_STRATEGY environment variable", "relevant": ["src/search/search_engine_builder.cpp"]},
     {"query": "topology evidence fuses text and vector results", "relevant": ["src/search/evidence_search_pipeline.cpp"]},
     {"query": "knowledge graph store delete orphaned nodes sqlite", "relevant": ["src/metadata/knowledge_graph_store_sqlite.cpp"]},
     {"query": "graph context service lookup symbol impact trace", "relevant": ["src/app/services/graph_context_service.cpp"]},

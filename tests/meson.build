@@ -1528,7 +1528,6 @@ if catch2_dep.found()
         'unit/vector/turboquant_asymmetric_score_catch2_test.cpp',
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
-        'unit/vector/turboquant_packed_reranker_catch2_test.cpp',
         'unit/vector/simeon_backend_catch2_test.cpp',
       ),
       include_directories: incs,

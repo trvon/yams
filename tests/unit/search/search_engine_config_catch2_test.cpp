@@ -4,9 +4,8 @@
  *        and score attribution helpers (search_models.h)
  *
  * These are header-only or inline functions at 0% coverage. Tests here
- * exercise forProfile(), detectProfile(), fusionStrategyToString(),
- * componentSourceToString(), isVectorComponent(), isTextAnchoringComponent(),
- * and accumulateComponentScore().
+ * exercise forProfile(), detectProfile(), componentSourceToString(),
+ * isVectorComponent(), isTextAnchoringComponent(), and accumulateComponentScore().
  */
 
 #include <catch2/catch_approx.hpp>
@@ -20,22 +19,6 @@
 using namespace yams::search;
 using Catch::Approx;
 using yams::metadata::SearchResult;
-
-// ────────────────────────────────────────────────────────────────────────────────
-// fusionStrategyToString
-// ────────────────────────────────────────────────────────────────────────────────
-
-TEST_CASE("fusionStrategyToString covers all strategies", "[search][config][catch2]") {
-    using FS = SearchEngineConfig::FusionStrategy;
-
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::WEIGHTED_SUM)) ==
-          "WEIGHTED_SUM");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::RECIPROCAL_RANK)) ==
-          "RECIPROCAL_RANK");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::WEIGHTED_RECIPROCAL)) ==
-          "WEIGHTED_RECIPROCAL");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::COMB_MNZ)) == "COMB_MNZ");
-}
 
 TEST_CASE("navigationZoomLevelToString covers all zoom levels", "[search][config][catch2]") {
     using Z = SearchEngineConfig::NavigationZoomLevel;
@@ -331,8 +314,6 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.maxResults == 100);
     CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
-    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
-    CHECK(cfg.enableTopologyWeakQueryRouting == false);
     CHECK(cfg.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
     CHECK(cfg.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
     CHECK(cfg.topologyMaxClusters == 2U);
@@ -346,7 +327,6 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
-    CHECK(cfg.symbolRank == true);
     CHECK(cfg.enableReranking == true);
     CHECK(cfg.rerankTopK == 5);
     CHECK(cfg.rerankReplaceScores == false);
@@ -360,7 +340,6 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
 
     SearchEngineConfig configured;
     configured.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    configured.enableTopologyWeakQueryRouting = true;
     configured.topologyMaxClusters = 3;
     configured.topologyMinClusters = 2;
     configured.topologyMaxSeedDocuments = 24;
@@ -383,7 +362,6 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
 
     CHECK(tuned.textWeight == Approx(0.25F));
     CHECK(tuned.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
-    CHECK(tuned.enableTopologyWeakQueryRouting);
     CHECK(tuned.topologyMaxClusters == 3);
     CHECK(tuned.topologyMinClusters == 2);
     CHECK(tuned.topologyMaxSeedDocuments == 24);

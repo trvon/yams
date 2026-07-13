@@ -1214,10 +1214,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // torn read under concurrent topology rebuilds).
     const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
 
-    // R2: construct a TuningContext populated with corpus-slow features,
-    // query token stats, and the topology epoch fingerprint. The context is
-    // passed to both getParams() and observe() so the contextual policy
-    // (R4+) can condition on it. SearchTuner (rules) ignores the context.
+    // Capture the request context once for diagnostics.
     TuningContext tuningCtx;
     if (tuner_) {
         fillCorpusFeatures(tuningCtx, tuner_->corpusStats());
@@ -1229,7 +1226,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     TunedParams baseParams;
     if (tuner_) {
         baselineState = tuner_->currentState();
-        baseParams = tuner_->getParams(tuningCtx);
+        baseParams = tuner_->getParams();
     } else {
         baseParams = seedTunedParamsFromConfig(workingConfig);
     }
@@ -1444,7 +1441,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                   SearchEngineConfig::navigationZoomLevelToString(effectiveZoomLevel),
                   zoomLevelInferredFromIntent ? "intent_auto" : "configured");
 
-    SearchTraceCollector traceCollector(workingConfig);
+    SearchTraceCollector traceCollector(workingConfig, stageTraceEnabled);
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
@@ -2059,7 +2056,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
                                        topologySession, topologySkipReason, tier2Candidates.size(),
-                                       topologyVectorShadow);
+                                       topologyVectorShadow, stageTraceEnabled);
             setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,
                          topologyWeakQueryNarrowApplied);
 
@@ -2093,6 +2090,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::size_t topologyVectorFilterRemoved = 0;
             bool topologyVectorAllowedSetAnnApplied = false;
             bool topologyVectorAllowedSetAnnFallback = false;
+            std::size_t topologyShadowRetainedCandidates = 0;
+            std::size_t topologyShadowRemovedCandidates = 0;
             std::vector<std::string> topologyShadowRetainedDocIds;
             std::vector<std::string> topologyShadowRemovedDocIds;
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
@@ -2106,8 +2105,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      topologyVectorShadow, &topologyVectorFilterApplied,
                      &topologyVectorFilterFallback, &topologyVectorFilterMatched,
                      &topologyVectorFilterRemoved, &topologyVectorAllowedSetAnnApplied,
-                     &topologyVectorAllowedSetAnnFallback, &topologyShadowRetainedDocIds,
-                     &topologyShadowRemovedDocIds]() {
+                     &topologyVectorAllowedSetAnnFallback, stageTraceEnabled,
+                     &topologyShadowRetainedCandidates, &topologyShadowRemovedCandidates,
+                     &topologyShadowRetainedDocIds, &topologyShadowRemovedDocIds]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         Result<std::vector<ComponentResult>> results = [&]() {
                             if (topologyVectorAllowedSetAnnEligible) {
@@ -2140,10 +2140,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             const auto globalDocIds = collectUniqueComponentDocIds(results.value());
                             auto projected = detail::filterVectorResultsByAllowedDocuments(
                                 results.value(), *topologyRouteAllowedDocuments);
-                            topologyShadowRetainedDocIds =
+                            const auto retainedDocIds =
                                 collectUniqueComponentDocIds(projected.results);
-                            topologyShadowRemovedDocIds =
-                                setDifferenceIds(globalDocIds, topologyShadowRetainedDocIds);
+                            topologyShadowRetainedCandidates = retainedDocIds.size();
+                            topologyShadowRemovedCandidates =
+                                globalDocIds.size() - retainedDocIds.size();
+                            if (stageTraceEnabled) {
+                                topologyShadowRetainedDocIds = retainedDocIds;
+                                topologyShadowRemovedDocIds =
+                                    setDifferenceIds(globalDocIds, retainedDocIds);
+                            }
                         }
                         if (results && topologyVectorFilterEligible &&
                             !topologyVectorAllowedSetAnnEligible) {
@@ -2204,13 +2210,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             setDebugBool(response.debugStats, metrics::kTopologyVectorAllowedSetAnnFallback,
                          topologyVectorAllowedSetAnnFallback);
             setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidates,
-                     std::to_string(topologyShadowRetainedDocIds.size()));
+                     std::to_string(topologyShadowRetainedCandidates));
             setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidates,
-                     std::to_string(topologyShadowRemovedDocIds.size()));
-            setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidateDocIds,
-                     joinWithTab(topologyShadowRetainedDocIds));
-            setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidateDocIds,
-                     joinWithTab(topologyShadowRemovedDocIds));
+                     std::to_string(topologyShadowRemovedCandidates));
+            if (stageTraceEnabled) {
+                setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidateDocIds,
+                         joinWithTab(topologyShadowRetainedDocIds));
+                setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidateDocIds,
+                         joinWithTab(topologyShadowRemovedDocIds));
+            }
             traceCollector.recordStageCounter("vector", "topology_filter_applied",
                                               topologyVectorFilterApplied ? 1 : 0);
             traceCollector.recordStageCounter("vector", "topology_filter_fallback",
@@ -2697,44 +2705,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     preFusionSignals = buildPreFusionSignalMap(allComponentResults);
 
-    // P7: adaptive convex-fusion switch. Once the SearchTuner reports convergence
-    // and the user has opted in via enableAdaptiveFusion, override the configured
-    // fusion strategy to CONVEX. The convex dispatch itself falls back to RRF on
-    // any exception so this is fail-soft.
-    bool adaptiveFusionApplied = false;
-    bool tunerConvergedForFusion = false;
-    if (tuner_) {
-        tunerConvergedForFusion = tuner_->hasConverged();
-    }
-    if (workingConfig.enableAdaptiveFusion && tunerConvergedForFusion &&
-        workingConfig.fusionStrategy != SearchEngineConfig::FusionStrategy::CONVEX) {
-        workingConfig.fusionStrategy = SearchEngineConfig::FusionStrategy::CONVEX;
-        adaptiveFusionApplied = true;
-    }
-    response.debugStats["fusion_strategy"] =
-        SearchEngineConfig::fusionStrategyToString(workingConfig.fusionStrategy);
-    response.debugStats["fusion_adaptive_applied"] = adaptiveFusionApplied ? "1" : "0";
-    response.debugStats["search_tuner_converged"] = tunerConvergedForFusion ? "1" : "0";
-    // Joins per-query traces back to the active simeon encoder recipe (env
-    // controlled). When the cascade fusion is selected the recipe identity
-    // includes the fusion knobs so retrieval-quality runs can be attributed
-    // end-to-end.
+    // Join per-query traces back to the active simeon encoder recipe.
     {
-        std::string recipe = vector::simeonRecipeLabel();
-        if (workingConfig.fusionStrategy ==
-            SearchEngineConfig::FusionStrategy::WEIGHTED_LINEAR_ZSCORE) {
-            recipe += "+linear_a";
-            // emit alpha as e.g. "075" for 0.75 to match the bench row label
-            const int a100 = static_cast<int>(std::lround(
-                std::clamp(static_cast<double>(workingConfig.weightedLinearZScoreAlpha), 0.0, 1.0) *
-                100.0));
-            char buf[8];
-            std::snprintf(buf, sizeof(buf), "%03d", a100);
-            recipe += buf;
-            recipe += "_pool";
-            recipe += std::to_string(workingConfig.weightedLinearZScorePoolSize);
-        }
-        response.debugStats["simeon_recipe"] = recipe;
+        response.debugStats["simeon_recipe"] = vector::simeonRecipeLabel();
         if (!simeonRouteRecipe.empty()) {
             response.debugStats["simeon_route"] = simeonRouteRecipe;
         }
@@ -4128,7 +4101,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::to_string(componentTopDefault);
         response.debugStats["trace_graph_rerank_applied"] = graphRerankApplied ? "1" : "0";
         response.debugStats["trace_cross_rerank_applied"] = crossRerankApplied ? "1" : "0";
-        response.debugStats["trace_turboquant_rerank_applied"] = "0";
         response.debugStats["trace_rerank_guard_score_gap"] =
             fmt::format("{:.6f}", rerankGuardScoreGap);
 
@@ -4169,8 +4141,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             graphDisplacementSummary.dump();
     }
 
-    SearchObservability::publishTraceSummaryDebugStats(response, traceCollector,
-                                                       allComponentResults, userLimit);
+    if (stageTraceEnabled) {
+        SearchObservability::publishTraceSummaryDebugStats(response, traceCollector,
+                                                           allComponentResults, userLimit);
+    }
 
     if (tuner_) {
         SearchTuner::RuntimeTelemetry telemetry;
@@ -4244,7 +4218,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         // if trace data is malformed
         }
 
-        tuner_->observe(tuningCtx, telemetry);
+        tuner_->observe(telemetry);
         const auto tunerState = tuner_->adaptiveStateToJson();
         response.debugStats["tuner_adaptive_active"] = "1";
         response.debugStats["tuner_decision_reason"] =

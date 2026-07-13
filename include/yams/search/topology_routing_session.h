@@ -92,6 +92,8 @@ struct TopologyRoutingSessionRequest {
     std::size_t representativeLimit = 0;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
+    /// Maximum documents in a materialized route allowed set or expansion result.
+    /// Zero explicitly means unbounded full membership.
     std::size_t maxDocs = 0;
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
