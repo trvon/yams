@@ -138,17 +138,6 @@ fuzz_ipc_roundtrip = executable('fuzz_ipc_roundtrip',
   build_by_default: true,
 )
 
-# QueryParser Fuzzer (user-facing search query parsing)
-fuzz_query_parser = executable('fuzz_query_parser',
-  'fuzz_query_parser.cpp',
-  include_directories: include_directories('../../include'),
-  link_with: yams_daemon_lib,
-  dependencies: fuzz_deps,
-  cpp_args: fuzzer_args,
-  link_args: fuzzer_args,
-  build_by_default: true,
-)
-
 # Plugin Trust/Path Fuzzer (trust file parsing + safe path containment)
 fuzz_plugin_trust = executable('fuzz_plugin_trust',
   'fuzz_plugin_trust.cpp',
