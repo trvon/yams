@@ -2565,104 +2565,133 @@ public:
                         std::optional<std::string_view> namePattern, std::size_t limit,
                         std::size_t offset) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<SymbolMetadata>> {
-            std::ostringstream sql;
-            sql << "SELECT sm.symbol_id, sm.document_hash, sm.file_path, sm.symbol_name, "
-                << "sm.qualified_name, sm.kind, sm.start_line, sm.end_line, sm.start_offset, "
-                << "sm.end_offset, sm.return_type, sm.parameters, sm.documentation "
-                << "FROM symbol_metadata AS sm WHERE 1=1";
+            struct SymbolQuery {
+                std::string sql;
+                std::vector<std::string> binds;
+            };
+            const bool ftsEligibleFilePath = filePath.has_value() && filePath->size() >= 3;
+            const bool ftsEligibleName = namePattern.has_value() && namePattern->size() >= 3;
+            const bool ftsEligible = ftsEligibleFilePath || ftsEligibleName;
+            const auto buildQuery = [&](bool useFts) {
+                std::ostringstream sql;
+                sql << "SELECT sm.symbol_id, sm.document_hash, sm.file_path, sm.symbol_name, "
+                    << "sm.qualified_name, sm.kind, sm.start_line, sm.end_line, sm.start_offset, "
+                    << "sm.end_offset, sm.return_type, sm.parameters, sm.documentation "
+                    << "FROM symbol_metadata AS sm WHERE 1=1";
 
-            std::vector<std::string> binds;
-            const bool indexedFilePath = filePath.has_value() && filePath->size() >= 3;
-            const bool indexedName = namePattern.has_value() && namePattern->size() >= 3;
-            if (indexedFilePath) {
-                sql << " AND sm.symbol_id IN ("
-                    << "SELECT rowid FROM symbol_metadata_fts WHERE file_path LIKE ?)";
-                binds.push_back("%" + std::string(*filePath) + "%");
-            }
-            if (indexedName) {
-                sql << " AND sm.symbol_id IN ("
-                    << "SELECT rowid FROM symbol_metadata_fts WHERE symbol_name LIKE ? "
-                    << "UNION SELECT rowid FROM symbol_metadata_fts WHERE qualified_name LIKE ?)";
-                const std::string pattern = "%" + std::string(*namePattern) + "%";
-                binds.push_back(pattern);
-                binds.push_back(pattern);
-            }
-            if (kind.has_value()) {
-                sql << " AND sm.kind = ?";
-                binds.push_back(std::string(kind.value()));
-            }
-            if (filePath.has_value() && !indexedFilePath) {
-                sql << " AND sm.file_path LIKE ?";
-                binds.push_back("%" + std::string(*filePath) + "%");
-            }
-            if (namePattern.has_value() && !indexedName) {
-                sql << " AND (sm.symbol_name LIKE ? OR sm.qualified_name LIKE ?)";
-                const std::string pattern = "%" + std::string(*namePattern) + "%";
-                binds.push_back(pattern);
-                binds.push_back(pattern);
-            }
-            sql << " ORDER BY sm.qualified_name LIMIT ? OFFSET ?";
+                std::vector<std::string> binds;
+                const bool indexedFilePath = useFts && ftsEligibleFilePath;
+                const bool indexedName = useFts && ftsEligibleName;
+                if (indexedFilePath) {
+                    sql << " AND sm.symbol_id IN ("
+                        << "SELECT rowid FROM symbol_metadata_fts WHERE file_path LIKE ?)";
+                    binds.push_back("%" + std::string(*filePath) + "%");
+                }
+                if (indexedName) {
+                    sql << " AND sm.symbol_id IN ("
+                        << "SELECT rowid FROM symbol_metadata_fts WHERE symbol_name LIKE ? "
+                        << "UNION SELECT rowid FROM symbol_metadata_fts "
+                           "WHERE qualified_name LIKE ?)";
+                    const std::string pattern = "%" + std::string(*namePattern) + "%";
+                    binds.push_back(pattern);
+                    binds.push_back(pattern);
+                }
+                if (kind.has_value()) {
+                    sql << " AND sm.kind = ?";
+                    binds.push_back(std::string(kind.value()));
+                }
+                if (filePath.has_value() && !indexedFilePath) {
+                    sql << " AND sm.file_path LIKE ?";
+                    binds.push_back("%" + std::string(*filePath) + "%");
+                }
+                if (namePattern.has_value() && !indexedName) {
+                    sql << " AND (sm.symbol_name LIKE ? OR sm.qualified_name LIKE ?)";
+                    const std::string pattern = "%" + std::string(*namePattern) + "%";
+                    binds.push_back(pattern);
+                    binds.push_back(pattern);
+                }
+                sql << " ORDER BY sm.qualified_name LIMIT ? OFFSET ?";
+                return SymbolQuery{.sql = sql.str(), .binds = std::move(binds)};
+            };
 
-            auto stmtR = db.prepare(sql.str());
-            if (!stmtR)
-                return stmtR.error();
+            const auto executeQuery =
+                [&](const SymbolQuery& query) -> Result<std::vector<SymbolMetadata>> {
+                auto stmtR = db.prepare(query.sql);
+                if (!stmtR)
+                    return stmtR.error();
 
-            auto stmt = std::move(stmtR).value();
-            int idx = 1;
-            for (const auto& b : binds) {
-                auto br = stmt.bind(idx++, b);
+                auto stmt = std::move(stmtR).value();
+                int idx = 1;
+                for (const auto& b : query.binds) {
+                    auto br = stmt.bind(idx++, b);
+                    if (!br)
+                        return br.error();
+                }
+                auto br = stmt.bind(idx++, static_cast<std::int64_t>(limit));
                 if (!br)
                     return br.error();
+                br = stmt.bind(idx, static_cast<std::int64_t>(offset));
+                if (!br)
+                    return br.error();
+
+                std::vector<SymbolMetadata> results;
+                while (true) {
+                    auto stepR = stmt.step();
+                    if (!stepR)
+                        return stepR.error();
+                    if (!stepR.value())
+                        break;
+
+                    SymbolMetadata sym;
+                    sym.symbolId = stmt.getInt64(0);
+                    sym.documentHash = stmt.getString(1);
+                    sym.filePath = stmt.getString(2);
+                    sym.symbolName = stmt.getString(3);
+                    sym.qualifiedName = stmt.getString(4);
+                    sym.kind = stmt.getString(5);
+                    if (!stmt.isNull(6))
+                        sym.startLine = static_cast<std::int32_t>(stmt.getInt64(6));
+                    if (!stmt.isNull(7))
+                        sym.endLine = static_cast<std::int32_t>(stmt.getInt64(7));
+                    if (!stmt.isNull(8))
+                        sym.startOffset = static_cast<std::int32_t>(stmt.getInt64(8));
+                    if (!stmt.isNull(9))
+                        sym.endOffset = static_cast<std::int32_t>(stmt.getInt64(9));
+                    if (!stmt.isNull(10)) {
+                        auto s = stmt.getString(10);
+                        if (!s.empty())
+                            sym.returnType = s;
+                    }
+                    if (!stmt.isNull(11)) {
+                        auto s = stmt.getString(11);
+                        if (!s.empty())
+                            sym.parameters = s;
+                    }
+                    if (!stmt.isNull(12)) {
+                        auto s = stmt.getString(12);
+                        if (!s.empty())
+                            sym.documentation = s;
+                    }
+                    results.push_back(std::move(sym));
+                }
+                return results;
+            };
+
+            auto result = executeQuery(buildQuery(ftsEligible));
+            if (!result && ftsEligible) {
+                // A database can be readable before the optional symbol FTS migration has
+                // completed. Avoid a sqlite_schema probe on every healthy lookup; only inspect
+                // the capability after indexed prepare or execution fails. Execution must be
+                // covered because a cached SQLite statement can outlive a schema change.
+                auto ftsExists = db.tableExists("symbol_metadata_fts");
+                if (!ftsExists) {
+                    return ftsExists.error();
+                }
+                if (!ftsExists.value()) {
+                    return executeQuery(buildQuery(false));
+                }
             }
-            auto br = stmt.bind(idx++, static_cast<std::int64_t>(limit));
-            if (!br)
-                return br.error();
-            br = stmt.bind(idx, static_cast<std::int64_t>(offset));
-            if (!br)
-                return br.error();
-
-            std::vector<SymbolMetadata> results;
-            while (true) {
-                auto stepR = stmt.step();
-                if (!stepR)
-                    return stepR.error();
-                if (!stepR.value())
-                    break;
-
-                SymbolMetadata sym;
-                sym.symbolId = stmt.getInt64(0);
-                sym.documentHash = stmt.getString(1);
-                sym.filePath = stmt.getString(2);
-                sym.symbolName = stmt.getString(3);
-                sym.qualifiedName = stmt.getString(4);
-                sym.kind = stmt.getString(5);
-                if (!stmt.isNull(6))
-                    sym.startLine = static_cast<std::int32_t>(stmt.getInt64(6));
-                if (!stmt.isNull(7))
-                    sym.endLine = static_cast<std::int32_t>(stmt.getInt64(7));
-                if (!stmt.isNull(8))
-                    sym.startOffset = static_cast<std::int32_t>(stmt.getInt64(8));
-                if (!stmt.isNull(9))
-                    sym.endOffset = static_cast<std::int32_t>(stmt.getInt64(9));
-                if (!stmt.isNull(10)) {
-                    auto s = stmt.getString(10);
-                    if (!s.empty())
-                        sym.returnType = s;
-                }
-                if (!stmt.isNull(11)) {
-                    auto s = stmt.getString(11);
-                    if (!s.empty())
-                        sym.parameters = s;
-                }
-                if (!stmt.isNull(12)) {
-                    auto s = stmt.getString(12);
-                    if (!s.empty())
-                        sym.documentation = s;
-                }
-                results.push_back(std::move(sym));
-            }
-
-            return results;
+            return result;
         });
     }
 

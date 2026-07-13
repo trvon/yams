@@ -1119,6 +1119,46 @@ TEST_CASE("KG Store: symbol metadata queries support update, filter, pagination,
     CHECK((missingDelete.value() == 0));
 }
 
+TEST_CASE("KG Store: symbol lookup falls back while the optional FTS capability is unavailable",
+          "[unit][metadata][kg][symbols]") {
+    KGStoreRepoFixture fix;
+    fix.insertDocument("hash-symbol-fallback", "/tmp/write-coordinator.cpp");
+
+    SymbolMetadata symbol;
+    symbol.documentHash = "hash-symbol-fallback";
+    symbol.filePath = "/tmp/write-coordinator.cpp";
+    symbol.symbolName = "WriteCoordinator";
+    symbol.qualifiedName = "yams::daemon::WriteCoordinator";
+    symbol.kind = "class";
+    REQUIRE(fix.store_->upsertSymbolMetadata({symbol}).has_value());
+
+    auto dropFts = fix.pool_->withConnection([](Database& db) -> Result<void> {
+        for (const auto* sql : {"DROP TRIGGER IF EXISTS symbol_metadata_ai",
+                                "DROP TRIGGER IF EXISTS symbol_metadata_ad",
+                                "DROP TRIGGER IF EXISTS symbol_metadata_au",
+                                "DROP TABLE IF EXISTS symbol_metadata_fts"}) {
+            auto result = db.execute(sql);
+            if (!result) {
+                return result;
+            }
+        }
+        return {};
+    });
+    REQUIRE(dropFts.has_value());
+
+    auto byName = fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, "Coordinator", 10, 0);
+    REQUIRE(byName.has_value());
+    REQUIRE(byName.value().size() == 1);
+    CHECK(byName.value().front().qualifiedName == "yams::daemon::WriteCoordinator");
+
+    auto byPath =
+        fix.store_->querySymbolMetadata("coordinator.cpp", std::nullopt, std::nullopt, 10, 0);
+    INFO((byPath.has_value() ? std::string{} : byPath.error().message));
+    REQUIRE(byPath.has_value());
+    REQUIRE(byPath.value().size() == 1);
+    CHECK(byPath.value().front().documentHash == "hash-symbol-fallback");
+}
+
 TEST_CASE("KG Store: maintenance helpers summarize graph state and search labels",
           "[unit][metadata][kg]") {
     KGStoreFixture fix;
