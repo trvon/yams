@@ -125,15 +125,7 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         }
         // seedRuntimeConfig re-applies dead-source gates; push the gated view
         // back into cfg so the engine and tuner share one weight package.
-        {
-            const auto maxResults = cfg.maxResults;
-            const auto enableParallelExecution = cfg.enableParallelExecution;
-            const auto includeDebugInfo = cfg.includeDebugInfo;
-            cfg = runtimeTuner->getConfig();
-            cfg.maxResults = maxResults;
-            cfg.enableParallelExecution = enableParallelExecution;
-            cfg.includeDebugInfo = includeDebugInfo;
-        }
+        cfg = runtimeTuner->getConfig();
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);
             if (!loaded) {

@@ -982,7 +982,12 @@ public:
 
     Result<std::vector<SearchResult>> search(const std::string& query, const SearchParams& params);
 
-    void setConfig(const SearchEngineConfig& config) { config_ = config; }
+    void setConfig(const SearchEngineConfig& config) {
+        config_ = config;
+        if (tuner_) {
+            tuner_->seedRuntimeConfig(config_);
+        }
+    }
 
     const SearchEngineConfig& getConfig() const { return config_; }
 

@@ -326,6 +326,121 @@ struct TunedParams {
     }
 
     /**
+     * @brief Overlay values from an explicit config without changing slot provenance.
+     */
+    void overlayValuesFrom(const SearchEngineConfig& config) {
+        zoomLevel = config.zoomLevel;
+        weights.text.value = config.textWeight;
+        weights.simeonText.value = config.simeonTextWeight;
+        weights.vector.value = config.vectorWeight;
+        weights.entityVector.value = config.entityVectorWeight;
+        weights.pathTree.value = config.pathTreeWeight;
+        weights.kg.value = config.kgWeight;
+        weights.tag.value = config.tagWeight;
+        weights.metadata.value = config.metadataWeight;
+        similarityThreshold.value = config.similarityThreshold;
+        rrfK = static_cast<int>(std::lround(config.rrfK));
+        enableGraphRerank = config.enableGraphRerank;
+        graphRerankTopN = config.graphRerankTopN;
+        graphRerankWeight = config.graphRerankWeight;
+        graphRerankMaxBoost = config.graphRerankMaxBoost;
+        graphRerankMinSignal = config.graphRerankMinSignal;
+        graphCommunityWeight = config.graphCommunityWeight;
+        kgMaxResults = config.kgMaxResults;
+        graphScoringBudgetMs = config.graphScoringBudgetMs;
+        graphEnablePathEnumeration = config.graphEnablePathEnumeration;
+        enableGraphQueryExpansion = config.enableGraphQueryExpansion;
+        graphExpansionMinHits = config.graphExpansionMinHits;
+        graphExpansionMaxTerms = config.graphExpansionMaxTerms;
+        graphExpansionMaxSeeds = config.graphExpansionMaxSeeds;
+        graphExpansionQueryNeighborK = config.graphExpansionQueryNeighborK;
+        graphExpansionQueryNeighborMinScore = config.graphExpansionQueryNeighborMinScore;
+        graphVectorRequireCorroboration = config.graphVectorRequireCorroboration;
+        graphVectorRequireTextAnchoring = config.graphVectorRequireTextAnchoring;
+        graphVectorRequireBaselineTextAnchoring = config.graphVectorRequireBaselineTextAnchoring;
+        enableGraphFusionWindowGuard = config.enableGraphFusionWindowGuard;
+        graphFusionGuardDepthMultiplier = config.graphFusionGuardDepthMultiplier;
+        graphMaxAddedInFusionWindow = config.graphMaxAddedInFusionWindow;
+        graphTextMinAdmissionScore = config.graphTextMinAdmissionScore;
+        graphExpansionFtsPenalty = config.graphExpansionFtsPenalty;
+        graphExpansionVectorPenalty = config.graphExpansionVectorPenalty;
+        graphEntitySignalWeight = config.graphEntitySignalWeight;
+        graphStructuralSignalWeight = config.graphStructuralSignalWeight;
+        graphCoverageSignalWeight = config.graphCoverageSignalWeight;
+        graphPathSignalWeight = config.graphPathSignalWeight;
+        graphCorroborationFloor = config.graphCorroborationFloor;
+        graphCommunityReferenceSize = config.graphCommunityReferenceSize;
+        graphCommunityDecayHalfLifeDays = config.graphCommunityDecayHalfLifeDays;
+        graphCommunityMinEdgeWeight = config.graphCommunityMinEdgeWeight;
+        graphUseQueryConcepts = config.graphUseQueryConcepts;
+        graphFallbackToTopSignal = config.graphFallbackToTopSignal;
+        graphMaxNeighbors = config.graphMaxNeighbors;
+        graphMaxHops = config.graphMaxHops;
+        graphMaxPaths = config.graphMaxPaths;
+        graphHopDecay = config.graphHopDecay;
+        vectorMaxResults = config.vectorMaxResults;
+        bm25NormDivisor = config.bm25NormDivisor;
+        textMaxResults = config.textMaxResults;
+        pathTreeMaxResults = config.pathTreeMaxResults;
+        entityVectorMaxResults = config.entityVectorMaxResults;
+        tagMaxResults = config.tagMaxResults;
+        metadataMaxResults = config.metadataMaxResults;
+        semanticBudgetVectorMaxResults = config.semanticBudgetVectorMaxResults;
+        semanticBudgetEntityVectorMaxResults = config.semanticBudgetEntityVectorMaxResults;
+        vectorOnlyThreshold = config.vectorOnlyThreshold;
+        vectorOnlyPenalty = config.vectorOnlyPenalty;
+        vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
+        vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
+        vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
+        enableStrongVectorOnlyRelief = config.enableStrongVectorOnlyRelief;
+        strongVectorOnlyMinScore = config.strongVectorOnlyMinScore;
+        strongVectorOnlyTopRank = config.strongVectorOnlyTopRank;
+        strongVectorOnlyPenalty = config.strongVectorOnlyPenalty;
+        lexicalFloorTopN = config.lexicalFloorTopN;
+        lexicalFloorBoost = config.lexicalFloorBoost;
+        enableLexicalTieBreak = config.enableLexicalTieBreak;
+        lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
+        semanticRescueSlots.value = config.semanticRescueSlots;
+        semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
+        fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
+        fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
+        enableAdaptiveFusion = config.enableAdaptiveFusion;
+        weakQueryMinTextHits = config.weakQueryMinTextHits;
+        weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
+        enableWeakQueryFanoutBoost = config.enableWeakQueryFanoutBoost;
+        weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
+        weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
+        enableSubPhraseRescoring = config.enableSubPhraseRescoring;
+        subPhraseScoringPenalty = config.subPhraseScoringPenalty;
+        enableSubPhraseExpansion = config.enableSubPhraseExpansion;
+        subPhraseExpansionMinHits = config.subPhraseExpansionMinHits;
+        subPhraseExpansionPenalty = config.subPhraseExpansionPenalty;
+        enableLexicalExpansion = config.enableLexicalExpansion;
+        lexicalExpansionMinHits = config.lexicalExpansionMinHits;
+        lexicalExpansionScorePenalty = config.lexicalExpansionScorePenalty;
+        conceptBoostWeight = config.conceptBoostWeight;
+        conceptMinConfidence = config.conceptMinConfidence;
+        conceptMaxCount = config.conceptMaxCount;
+        conceptMaxBoost = config.conceptMaxBoost;
+        conceptMaxScanResults = config.conceptMaxScanResults;
+        conceptExtractionBackend = config.conceptExtractionBackend;
+        rerankTopK = config.rerankTopK;
+        enableReranking = config.enableReranking;
+        rerankReplaceScores = config.rerankReplaceScores;
+        fusionCandidateLimit = config.fusionCandidateLimit;
+        enableMultiVectorQuery = config.enableMultiVectorQuery;
+        multiVectorMaxPhrases = config.multiVectorMaxPhrases;
+        multiVectorScoreDecay = config.multiVectorScoreDecay;
+        chunkAggregation = config.chunkAggregation;
+        graphTextWeight = config.graphTextWeight;
+        graphVectorWeight = config.graphVectorWeight;
+        chunkAggregationTopK = config.chunkAggregationTopK;
+        chunkAggregationWeightDecay = config.chunkAggregationWeightDecay;
+        tieredNarrowVectorSearch = config.tieredNarrowVectorSearch;
+        tieredMinCandidates = config.tieredMinCandidates;
+    }
+
+    /**
      * @brief Serialize to JSON.
      */
     [[nodiscard]] nlohmann::json toJson() const {

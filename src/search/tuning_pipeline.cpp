@@ -79,51 +79,7 @@ effectiveZoomLevelForIntent(SearchEngineConfig::NavigationZoomLevel configured,
 
 TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     TunedParams params;
-    params.zoomLevel = config.zoomLevel;
-    params.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params.weights.setAll(config.textWeight, config.simeonTextWeight, config.vectorWeight,
-                          config.entityVectorWeight, config.pathTreeWeight, config.kgWeight,
-                          config.tagWeight, config.metadataWeight, TuningLayer::Default);
-    params.similarityThreshold =
-        TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
-    params.vectorOnlyThreshold = config.vectorOnlyThreshold;
-    params.vectorOnlyPenalty = config.vectorOnlyPenalty;
-    params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
-    params.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
-    params.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
-    params.lexicalFloorTopN = config.lexicalFloorTopN;
-    params.lexicalFloorBoost = config.lexicalFloorBoost;
-    params.enableLexicalTieBreak = config.enableLexicalTieBreak;
-    params.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
-    params.semanticRescueSlots =
-        TuningSlot<size_t>(config.semanticRescueSlots, TuningLayer::Default);
-    params.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
-    params.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
-    params.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params.weakQueryMinTextHits = config.weakQueryMinTextHits;
-    params.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
-    params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
-    params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
-    params.rerankTopK = config.rerankTopK;
-    params.enableReranking = config.enableReranking;
-    params.rerankReplaceScores = config.rerankReplaceScores;
-    params.chunkAggregation = config.chunkAggregation;
-    params.enableGraphRerank = config.enableGraphRerank;
-    params.graphRerankTopN = config.graphRerankTopN;
-    params.graphRerankWeight = config.graphRerankWeight;
-    params.graphRerankMaxBoost = config.graphRerankMaxBoost;
-    params.graphRerankMinSignal = config.graphRerankMinSignal;
-    params.graphCommunityWeight = config.graphCommunityWeight;
-    params.kgMaxResults = config.kgMaxResults;
-    params.graphScoringBudgetMs = config.graphScoringBudgetMs;
-    params.graphEnablePathEnumeration = config.graphEnablePathEnumeration;
-    params.enableGraphQueryExpansion = config.enableGraphQueryExpansion;
-    params.graphEntitySignalWeight = config.graphEntitySignalWeight;
-    params.graphStructuralSignalWeight = config.graphStructuralSignalWeight;
-    params.graphCoverageSignalWeight = config.graphCoverageSignalWeight;
-    params.graphPathSignalWeight = config.graphPathSignalWeight;
-    params.graphCorroborationFloor = config.graphCorroborationFloor;
-    params.conceptExtractionBackend = config.conceptExtractionBackend;
+    params.overlayValuesFrom(config);
     return params;
 }
 

@@ -584,6 +584,29 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides"
     CHECK((seeded.rerankReplaceScores == false));
 }
 
+TEST_CASE("SearchEngine setConfig reseeds an installed tuner",
+          "[unit][search_tuner][engine_config]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.proseRatio = 0.90F;
+    auto tuner = std::make_shared<SearchTuner>(stats);
+
+    SearchEngineConfig initial = tuner->getConfig();
+    SearchEngine engine(nullptr, nullptr, nullptr, nullptr, initial);
+    engine.setSearchTuner(tuner);
+
+    SearchEngineConfig replacement = initial;
+    replacement.vectorMaxResults = 149;
+    replacement.enableReranking = true;
+    replacement.rerankTopK = 31;
+    engine.setConfig(replacement);
+
+    const auto effective = tuner->getConfig();
+    CHECK(effective.vectorMaxResults == replacement.vectorMaxResults);
+    CHECK(effective.enableReranking == replacement.enableReranking);
+    CHECK(effective.rerankTopK == replacement.rerankTopK);
+}
+
 TEST_CASE("SearchTuner: dead-source gates pin structure weights on SCIENTIFIC",
           "[unit][search_tuner][dead_source]") {
     CorpusStats stats;
@@ -947,6 +970,19 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.graphCoverageSignalWeight = 0.22f;
     config.graphPathSignalWeight = 0.14f;
     config.graphCorroborationFloor = 0.39f;
+    config.vectorMaxResults = 137;
+    config.textMaxResults = 83;
+    config.graphExpansionMaxTerms = 13;
+    config.graphExpansionQueryNeighborK = 19;
+    config.enableLexicalExpansion = true;
+    config.lexicalExpansionMinHits = 6;
+    config.conceptMaxCount = 7;
+    config.fusionCandidateLimit = 211;
+    config.enableMultiVectorQuery = true;
+    config.multiVectorMaxPhrases = 5;
+    config.chunkAggregationTopK = 4;
+    config.tieredNarrowVectorSearch = false;
+    config.tieredMinCandidates = 23;
 
     const auto params = seedTunedParamsFromConfig(config);
     SearchEngineConfig roundTrip;
@@ -979,6 +1015,19 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     CHECK((roundTrip.graphCoverageSignalWeight == Approx(config.graphCoverageSignalWeight)));
     CHECK((roundTrip.graphPathSignalWeight == Approx(config.graphPathSignalWeight)));
     CHECK((roundTrip.graphCorroborationFloor == Approx(config.graphCorroborationFloor)));
+    CHECK((roundTrip.vectorMaxResults == config.vectorMaxResults));
+    CHECK((roundTrip.textMaxResults == config.textMaxResults));
+    CHECK((roundTrip.graphExpansionMaxTerms == config.graphExpansionMaxTerms));
+    CHECK((roundTrip.graphExpansionQueryNeighborK == config.graphExpansionQueryNeighborK));
+    CHECK((roundTrip.enableLexicalExpansion == config.enableLexicalExpansion));
+    CHECK((roundTrip.lexicalExpansionMinHits == config.lexicalExpansionMinHits));
+    CHECK((roundTrip.conceptMaxCount == config.conceptMaxCount));
+    CHECK((roundTrip.fusionCandidateLimit == config.fusionCandidateLimit));
+    CHECK((roundTrip.enableMultiVectorQuery == config.enableMultiVectorQuery));
+    CHECK((roundTrip.multiVectorMaxPhrases == config.multiVectorMaxPhrases));
+    CHECK((roundTrip.chunkAggregationTopK == config.chunkAggregationTopK));
+    CHECK((roundTrip.tieredNarrowVectorSearch == config.tieredNarrowVectorSearch));
+    CHECK((roundTrip.tieredMinCandidates == config.tieredMinCandidates));
 }
 
 TEST_CASE("resolveQueryPolicy preserves no-tuner config fields unaffected by query layers",

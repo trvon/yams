@@ -599,59 +599,13 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
 void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     baseConfig_ = config;
-    params_.zoomLevel = config.zoomLevel;
-    params_.weights.text.value = config.textWeight;
-    params_.weights.simeonText.value = config.simeonTextWeight;
-    params_.weights.vector.value = config.vectorWeight;
-    params_.weights.entityVector.value = config.entityVectorWeight;
-    params_.weights.pathTree.value = config.pathTreeWeight;
-    params_.weights.kg.value = config.kgWeight;
-    params_.weights.tag.value = config.tagWeight;
-    params_.weights.metadata.value = config.metadataWeight;
-    // seed writes .value only; clear capability pins so gates re-evaluate cleanly.
+    params_.overlayValuesFrom(config);
+    // Capability pins are recomputed from the new runtime baseline.
     params_.weights.pathTree.unpin();
     params_.weights.tag.unpin();
     params_.weights.kg.unpin();
     params_.weights.entityVector.unpin();
     params_.weights.metadata.unpin();
-    params_.similarityThreshold.value = config.similarityThreshold;
-    params_.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params_.vectorMaxResults = config.vectorMaxResults;
-    params_.bm25NormDivisor = config.bm25NormDivisor;
-    params_.vectorOnlyThreshold = config.vectorOnlyThreshold;
-    params_.vectorOnlyPenalty = config.vectorOnlyPenalty;
-    params_.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
-    params_.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
-    params_.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
-    params_.enableStrongVectorOnlyRelief = config.enableStrongVectorOnlyRelief;
-    params_.strongVectorOnlyMinScore = config.strongVectorOnlyMinScore;
-    params_.strongVectorOnlyTopRank = config.strongVectorOnlyTopRank;
-    params_.strongVectorOnlyPenalty = config.strongVectorOnlyPenalty;
-    params_.lexicalFloorTopN = config.lexicalFloorTopN;
-    params_.lexicalFloorBoost = config.lexicalFloorBoost;
-    params_.enableLexicalTieBreak = config.enableLexicalTieBreak;
-    params_.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
-    params_.semanticRescueSlots.value = config.semanticRescueSlots;
-    params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
-    params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
-    params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params_.enableAdaptiveFusion = config.enableAdaptiveFusion;
-    params_.weakQueryMinTextHits = config.weakQueryMinTextHits;
-    params_.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
-    params_.enableWeakQueryFanoutBoost = config.enableWeakQueryFanoutBoost;
-    params_.weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
-    params_.weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
-    params_.rerankTopK = config.rerankTopK;
-    params_.enableReranking = config.enableReranking;
-    params_.rerankReplaceScores = config.rerankReplaceScores;
-    params_.enableGraphRerank = config.enableGraphRerank;
-    params_.graphRerankTopN = config.graphRerankTopN;
-    params_.graphRerankWeight = config.graphRerankWeight;
-    params_.graphRerankMaxBoost = config.graphRerankMaxBoost;
-    params_.graphRerankMinSignal = config.graphRerankMinSignal;
-    params_.graphCommunityWeight = config.graphCommunityWeight;
-    params_.kgMaxResults = config.kgMaxResults;
-    params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
     const bool preserveExplicitGraphConfig =
         !stats_.hasKnowledgeGraph() &&
         (config.enableGraphRerank || config.kgWeight > 0.0f || config.graphRerankWeight > 0.0f ||
