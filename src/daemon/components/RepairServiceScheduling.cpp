@@ -130,7 +130,9 @@ void RepairService::onDocumentAdded(const DocumentAddedEvent& event) {
                 }
                 if (!alreadyExtracted) {
                     GraphComponent::EntityExtractionJob job{.documentHash = event.hash,
-                                                            .filePath = event.path};
+                                                            .filePath = event.path,
+                                                            .contentUtf8 = {},
+                                                            .language = {}};
                     job.language.append(it->second.data(), it->second.size());
                     (void)gc->submitEntityExtraction(std::move(job));
                 }

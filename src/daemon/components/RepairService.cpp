@@ -1029,16 +1029,217 @@ void RepairService::endRepairOperation() {
 // On-demand Repair (RPC entry point)
 // ============================================================================
 
+RepairService::RepairExecutionGuard::RepairExecutionGuard(RepairService& owner) {
+    bool expected = false;
+    if (!owner.repairInProgress_.compare_exchange_strong(expected, true,
+                                                         std::memory_order_acq_rel)) {
+        return;
+    }
+
+    try {
+        std::lock_guard<std::mutex> lock(owner.activeRepairMutex_);
+        ++owner.activeRepairExecutions_;
+    } catch (...) {
+        owner.repairInProgress_.store(false, std::memory_order_release);
+        throw;
+    }
+    owner_ = &owner;
+    if (owner.state_) {
+        owner.state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
+    }
+}
+
+RepairService::RepairExecutionGuard::~RepairExecutionGuard() {
+    if (!owner_) {
+        return;
+    }
+
+    owner_->repairInProgress_.store(false, std::memory_order_release);
+    if (owner_->state_) {
+        owner_->state_->stats.repairInProgress.store(false, std::memory_order_relaxed);
+    }
+    owner_->endRepairOperation();
+    {
+        std::lock_guard<std::mutex> lock(owner_->activeRepairMutex_);
+        if (owner_->activeRepairExecutions_ > 0) {
+            --owner_->activeRepairExecutions_;
+        }
+    }
+    owner_->activeRepairCv_.notify_all();
+}
+
+RepairService::RepairRun::RepairRun(RepairService& owner, ProgressFn progress,
+                                    std::atomic<bool>* cancelRequested)
+    : owner_(owner), progress_(std::move(progress)), cancelRequested_(cancelRequested) {}
+
+bool RepairService::RepairRun::isCanceled() const noexcept {
+    return cancelRequested_ && cancelRequested_->load(std::memory_order_relaxed);
+}
+
+void RepairService::RepairRun::emitCancellation(std::string_view operation) {
+    errors_.push_back("Repair canceled");
+    if (!progress_) {
+        return;
+    }
+    RepairEvent event;
+    event.phase = "error";
+    event.operation = operation;
+    event.message = "Repair canceled";
+    progress_(event);
+}
+
+bool RepairService::RepairRun::begin(std::string_view operation) {
+    if (isCanceled()) {
+        emitCancellation(operation);
+        return false;
+    }
+    if (progress_) {
+        RepairEvent event;
+        event.phase = "repairing";
+        event.operation = operation;
+        event.message = "Starting " + std::string(operation) + "...";
+        progress_(event);
+    }
+    owner_.beginRepairOperation(operation);
+    return true;
+}
+
+bool RepairService::RepairRun::complete(std::string_view operation, RepairOperationResult result) {
+    owner_.endRepairOperation();
+    ++response_.totalOperations;
+    response_.totalSucceeded += result.succeeded;
+    response_.totalFailed += result.failed;
+    response_.totalSkipped += result.skipped;
+    if (result.failed > 0 && !result.message.empty()) {
+        errors_.push_back(std::string(operation) + ": " + result.message);
+    }
+    if (progress_) {
+        RepairEvent event;
+        event.phase = "completed";
+        event.operation = operation;
+        event.processed = result.processed;
+        event.succeeded = result.succeeded;
+        event.failed = result.failed;
+        event.skipped = result.skipped;
+        event.message = result.message;
+        progress_(event);
+    }
+    results_.push_back(std::move(result));
+    if (isCanceled()) {
+        emitCancellation(operation);
+        return false;
+    }
+    return true;
+}
+
+RepairResponse RepairService::RepairRun::finish() {
+    response_.success = errors_.empty();
+    response_.errors = std::move(errors_);
+    response_.operationResults = std::move(results_);
+    return std::move(response_);
+}
+
+std::vector<RepairService::OnDemandRepairOperation>
+RepairService::buildRepairPlan(const RepairRequest& request) {
+    std::vector<OnDemandRepairOperation> operations;
+    operations.reserve(13);
+    auto include = [&](bool enabled, OnDemandRepairOperation operation) {
+        if (enabled) {
+            operations.push_back(operation);
+        }
+    };
+    include(request.repairStuckDocs || request.repairAll, OnDemandRepairOperation::StuckDocuments);
+    include(request.repairOrphans || request.repairAll, OnDemandRepairOperation::Orphans);
+    include(request.repairMime || request.repairAll, OnDemandRepairOperation::Mime);
+    include(request.repairDownloads || request.repairAll, OnDemandRepairOperation::Downloads);
+    include(request.repairPathTree || request.repairAll, OnDemandRepairOperation::PathTree);
+    include(request.repairDedupe || request.repairAll, OnDemandRepairOperation::Dedupe);
+    include(request.repairChunks || request.repairAll, OnDemandRepairOperation::Chunks);
+    include(request.repairBlockRefs || request.repairAll, OnDemandRepairOperation::BlockReferences);
+    include(request.repairGraph || request.repairAll, OnDemandRepairOperation::Graph);
+    include(request.repairFts5 || request.repairAll, OnDemandRepairOperation::Fts5);
+    include(request.repairEmbeddings || request.repairAll, OnDemandRepairOperation::Embeddings);
+    include(request.repairTopology, OnDemandRepairOperation::Topology);
+    include(request.optimizeDb || request.repairAll, OnDemandRepairOperation::Optimize);
+    return operations;
+}
+
+std::string_view RepairService::repairOperationName(OnDemandRepairOperation operation) noexcept {
+    switch (operation) {
+        case OnDemandRepairOperation::StuckDocuments:
+            return "stuck_docs";
+        case OnDemandRepairOperation::Orphans:
+            return "orphans";
+        case OnDemandRepairOperation::Mime:
+            return "mime";
+        case OnDemandRepairOperation::Downloads:
+            return "downloads";
+        case OnDemandRepairOperation::PathTree:
+            return "path_tree";
+        case OnDemandRepairOperation::Dedupe:
+            return "dedupe";
+        case OnDemandRepairOperation::Chunks:
+            return "chunks";
+        case OnDemandRepairOperation::BlockReferences:
+            return "block_refs";
+        case OnDemandRepairOperation::Graph:
+            return "graph";
+        case OnDemandRepairOperation::Fts5:
+            return "fts5";
+        case OnDemandRepairOperation::Embeddings:
+            return "embeddings";
+        case OnDemandRepairOperation::Topology:
+            return "topology";
+        case OnDemandRepairOperation::Optimize:
+            return "optimize";
+    }
+    return "unknown";
+}
+
+RepairOperationResult RepairService::runRepairOperation(OnDemandRepairOperation operation,
+                                                        const RepairRequest& request,
+                                                        const ProgressFn& progress,
+                                                        std::atomic<bool>* cancelRequested) {
+    switch (operation) {
+        case OnDemandRepairOperation::StuckDocuments:
+            return recoverStuckDocuments(request, progress);
+        case OnDemandRepairOperation::Orphans:
+            return cleanOrphanedMetadata(request.dryRun, request.verbose, request.removeCorrupt,
+                                         progress);
+        case OnDemandRepairOperation::Mime:
+            return repairMimeTypes(request.dryRun, request.verbose, progress);
+        case OnDemandRepairOperation::Downloads:
+            return repairDownloads(request.dryRun, request.verbose, progress);
+        case OnDemandRepairOperation::PathTree:
+            return rebuildPathTree(request.dryRun, request.verbose, progress);
+        case OnDemandRepairOperation::Dedupe:
+            return applySemanticDedupe(request, progress);
+        case OnDemandRepairOperation::Chunks:
+            return cleanOrphanedChunks(request.dryRun, request.verbose, progress);
+        case OnDemandRepairOperation::BlockReferences:
+            return repairBlockReferences(request.dryRun, request.verbose, progress);
+        case OnDemandRepairOperation::Graph:
+            return repairKnowledgeGraph(request, progress, cancelRequested);
+        case OnDemandRepairOperation::Fts5:
+            return rebuildFts5Index(request, progress, cancelRequested);
+        case OnDemandRepairOperation::Embeddings:
+            return generateMissingEmbeddings(request, progress, cancelRequested);
+        case OnDemandRepairOperation::Topology:
+            return rebuildTopologyArtifacts(request, progress);
+        case OnDemandRepairOperation::Optimize:
+            return optimizeDatabase(request.dryRun, request.verbose, progress);
+    }
+    RepairOperationResult result;
+    result.operation = "unknown";
+    result.failed = 1;
+    result.message = "Unknown repair operation";
+    return result;
+}
+
 RepairResponse RepairService::executeRepair(const RepairRequest& request, ProgressFn progress,
                                             std::atomic<bool>* cancelRequested) {
-    // Serialize repairs via an atomic gate (one repair RPC at a time). An atomic
-    // is used rather than a std::mutex because the async twin holds this guard
-    // across co_await suspension points; a mutex would be unlocked on a different
-    // thread than locked, which aborts under MSVC's checked std::mutex.
-    bool repairExpected = false;
-    if (!repairInProgress_.compare_exchange_strong(repairExpected, true,
-                                                   std::memory_order_acq_rel)) {
-        // Another repair RPC is already running — return immediately.
+    RepairExecutionGuard executionGuard(*this);
+    if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
         busy.errors.push_back(
@@ -1047,189 +1248,25 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
         return busy;
     }
 
-    if (state_) {
-        state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
+    RepairRun run(*this, std::move(progress), cancelRequested);
+    for (const auto operation : buildRepairPlan(request)) {
+        const auto name = repairOperationName(operation);
+        if (!run.begin(name)) {
+            break;
+        }
+        auto result = runRepairOperation(operation, request, run.progress(), cancelRequested);
+        if (!run.complete(name, std::move(result))) {
+            break;
+        }
     }
-    {
-        std::lock_guard<std::mutex> lk(activeRepairMutex_);
-        ++activeRepairExecutions_;
-    }
-    // RAII guard to clear the flag when we leave this scope.
-    struct InProgressGuard {
-        RepairService* self;
-        std::atomic<bool>& flag;
-        std::atomic<bool>* statsFlag;
-        ~InProgressGuard() {
-            flag.store(false, std::memory_order_release);
-            if (statsFlag) {
-                statsFlag->store(false, std::memory_order_relaxed);
-            }
-            if (self) {
-                self->endRepairOperation();
-                std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
-                if (self->activeRepairExecutions_ > 0) {
-                    --self->activeRepairExecutions_;
-                }
-                self->activeRepairCv_.notify_all();
-            }
-        }
-    } inProgressGuard{this, repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
-
-    RepairResponse response;
-    std::vector<RepairOperationResult> results;
-    std::vector<std::string> errors;
-    auto isCanceled = [&]() {
-        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
-    };
-
-    auto emitCancel = [&](const std::string& operation) {
-        if (!progress) {
-            return;
-        }
-        RepairEvent ev;
-        ev.phase = "error";
-        ev.operation = operation;
-        ev.message = "Repair canceled";
-        progress(ev);
-    };
-
-    auto runOp = [&](const std::string& name, auto&& fn) {
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            return false;
-        }
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "repairing";
-            ev.operation = name;
-            ev.message = "Starting " + name + "...";
-            progress(ev);
-        }
-        beginRepairOperation(name);
-        auto result = fn();
-        endRepairOperation();
-        results.push_back(result);
-        response.totalOperations++;
-        response.totalSucceeded += result.succeeded;
-        response.totalFailed += result.failed;
-        response.totalSkipped += result.skipped;
-        if (result.failed > 0 && !result.message.empty())
-            errors.push_back(name + ": " + result.message);
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "completed";
-            ev.operation = name;
-            ev.processed = result.processed;
-            ev.succeeded = result.succeeded;
-            ev.failed = result.failed;
-            ev.skipped = result.skipped;
-            ev.message = std::move(result.message);
-            progress(ev);
-        }
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            return false;
-        }
-        return true;
-    };
-
-    bool doOrphans = request.repairOrphans || request.repairAll;
-    bool doMime = request.repairMime || request.repairAll;
-    bool doDownloads = request.repairDownloads || request.repairAll;
-    bool doPathTree = request.repairPathTree || request.repairAll;
-    bool doChunks = request.repairChunks || request.repairAll;
-    bool doBlockRefs = request.repairBlockRefs || request.repairAll;
-    bool doFts5 = request.repairFts5 || request.repairAll;
-    bool doEmbeddings = request.repairEmbeddings || request.repairAll;
-    bool doStuckDocs = request.repairStuckDocs || request.repairAll;
-    bool doGraph = request.repairGraph || request.repairAll;
-    bool doTopology = request.repairTopology;
-    bool doDedupe = request.repairDedupe || request.repairAll;
-    bool doOptimize = request.optimizeDb || request.repairAll;
-
-    // Phase 0: Stuck document recovery
-    if (doStuckDocs)
-        if (!runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); }))
-            goto finalize;
-
-    // Phase 1: Metadata repair
-    if (doOrphans)
-        if (!runOp("orphans", [&] {
-                return cleanOrphanedMetadata(request.dryRun, request.verbose, request.removeCorrupt,
-                                             progress);
-            }))
-            goto finalize;
-    if (doMime)
-        if (!runOp("mime",
-                   [&] { return repairMimeTypes(request.dryRun, request.verbose, progress); }))
-            goto finalize;
-    if (doDownloads)
-        if (!runOp("downloads",
-                   [&] { return repairDownloads(request.dryRun, request.verbose, progress); }))
-            goto finalize;
-    if (doPathTree)
-        if (!runOp("path_tree",
-                   [&] { return rebuildPathTree(request.dryRun, request.verbose, progress); }))
-            goto finalize;
-    if (doDedupe)
-        if (!runOp("dedupe", [&] { return applySemanticDedupe(request, progress); }))
-            goto finalize;
-
-    // Phase 2: Storage repair
-    if (doChunks)
-        if (!runOp("chunks",
-                   [&] { return cleanOrphanedChunks(request.dryRun, request.verbose, progress); }))
-            goto finalize;
-    if (doBlockRefs)
-        if (!runOp("block_refs", [&] {
-                return repairBlockReferences(request.dryRun, request.verbose, progress);
-            }))
-            goto finalize;
-
-    // Phase 2.5: Knowledge graph repair
-    if (doGraph)
-        if (!runOp("graph",
-                   [&] { return repairKnowledgeGraph(request, progress, cancelRequested); }))
-            goto finalize;
-
-    // Phase 3: Search index repair
-    if (doFts5)
-        if (!runOp("fts5", [&] { return rebuildFts5Index(request, progress, cancelRequested); }))
-            goto finalize;
-    if (doEmbeddings)
-        if (!runOp("embeddings",
-                   [&] { return generateMissingEmbeddings(request, progress, cancelRequested); }))
-            goto finalize;
-    if (doTopology)
-        if (!runOp("topology", [&] { return rebuildTopologyArtifacts(request, progress); }))
-            goto finalize;
-
-    // Phase 4: Database maintenance
-    if (doOptimize)
-        if (!runOp("optimize",
-                   [&] { return optimizeDatabase(request.dryRun, request.verbose, progress); }))
-            goto finalize;
-
-finalize:
-    response.success = errors.empty();
-    response.errors = std::move(errors);
-    response.operationResults = std::move(results);
-    return response;
+    return run.finish();
 }
 
 boost::asio::awaitable<RepairResponse>
 RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progress,
                                   std::atomic<bool>* cancelRequested) {
-    // Serialize repairs via an atomic gate (one repair RPC at a time). This guard
-    // is held across co_await suspension points and the coroutine may resume on a
-    // different worker thread, so a std::mutex must NOT be used here: its RAII
-    // unlock would run on a non-owning thread and abort under MSVC's checked
-    // std::mutex. The atomic gate is thread-agnostic; InProgressGuard clears it.
-    bool repairExpected = false;
-    if (!repairInProgress_.compare_exchange_strong(repairExpected, true,
-                                                   std::memory_order_acq_rel)) {
+    RepairExecutionGuard executionGuard(*this);
+    if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
         busy.errors.push_back(
@@ -1238,227 +1275,28 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
         co_return busy;
     }
 
-    if (state_) {
-        state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
-    }
-    {
-        std::lock_guard<std::mutex> lk(activeRepairMutex_);
-        ++activeRepairExecutions_;
-    }
-    struct InProgressGuard {
-        RepairService* self;
-        std::atomic<bool>& flag;
-        std::atomic<bool>* statsFlag;
-        ~InProgressGuard() {
-            flag.store(false, std::memory_order_release);
-            if (statsFlag) {
-                statsFlag->store(false, std::memory_order_relaxed);
-            }
-            if (self) {
-                self->endRepairOperation();
-                std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
-                if (self->activeRepairExecutions_ > 0) {
-                    --self->activeRepairExecutions_;
-                }
-                self->activeRepairCv_.notify_all();
-            }
+    RepairRun run(*this, std::move(progress), cancelRequested);
+    for (const auto operation : buildRepairPlan(request)) {
+        const auto name = repairOperationName(operation);
+        if (!run.begin(name)) {
+            break;
         }
-    } inProgressGuard{this, repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
 
-    RepairResponse response;
-    std::vector<RepairOperationResult> results;
-    std::vector<std::string> errors;
-    auto isCanceled = [&]() {
-        return cancelRequested && cancelRequested->load(std::memory_order_relaxed);
-    };
-
-    auto emitCancel = [&](const std::string& operation) {
-        if (!progress) {
-            return;
-        }
-        RepairEvent ev;
-        ev.phase = "error";
-        ev.operation = operation;
-        ev.message = "Repair canceled";
-        progress(ev);
-    };
-
-    auto runOp = [&](const std::string& name, auto&& fn) {
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            return false;
-        }
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "repairing";
-            ev.operation = name;
-            ev.message = "Starting " + name + "...";
-            progress(ev);
-        }
-        beginRepairOperation(name);
-        auto result = fn();
-        endRepairOperation();
-        results.push_back(result);
-        response.totalOperations++;
-        response.totalSucceeded += result.succeeded;
-        response.totalFailed += result.failed;
-        response.totalSkipped += result.skipped;
-        if (result.failed > 0 && !result.message.empty()) {
-            errors.push_back(name + ": " + result.message);
-        }
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "completed";
-            ev.operation = name;
-            ev.processed = result.processed;
-            ev.succeeded = result.succeeded;
-            ev.failed = result.failed;
-            ev.skipped = result.skipped;
-            ev.message = std::move(result.message);
-            progress(ev);
-        }
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            return false;
-        }
-        return true;
-    };
-
-    auto runAsyncOp = [&](const std::string& name, auto&& fn) -> boost::asio::awaitable<bool> {
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            co_return false;
-        }
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "repairing";
-            ev.operation = name;
-            ev.message = "Starting " + name + "...";
-            progress(ev);
-        }
-        beginRepairOperation(name);
-        auto result = co_await fn();
-        endRepairOperation();
-        results.push_back(result);
-        response.totalOperations++;
-        response.totalSucceeded += result.succeeded;
-        response.totalFailed += result.failed;
-        response.totalSkipped += result.skipped;
-        if (result.failed > 0 && !result.message.empty()) {
-            errors.push_back(name + ": " + result.message);
-        }
-        if (progress) {
-            RepairEvent ev;
-            ev.phase = "completed";
-            ev.operation = name;
-            ev.processed = result.processed;
-            ev.succeeded = result.succeeded;
-            ev.failed = result.failed;
-            ev.skipped = result.skipped;
-            ev.message = std::move(result.message);
-            progress(ev);
-        }
-        if (isCanceled()) {
-            emitCancel(name);
-            errors.push_back("Repair canceled");
-            co_return false;
-        }
-        co_return true;
-    };
-
-    const bool doOrphans = request.repairOrphans || request.repairAll;
-    const bool doMime = request.repairMime || request.repairAll;
-    const bool doDownloads = request.repairDownloads || request.repairAll;
-    const bool doPathTree = request.repairPathTree || request.repairAll;
-    const bool doChunks = request.repairChunks || request.repairAll;
-    const bool doBlockRefs = request.repairBlockRefs || request.repairAll;
-    const bool doFts5 = request.repairFts5 || request.repairAll;
-    const bool doEmbeddings = request.repairEmbeddings || request.repairAll;
-    const bool doStuckDocs = request.repairStuckDocs || request.repairAll;
-    const bool doGraph = request.repairGraph || request.repairAll;
-    const bool doTopology = request.repairTopology;
-    const bool doDedupe = request.repairDedupe || request.repairAll;
-    const bool doOptimize = request.optimizeDb || request.repairAll;
-
-    bool keepGoing = true;
-
-    if (keepGoing && doStuckDocs) {
-        if (request.foreground) {
-            keepGoing =
-                runOp("stuck_docs", [&] { return recoverStuckDocuments(request, progress); });
+        RepairOperationResult result;
+        if (!request.foreground && operation == OnDemandRepairOperation::StuckDocuments) {
+            result = co_await recoverStuckDocumentsAsync(request, run.progress(), cancelRequested);
+        } else if (!request.foreground && operation == OnDemandRepairOperation::Embeddings) {
+            result =
+                co_await generateMissingEmbeddingsAsync(request, run.progress(), cancelRequested);
         } else {
-            keepGoing = co_await runAsyncOp("stuck_docs", [&]() {
-                return recoverStuckDocumentsAsync(request, progress, cancelRequested);
-            });
+            result = runRepairOperation(operation, request, run.progress(), cancelRequested);
         }
-    }
-    if (keepGoing && doOrphans) {
-        keepGoing = runOp("orphans", [&] {
-            return cleanOrphanedMetadata(request.dryRun, request.verbose, request.removeCorrupt,
-                                         progress);
-        });
-    }
-    if (keepGoing && doMime) {
-        keepGoing = runOp(
-            "mime", [&] { return repairMimeTypes(request.dryRun, request.verbose, progress); });
-    }
-    if (keepGoing && doDownloads) {
-        keepGoing = runOp("downloads", [&] {
-            return repairDownloads(request.dryRun, request.verbose, progress);
-        });
-    }
-    if (keepGoing && doPathTree) {
-        keepGoing = runOp("path_tree", [&] {
-            return rebuildPathTree(request.dryRun, request.verbose, progress);
-        });
-    }
-    if (keepGoing && doDedupe) {
-        keepGoing = runOp("dedupe", [&] { return applySemanticDedupe(request, progress); });
-    }
-    if (keepGoing && doChunks) {
-        keepGoing = runOp("chunks", [&] {
-            return cleanOrphanedChunks(request.dryRun, request.verbose, progress);
-        });
-    }
-    if (keepGoing && doBlockRefs) {
-        keepGoing = runOp("block_refs", [&] {
-            return repairBlockReferences(request.dryRun, request.verbose, progress);
-        });
-    }
-    if (keepGoing && doGraph) {
-        keepGoing =
-            runOp("graph", [&] { return repairKnowledgeGraph(request, progress, cancelRequested); });
-    }
-    if (keepGoing && doFts5) {
-        keepGoing =
-            runOp("fts5", [&] { return rebuildFts5Index(request, progress, cancelRequested); });
-    }
-    if (keepGoing && doEmbeddings) {
-        if (request.foreground) {
-            keepGoing = runOp("embeddings", [&] {
-                return generateMissingEmbeddings(request, progress, cancelRequested);
-            });
-        } else {
-            keepGoing = co_await runAsyncOp("embeddings", [&]() {
-                return generateMissingEmbeddingsAsync(request, progress, cancelRequested);
-            });
-        }
-    }
-    if (keepGoing && doTopology) {
-        keepGoing = runOp("topology", [&] { return rebuildTopologyArtifacts(request, progress); });
-    }
-    if (keepGoing && doOptimize) {
-        (void)runOp("optimize",
-                    [&] { return optimizeDatabase(request.dryRun, request.verbose, progress); });
-    }
 
-    response.success = errors.empty();
-    response.errors = std::move(errors);
-    response.operationResults = std::move(results);
-    co_return response;
+        if (!run.complete(name, std::move(result))) {
+            break;
+        }
+    }
+    co_return run.finish();
 }
 
 // ============================================================================
@@ -2561,7 +2399,8 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 if (after.edgesDeleted >= before.edgesDeleted)
                     stats.edgesDeleted += after.edgesDeleted - before.edgesDeleted;
                 if (after.docEntitiesDeleted >= before.docEntitiesDeleted)
-                    stats.docEntitiesDeleted += after.docEntitiesDeleted - before.docEntitiesDeleted;
+                    stats.docEntitiesDeleted +=
+                        after.docEntitiesDeleted - before.docEntitiesDeleted;
             }
         }
     } else {
