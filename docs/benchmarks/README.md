@@ -57,7 +57,8 @@ Artifacts: `build/benchmarks/retrieval_load/kpi-20260709T003228Z-load/`
 
 ### Search quality — BEIR scifact (default hybrid)
 
-2000 docs · 50 queries · topk=10 · topology routing **off** (product default)
+2000 docs · 50 queries · topk=10 · topology routing **off** (historical control; the current
+product default is `hybrid_assist` + `shadow`)
 
 | Metric | Value |
 |--------|------:|
