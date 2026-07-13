@@ -3232,12 +3232,21 @@ bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t
         freePageCount > pageCount) {
         return false;
     }
-    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
+    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize ||
+        pageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
         return false;
     }
-    const auto reclaimableBytes = freePageCount * pageSize;
-    const auto reclaimableRatio = static_cast<double>(freePageCount) / pageCount;
-    return reclaimableBytes >= kMinReclaimableBytes && reclaimableRatio >= kMinReclaimableRatio;
+    const auto reclaimablePageBytes = freePageCount * pageSize;
+    const auto logicalBytes = pageCount * pageSize;
+    const auto reclaimableTailBytes =
+        databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
+    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
+    const auto reclaimableTailRatio =
+        static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
+    return (reclaimablePageBytes >= kMinReclaimableBytes &&
+            reclaimablePageRatio >= kMinReclaimableRatio) ||
+           (reclaimableTailBytes >= kMinReclaimableBytes &&
+            reclaimableTailRatio >= kMinReclaimableRatio);
 }
 
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
@@ -3305,6 +3314,13 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         this);
     auto vacuumR = vacuumDb.execute("VACUUM");
     sqlite3_progress_handler(vacuumDb.rawHandle(), 0, nullptr, nullptr);
+    if (vacuumR) {
+        auto checkpointR = vacuumDb.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!checkpointR) {
+            spdlog::debug("[ServiceManager] post-VACUUM WAL checkpoint skipped: {}",
+                          checkpointR.error().message);
+        }
+    }
     vacuumDb.close();
     if (!vacuumR) {
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
