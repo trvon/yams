@@ -423,11 +423,13 @@ public:
      * All fields are optional; unset keys are left nullopt.
      *
      * Config keys:
+     * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
      * - search.topology.vector_policy = narrow|shadow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
+     * - search.topology.representative_limit = int
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
@@ -439,6 +441,7 @@ public:
      * - search.topology.expansion_source = clusters|graph_neighbors
      * - search.topology.graph_neighbor_min_score = float
      * - search.topology.graph_neighbor_reciprocal_only = true|false
+     * - search.topology.graph_vector_seed_probe = int
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();

@@ -25,8 +25,8 @@ std::string truncateSearchSnippet(const std::string& content, size_t maxLen) {
 }
 
 size_t vectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
-                               bool narrowedSearch) noexcept {
-    if (limit == 0 || narrowedSearch) {
+                               bool /*narrowedSearch*/) noexcept {
+    if (limit == 0) {
         return limit;
     }
 

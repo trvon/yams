@@ -12,7 +12,7 @@ TEST_CASE("Vector pipeline over-fetches chunks for aggregating unique docs",
     cfg.chunkAggregationTopK = 3;
 
     CHECK(yams::search::detail::testingVectorRawCandidateLimit(cfg, 10, false) == 30U);
-    CHECK(yams::search::detail::testingVectorRawCandidateLimit(cfg, 10, true) == 10U);
+    CHECK(yams::search::detail::testingVectorRawCandidateLimit(cfg, 10, true) == 30U);
 
     cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::MAX;
     CHECK(yams::search::detail::testingVectorRawCandidateLimit(cfg, 10, false) == 10U);

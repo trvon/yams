@@ -872,7 +872,14 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
 }
 
 SearchEngineConfig::TopologyRoutingMode
-resolveTopologyRoutingMode(const SearchEngineConfig& config) noexcept {
+resolveTopologyRoutingMode(const SearchEngineConfig& config,
+                           std::optional<bool> legacyWeakQueryRouting) noexcept {
+    // The old boolean only expressed the former opt-in weak-query lane. Preserve an explicit
+    // `true`, but do not let the generated legacy `false` disable the current product default.
+    // Explicit disabling now uses search.topology.mode = "disabled".
+    if (legacyWeakQueryRouting.value_or(false)) {
+        return SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly;
+    }
     return config.topologyRoutingMode;
 }
 

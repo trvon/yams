@@ -282,6 +282,7 @@ public:
         snapshot.lexicalDeltaRecentDocs = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             lexicalDelta.recentDocs, std::numeric_limits<std::uint32_t>::max()));
         const auto topology = topologyManager_.getTelemetrySnapshot();
+        snapshot.topologyStatusKnown = true;
         snapshot.topologyEpoch = topologyManager_.publishedEpoch();
         snapshot.topologyArtifactsFresh = topology.artifactsFresh;
         snapshot.topologyRebuildRunning = topology.rebuildRunning;

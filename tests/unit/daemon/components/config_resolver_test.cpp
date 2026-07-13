@@ -11,6 +11,7 @@
 
 #include <yams/compat/unistd.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -540,6 +541,19 @@ rrf_k = 33
     CHECK(*policy.medoidBoost < 0.21f);
     REQUIRE(policy.rrfK.has_value());
     CHECK(*policy.rrfK == 33.0f);
+}
+
+TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
+          "[config][search][topology][catch2]") {
+    const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();
+    const auto topologyIt = defaults.find("search.topology");
+    REQUIRE(topologyIt != defaults.end());
+
+    const auto& topology = topologyIt->second;
+    CHECK(topology.at("mode") == "hybrid_assist");
+    CHECK(topology.at("vector_policy") == "shadow");
+    CHECK_FALSE(topology.contains("enable_weak_query_routing"));
+    CHECK_FALSE(topology.contains("routing_variant"));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver reads topology evidence weight",

@@ -1764,7 +1764,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                   workingConfig.vectorMaxResults);
 
     std::vector<ComponentResult> allComponentResults;
-    const auto topologyRoutingMode = resolveTopologyRoutingMode(workingConfig);
+    const auto configuredTopologyRoutingMode = resolveTopologyRoutingMode(workingConfig);
+    const bool topologyFreshnessGatePassed = freshness.topologyRoutingUsable();
+    const auto topologyRoutingMode = topologyFreshnessGatePassed
+                                         ? configuredTopologyRoutingMode
+                                         : SearchEngineConfig::TopologyRoutingMode::Disabled;
+    response.debugStats["topology_routing_freshness_gate"] =
+        topologyFreshnessGatePassed ? "1" : "0";
     std::unordered_set<std::string> topologyMedoidHashes;
     bool topologyWeakQueryRoutingApplied = false;
     bool topologyWeakQueryNarrowApplied = false;
@@ -1980,7 +1986,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const auto topologyAssist = runTopologyAssistStage(topologyAssistReq);
             const auto& topologySession = topologyAssist.session;
             topologyLoadSucceeded = topologySession.loadSucceeded;
-            topologySkipReason = topologyAssist.skipReason;
+            topologySkipReason =
+                topologyFreshnessGatePassed ? topologyAssist.skipReason : "artifacts_not_fresh";
             topologyWeakQueryRoutedClusters = topologySession.routedClusters;
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
             const bool topologyVectorShadow = workingConfig.topologyVectorPolicy ==

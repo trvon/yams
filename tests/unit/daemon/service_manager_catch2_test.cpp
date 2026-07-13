@@ -227,6 +227,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
 TEST_CASE("ServiceManager topology readiness follows artifact freshness",
           "[daemon][service_manager][topology]") {
     yams::search::IndexFreshnessSnapshot snapshot;
+    snapshot.topologyStatusKnown = true;
     snapshot.topologyEpoch = 42;
     snapshot.topologyArtifactsFresh = true;
 

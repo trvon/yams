@@ -170,7 +170,8 @@ selectTopologyRoutesForNarrowing(const std::vector<yams::topology::ClusterRoute>
                                  float adaptiveScoreGap, float minBoundaryMargin);
 
 SearchEngineConfig::TopologyRoutingMode
-resolveTopologyRoutingMode(const SearchEngineConfig& config) noexcept;
+resolveTopologyRoutingMode(const SearchEngineConfig& config,
+                           std::optional<bool> legacyWeakQueryRouting = std::nullopt) noexcept;
 
 bool topologyRoutingMayLoad(SearchEngineConfig::TopologyRoutingMode mode,
                             bool weakTier1Query) noexcept;

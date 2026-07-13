@@ -7,6 +7,7 @@
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_engine_config.h>
 #include <yams/search/simeon_lexical_backend.h>
+#include <yams/search/topology_routing_session.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 
@@ -411,9 +412,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.enableWeakQueryRouting && !tp.mode) {
             opts.config.topologyRoutingMode =
-                *tp.enableWeakQueryRouting
-                    ? yams::search::SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly
-                    : yams::search::SearchEngineConfig::TopologyRoutingMode::Disabled;
+                yams::search::resolveTopologyRoutingMode(opts.config, tp.enableWeakQueryRouting);
         }
         if (tp.minClusters) {
             opts.config.topologyMinClusters = std::max<std::size_t>(1, *tp.minClusters);

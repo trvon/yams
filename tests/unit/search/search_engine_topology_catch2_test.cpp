@@ -560,6 +560,7 @@ TEST_CASE("SearchEngine topology routing loads stored artifacts without freshnes
     REQUIRE(response.has_value());
 
     const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_routing_freshness_gate") == "1");
     CHECK((debug.at("topology_routing_mode") == "weak_query_only"));
     CHECK((debug.at("topology_weak_query_enabled") == "1"));
     CHECK((debug.at("topology_weak_query_load_attempted") == "1"));
@@ -570,6 +571,42 @@ TEST_CASE("SearchEngine topology routing loads stored artifacts without freshnes
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
     CHECK((debug.at("topology_weak_query_added_candidates") == "0"));
+}
+
+TEST_CASE("SearchEngine abstains from topology routing when daemon artifacts are stale",
+          "[search][topology][freshness][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngineConfig config = topologyRoutingTestConfig(true);
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyStatusKnown = true;
+    context.freshness.topologyEpoch = 7;
+    context.freshness.topologyReady = false;
+    context.freshness.topologyArtifactsFresh = false;
+    context.freshness.topologyDirtyDocuments = 1;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 4;
+    auto response = engine.searchWithResponse("zz", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_routing_freshness_gate") == "0");
+    CHECK(debug.at("topology_routing_mode") == "disabled");
+    CHECK(debug.at("topology_weak_query_load_attempted") == "0");
+    CHECK(debug.at("topology_weak_query_load_succeeded") == "0");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "artifacts_not_fresh");
+    CHECK(debug.at("topology_weak_query_applied") == "0");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
 }
 
 TEST_CASE("SearchEngine rejects inconsistent topology artifacts before routing",
@@ -1202,6 +1239,20 @@ TEST_CASE("selectTopologyRoutesForNarrowing adapts probes and abstains at an uns
         /*minBoundaryMargin=*/0.20F);
     REQUIRE((unsafe.routes.size() == 2));
     CHECK(unsafe.abstained);
+}
+
+TEST_CASE("legacy topology false preserves the hybrid product default",
+          "[unit][search][topology][config]") {
+    SearchEngineConfig config;
+    REQUIRE(config.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+
+    CHECK(resolveTopologyRoutingMode(config, false) ==
+          SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(resolveTopologyRoutingMode(config, true) ==
+          SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly);
+
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::Disabled;
+    CHECK(resolveTopologyRoutingMode(config) == SearchEngineConfig::TopologyRoutingMode::Disabled);
 }
 
 TEST_CASE("fillTopologySkipReason preserves session reason and fills product defaults",

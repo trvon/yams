@@ -448,8 +448,9 @@ struct SearchEngineConfig {
     std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
 
     /// Reapply the operator-selected topology policy after corpus tuning.
-    /// Topology routing is an opt-in execution policy, not a corpus-derived
-    /// relevance weight, so tuning must not silently reset it to Disabled.
+    /// Topology routing is an execution policy, not a corpus-derived relevance
+    /// weight, so tuning must not silently change the product default or an
+    /// explicit override.
     void applyTopologyPolicyFrom(const SearchEngineConfig& source) noexcept {
         topologyRoutingMode = source.topologyRoutingMode;
         topologyVectorPolicy = source.topologyVectorPolicy;
