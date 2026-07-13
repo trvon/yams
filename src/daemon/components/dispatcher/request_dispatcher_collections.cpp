@@ -1,4 +1,5 @@
 // PBI-066: Snapshot request handlers (collections use generic metadata query)
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <filesystem>
@@ -9,6 +10,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 namespace yams::daemon {
 

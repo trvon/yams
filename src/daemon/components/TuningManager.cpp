@@ -1,3 +1,4 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/components/TuningManager.h>
 
 #include <spdlog/spdlog.h>
@@ -28,6 +29,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/profiling.h>
 

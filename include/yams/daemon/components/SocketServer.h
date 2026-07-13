@@ -7,6 +7,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/AdmissionPolicy.h>
+#include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/ipc/request_handler.h>
 
 #include <atomic>
@@ -93,10 +94,13 @@ public:
     // Check slot utilization: activeConnections / slotLimit (0.0 to 1.0+ if overcommitted)
     double getSlotUtilization() const;
 
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
     // Test hooks: keep socket admission accounting observable without needing a live daemon.
-    void testing_setConnectionCounts(size_t mainActive, size_t proxyActive);
-    bool testing_mainSocketEmergencyGuardRejects() const;
-    SocketAdmissionVerdict testing_mainSocketAdmissionVerdict(const Request& request) const;
+    YAMS_DAEMON_TEST_HOOK void testing_setConnectionCounts(size_t mainActive, size_t proxyActive);
+    YAMS_DAEMON_TEST_HOOK bool testing_mainSocketEmergencyGuardRejects() const;
+    YAMS_DAEMON_TEST_HOOK SocketAdmissionVerdict
+    testing_mainSocketAdmissionVerdict(const Request& request) const;
+#endif
 
 private:
     // Async operations

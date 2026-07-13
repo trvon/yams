@@ -24,6 +24,7 @@ class any_io_executor;
 #else
 #include "../core/types.h"
 #endif
+#include <yams/daemon/components/test_hooks.h>
 
 namespace yams::daemon {
 
@@ -48,9 +49,7 @@ public:
 
     ~EmbeddedServiceHost();
 
-    // Testing-only shutdown probes are declared unconditionally so the production
-    // daemon library can still satisfy test-only callers that are compiled with
-    // -DYAMS_TESTING=1.
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
     enum class TestingShutdownPhase {
         BeforeThreadJoin,
         AfterThreadJoin,
@@ -67,9 +66,10 @@ public:
 
     using TestingShutdownHook = std::function<void(const TestingShutdownSnapshot&)>;
 
-    void testing_setShutdownHook(TestingShutdownHook hook);
-    [[nodiscard]] std::optional<TestingShutdownSnapshot>
+    YAMS_DAEMON_TEST_HOOK void testing_setShutdownHook(TestingShutdownHook hook);
+    [[nodiscard]] YAMS_DAEMON_TEST_HOOK std::optional<TestingShutdownSnapshot>
     testing_getShutdownSnapshot(TestingShutdownPhase phase) const;
+#endif
 
     EmbeddedServiceHost(const EmbeddedServiceHost&) = delete;
     EmbeddedServiceHost& operator=(const EmbeddedServiceHost&) = delete;

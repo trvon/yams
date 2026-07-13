@@ -1,3 +1,4 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/AdmissionPolicy.h>
@@ -15,6 +16,7 @@
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/profiling.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 namespace {
 bool stream_trace_enabled() {

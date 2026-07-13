@@ -1,3 +1,4 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -230,6 +231,8 @@ std::uint64_t nowUnixMillis() {
 } // namespace
 
 // Open the daemon namespace for all following member definitions.
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
+
 namespace yams::daemon {
 
 namespace {

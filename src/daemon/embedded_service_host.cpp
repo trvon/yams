@@ -1,4 +1,6 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include "yams/daemon/embedded_service_host.h"
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 #include <algorithm>
 #include <chrono>

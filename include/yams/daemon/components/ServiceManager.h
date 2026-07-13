@@ -49,6 +49,7 @@
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
@@ -583,7 +584,8 @@ public:
 
     boost::asio::awaitable<Result<void>> initializeAsyncAwaitable(yams::compat::stop_token token);
 
-    // Test helpers: inject mock provider and tweak provider state/name
+#ifdef YAMS_TESTING
+    // Test helpers: inject mock provider and tweak provider state/name.
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }
@@ -607,9 +609,6 @@ public:
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         embeddingLifecycle_.setAdoptedPluginName(name);
     }
-    void __test_setModelProviderDegraded(bool degraded, const std::string& error = {});
-
-#ifdef YAMS_TESTING
     void __test_setAbiHost(std::unique_ptr<AbiPluginHost> host) {
         abiHost_ = std::move(host);
         if (pluginManager_) {
@@ -628,6 +627,13 @@ public:
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
     AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
 #endif
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
+                                                               const std::string& error = {});
+#endif
+
+#ifdef YAMS_TESTING
     void __test_pluginLoadFailed(const std::string& error) {
         if (pluginManager_) {
             pluginManager_->dispatchPluginLoadFailed(error);
@@ -648,12 +654,7 @@ public:
             pluginManager_->dispatchPluginLoaded(name);
         }
     }
-    Result<bool> __test_forceVectorDbInitOnce(const std::filesystem::path& dataDir) {
-        if (vectorSystemManager_) {
-            return vectorSystemManager_->initializeOnce(dataDir);
-        }
-        return Result<bool>(false);
-    }
+#endif
     // NOLINTEND(bugprone-reserved-identifier)
 
 private:
