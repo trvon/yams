@@ -71,6 +71,32 @@ TEST_CASE("SearchTuner parameter snapshots are safe during observation",
     CHECK(snapshotsValid.load(std::memory_order_relaxed));
 }
 
+TEST_CASE("SearchTuner snapshot keeps config and parameters correlated",
+          "[unit][search_tuner][concurrency][snapshot]") {
+    CorpusStats stats;
+    SearchTuner tuner(stats);
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 200.0;
+
+    std::atomic<bool> start{false};
+    std::jthread writer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 500; ++i) {
+            tuner.observe(telemetry);
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (std::size_t i = 0; i < 500; ++i) {
+        const auto snapshot = tuner.snapshot();
+        CHECK(snapshot.config.rrfK == Approx(static_cast<float>(snapshot.params.rrfK)));
+        CHECK(snapshot.config.textWeight == Approx(snapshot.params.weights.text.value));
+        CHECK(snapshot.config.vectorWeight == Approx(snapshot.params.weights.vector.value));
+        CHECK(snapshot.state == tuner.currentState());
+    }
+}
+
 // =============================================================================
 // TuningState enum and string conversion tests
 // =============================================================================

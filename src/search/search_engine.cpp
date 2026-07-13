@@ -1207,9 +1207,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t effectiveVectorMaxResults = 0;
     size_t effectiveEntityVectorMaxResults = 0;
     SearchEngineConfig workingConfig = config_;
+    std::optional<SearchTuner::Snapshot> tunerSnapshot;
 
     if (tuner_) {
-        workingConfig = tuner_->getConfig();
+        tunerSnapshot = tuner_->snapshot();
+        workingConfig = tunerSnapshot->config;
         workingConfig.applyExecutionPolicyFrom(config_);
     }
 
@@ -1229,9 +1231,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     std::optional<TuningState> baselineState;
     TunedParams baseParams;
-    if (tuner_) {
-        baselineState = tuner_->currentState();
-        baseParams = tuner_->getParams();
+    if (tunerSnapshot) {
+        baselineState = tunerSnapshot->state;
+        baseParams = std::move(tunerSnapshot->params);
     } else {
         baseParams = seedTunedParamsFromConfig(workingConfig);
     }

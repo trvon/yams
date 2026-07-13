@@ -652,6 +652,11 @@ SearchEngineConfig SearchTuner::getConfig() const {
     return buildConfigFromParamsLocked();
 }
 
+SearchTuner::Snapshot SearchTuner::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return Snapshot{.config = buildConfigFromParamsLocked(), .params = params_, .state = state_};
+}
+
 void SearchTuner::observeRelevanceFeedback(const RelevanceSession& session) {
     if (session.queries.empty()) {
         return;

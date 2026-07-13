@@ -795,6 +795,12 @@ inline void fillQueryTokenFeature(TuningContext& ctx, std::string_view query) no
 
 class SearchTuner {
 public:
+    struct Snapshot {
+        SearchEngineConfig config;
+        TunedParams params;
+        TuningState state;
+    };
+
     // Backward-compat type aliases — the nested names were the public API
     // before R1 extracted them to namespace scope. Preserved so every call
     // site that writes `SearchTuner::RuntimeTelemetry` keeps compiling.
@@ -832,6 +838,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return params_;
     }
+
+    /// Return the config, parameters, and state from one locked tuning epoch.
+    [[nodiscard]] Snapshot snapshot() const;
 
     /**
      * @brief The corpus statistics snapshot this tuner was built from.
