@@ -2420,6 +2420,32 @@ struct IdleWakeProbeObservation {
     }
 };
 
+bool writePipelineDrained(const DaemonSnapshot& snapshot) {
+    return snapshot.postIngestQueued == 0 && snapshot.postIngestInflight == 0 &&
+           snapshot.writeQueueDepth == 0 && snapshot.writeInFlight == 0;
+}
+
+TEST_CASE("Drain contract includes post-ingest and coordinated writes",
+          "[benchmark-contract][drain]") {
+    DaemonSnapshot snapshot;
+    CHECK(writePipelineDrained(snapshot));
+
+    snapshot.postIngestQueued = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.postIngestQueued = 0;
+
+    snapshot.postIngestInflight = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.postIngestInflight = 0;
+
+    snapshot.writeQueueDepth = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.writeQueueDepth = 0;
+
+    snapshot.writeInFlight = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+}
+
 DrainObservation waitForDrainObservation(DaemonClient& client, std::chrono::milliseconds timeout,
                                          std::chrono::milliseconds sampleInterval = 500ms) {
     DrainObservation observation;
@@ -2440,7 +2466,7 @@ DrainObservation waitForDrainObservation(DaemonClient& client, std::chrono::mill
         observation.maxPressureLevel = std::max(
             observation.maxPressureLevel, static_cast<uint32_t>(std::max(0, snap.pressureLevel)));
 
-        const bool drained = (snap.postIngestQueued == 0 && snap.postIngestInflight == 0);
+        const bool drained = writePipelineDrained(snap);
         if (drained) {
             ++stableCount;
             if (stableCount >= stableRequired) {
