@@ -148,6 +148,38 @@ TEST_CASE("TuneAdvisor bounded override readers share env and override behavior"
     TuneAdvisor::setConnectionSlotsScaleStep(0);
 }
 
+TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
+          "[daemon][components][config][tuning][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    sections["tuning"] = {{"target_cpu_percent", "175"},
+                          {"post_ingest_capacity", "4096"},
+                          {"post_ingest_threads_min", "3"},
+                          {"control_interval_ms", "250"}};
+
+    TuningConfig base;
+    base.postIngestThreadsMax = 12;
+    base.topologyAlgorithm = "multiscale";
+
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK(resolved.targetCpuPercent == 175);
+    CHECK(resolved.postIngestCapacity == 4096);
+    CHECK(resolved.postIngestThreadsMin == 3);
+    CHECK(resolved.controlIntervalMs == 250);
+    CHECK(resolved.postIngestThreadsMax == 12);
+    CHECK(resolved.topologyAlgorithm == "multiscale");
+
+    sections["tuning"] = {{"target_cpu_percent", "-1"},
+                          {"post_ingest_capacity", "-2"},
+                          {"control_interval_ms", "4294967296"}};
+    base.targetCpuPercent = 80;
+    base.postIngestCapacity = 2048;
+    base.controlIntervalMs = 500;
+    const auto rejected = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK(rejected.targetCpuPercent == 80);
+    CHECK(rejected.postIngestCapacity == 2048);
+    CHECK(rejected.controlIntervalMs == 500);
+}
+
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
           "[daemon][components][config][chunking][catch2]") {
     // Ensure config file discovery doesn't accidentally pick up a user config during local dev.

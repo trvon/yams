@@ -4,6 +4,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
@@ -1218,6 +1219,228 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
     policy.suppressVectorIndexBuild = suppressVectorIndexBuild.value_or(defaultSuppress);
 
     return policy;
+}
+
+TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
+                                                TuningConfig tuningConfig) {
+    const auto findSection = [&](std::string_view name) -> const ConfigSection* {
+        auto it = sections.find(std::string(name));
+        return it == sections.end() ? nullptr : &it->second;
+    };
+    const auto findValue = [](const ConfigSection* section,
+                              std::string_view key) -> const std::string* {
+        if (!section) {
+            return nullptr;
+        }
+        auto it = section->find(std::string(key));
+        return it == section->end() ? nullptr : &it->second;
+    };
+    const auto parseUnsigned = [&](const ConfigSection* section, std::string_view sectionName,
+                                   std::string_view key) -> std::optional<std::uint64_t> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseUnsignedIntegral<std::uint64_t>(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as unsigned integer", sectionName, key);
+        }
+        return value;
+    };
+    const auto parseUint32 = [&](const ConfigSection* section, std::string_view sectionName,
+                                 std::string_view key) -> std::optional<std::uint32_t> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseUnsignedIntegral<std::uint32_t>(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as uint32", sectionName, key);
+        }
+        return value;
+    };
+    const auto parseSize = [&](const ConfigSection* section, std::string_view sectionName,
+                               std::string_view key) -> std::optional<std::size_t> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseUnsignedIntegral<std::size_t>(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as size", sectionName, key);
+        }
+        return value;
+    };
+    const auto parseSigned = [&](const ConfigSection* section, std::string_view sectionName,
+                                 std::string_view key) -> std::optional<int> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseSignedIntegral<int>(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as integer", sectionName, key);
+        }
+        return value;
+    };
+    const auto parseFloating = [&](const ConfigSection* section, std::string_view sectionName,
+                                   std::string_view key) -> std::optional<double> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseDouble(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as floating-point", sectionName, key);
+        }
+        return value;
+    };
+    const auto parseBoolean = [&](const ConfigSection* section, std::string_view sectionName,
+                                  std::string_view key) -> std::optional<bool> {
+        const auto* raw = findValue(section, key);
+        if (!raw) {
+            return std::nullopt;
+        }
+        auto value = parseBoolValue(*raw);
+        if (!value) {
+            spdlog::warn("Config: failed to parse {}.{} as boolean", sectionName, key);
+        }
+        return value;
+    };
+
+    const auto* tuning = findSection("tuning");
+    const auto applyUint32 = [&](std::string_view key, auto setter) {
+        if (auto value = parseUint32(tuning, "tuning", key)) {
+            setter(*value);
+        }
+    };
+    applyUint32("backpressure_read_pause_ms", &TuneAdvisor::setBackpressureReadPauseMs);
+    applyUint32("worker_poll_ms", &TuneAdvisor::setWorkerPollMs);
+    if (auto value = parseFloating(tuning, "tuning", "idle_cpu_pct")) {
+        TuneAdvisor::setIdleCpuThresholdPercent(*value);
+    }
+    if (auto value = parseUnsigned(tuning, "tuning", "idle_mux_low_bytes")) {
+        TuneAdvisor::setIdleMuxLowBytes(*value);
+    }
+    applyUint32("idle_shrink_hold_ms", &TuneAdvisor::setIdleShrinkHoldMs);
+    applyUint32("pool_cooldown_ms", &TuneAdvisor::setPoolCooldownMs);
+    if (auto value = parseSigned(tuning, "tuning", "pool_scale_step")) {
+        TuneAdvisor::setPoolScaleStep(*value);
+    }
+    applyUint32("pool_ipc_min", &TuneAdvisor::setPoolMinSizeIpc);
+    applyUint32("pool_ipc_max", &TuneAdvisor::setPoolMaxSizeIpc);
+    applyUint32("pool_io_min", &TuneAdvisor::setPoolMinSizeIpcIo);
+    applyUint32("pool_io_max", &TuneAdvisor::setPoolMaxSizeIpcIo);
+    applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
+    applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
+    applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
+    applyUint32("cli_pool_threads", &TuneAdvisor::setCliRequestPoolThreads);
+    applyUint32("list_inflight_limit", &TuneAdvisor::setListInflightLimit);
+    applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
+    applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);
+    applyUint32("grep_admission_wait_ms", &TuneAdvisor::setGrepAdmissionWaitMs);
+
+    if (auto value = parseBoolean(tuning, "tuning", "aggressive_idle_shrink")) {
+        TuneAdvisor::setAggressiveIdleShrinkEnabled(*value);
+    }
+    if (auto value = parseBoolean(tuning, "tuning", "use_internal_bus_for_repair")) {
+        TuneAdvisor::setUseInternalBusForRepair(*value);
+    }
+    if (auto value = parseBoolean(tuning, "tuning", "use_internal_bus_for_post_ingest")) {
+        TuneAdvisor::setUseInternalBusForPostIngest(*value);
+    }
+    if (const auto* rawProfile = findValue(tuning, "profile")) {
+        std::string profile = *rawProfile;
+        std::transform(profile.begin(), profile.end(), profile.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (profile == "efficient" || profile == "conservative") {
+            TuneAdvisor::setTuningProfile(TuneAdvisor::Profile::Efficient);
+        } else if (profile == "aggressive") {
+            TuneAdvisor::setTuningProfile(TuneAdvisor::Profile::Aggressive);
+        } else if (profile == "balanced") {
+            TuneAdvisor::setTuningProfile(TuneAdvisor::Profile::Balanced);
+        } else {
+            spdlog::warn("Config: unknown tuning.profile '{}'", profile);
+        }
+    }
+
+    const auto updateSize = [&](std::string_view key, std::size_t& field) {
+        if (auto value = parseSize(tuning, "tuning", key)) {
+            field = *value;
+        }
+    };
+    const auto updateUint32 = [&](std::string_view key, std::uint32_t& field) {
+        if (auto value = parseUint32(tuning, "tuning", key)) {
+            field = *value;
+        }
+    };
+    updateUint32("target_cpu_percent", tuningConfig.targetCpuPercent);
+    updateSize("post_ingest_capacity", tuningConfig.postIngestCapacity);
+    updateSize("post_ingest_threads_min", tuningConfig.postIngestThreadsMin);
+    updateSize("post_ingest_threads_max", tuningConfig.postIngestThreadsMax);
+    updateSize("admit_warn_threshold", tuningConfig.admitWarnThreshold);
+    updateSize("admit_stop_threshold", tuningConfig.admitStopThreshold);
+    updateUint32("control_interval_ms", tuningConfig.controlIntervalMs);
+    updateUint32("hold_ms", tuningConfig.holdMs);
+
+    const auto* postIngest = findSection("tuning.post_ingest");
+    const auto applyPostIngestCap = [&](std::string_view key, const char* envName,
+                                        std::uint32_t minimum, std::uint32_t maximum, auto setter) {
+        auto value = parseUnsigned(postIngest, "tuning.post_ingest", key);
+        if (!value || std::getenv(envName) != nullptr) {
+            return;
+        }
+        if (*value < minimum || *value > maximum) {
+            spdlog::warn("Config: tuning.post_ingest.{} outside range {}..{}", key, minimum,
+                         maximum);
+            return;
+        }
+        setter(static_cast<std::uint32_t>(*value));
+    };
+    applyPostIngestCap("total_concurrent", "YAMS_POST_INGEST_TOTAL_CONCURRENT", 1, 256,
+                       &TuneAdvisor::setPostIngestTotalConcurrent);
+    applyPostIngestCap("embed_concurrent", "YAMS_POST_EMBED_CONCURRENT", 1, 32,
+                       &TuneAdvisor::setPostEmbedConcurrent);
+    applyPostIngestCap("extraction_concurrent", "YAMS_POST_EXTRACTION_CONCURRENT", 1, 64,
+                       &TuneAdvisor::setPostExtractionConcurrent);
+    applyPostIngestCap("kg_concurrent", "YAMS_POST_KG_CONCURRENT", 1, 64,
+                       &TuneAdvisor::setPostKgConcurrent);
+    applyPostIngestCap("symbol_concurrent", "YAMS_POST_SYMBOL_CONCURRENT", 1, 32,
+                       &TuneAdvisor::setPostSymbolConcurrent);
+    applyPostIngestCap("entity_concurrent", "YAMS_POST_ENTITY_CONCURRENT", 1, 16,
+                       &TuneAdvisor::setPostEntityConcurrent);
+    applyPostIngestCap("title_concurrent", "YAMS_POST_TITLE_CONCURRENT", 1, 16,
+                       &TuneAdvisor::setPostTitleConcurrent);
+    applyPostIngestCap("batch_size", "YAMS_POST_INGEST_BATCH_SIZE", 1, 256,
+                       &TuneAdvisor::setPostIngestBatchSize);
+
+    const auto* gradient = findSection("gradient_limiter");
+    if (auto value = parseBoolean(gradient, "gradient_limiter", "enable")) {
+        TuneAdvisor::setEnableGradientLimiters(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "smoothing_alpha")) {
+        TuneAdvisor::setGradientSmoothingAlpha(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "long_window_alpha")) {
+        TuneAdvisor::setGradientLongAlpha(*value);
+    }
+    if (auto value = parseUint32(gradient, "gradient_limiter", "warmup_samples")) {
+        TuneAdvisor::setGradientWarmupSamples(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "tolerance")) {
+        TuneAdvisor::setGradientTolerance(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "initial_limit")) {
+        TuneAdvisor::setGradientInitialLimit(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "min_limit")) {
+        TuneAdvisor::setGradientMinLimit(*value);
+    }
+    if (auto value = parseFloating(gradient, "gradient_limiter", "max_limit")) {
+        TuneAdvisor::setGradientMaxLimit(*value);
+    }
+
+    return tuningConfig;
 }
 
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
