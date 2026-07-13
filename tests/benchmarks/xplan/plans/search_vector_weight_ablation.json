@@ -1,6 +1,6 @@
 {
   "name": "search_vector_weight_ablation",
-  "description": "Product hybrid (topology off): ablate SearchEngineConfig.vectorWeight. Product default 0.30 vs lower weights. Driven by search_product_component no_vector lift.",
+  "description": "Product topology+ANN hybrid: ablate SearchEngineConfig.vectorWeight. Product default 0.30 vs lower weights.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -13,7 +13,8 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled"
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"
     },
     "params": {
       "dataset": "scifact",

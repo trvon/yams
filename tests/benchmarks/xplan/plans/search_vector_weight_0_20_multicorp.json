@@ -1,6 +1,6 @@
 {
   "name": "search_vector_weight_0_20_multicorp",
-  "description": "Cautious product hybrid (topology off): vectorWeight 0.30 vs 0.20 with text rebalance, scifact + nfcorpus (repeats=3).",
+  "description": "Product topology+ANN hybrid: vectorWeight 0.30 vs 0.20 with text rebalance, scifact + nfcorpus (repeats=3).",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 10800,
@@ -13,7 +13,8 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
       "YAMS_BENCH_SKIP_BUILD": "1"
     },
     "params": {

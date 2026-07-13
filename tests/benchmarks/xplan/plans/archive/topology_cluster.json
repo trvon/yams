@@ -1,6 +1,6 @@
 {
   "name": "topology_cluster",
-  "description": "Topology clustering engine ablation on BEIR scifact via retrieval_quality_bench (connected/HDBSCAN/Louvain).",
+  "description": "Topology clustering engine ablation on BEIR scifact via retrieval_quality_bench (connected/Louvain).",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 3600,
@@ -29,28 +29,6 @@
       "env": {
         "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
         "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
-      }
-    },
-    {
-      "name": "hdbscan",
-      "factors": {
-        "topology_engine": "hdbscan",
-        "feature_smoothing_hops": 0
-      },
-      "env": {
-        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
-        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
-      }
-    },
-    {
-      "name": "hdbscan_sgc1",
-      "factors": {
-        "topology_engine": "hdbscan",
-        "feature_smoothing_hops": 1
-      },
-      "env": {
-        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
-        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "1"
       }
     },
     {

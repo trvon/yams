@@ -1,6 +1,6 @@
 {
   "name": "search_product_component_ablation",
-  "description": "Product-default hybrid (topology routing disabled) one-factor-off on BEIR scifact. Identifies which engine components carry quality vs noise for the path users actually hit.",
+  "description": "Product-default topology+ANN hybrid one-factor-off on BEIR scifact. Identifies which engine components carry quality versus noise for the path users actually hit.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -13,13 +13,16 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled"
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"
     },
     "params": {
       "dataset": "scifact",
       "corpus_size": 2000,
       "num_queries": 50,
-      "topk": 10
+      "topk": 10,
+      "topology_mode": "hybrid_assist",
+      "topology_vector_policy": "shadow"
     }
   },
   "arms": [
@@ -33,8 +36,7 @@
         "graph_vector": "on",
         "graph_rerank": "on",
         "rerank": "on",
-        "topology": "off",
-        "parallel_tiered": "on"
+        "topology": "shadow"
       }
     },
     {
@@ -60,10 +62,6 @@
     {
       "name": "no_rerank",
       "factors": { "rerank": "off" }
-    },
-    {
-      "name": "no_tiered",
-      "factors": { "parallel_tiered": "off" }
     },
     {
       "name": "no_text",

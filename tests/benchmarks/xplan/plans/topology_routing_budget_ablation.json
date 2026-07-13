@@ -75,17 +75,19 @@
       "name": "routed_cc_adaptive_docs16",
       "factors": {
         "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "narrow",
         "route_candidate_budget": 16,
         "adaptive_routing": true
       },
       "env": {
-        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist"
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow"
       },
       "params": {
+        "topology_vector_policy": "narrow",
         "min_clusters": 1,
         "max_clusters": 4,
         "max_docs": 16,
-        "max_docs_per_cluster": 8,
         "max_seed_documents": 16,
         "adaptive_probe_score_gap": 0.05,
         "narrow_min_boundary_margin": 0.02,
@@ -109,19 +111,18 @@
         "topology_route_boundary_score_margin_avg",
         "topology_snapshot_cache_hit_rate",
         "topology_allowed_candidates_avg",
-        "topology_member_rerank_candidates_avg",
+        "topology_vector_filter_allowed_candidates_avg",
+        "topology_vector_filter_latency_ms_avg",
+        "topology_vector_abstain_latency_ms_avg",
         "vector_candidate_budget_avg",
         "vector_result_budget_avg",
         "vector_candidate_work_budget_avg",
         "vector_distance_evaluation_budget_avg",
-        "topology_member_rows_visited_actual_avg",
-        "topology_member_distance_evaluations_actual_avg",
         "vector_rows_visited_actual_avg",
         "vector_exact_distance_evaluations_actual_avg",
         "vector_ann_candidate_budget_actual_avg",
         "vector_total_rows_visited_actual_avg",
-        "vector_total_exact_distance_evaluations_actual_avg",
-        "topology_vector_scores_reuse_rate"
+        "vector_total_exact_distance_evaluations_actual_avg"
       ]
     }
   ],
@@ -142,13 +143,14 @@
       "topology_route_boundary_score_margin_avg",
       "topology_snapshot_cache_hit_rate",
       "topology_allowed_candidates_avg",
-      "topology_member_rerank_candidates_avg",
+      "topology_vector_filter_allowed_candidates_avg",
+      "topology_vector_filter_latency_ms_avg",
+      "topology_vector_abstain_latency_ms_avg",
       "vector_candidate_work_budget_avg",
       "vector_distance_evaluation_budget_avg",
       "vector_ann_candidate_budget_actual_avg",
       "vector_total_rows_visited_actual_avg",
-      "vector_total_exact_distance_evaluations_actual_avg",
-      "topology_vector_scores_reuse_rate"
+      "vector_total_exact_distance_evaluations_actual_avg"
     ]
   }
 }

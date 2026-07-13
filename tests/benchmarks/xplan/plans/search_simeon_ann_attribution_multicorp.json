@@ -1,6 +1,6 @@
 {
   "name": "search_simeon_ann_attribution_multicorp",
-  "description": "Steady-state mixed-corpus attribution: isolate text, current Simeon PQ ANN, and exact vec0 retrieval over identical Simeon embeddings. The exact arm is a candidate-quality oracle, not an equal-distance-cost competitor.",
+  "description": "Topology-disabled scientific control: isolate text, current Simeon PQ ANN, and exact vec0 retrieval over identical Simeon embeddings. The exact arm is a candidate-quality oracle, not an equal-distance-cost competitor.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 10800,

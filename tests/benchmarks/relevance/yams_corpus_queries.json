@@ -3,9 +3,9 @@
   "notes": "Judged relevance set over the live global corpus, scoped to the yams repo. relevant = path substrings; a returned result counts as relevant if any substring is contained in its path. Edit/extend freely; keep ground-truth files canonical for each query.",
   "queries": [
     {"query": "where is the search fusion strategy enum defined", "relevant": ["include/yams/search/search_engine_config.h"]},
-    {"query": "reciprocal rank fusion scoring implementation", "relevant": ["src/search/search_result_fusion.cpp"]},
+    {"query": "weighted reciprocal source evidence scoring implementation", "relevant": ["src/search/evidence_search_pipeline.cpp"]},
     {"query": "parse YAMS_FUSION_STRATEGY environment variable", "relevant": ["src/search/search_engine_builder.cpp"]},
-    {"query": "convex z-score fusion combine text and vector results", "relevant": ["src/search/search_result_fusion.cpp"]},
+    {"query": "topology evidence fuses text and vector results", "relevant": ["src/search/evidence_search_pipeline.cpp"]},
     {"query": "knowledge graph store delete orphaned nodes sqlite", "relevant": ["src/metadata/knowledge_graph_store_sqlite.cpp"]},
     {"query": "graph context service lookup symbol impact trace", "relevant": ["src/app/services/graph_context_service.cpp"]},
     {"query": "repair service reconcile symbol references knowledge graph", "relevant": ["src/daemon/components/RepairService.cpp", "src/daemon/components/GraphComponent.cpp"]},
@@ -21,6 +21,6 @@
     {"query": "daemon ipc request handler dispatch search", "relevant": ["src/daemon/ipc/request_handler.cpp"]},
     {"query": "tracy profiling zone scoped macro instrumentation", "relevant": ["include/yams/profiling.h"]},
     {"query": "search engine builder construct hybrid engine", "relevant": ["src/search/search_engine_builder.cpp"]},
-    {"query": "result fusion unit test component result", "relevant": ["tests/unit/search/result_fusion_catch2_test.cpp"]}
+    {"query": "evidence fusion unit test component result", "relevant": ["tests/unit/search/evidence_search_pipeline_catch2_test.cpp"]}
   ]
 }

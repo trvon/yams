@@ -108,15 +108,6 @@
       "params": {
         "topology": "off"
       }
-    },
-    {
-      "name": "no_tiered",
-      "factors": {
-        "parallel_tiered": "off"
-      },
-      "params": {
-        "parallel_tiered": "off"
-      }
     }
   ],
   "steps": [

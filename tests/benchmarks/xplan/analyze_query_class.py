@@ -90,9 +90,7 @@ def load_by_type(debug_path: Path) -> dict[str, list[dict[str, Any]]]:
         stats = o.get("search_stats") or {}
         if not isinstance(stats, dict):
             stats = {}
-        exact_work = _as_int(
-            stats.get("topology_member_rerank_distance_evaluations_actual")
-        ) + _as_int(stats.get("vector_search_exact_distance_evaluations_actual"))
+        exact_work = _as_int(stats.get("vector_search_exact_distance_evaluations_actual"))
         out.setdefault(st, []).append(
             {
                 "query": q,
@@ -299,22 +297,32 @@ def shadow_route_risk(
 
 
 def compare_arms(a_dir: Path, b_dir: Path) -> None:
-    a_debug = first_rep_debug(a_dir)
-    b_debug = first_rep_debug(b_dir)
-    if a_debug is None or b_debug is None:
-        missing = a_dir if a_debug is None else b_dir
+    a_debugs = all_rep_debugs(a_dir)
+    b_debugs = all_rep_debugs(b_dir)
+    common_repeats = sorted(set(a_debugs) & set(b_debugs))
+    if not common_repeats:
+        missing = a_dir if not a_debugs else b_dir
         print(f"no debug.jsonl under {missing}")
         return
-    a = load_by_type(a_debug)
-    b = load_by_type(b_debug)
-    ha = {x["query"]: x for x in a.get("hybrid", [])}
-    hb = {x["query"]: x for x in b.get("hybrid", [])}
+    ha: dict[tuple[str, str], dict[str, Any]] = {}
+    hb: dict[tuple[str, str], dict[str, Any]] = {}
+    for repeat in common_repeats:
+        for row in load_by_type(a_debugs[repeat]).get("hybrid", []):
+            ha[(repeat, row["query"])] = row
+        for row in load_by_type(b_debugs[repeat]).get("hybrid", []):
+            hb[(repeat, row["query"])] = row
     common = sorted(set(ha) & set(hb))
-    deltas = [(hb[q]["rr"] - ha[q]["rr"], q, ha[q], hb[q]) for q in common]
-    deltas.sort()
+    deltas = [
+        (hb[key]["rr"] - ha[key]["rr"], key[1], ha[key], hb[key])
+        for key in common
+    ]
+    deltas.sort(key=lambda item: (item[0], item[1]))
     print(
         f"compare {a_dir.name} -> {b_dir.name}  n={len(common)} "
-        f"meanΔrr={mean([d[0] for d in deltas]):.4f}"
+        f"meanΔrr={mean([d[0] for d in deltas]):.4f} "
+        f"win={sum(1 for d in deltas if d[0] > 0)} "
+        f"lose={sum(1 for d in deltas if d[0] < 0)} "
+        f"tie={sum(1 for d in deltas if d[0] == 0)}"
     )
     print("  hurts most (B worse):")
     for da, q, qa, qb in deltas[:5]:

@@ -1,6 +1,6 @@
 {
   "name": "search_product_clean_baseline",
-  "description": "Product hybrid baseline after dead-source gates (topology off): scifact + nfcorpus, n=3. Expect only text+vector fusion contribution; quality must not regress vs prior product defaults.",
+  "description": "Product topology+ANN baseline after dead-source gates: scifact + nfcorpus, n=3. Topology contributes non-destructive evidence while global ANN and lexical fallback preserve recall.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 10800,
@@ -13,13 +13,16 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
       "YAMS_BENCH_SKIP_BUILD": "1"
     },
     "params": {
       "topk": 10,
       "num_queries": 50,
-      "skip_build": true
+      "skip_build": true,
+      "topology_mode": "hybrid_assist",
+      "topology_vector_policy": "shadow"
     }
   },
   "arms": [

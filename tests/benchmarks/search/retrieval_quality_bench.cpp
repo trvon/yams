@@ -18,8 +18,6 @@
     YAMS_BENCH_ENABLE_GLINT=1         - Opt into Glint/GLiNER entity extraction on simeon runs
     YAMS_BENCH_ENABLE_ONNX_RERANK=1   - Opt into ONNX reranker on simeon runs
     YAMS_BENCH_TOPOLOGY_MODE=disabled|weak_query_only|hybrid_assist|rerank_only
-    YAMS_BENCH_CANDIDATE_PIPELINE=classic|evidence
-                                          Write typed topology routing mode into isolated config
     YAMS_BENCH_TOPOLOGY_EXPANSION=clusters|graph_neighbors
                                           Cluster partition vs pure semantic_neighbor expansion
     YAMS_BENCH_TOPOLOGY_ENGINE=connected|louvain|kmeans
@@ -94,6 +92,7 @@
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
 #include <yams/common/fs_utils.h>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -654,10 +653,6 @@ struct QueryDiagnosticsSummary {
     std::uint64_t queryWithGraphDisplacedRelevantPostFusionCount = 0;
     std::uint64_t queryWithTopologyAddedRelevantPostFusionCount = 0;
     std::uint64_t queryWithTopologyAddedRelevantFusionDroppedCount = 0;
-    std::uint64_t queryWithTopologySidecarRelevantPostFusionCount = 0;
-    std::uint64_t queryWithTopologySidecarRelevantFinalCount = 0;
-    std::uint64_t queryWithTopologyNewRelevantPostFusionCount = 0;
-    std::uint64_t queryWithTopologyDuplicateRelevantPostFusionCount = 0;
     std::uint64_t queryWithTopKDuplicateCount = 0;
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
@@ -710,11 +705,6 @@ struct QueryDiagnosticsSummary {
     std::vector<double> topologyAddedCandidatesSamples;
     std::vector<double> topologyDuplicateCandidatesSamples;
     std::vector<double> topologyStaleCandidatesSamples;
-    std::vector<double> topologyAddedPostFusionSamples;
-    std::vector<double> topologyAddedFusionDroppedSamples;
-    std::vector<double> topologySidecarFinalSamples;
-    std::vector<double> topologyNewPostFusionSamples;
-    std::vector<double> topologyDuplicatePostFusionSamples;
     std::vector<double> graphCommunitySupportedDocsSamples;
     std::vector<double> graphCommunityEdgeCountSamples;
     std::vector<double> graphCommunityLargestSizeSamples;
@@ -879,22 +869,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
                         : (searchStats.contains("topology_weak_query_added_candidate_hashes")
                                ? searchStats.at("topology_weak_query_added_candidate_hashes")
                                : ""));
-    const auto topologySidecarPostFusionSet =
-        splitTabSet(searchStats.contains("topology_sidecar_post_fusion_doc_ids")
-                        ? searchStats.at("topology_sidecar_post_fusion_doc_ids")
-                        : "");
-    const auto topologySidecarFinalSet =
-        splitTabSet(searchStats.contains("topology_sidecar_final_doc_ids")
-                        ? searchStats.at("topology_sidecar_final_doc_ids")
-                        : "");
-    const auto topologyNewPostFusionSet =
-        splitTabSet(searchStats.contains("topology_new_post_fusion_doc_ids")
-                        ? searchStats.at("topology_new_post_fusion_doc_ids")
-                        : "");
-    const auto topologyDuplicatePostFusionSet =
-        splitTabSet(searchStats.contains("topology_duplicate_post_fusion_doc_ids")
-                        ? searchStats.at("topology_duplicate_post_fusion_doc_ids")
-                        : "");
     const std::unordered_set<std::string> returnedTopKSet(returnedDocIds.begin(),
                                                           returnedDocIds.end());
 
@@ -926,15 +900,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         } catch (...) {
         }
     }
-    json topologySidecarTrace = json::array();
-    if (auto it = searchStats.find("trace_topology_sidecar_candidates_json");
-        it != searchStats.end()) {
-        try {
-            topologySidecarTrace = json::parse(it->second);
-        } catch (...) {
-        }
-    }
-
     const auto findDoc = [](const json& docs, const std::string& docId) -> json {
         if (!docs.is_array()) {
             return json();
@@ -976,24 +941,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     };
 
     json relevant = json::array();
-    json topologySidecarCandidates = json::array();
-    if (topologySidecarTrace.is_array()) {
-        for (auto candidate : topologySidecarTrace) {
-            if (!candidate.is_object()) {
-                continue;
-            }
-            const std::string docId = candidate.value("doc_id", "");
-            const bool isRelevant = std::find(relevantDocIds.begin(), relevantDocIds.end(),
-                                              docId) != relevantDocIds.end();
-            candidate["is_relevant"] = isRelevant;
-            candidate["in_pre_fusion"] = preSet.contains(docId);
-            candidate["in_post_fusion"] = postSet.contains(docId);
-            candidate["in_graphless_post_fusion"] = graphlessPostSet.contains(docId);
-            candidate["in_final_window"] = finalWindowSet.contains(docId);
-            candidate["in_returned_topk"] = returnedTopKSet.contains(docId);
-            topologySidecarCandidates.push_back(candidate);
-        }
-    }
     bool anyPre = false;
     bool anyPost = false;
     bool anyGraphlessPost = false;
@@ -1003,10 +950,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     json graphDisplacedRelevant = json::array();
     json topologyAddedRelevantPostFusion = json::array();
     json topologyAddedRelevantDroppedByFusion = json::array();
-    json topologySidecarRelevantPostFusion = json::array();
-    json topologySidecarRelevantFinal = json::array();
-    json topologyNewRelevantPostFusion = json::array();
-    json topologyDuplicateRelevantPostFusion = json::array();
     json stageRelevantPresence = json::object();
 
     if (stageSummary.is_object()) {
@@ -1065,19 +1008,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
         if (topologyAddedCandidate && !inPost) {
             topologyAddedRelevantDroppedByFusion.push_back(docId);
         }
-        if (topologySidecarPostFusionSet.contains(docId)) {
-            topologySidecarRelevantPostFusion.push_back(docId);
-        }
-        if (topologySidecarFinalSet.contains(docId)) {
-            topologySidecarRelevantFinal.push_back(docId);
-        }
-        if (topologyNewPostFusionSet.contains(docId)) {
-            topologyNewRelevantPostFusion.push_back(docId);
-        }
-        if (topologyDuplicatePostFusionSet.contains(docId)) {
-            topologyDuplicateRelevantPostFusion.push_back(docId);
-        }
-
         json componentSources = json::array();
         if (componentHits.is_object()) {
             for (const auto& [component, details] : componentHits.items()) {
@@ -1166,16 +1096,6 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
          topologyAddedRelevantDroppedByFusion.size()},
         {"topology_added_relevant_post_fusion_doc_ids", topologyAddedRelevantPostFusion},
         {"topology_added_relevant_fusion_dropped_doc_ids", topologyAddedRelevantDroppedByFusion},
-        {"topology_sidecar_relevant_post_fusion_count", topologySidecarRelevantPostFusion.size()},
-        {"topology_sidecar_relevant_final_count", topologySidecarRelevantFinal.size()},
-        {"topology_new_relevant_post_fusion_count", topologyNewRelevantPostFusion.size()},
-        {"topology_duplicate_relevant_post_fusion_count",
-         topologyDuplicateRelevantPostFusion.size()},
-        {"topology_sidecar_relevant_post_fusion_doc_ids", topologySidecarRelevantPostFusion},
-        {"topology_sidecar_relevant_final_doc_ids", topologySidecarRelevantFinal},
-        {"topology_new_relevant_post_fusion_doc_ids", topologyNewRelevantPostFusion},
-        {"topology_duplicate_relevant_post_fusion_doc_ids", topologyDuplicateRelevantPostFusion},
-        {"topology_sidecar_candidates", topologySidecarCandidates},
         {"stage_relevant_presence", stageRelevantPresence},
         {"miss_stage", missStage},
         {"relevant_docs", relevant},
@@ -1352,18 +1272,6 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         if (relevantDecisionTrace.value("topology_added_relevant_fusion_dropped_count", 0) > 0) {
             summary.queryWithTopologyAddedRelevantFusionDroppedCount++;
         }
-        if (relevantDecisionTrace.value("topology_sidecar_relevant_post_fusion_count", 0) > 0) {
-            summary.queryWithTopologySidecarRelevantPostFusionCount++;
-        }
-        if (relevantDecisionTrace.value("topology_sidecar_relevant_final_count", 0) > 0) {
-            summary.queryWithTopologySidecarRelevantFinalCount++;
-        }
-        if (relevantDecisionTrace.value("topology_new_relevant_post_fusion_count", 0) > 0) {
-            summary.queryWithTopologyNewRelevantPostFusionCount++;
-        }
-        if (relevantDecisionTrace.value("topology_duplicate_relevant_post_fusion_count", 0) > 0) {
-            summary.queryWithTopologyDuplicateRelevantPostFusionCount++;
-        }
         if (firstRelevantRank < 0) {
             const std::string missStage = relevantDecisionTrace.value("miss_stage", "unknown");
             if (missStage == "missing_pre_fusion") {
@@ -1503,21 +1411,6 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     }
     if (auto v = parseDoubleStat(searchStats, "topology_weak_query_stale_candidates")) {
         summary.topologyStaleCandidatesSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "topology_added_candidate_post_fusion_count")) {
-        summary.topologyAddedPostFusionSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "topology_added_candidate_fusion_dropped_count")) {
-        summary.topologyAddedFusionDroppedSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "topology_sidecar_final_count")) {
-        summary.topologySidecarFinalSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "topology_new_post_fusion_count")) {
-        summary.topologyNewPostFusionSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "topology_duplicate_post_fusion_count")) {
-        summary.topologyDuplicatePostFusionSamples.push_back(*v);
     }
     if (auto v = parseDoubleStat(searchStats, "anchored_pre_fusion_count")) {
         summary.anchoredPreFusionCountSamples.push_back(*v);
@@ -1837,14 +1730,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          summary.queryWithTopologyAddedRelevantPostFusionCount},
         {"query_with_topology_added_relevant_fusion_dropped_count",
          summary.queryWithTopologyAddedRelevantFusionDroppedCount},
-        {"query_with_topology_sidecar_relevant_post_fusion_count",
-         summary.queryWithTopologySidecarRelevantPostFusionCount},
-        {"query_with_topology_sidecar_relevant_final_count",
-         summary.queryWithTopologySidecarRelevantFinalCount},
-        {"query_with_topology_new_relevant_post_fusion_count",
-         summary.queryWithTopologyNewRelevantPostFusionCount},
-        {"query_with_topology_duplicate_relevant_post_fusion_count",
-         summary.queryWithTopologyDuplicateRelevantPostFusionCount},
         {"query_with_topk_duplicate_count", summary.queryWithTopKDuplicateCount},
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
@@ -1878,15 +1763,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.queryWithTopologyAddedRelevantPostFusionCount) / queryCount},
         {"query_with_topology_added_relevant_fusion_dropped_rate",
          static_cast<double>(summary.queryWithTopologyAddedRelevantFusionDroppedCount) /
-             queryCount},
-        {"query_with_topology_sidecar_relevant_post_fusion_rate",
-         static_cast<double>(summary.queryWithTopologySidecarRelevantPostFusionCount) / queryCount},
-        {"query_with_topology_sidecar_relevant_final_rate",
-         static_cast<double>(summary.queryWithTopologySidecarRelevantFinalCount) / queryCount},
-        {"query_with_topology_new_relevant_post_fusion_rate",
-         static_cast<double>(summary.queryWithTopologyNewRelevantPostFusionCount) / queryCount},
-        {"query_with_topology_duplicate_relevant_post_fusion_rate",
-         static_cast<double>(summary.queryWithTopologyDuplicateRelevantPostFusionCount) /
              queryCount},
         {"query_with_topk_duplicate_rate",
          static_cast<double>(summary.queryWithTopKDuplicateCount) / queryCount},
@@ -1969,14 +1845,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          summarizeSamples(summary.topologyDuplicateCandidatesSamples)},
         {"topology_weak_query_stale_candidates",
          summarizeSamples(summary.topologyStaleCandidatesSamples)},
-        {"topology_added_candidate_post_fusion_count",
-         summarizeSamples(summary.topologyAddedPostFusionSamples)},
-        {"topology_added_candidate_fusion_dropped_count",
-         summarizeSamples(summary.topologyAddedFusionDroppedSamples)},
-        {"topology_sidecar_final_count", summarizeSamples(summary.topologySidecarFinalSamples)},
-        {"topology_new_post_fusion_count", summarizeSamples(summary.topologyNewPostFusionSamples)},
-        {"topology_duplicate_post_fusion_count",
-         summarizeSamples(summary.topologyDuplicatePostFusionSamples)},
         {"graph_community_supported_docs",
          summarizeSamples(summary.graphCommunitySupportedDocsSamples)},
         {"graph_community_edge_count", summarizeSamples(summary.graphCommunityEdgeCountSamples)},
@@ -3218,22 +3086,6 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
              {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
              {"YAMS_SEARCH_ENABLE_INTENT_ADAPTIVE", "0"},
-         }},
-        {"mixed_ablation_disable_tiered_execution",
-         "Ablation: disable tiered execution, run flat fanout",
-         {
-             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
-             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
-             {"YAMS_TUNING_OVERRIDE", "MIXED"},
-             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
-             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
-             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
-             {"YAMS_SEARCH_RRF_K", "16"},
-             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
-             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
-             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
-             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
-             {"YAMS_SEARCH_ENABLE_TIERED_EXECUTION", "0"},
          }},
         {"mixed_ablation_disable_graph_rerank",
          "Ablation: disable graph reranking",
@@ -5384,6 +5236,8 @@ struct BenchFixture {
 
         std::vector<DocSeedInfo> docs;
         docs.reserve(documentPaths.size());
+        yams::crypto::SHA256Hasher contentHasher;
+        std::size_t warmPathRebases = 0;
 
         auto trimCopy = [](std::string value) {
             const auto first = std::find_if_not(
@@ -5431,11 +5285,25 @@ struct BenchFixture {
                 throw std::runtime_error("Failed to resolve benchmark document " + docPath + ": " +
                                          docResult.error().message);
             }
-            if (!docResult.value().has_value()) {
+            auto resolvedDoc = std::move(docResult.value());
+            if (!resolvedDoc.has_value() && warmDataDir) {
+                const auto contentHash = contentHasher.hashFile(docPath);
+                auto hashResult = metadataRepo->getDocumentByHash(contentHash);
+                if (!hashResult) {
+                    throw std::runtime_error("Failed to resolve warm-cache benchmark document " +
+                                             docPath +
+                                             " by content hash: " + hashResult.error().message);
+                }
+                resolvedDoc = std::move(hashResult.value());
+                if (resolvedDoc.has_value()) {
+                    ++warmPathRebases;
+                }
+            }
+            if (!resolvedDoc.has_value()) {
                 throw std::runtime_error("Benchmark document missing from metadata: " + docPath);
             }
 
-            const auto& doc = *docResult.value();
+            const auto& doc = *resolvedDoc;
             std::vector<float> embedding;
             if (topologySource == "vector") {
                 const auto vectors = vectorDb->getVectorsByDocument(doc.sha256Hash);
@@ -5507,6 +5375,10 @@ struct BenchFixture {
             }
             docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), text, headerText,
                             themeText, embedding, doc.id, nodeIdResult.value()});
+        }
+        if (warmPathRebases > 0) {
+            spdlog::info("Resolved {} cloned warm-cache documents by stable content hash",
+                         warmPathRebases);
         }
 
         if (docs.size() < 2) {
@@ -6314,8 +6186,16 @@ struct BenchFixture {
             bool useIsolatedBenchmarkConfig = true;
             const char* topologyModeEnv = std::getenv("YAMS_BENCH_TOPOLOGY_MODE");
             const char* topologyEngineEnv = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE");
-            const char* candidatePipelineEnv = std::getenv("YAMS_BENCH_CANDIDATE_PIPELINE");
-            const bool writeTopologyEngineConfig = topologyEngineEnv && *topologyEngineEnv;
+            const char* topologyRepresentativesEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES");
+            const char* topologyBoundarySpillEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL");
+            const char* topologyRepresentativeLimitEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
+            const bool writeTopologyEngineConfig =
+                (topologyEngineEnv && *topologyEngineEnv) ||
+                (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
+                (topologyBoundarySpillEnv && *topologyBoundarySpillEnv);
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
@@ -6323,6 +6203,7 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
+                (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
@@ -6568,10 +6449,6 @@ struct BenchFixture {
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
                     }
-                    if (candidatePipelineEnv && *candidatePipelineEnv) {
-                        configOut << "\n[search]\n";
-                        configOut << "candidate_pipeline = \"" << candidatePipelineEnv << "\"\n";
-                    }
                     if ((topologyModeEnv && *topologyModeEnv) || writeTopologyRouteConfig) {
                         configOut << "\n[search.topology]\n";
                         if (topologyModeEnv && *topologyModeEnv) {
@@ -6592,15 +6469,16 @@ struct BenchFixture {
                                   << parseSizeEnvOrFallback("YAMS_BENCH_TOPOLOGY_MAX_DOCS",
                                                             "YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
                                   << "\n";
-                        configOut << "max_docs_per_cluster = "
-                                  << parseSizeEnvOrFallback(
-                                         "YAMS_BENCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
-                                         "YAMS_SEARCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER", 0)
-                                  << "\n";
                         configOut << "max_seed_documents = "
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
                                                            32)
                                   << "\n";
+                        if (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) {
+                            configOut << "representative_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT", 0)
+                                      << "\n";
+                        }
                         configOut << "adaptive_probe_score_gap = "
                                   << parseFloatEnvOrDefault(
                                          "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP", 0.0F)
@@ -6625,14 +6503,6 @@ struct BenchFixture {
                                              "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE", 0.0F)
                                       << "\n";
                         }
-                        if (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) {
-                            configOut << "medoid_only_expansion = "
-                                      << (envTruthy(std::getenv(
-                                              "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION"))
-                                              ? "true"
-                                              : "false")
-                                      << "\n";
-                        }
                         if (const char* exp = std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION");
                             exp && *exp) {
                             configOut << "expansion_source = \"" << exp << "\"\n";
@@ -6648,26 +6518,36 @@ struct BenchFixture {
                                              "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE", 0.25F)
                                       << "\n";
                         }
-                        if (std::getenv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS") !=
-                            nullptr) {
-                            configOut << "sidecar_fusion_rescue_slots = "
-                                      << parseSizeEnvOrDefault(
-                                             "YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_SLOTS", 0)
-                                      << "\n";
-                        }
-                        if (std::getenv("YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE") !=
-                            nullptr) {
-                            configOut
-                                << "sidecar_fusion_rescue_min_score = "
-                                << parseFloatEnvOrDefault(
-                                       "YAMS_SEARCH_TOPOLOGY_SIDECAR_FUSION_RESCUE_MIN_SCORE", 0.0F)
-                                << "\n";
-                        }
                     }
                     if (writeTopologyEngineConfig) {
                         configOut << "\n[topology]\n";
                         if (topologyEngineEnv && *topologyEngineEnv) {
                             configOut << "engine = \"" << topologyEngineEnv << "\"\n";
+                        }
+                        if (topologyRepresentativesEnv && *topologyRepresentativesEnv) {
+                            configOut << "routing_representatives = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES", 1)
+                                      << "\n";
+                        }
+                        if (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) {
+                            configOut << "boundary_spill = "
+                                      << (envTruthy(topologyBoundarySpillEnv) ? "true" : "false")
+                                      << "\n";
+                            configOut << "boundary_spill_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_LIMIT", 1)
+                                      << "\n";
+                            configOut
+                                << "boundary_spill_distance_ratio = "
+                                << parseFloatEnvOrDefault(
+                                       "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_DISTANCE_RATIO", 1.05F)
+                                << "\n";
+                            configOut
+                                << "boundary_spill_residual_penalty = "
+                                << parseFloatEnvOrDefault(
+                                       "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_RESIDUAL_PENALTY", 1.0F)
+                                << "\n";
                         }
                     }
                     configOut.close();
@@ -8235,7 +8115,13 @@ struct BenchFixture {
         }
 
         seedSyntheticCommunityEdges();
-        const bool seededBenchmarkTopology = seedBenchmarkSemanticNeighbors();
+        const bool reuseSeededTopologyInputs =
+            warmDataDir && envTruthy(std::getenv("YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"));
+        const bool seededBenchmarkTopology =
+            reuseSeededTopologyInputs || seedBenchmarkSemanticNeighbors();
+        if (reuseSeededTopologyInputs) {
+            spdlog::info("Reusing immutable semantic-neighbor topology inputs from warm cache");
+        }
 
         if (benchmarkSemanticNeighborSeedingEnabled()) {
             if (!seededBenchmarkTopology) {
@@ -8763,8 +8649,9 @@ static int runOptimizationLoop() {
 
     if (pruneKnownBadCandidates && selectedCandidates.empty()) {
         static const std::unordered_set<std::string> kKnownBadCandidates = {
-            "mixed_precision_rrf_neighbor_t92_p80_k14", "mixed_precision_rrf_neighbor_t92_p78_k16",
-            "mixed_precision_rrf_neighbor_t90_p84_k18", "mixed_ablation_disable_tiered_execution",
+            "mixed_precision_rrf_neighbor_t92_p80_k14",
+            "mixed_precision_rrf_neighbor_t92_p78_k16",
+            "mixed_precision_rrf_neighbor_t90_p84_k18",
             "mixed_ablation_disable_graph_rerank",
         };
 

@@ -118,35 +118,6 @@
       "params": { "expansion_arm": "cap2", "route_scoring": "seed_coverage" }
     },
     {
-      "name": "hdbscan",
-      "factors": {
-        "topology_mode": "hybrid_assist",
-        "topology_engine": "hdbscan",
-        "expansion_arm": "cap2"
-      },
-      "env": {
-        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
-        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
-        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
-      },
-      "params": { "expansion_arm": "cap2" }
-    },
-    {
-      "name": "hdbscan_sgc1",
-      "factors": {
-        "topology_mode": "hybrid_assist",
-        "topology_engine": "hdbscan",
-        "feature_smoothing_hops": 1,
-        "expansion_arm": "cap2"
-      },
-      "env": {
-        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
-        "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
-        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "1"
-      },
-      "params": { "expansion_arm": "cap2", "feature_smoothing_hops": 1 }
-    },
-    {
       "name": "louvain",
       "factors": {
         "topology_mode": "hybrid_assist",

@@ -7,7 +7,7 @@ skips components when weight is 0) and require YAMS_ENABLE_ENV_OVERRIDES=1.
 Factor names (on/off or 0/1 or enabled/disabled):
   kg, vectors, gliner, topology, rerank, graph_rerank,
   text, path, vector_weight, kg_weight, graph_text, graph_vector,
-  entity_vector, metadata, tag, parallel_tiered,
+  entity_vector, metadata, tag,
   search_type, auto_repair, seed_semantic_neighbors
 
 Also accepts expansion_arm (delegates to EXPANSION_PRESETS in retrieval_quality).
@@ -72,7 +72,7 @@ def apply_ablation(
     # Params overlay factors for explicit plan params.
     axes: dict[str, Any] = {**factors, **{k: v for k, v in params.items() if k in factors or k in WEIGHT_OFF_ENV or k in {
         "kg", "vectors", "gliner", "topology", "rerank", "graph_rerank", "search_type",
-        "auto_repair", "seed_semantic_neighbors", "parallel_tiered", "topology_mode",
+        "auto_repair", "seed_semantic_neighbors", "topology_mode",
         "text", "vector", "vector_weight", "kg_weight", "graph_text", "graph_vector",
         "simeon_text", "entity_vector", "concept_boost", "graph_rerank_weight", "rerank_weight",
     }}}
@@ -129,15 +129,6 @@ def apply_ablation(
         applied["axes"]["graph_rerank"] = "off" if off else "on"
         env["YAMS_SEARCH_ENABLE_GRAPH_RERANK"] = "0" if off else "1"
         applied["flags"]["YAMS_SEARCH_ENABLE_GRAPH_RERANK"] = env["YAMS_SEARCH_ENABLE_GRAPH_RERANK"]
-        needs_search_env = True
-
-    if "parallel_tiered" in axes:
-        off = _is_off(axes["parallel_tiered"])
-        applied["axes"]["parallel_tiered"] = "off" if off else "on"
-        env["YAMS_SEARCH_ENABLE_TIERED_EXECUTION"] = "0" if off else "1"
-        applied["flags"]["YAMS_SEARCH_ENABLE_TIERED_EXECUTION"] = env[
-            "YAMS_SEARCH_ENABLE_TIERED_EXECUTION"
-        ]
         needs_search_env = True
 
     if "seed_semantic_neighbors" in axes:

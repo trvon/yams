@@ -62,7 +62,6 @@ def run_external_script(ctx: WorkerContext) -> WorkerResult:
     # Map common factor names onto harness env expected by legacy scripts.
     factor_env_map = {
         "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
-        "search_engine_variant": "YAMS_SEARCH_ENGINE_VARIANT",
         "expansion_arms": "YAMS_TOPOLOGY_EXPANSION_ARMS",
         "expansion_arm": "YAMS_TOPOLOGY_EXPANSION_ARMS",
     }

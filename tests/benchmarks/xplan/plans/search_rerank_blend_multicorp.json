@@ -1,6 +1,6 @@
 {
   "name": "search_rerank_blend_multicorp",
-  "description": "Product hybrid (topology off): cross-rerank blend weight sweep — off / 0.15 / 0.30(default) / 0.50 — on scifact + nfcorpus (repeats=3). Complements scifact-only simeon_rerank_beir (blend>replace).",
+  "description": "Product topology+ANN hybrid: cross-rerank blend weight sweep — off / 0.15 / 0.30(default) / 0.50 — on scifact + nfcorpus (repeats=3).",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 14400,
@@ -13,7 +13,8 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
       "YAMS_BENCH_SKIP_BUILD": "1",
       "YAMS_SEARCH_RERANK_REPLACE_SCORES": "0"
     },

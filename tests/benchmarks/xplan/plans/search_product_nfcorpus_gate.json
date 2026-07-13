@@ -1,6 +1,6 @@
 {
   "name": "search_product_nfcorpus_gate",
-  "description": "Multi-corpus gate for product hybrid (topology off) on BEIR nfcorpus. Use after a scifact-only weight win to check transfer before flipping defaults.",
+  "description": "Multi-corpus gate for the product topology+ANN hybrid on BEIR nfcorpus. Use after a scifact-only weight win to check transfer before flipping defaults.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -13,7 +13,8 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
       "YAMS_BENCH_SKIP_BUILD": "1"
     },
     "params": {

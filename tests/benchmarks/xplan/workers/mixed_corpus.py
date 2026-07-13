@@ -600,29 +600,28 @@ def analyze_mixed_corpus_debug(
             ).split("\t")
             if value
         ]
-        if routed_hashes:
-            routed_hash_set = set(routed_hashes)
-            known_relevant_hashes: list[str] = []
-            for document_id in relevant:
-                document_hash = document_hashes.get(document_id)
-                if document_hash:
-                    known_relevant_hashes.append(document_hash)
-                else:
-                    relevant_fragment_unknown += 1
-            if known_relevant_hashes:
-                covered = sum(
-                    document_hash in routed_hash_set
-                    for document_hash in known_relevant_hashes
-                )
-                relevant_fragment_covered += covered
-                relevant_fragment_total += len(known_relevant_hashes)
-                relevant_fragment_query_hits += int(covered > 0)
-                relevant_fragment_queries += 1
-                source_coverage = relevant_fragment_by_source[source]
-                source_coverage[0] += covered
-                source_coverage[1] += len(known_relevant_hashes)
-                source_coverage[2] += int(covered > 0)
-                source_coverage[3] += 1
+        routed_hash_set = set(routed_hashes)
+        known_relevant_hashes: list[str] = []
+        for document_id in relevant:
+            document_hash = document_hashes.get(document_id)
+            if document_hash:
+                known_relevant_hashes.append(document_hash)
+            else:
+                relevant_fragment_unknown += 1
+        if known_relevant_hashes:
+            covered = sum(
+                document_hash in routed_hash_set
+                for document_hash in known_relevant_hashes
+            )
+            relevant_fragment_covered += covered
+            relevant_fragment_total += len(known_relevant_hashes)
+            relevant_fragment_query_hits += int(covered > 0)
+            relevant_fragment_queries += 1
+            source_coverage = relevant_fragment_by_source[source]
+            source_coverage[0] += covered
+            source_coverage[1] += len(known_relevant_hashes)
+            source_coverage[2] += int(covered > 0)
+            source_coverage[3] += 1
         for document_hash in routed_hashes:
             sources = document_hash_sources.get(document_hash)
             if not sources:

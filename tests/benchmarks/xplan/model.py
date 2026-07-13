@@ -193,6 +193,13 @@ class ExperimentPlan:
         steps = [Step.from_dict(s) for s in (raw.get("steps") or [])]
         if not steps:
             raise ValueError(f"plan has no steps: {path}")
+        source_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        repeats = raw.get("repeats")
+        if repeats is None:
+            repeats = source_raw.get("repeats")
+        baseline = raw.get("baseline")
+        if baseline is None:
+            baseline = source_raw.get("baseline")
 
         return cls(
             name=name,
@@ -211,8 +218,8 @@ class ExperimentPlan:
             summarize=SummarizeSpec.from_dict(raw.get("summarize")),
             source_path=path,
             raw=raw,
-            repeats=max(1, int(raw.get("repeats") or 1)),
-            baseline=str(raw["baseline"]) if raw.get("baseline") else None,
+            repeats=max(1, int(repeats or 1)),
+            baseline=str(baseline) if baseline else None,
         )
 
     def resolved_dict(self, *, stamp: str, repo_root: Path, git_sha: str | None) -> dict[str, Any]:
@@ -228,6 +235,8 @@ class ExperimentPlan:
             "timeout_sec": self.timeout_sec,
             "continue_on_arm_failure": self.continue_on_arm_failure,
             "mode": self.mode,
+            "repeats": self.repeats,
+            "baseline": self.baseline,
             "fixed": {"env": self.fixed_env, "params": self.fixed_params},
             "factors": self.factors,
             "arms": [

@@ -67,7 +67,6 @@
         "topology_narrow_rate",
         "topology_snapshot_cache_hit_rate",
         "topology_allowed_candidates_avg",
-        "topology_member_rerank_candidates_avg",
         "vector_candidate_work_budget_avg"
       ]
     }

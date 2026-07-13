@@ -12,6 +12,7 @@ import math
 import os
 import re
 import resource
+import shutil
 import statistics
 import sys
 import time
@@ -76,6 +77,26 @@ EXPANSION_PRESETS: dict[str, dict[str, str]] = {
 _NON_VECTOR_SOURCES = frozenset(
     {"fts5", "keyphrase", "segment_keyphrase", "kg", "gliner", "header", "theme"}
 )
+
+
+def _benchmark_command(binary: Path, benchmark_filter: str) -> list[str]:
+    """Run one heavy workload iteration; xplan owns isolated statistical repeats."""
+    return [
+        str(binary),
+        f"--benchmark_filter={benchmark_filter}",
+        "--benchmark_min_time=1x",
+    ]
+
+
+def _reset_measured_outputs(paths: list[Path]) -> None:
+    """Make retries idempotent when a benchmark writes append-only diagnostics."""
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _mark_shared_topology_seed_reuse(env: dict[str, str]) -> None:
+    """Keep cloned topology inputs immutable while allowing per-arm reconstruction."""
+    env["YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"] = "1"
 
 
 def _truthy(val: Any) -> bool:
@@ -166,59 +187,59 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "routed_clusters": 0,
         "route_available": 0,
         "rejected": 0,
-        "added_post_fusion": 0,
-        "added_fusion_dropped": 0,
-        "sidecar_candidates": 0,
-        "augmentation_candidates": 0,
         "allowed_candidates": 0,
-        "member_rerank_candidates": 0,
-        "member_rerank_selected": 0,
         "vector_candidate_budget": 0,
         "vector_result_budget": 0,
         "vector_distance_evaluation_budget": 0,
-        "topology_member_rows_visited_actual": 0,
-        "topology_member_distance_evaluations_actual": 0,
         "vector_rows_visited_actual": 0,
         "vector_exact_distance_evaluations_actual": 0,
         "vector_ann_candidate_budget_actual": 0,
-        "topology_vector_scores_reused_count": 0,
-        "topology_vector_scores_reused_queries": 0,
         "topology_vector_filter_applied_queries": 0,
         "topology_vector_filter_fallback_queries": 0,
+        "topology_vector_filter_allowed_candidates": 0,
         "topology_vector_filter_matched": 0,
         "topology_vector_filter_removed": 0,
-        "topology_vector_partition_ann_applied_queries": 0,
-        "topology_vector_partition_ann_fallback_queries": 0,
+        "topology_vector_allowed_set_ann_applied_queries": 0,
+        "topology_vector_allowed_set_ann_fallback_queries": 0,
         "topology_shadow_evaluated_queries": 0,
         "topology_shadow_narrow_proposed_queries": 0,
         "topology_shadow_retained_candidates": 0,
         "topology_shadow_removed_candidates": 0,
+        "route_representative_distance_evaluations": 0,
+        "route_representative_count_max": 0,
     }
     added_vals: list[int] = []
     routed_docs: list[int] = []
     routed_clusters: list[int] = []
     route_available_vals: list[int] = []
     route_boundary_score_margin_vals: list[float] = []
-    sidecar_vals: list[int] = []
-    augmentation_vals: list[int] = []
+    route_representative_distance_evaluation_vals: list[int] = []
+    route_representative_count_max_vals: list[int] = []
+    structure_evidence_vals: dict[str, list[float]] = {
+        "candidate_count": [],
+        "scale_agreement": [],
+        "overlap_support": [],
+        "persistence_support": [],
+        "cohesion_support": [],
+        "bridge_support": [],
+        "density_support": [],
+    }
     allowed_candidate_vals: list[int] = []
-    member_rerank_candidate_vals: list[int] = []
     vector_candidate_budget_vals: list[int] = []
     vector_result_budget_vals: list[int] = []
     vector_distance_evaluation_budget_vals: list[int] = []
-    topology_member_rows_visited_actual_vals: list[int] = []
-    topology_member_distance_evaluations_actual_vals: list[int] = []
     vector_rows_visited_actual_vals: list[int] = []
     vector_exact_distance_evaluations_actual_vals: list[int] = []
     vector_ann_candidate_budget_actual_vals: list[int] = []
     topology_vector_filter_matched_vals: list[int] = []
     topology_vector_filter_removed_vals: list[int] = []
+    topology_vector_filter_allowed_candidate_vals: list[int] = []
+    topology_vector_filter_latency_vals: list[float] = []
+    topology_vector_abstain_latency_vals: list[float] = []
     skip_reasons: dict[str, int] = {}
     scoring_modes: dict[str, int] = {}
     routing_modes: dict[str, int] = {}
-    medoid_flags: dict[str, int] = {}
-    engine_variants: dict[str, int] = {}
-    pipeline_variants: dict[str, int] = {}
+    construction_fingerprints: dict[str, int] = {}
     cert_seen = 0
     cert_ok = 0
     cert_errors: list[Any] = []
@@ -263,30 +284,23 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "routed_clusters": "topology_weak_query_routed_clusters",
         "route_available": "topology_route_available_count",
         "rejected": "topology_weak_query_routes_rejected",
-        "added_post_fusion": "topology_added_candidate_post_fusion_count",
-        "added_fusion_dropped": "topology_added_candidate_fusion_dropped_count",
-        "sidecar_candidates": "topology_sidecar_vector_candidates",
-        "augmentation_candidates": "topology_vector_augmentation_candidates",
         "allowed_candidates": "topology_weak_query_allowed_candidates",
-        "member_rerank_candidates": "topology_member_rerank_candidates",
-        "member_rerank_selected": "topology_member_rerank_selected",
         "vector_candidate_budget": "vector_search_candidate_budget",
         "vector_result_budget": "vector_search_result_budget",
         "vector_distance_evaluation_budget": "vector_search_distance_evaluation_budget",
-        "topology_member_rows_visited_actual": "topology_member_rerank_rows_visited_actual",
-        "topology_member_distance_evaluations_actual": (
-            "topology_member_rerank_distance_evaluations_actual"
-        ),
         "vector_rows_visited_actual": "vector_search_rows_visited_actual",
         "vector_exact_distance_evaluations_actual": (
             "vector_search_exact_distance_evaluations_actual"
         ),
         "vector_ann_candidate_budget_actual": "vector_search_ann_candidate_budget_actual",
-        "topology_vector_scores_reused_count": "topology_vector_scores_reused_count",
         "topology_vector_filter_matched": "topology_vector_filter_matched",
         "topology_vector_filter_removed": "topology_vector_filter_removed",
         "topology_shadow_retained_candidates": "topology_shadow_retained_candidates",
         "topology_shadow_removed_candidates": "topology_shadow_removed_candidates",
+        "route_representative_distance_evaluations": (
+            "topology_route_representative_distance_evaluations"
+        ),
+        "route_representative_count_max": "topology_route_representative_count_max",
     }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -379,10 +393,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             vector_relevant_queries += int(vector_relevant)
             vector_unique_rescue_queries += int(vector_relevant and not text_relevant)
 
+        latency_value: float | None = None
         try:
             lat = stats.get("latency_ms")
             if lat is not None and str(lat) != "":
-                latency_vals.append(float(lat))
+                latency_value = float(lat)
+                latency_vals.append(latency_value)
         except (TypeError, ValueError):
             pass
 
@@ -441,16 +457,28 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["confidence_abstained"] += 1
         if _truthy(stats.get("topology_snapshot_cache_hit")):
             counters["snapshot_cache_hit"] += 1
-        if _truthy(stats.get("topology_vector_scores_reused")):
-            counters["topology_vector_scores_reused_queries"] += 1
-        if _truthy(stats.get("topology_vector_filter_applied")):
+        topology_vector_filter_applied = _truthy(
+            stats.get("topology_vector_filter_applied")
+        )
+        if topology_vector_filter_applied:
             counters["topology_vector_filter_applied_queries"] += 1
+            allowed = _as_int(stats.get("topology_weak_query_allowed_candidates"))
+            counters["topology_vector_filter_allowed_candidates"] += allowed
+            topology_vector_filter_allowed_candidate_vals.append(allowed)
+            if latency_value is not None:
+                topology_vector_filter_latency_vals.append(latency_value)
+        elif (
+            stats.get("topology_vector_policy") == "narrow"
+            and _truthy(stats.get("topology_route_confidence_abstained"))
+            and latency_value is not None
+        ):
+            topology_vector_abstain_latency_vals.append(latency_value)
         if _truthy(stats.get("topology_vector_filter_fallback")):
             counters["topology_vector_filter_fallback_queries"] += 1
-        if _truthy(stats.get("topology_vector_partition_ann_applied")):
-            counters["topology_vector_partition_ann_applied_queries"] += 1
-        if _truthy(stats.get("topology_vector_partition_ann_fallback")):
-            counters["topology_vector_partition_ann_fallback_queries"] += 1
+        if _truthy(stats.get("topology_vector_allowed_set_ann_applied")):
+            counters["topology_vector_allowed_set_ann_applied_queries"] += 1
+        if _truthy(stats.get("topology_vector_allowed_set_ann_fallback")):
+            counters["topology_vector_allowed_set_ann_fallback_queries"] += 1
         if _truthy(stats.get("topology_shadow_evaluated")):
             counters["topology_shadow_evaluated_queries"] += 1
             if stats.get("topology_shadow_proposed_action") == "narrow":
@@ -466,24 +494,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 routed_clusters.append(v)
             elif dst == "route_available":
                 route_available_vals.append(v)
-            elif dst == "sidecar_candidates":
-                sidecar_vals.append(v)
-            elif dst == "augmentation_candidates":
-                augmentation_vals.append(v)
             elif dst == "allowed_candidates":
                 allowed_candidate_vals.append(v)
-            elif dst == "member_rerank_candidates":
-                member_rerank_candidate_vals.append(v)
             elif dst == "vector_candidate_budget":
                 vector_candidate_budget_vals.append(v)
             elif dst == "vector_result_budget":
                 vector_result_budget_vals.append(v)
             elif dst == "vector_distance_evaluation_budget":
                 vector_distance_evaluation_budget_vals.append(v)
-            elif dst == "topology_member_rows_visited_actual":
-                topology_member_rows_visited_actual_vals.append(v)
-            elif dst == "topology_member_distance_evaluations_actual":
-                topology_member_distance_evaluations_actual_vals.append(v)
             elif dst == "vector_rows_visited_actual":
                 vector_rows_visited_actual_vals.append(v)
             elif dst == "vector_exact_distance_evaluations_actual":
@@ -494,6 +512,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 topology_vector_filter_matched_vals.append(v)
             elif dst == "topology_vector_filter_removed":
                 topology_vector_filter_removed_vals.append(v)
+            elif dst == "route_representative_distance_evaluations":
+                route_representative_distance_evaluation_vals.append(v)
+            elif dst == "route_representative_count_max":
+                route_representative_count_max_vals.append(v)
 
         try:
             margin = stats.get("topology_route_boundary_score_margin")
@@ -501,6 +523,17 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 route_boundary_score_margin_vals.append(float(margin))
         except (TypeError, ValueError):
             pass
+
+        for evidence_name, values in structure_evidence_vals.items():
+            debug_name = f"topology_structure_{evidence_name}"
+            if evidence_name != "candidate_count":
+                debug_name += "_mean"
+            try:
+                value = stats.get(debug_name)
+                if value is not None and str(value) != "":
+                    values.append(float(value))
+            except (TypeError, ValueError):
+                pass
 
         reason = str(stats.get("topology_weak_query_skip_reason", "") or "")
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -533,16 +566,11 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         rmode = str(stats.get("topology_routing_mode", "") or "")
         if rmode:
             routing_modes[rmode] = routing_modes.get(rmode, 0) + 1
-        med = str(stats.get("topology_medoid_only_expansion", "") or "")
-        if med:
-            medoid_flags[med] = medoid_flags.get(med, 0) + 1
-        for field, bucket in (
-            ("search_engine_variant", engine_variants),
-            ("search_pipeline_variant", pipeline_variants),
-        ):
-            val = str(stats.get(field) or obj.get(field) or "")
-            if val:
-                bucket[val] = bucket.get(val, 0) + 1
+        fingerprint = str(stats.get("topology_construction_fingerprint", "") or "")
+        if fingerprint:
+            construction_fingerprints[fingerprint] = (
+                construction_fingerprints.get(fingerprint, 0) + 1
+            )
 
     metrics: dict[str, Any] = {
         "hybrid_queries": float(hybrid),
@@ -559,19 +587,7 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_routed_docs_sum": float(counters["routed_docs"]),
         "topology_routed_clusters_sum": float(counters["routed_clusters"]),
         "topology_rejected_sum": float(counters["rejected"]),
-        "topology_added_post_fusion_sum": float(counters["added_post_fusion"]),
-        "topology_added_fusion_dropped_sum": float(counters["added_fusion_dropped"]),
-        "topology_sidecar_sum": float(counters["sidecar_candidates"]),
-        "topology_vector_augmentation_sum": float(
-            counters["augmentation_candidates"]
-        ),
         "topology_allowed_candidates_sum": float(counters["allowed_candidates"]),
-        "topology_member_rerank_candidates_sum": float(
-            counters["member_rerank_candidates"]
-        ),
-        "topology_member_rerank_selected_sum": float(
-            counters["member_rerank_selected"]
-        ),
         "topology_vector_filter_matched_sum": float(
             counters["topology_vector_filter_matched"]
         ),
@@ -589,12 +605,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "vector_distance_evaluation_budget_sum": float(
             counters["vector_distance_evaluation_budget"]
         ),
-        "topology_member_rows_visited_actual_sum": float(
-            counters["topology_member_rows_visited_actual"]
-        ),
-        "topology_member_distance_evaluations_actual_sum": float(
-            counters["topology_member_distance_evaluations_actual"]
-        ),
         "vector_rows_visited_actual_sum": float(counters["vector_rows_visited_actual"]),
         "vector_exact_distance_evaluations_actual_sum": float(
             counters["vector_exact_distance_evaluations_actual"]
@@ -604,6 +614,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "topology_cert_seen": float(cert_seen),
         "topology_cert_ok": float(cert_ok),
+        "topology_construction_fingerprint_count": float(
+            len(construction_fingerprints)
+        ),
+        "topology_route_representative_distance_evaluations_sum": float(
+            counters["route_representative_distance_evaluations"]
+        ),
     }
     for mkey, mval in (hybrid_summary_metrics or {}).items():
         try:
@@ -651,19 +667,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_routed_clusters_avg"] = float(
             statistics.mean(routed_clusters)
         )
-    if sidecar_vals:
-        metrics["topology_sidecar_avg"] = float(statistics.mean(sidecar_vals))
-    if augmentation_vals:
-        metrics["topology_vector_augmentation_avg"] = float(
-            statistics.mean(augmentation_vals)
-        )
     if allowed_candidate_vals:
         metrics["topology_allowed_candidates_avg"] = float(
             statistics.mean(allowed_candidate_vals)
-        )
-    if member_rerank_candidate_vals:
-        metrics["topology_member_rerank_candidates_avg"] = float(
-            statistics.mean(member_rerank_candidate_vals)
         )
     if vector_candidate_budget_vals:
         metrics["vector_candidate_budget_avg"] = float(
@@ -676,14 +682,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     if vector_distance_evaluation_budget_vals:
         metrics["vector_distance_evaluation_budget_avg"] = float(
             statistics.mean(vector_distance_evaluation_budget_vals)
-        )
-    if topology_member_rows_visited_actual_vals:
-        metrics["topology_member_rows_visited_actual_avg"] = float(
-            statistics.mean(topology_member_rows_visited_actual_vals)
-        )
-    if topology_member_distance_evaluations_actual_vals:
-        metrics["topology_member_distance_evaluations_actual_avg"] = float(
-            statistics.mean(topology_member_distance_evaluations_actual_vals)
         )
     if vector_rows_visited_actual_vals:
         metrics["vector_rows_visited_actual_avg"] = float(
@@ -705,6 +703,21 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_vector_filter_removed_avg"] = float(
             statistics.mean(topology_vector_filter_removed_vals)
         )
+    metrics["topology_vector_filter_allowed_candidates_avg"] = (
+        float(statistics.mean(topology_vector_filter_allowed_candidate_vals))
+        if topology_vector_filter_allowed_candidate_vals
+        else 0.0
+    )
+    metrics["topology_vector_filter_latency_ms_avg"] = (
+        float(statistics.mean(topology_vector_filter_latency_vals))
+        if topology_vector_filter_latency_vals
+        else 0.0
+    )
+    metrics["topology_vector_abstain_latency_ms_avg"] = (
+        float(statistics.mean(topology_vector_abstain_latency_vals))
+        if topology_vector_abstain_latency_vals
+        else 0.0
+    )
     if route_available_vals:
         metrics["topology_route_available_avg"] = float(
             statistics.mean(route_available_vals)
@@ -713,6 +726,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_route_boundary_score_margin_avg"] = float(
             statistics.mean(route_boundary_score_margin_vals)
         )
+    if route_representative_distance_evaluation_vals:
+        metrics["topology_route_representative_distance_evaluations_avg"] = float(
+            statistics.mean(route_representative_distance_evaluation_vals)
+        )
+    if route_representative_count_max_vals:
+        metrics["topology_route_representative_count_max"] = float(
+            max(route_representative_count_max_vals)
+        )
+    for evidence_name, values in structure_evidence_vals.items():
+        metrics[f"topology_structure_{evidence_name}_avg"] = (
+            float(statistics.mean(values)) if values else 0.0
+        )
     if hybrid > 0:
         metrics["corpus_warming_rate"] = float(warming_queries) / float(hybrid)
         metrics["search_engine_ready_rate"] = float(search_ready_queries) / float(hybrid)
@@ -720,18 +745,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["steady_state_query_rate"] = float(steady_state_queries) / float(hybrid)
         metrics["short_query_budget_rate"] = float(short_query_budget_queries) / float(hybrid)
         metrics["vector_candidate_work_budget_avg"] = float(
-            counters["member_rerank_candidates"] + counters["vector_candidate_budget"]
+            counters["vector_candidate_budget"]
+            + counters["topology_vector_filter_allowed_candidates"]
         ) / float(hybrid)
         metrics["vector_total_rows_visited_actual_avg"] = float(
-            counters["topology_member_rows_visited_actual"]
-            + counters["vector_rows_visited_actual"]
+            counters["vector_rows_visited_actual"]
         ) / float(hybrid)
         metrics["vector_total_exact_distance_evaluations_actual_avg"] = float(
-            counters["topology_member_distance_evaluations_actual"]
-            + counters["vector_exact_distance_evaluations_actual"]
-        ) / float(hybrid)
-        metrics["topology_vector_scores_reuse_rate"] = float(
-            counters["topology_vector_scores_reused_queries"]
+            counters["vector_exact_distance_evaluations_actual"]
         ) / float(hybrid)
         metrics["topology_vector_filter_rate"] = float(
             counters["topology_vector_filter_applied_queries"]
@@ -739,11 +760,11 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_vector_filter_fallback_rate"] = float(
             counters["topology_vector_filter_fallback_queries"]
         ) / float(hybrid)
-        metrics["topology_vector_partition_ann_rate"] = float(
-            counters["topology_vector_partition_ann_applied_queries"]
+        metrics["topology_vector_allowed_set_ann_rate"] = float(
+            counters["topology_vector_allowed_set_ann_applied_queries"]
         ) / float(hybrid)
-        metrics["topology_vector_partition_ann_fallback_rate"] = float(
-            counters["topology_vector_partition_ann_fallback_queries"]
+        metrics["topology_vector_allowed_set_ann_fallback_rate"] = float(
+            counters["topology_vector_allowed_set_ann_fallback_queries"]
         ) / float(hybrid)
         metrics["topology_shadow_evaluation_rate"] = float(
             counters["topology_shadow_evaluated_queries"]
@@ -831,9 +852,7 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         },
         "scoring_modes": scoring_modes,
         "routing_modes": routing_modes,
-        "medoid_flags": medoid_flags,
-        "engine_variants": engine_variants,
-        "pipeline_variants": pipeline_variants,
+        "construction_fingerprints": construction_fingerprints,
         "certificate": {
             "seen": cert_seen,
             "ok": cert_ok,
@@ -880,29 +899,37 @@ def require_steady_state(path: Path, *, require_vector: bool) -> str | None:
     )
 
 
-def require_candidate_pipeline(path: Path, *, expected: str) -> str | None:
-    """Return an identity error unless every hybrid query used the requested pipeline."""
-    if not path.is_file():
-        return f"missing debug log for candidate-pipeline validation: {path}"
-    observed: dict[str, int] = {}
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict) or event.get("search_type") != "hybrid":
-            continue
-        stats = event.get("search_stats") or {}
-        variant = str(stats.get("candidate_pipeline_variant") or "").strip().lower()
-        if variant:
-            observed[variant] = observed.get(variant, 0) + 1
-    if not observed:
-        return "candidate-pipeline validation found no variant-bearing hybrid traces"
-    normalized = expected.strip().lower()
-    unexpected = {name: count for name, count in observed.items() if name != normalized}
-    if not unexpected:
-        return None
-    return f"expected candidate pipeline {normalized!r}, observed {observed}"
+def require_shared_topology_construction_identity(
+    identity_path: Path, fingerprints: dict[str, int]
+) -> str | None:
+    """Pin every repeat and arm to the first observed topology construction."""
+    if len(fingerprints) != 1:
+        return (
+            "expected exactly one topology construction fingerprint, "
+            f"observed {fingerprints}"
+        )
+    observed = next(iter(fingerprints))
+    if identity_path.is_file():
+        expected = identity_path.read_text(encoding="utf-8").strip()
+        if expected == observed:
+            return None
+        return (
+            "shared topology construction identity mismatch: "
+            f"expected {expected!r}, observed {observed!r}"
+        )
+    identity_path.parent.mkdir(parents=True, exist_ok=True)
+    identity_path.write_text(observed + "\n", encoding="utf-8")
+    return None
+
+
+def clone_benchmark_state(source: Path, destination: Path) -> None:
+    """Clone an immutable prepared store into one isolated measured workload."""
+    if not source.is_dir():
+        raise ValueError(f"benchmark state seed is missing: {source}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, symlinks=True)
 
 
 def require_topology_certificate(
@@ -987,6 +1014,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     stderr_path = ctx.arm_dir / "time.log"
     debug_path = ctx.arm_dir / "debug.jsonl"
     topology_cluster_path = ctx.arm_dir / "topology_clusters.json"
+    _reset_measured_outputs([debug_path, topology_cluster_path])
 
     arm_factors = getattr(ctx.arm, "arm", None)
     arm_factors = getattr(arm_factors, "factors", None) or {}
@@ -1077,31 +1105,39 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "topology_vector_seeds_nonzero_rate": 0.0,
                 "topology_vector_seed_probe_avg": 0.0,
                 "topology_narrow_rate": 0.0,
-                "topology_vector_augmentation_avg": 0.0,
                 "topology_confidence_abstain_rate": 0.0,
                 "topology_route_available_avg": 0.0,
                 "topology_route_boundary_score_margin_avg": 0.0,
+                "topology_route_representative_distance_evaluations_avg": 0.0,
+                "topology_route_representative_count_max": 0.0,
+                "topology_construction_fingerprint_count": 0.0,
+                "topology_structure_candidate_count_avg": 0.0,
+                "topology_structure_scale_agreement_avg": 0.0,
+                "topology_structure_overlap_support_avg": 0.0,
+                "topology_structure_persistence_support_avg": 0.0,
+                "topology_structure_cohesion_support_avg": 0.0,
+                "topology_structure_bridge_support_avg": 0.0,
+                "topology_structure_density_support_avg": 0.0,
                 "topology_snapshot_cache_hit_rate": 0.0,
                 "topology_allowed_candidates_avg": 0.0,
-                "topology_member_rerank_candidates_avg": 0.0,
                 "vector_candidate_budget_avg": 0.0,
                 "vector_result_budget_avg": 0.0,
                 "vector_candidate_work_budget_avg": 0.0,
                 "vector_distance_evaluation_budget_avg": 0.0,
-                "topology_member_rows_visited_actual_avg": 0.0,
-                "topology_member_distance_evaluations_actual_avg": 0.0,
                 "vector_rows_visited_actual_avg": 0.0,
                 "vector_exact_distance_evaluations_actual_avg": 0.0,
                 "vector_ann_candidate_budget_actual_avg": 0.0,
                 "vector_total_rows_visited_actual_avg": 0.0,
                 "vector_total_exact_distance_evaluations_actual_avg": 0.0,
-                "topology_vector_scores_reuse_rate": 0.0,
                 "topology_vector_filter_rate": 0.0,
                 "topology_vector_filter_fallback_rate": 0.0,
                 "topology_vector_filter_matched_avg": 0.0,
                 "topology_vector_filter_removed_avg": 0.0,
-                "topology_vector_partition_ann_rate": 0.0,
-                "topology_vector_partition_ann_fallback_rate": 0.0,
+                "topology_vector_filter_allowed_candidates_avg": 0.0,
+                "topology_vector_filter_latency_ms_avg": 0.0,
+                "topology_vector_abstain_latency_ms_avg": 0.0,
+                "topology_vector_allowed_set_ann_rate": 0.0,
+                "topology_vector_allowed_set_ann_fallback_rate": 0.0,
                 "topology_shadow_evaluation_rate": 0.0,
                 "topology_shadow_narrow_proposal_rate": 0.0,
                 "topology_shadow_retained_candidates_avg": 0.0,
@@ -1223,23 +1259,34 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "topk": "YAMS_BENCH_TOPK",
         "dataset": "YAMS_BENCH_DATASET",
         "dataset_path": "YAMS_BENCH_DATASET_PATH",
-        "candidate_pipeline": "YAMS_BENCH_CANDIDATE_PIPELINE",
         "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
         "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
         "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
+        "topology_routing_representatives": (
+            "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES"
+        ),
+        "topology_route_representative_limit": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT"
+        ),
         "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
         "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
         "sparse_dense_alpha": "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA",
         "min_route_score": "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE",
-        "medoid_only_expansion": "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION",
         "min_clusters": "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS",
         "max_docs": "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
-        "max_docs_per_cluster": "YAMS_BENCH_TOPOLOGY_MAX_DOCS_PER_CLUSTER",
         "max_clusters": "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
         "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
         "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
         "narrow_min_boundary_margin": "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN",
         "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
+        "topology_boundary_spill": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL",
+        "topology_boundary_spill_limit": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_LIMIT",
+        "topology_boundary_spill_distance_ratio": (
+            "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_DISTANCE_RATIO"
+        ),
+        "topology_boundary_spill_residual_penalty": (
+            "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_RESIDUAL_PENALTY"
+        ),
         "min_edge_score": "YAMS_TOPOLOGY_MIN_EDGE_SCORE",
         "expansion_source": "YAMS_BENCH_TOPOLOGY_EXPANSION",
         "seed_semantic_neighbors": "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
@@ -1253,7 +1300,6 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "rerank_weight": "YAMS_SEARCH_RERANK_WEIGHT",
         "embed_backend": "YAMS_EMBED_BACKEND",
         "vector_search_engine": "YAMS_VECTOR_SEARCH_ENGINE",
-        "search_engine_variant": "YAMS_SEARCH_ENGINE_VARIANT",
         "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
         "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
     }
@@ -1265,6 +1311,12 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     )
     env.setdefault("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1")
     env.setdefault("YAMS_SEARCH_STAGE_TRACE", "1")
+
+    shared_warm_cache = str(ctx.params.get("shared_warm_cache") or "").strip()
+    shared_state_root: Path | None = None
+    if shared_warm_cache:
+        safe_cache_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", shared_warm_cache)
+        shared_state_root = ctx.arm.run_dir / "shared_state" / safe_cache_name
 
     # Default topology scoring knobs (match former common_env).
     env.setdefault("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING", "current")
@@ -1388,7 +1440,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         env.setdefault("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "1")
 
     bench_filter = str(ctx.params.get("benchmark_filter") or "BM_RetrievalQuality")
-    cmd = [str(binary), f"--benchmark_filter={bench_filter}"]
+    cmd = _benchmark_command(binary, bench_filter)
 
     timeout = ctx.step.timeout_sec or int(
         ctx.params.get("timeout_sec") or ctx.arm.plan.timeout_sec
@@ -1396,6 +1448,58 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # Let the bench's own ingest-stall logic (PROGRESS_TIMEOUT) fire before we kill the process.
     progress_timeout = int(env.get("YAMS_BENCH_PROGRESS_TIMEOUT", "0") or "0")
     timeout = max(timeout, progress_timeout + 120)
+    if shared_state_root is not None:
+        seed_dir = shared_state_root / "seed"
+        ready_marker = shared_state_root / "seed_ready"
+        if not ready_marker.is_file():
+            shared_state_root.mkdir(parents=True, exist_ok=True)
+            prime_env = dict(env)
+            prime_env["YAMS_BENCH_WARM_CACHE_DIR"] = str(seed_dir)
+            prime_env["YAMS_BENCH_DEBUG_FILE"] = str(shared_state_root / "prime_debug.jsonl")
+            prime_env["YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT"] = str(
+                shared_state_root / "prime_topology_clusters.json"
+            )
+            try:
+                prime = run_captured(
+                    cmd,
+                    cwd=ctx.repo_root,
+                    env=prime_env,
+                    timeout=timeout,
+                    stdout_path=shared_state_root / "prime_stdout.log",
+                    stderr_path=shared_state_root / "prime_time.log",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return WorkerResult(
+                    status="failed",
+                    exit_code=124,
+                    metrics={},
+                    message=f"retrieval_quality seed preparation timed out: {exc}",
+                )
+            if prime.returncode != 0:
+                return WorkerResult(
+                    status="failed",
+                    exit_code=prime.returncode or 1,
+                    metrics={},
+                    message=(
+                        "retrieval_quality seed preparation failed; see "
+                        f"{shared_state_root / 'prime_stdout.log'}"
+                    ),
+                )
+            ready_marker.write_text("ready\n", encoding="utf-8")
+        isolated_data_dir = ctx.arm_dir / "isolated_data"
+        try:
+            clone_benchmark_state(seed_dir, isolated_data_dir)
+        except (OSError, ValueError) as exc:
+            return WorkerResult(
+                status="failed",
+                exit_code=2,
+                metrics={},
+                message=f"failed to clone benchmark state seed: {exc}",
+            )
+        env.pop("YAMS_BENCH_DATA_DIR", None)
+        env["YAMS_BENCH_WARM_CACHE_DIR"] = str(isolated_data_dir)
+        if source == "vector":
+            _mark_shared_topology_seed_reuse(env)
     ru_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     wall_start = time.monotonic()
     try:
@@ -1500,32 +1604,60 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=steady_state_error,
             raw_path=str(debug_path),
         )
-    expected_candidate_pipeline = str(ctx.params.get("candidate_pipeline") or "").strip()
-    candidate_pipeline_error = (
-        require_candidate_pipeline(debug_path, expected=expected_candidate_pipeline)
-        if expected_candidate_pipeline
-        else None
+    require_cross_arm_identity = _truthy(
+        ctx.params.get("require_topology_construction_identity", False)
     )
-    if candidate_pipeline_error:
-        write_json(
-            ctx.arm_dir / "quality_parse.json",
-            {
-                "quality": quality,
-                "debug": dbg,
-                "candidate_pipeline_error": candidate_pipeline_error,
-            },
-        )
-        return WorkerResult(
-            status="failed",
-            exit_code=proc.returncode if proc.returncode != 0 else 1,
-            metrics=metrics,
-            attributes={
-                "binary": str(binary),
-                "candidate_pipeline_error": candidate_pipeline_error,
-            },
-            message=candidate_pipeline_error,
-            raw_path=str(debug_path),
-        )
+    require_arm_stability = _truthy(
+        ctx.params.get("require_topology_construction_stability", False)
+    )
+    if require_cross_arm_identity or require_arm_stability:
+        fingerprints = dbg.get("construction_fingerprints") or {}
+        identity_error = None
+        if require_arm_stability:
+            arm_identity_path = (
+                ctx.arm.run_dir
+                / "topology_construction_identity"
+                / f"{ctx.arm.arm.safe_name}.txt"
+            )
+            if ctx.arm_dir.name == "rep00" or ctx.arm_dir.name == ctx.arm.arm.safe_name:
+                arm_identity_path.unlink(missing_ok=True)
+            identity_error = require_shared_topology_construction_identity(
+                arm_identity_path,
+                fingerprints,
+            )
+        elif shared_warm_cache:
+            identity_error = require_shared_topology_construction_identity(
+                ctx.arm.run_dir
+                / "shared_state"
+                / safe_cache_name
+                / "topology_construction_fingerprint.txt",
+                fingerprints,
+            )
+        elif len(fingerprints) != 1:
+            identity_error = (
+                "expected exactly one topology construction fingerprint, "
+                f"observed {fingerprints}"
+            )
+        if identity_error:
+            write_json(
+                ctx.arm_dir / "quality_parse.json",
+                {
+                    "quality": quality,
+                    "debug": dbg,
+                    "topology_construction_identity_error": identity_error,
+                },
+            )
+            return WorkerResult(
+                status="failed",
+                exit_code=proc.returncode if proc.returncode != 0 else 1,
+                metrics=metrics,
+                attributes={
+                    "binary": str(binary),
+                    "topology_construction_identity_error": identity_error,
+                },
+                message=identity_error,
+                raw_path=str(debug_path),
+            )
     cert_err = require_topology_certificate(
         source=source, seed_enabled=seed_enabled, debug_path=debug_path
     )
@@ -1567,11 +1699,10 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                     "YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION",
                     "YAMS_BENCH_TOPOLOGY_SOURCE",
                     "YAMS_BENCH_TOPOLOGY_ENGINE",
+                    "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES",
                     "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
                     "YAMS_BENCH_REQUIRE_STEADY_STATE",
                     "YAMS_VECTOR_SEARCH_ENGINE",
-                    "YAMS_SEARCH_ENGINE_VARIANT",
-                    "YAMS_BENCH_CANDIDATE_PIPELINE",
                 )
             },
         },
@@ -1591,6 +1722,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             "skip_reasons": dbg.get("skip_reasons"),
             "scoring_modes": dbg.get("scoring_modes"),
             "routing_modes": dbg.get("routing_modes"),
+            "construction_fingerprints": dbg.get("construction_fingerprints"),
             "certificate": dbg.get("certificate"),
             "dataset": env.get("YAMS_BENCH_DATASET"),
             "corpus_size": env.get("YAMS_BENCH_CORPUS_SIZE"),

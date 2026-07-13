@@ -10,7 +10,7 @@
     "env": {
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
-      "YAMS_BENCH_TOPOLOGY_ENGINE": "hdbscan",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
       "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0",
       "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist"
     },
@@ -20,7 +20,7 @@
       "num_queries": 50,
       "topk": 10,
       "topology_mode": "hybrid_assist",
-      "topology_engine": "hdbscan"
+      "topology_engine": "connected"
     }
   },
   "arms": [

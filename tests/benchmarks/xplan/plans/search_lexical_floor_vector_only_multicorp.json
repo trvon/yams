@@ -1,6 +1,6 @@
 {
   "name": "search_lexical_floor_vector_only_multicorp",
-  "description": "Lever-1 soft fusion package (Simeon research): pure dense is weak; lexical floor + vector-only guardrails matter. Product hybrid topology off; scifact+nfcorpus n=3. Arms: product baseline package, stronger lexical floor, and vector-only (text=0) negative control.",
+  "description": "Lever-1 soft fusion package: pure dense is weak; lexical floor and vector-only guardrails matter. Product topology+ANN hybrid; scifact+nfcorpus n=3.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 10800,
@@ -13,7 +13,8 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_SEARCH_STAGE_TRACE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
-      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
       "YAMS_BENCH_SKIP_BUILD": "1"
     },
     "params": {

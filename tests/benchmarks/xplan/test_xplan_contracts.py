@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 XPLAN_ROOT = Path(__file__).resolve().parent
@@ -15,10 +17,12 @@ if str(XPLAN_ROOT) not in sys.path:
     sys.path.insert(0, str(XPLAN_ROOT))
 
 from analyze_query_class import (  # noqa: E402
+    compare_arms,
     load_by_type,
     paired_route_risk,
     shadow_route_risk,
 )
+from model import ExperimentPlan  # noqa: E402
 from report import _baseline_row  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
@@ -27,14 +31,134 @@ from workers.mixed_corpus import (  # noqa: E402
     materialize_mixed_beir_manifest,
 )
 from workers.retrieval_quality import (  # noqa: E402
+    _benchmark_command,
+    _mark_shared_topology_seed_reuse,
     _merge_benchmark_env,
+    _reset_measured_outputs,
+    clone_benchmark_state,
     parse_debug_jsonl,
-    require_candidate_pipeline,
+    require_shared_topology_construction_identity,
     require_steady_state,
 )
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_retrieval_quality_uses_one_google_benchmark_iteration(self) -> None:
+        command = _benchmark_command(Path("retrieval_quality_bench"), "BM_RetrievalQuality")
+        self.assertEqual(
+            command,
+            [
+                "retrieval_quality_bench",
+                "--benchmark_filter=BM_RetrievalQuality",
+                "--benchmark_min_time=1x",
+            ],
+        )
+
+    def test_retrieval_quality_retry_clears_append_only_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / "debug.jsonl", Path(tmp) / "topology_clusters.json"]
+            for path in paths:
+                path.write_text("stale\n", encoding="utf-8")
+            _reset_measured_outputs(paths)
+            self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_shared_clone_reuses_primed_topology_inputs(self) -> None:
+        env: dict[str, str] = {}
+        _mark_shared_topology_seed_reuse(env)
+        self.assertEqual(env["YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"], "1")
+
+    def test_resolved_plan_preserves_repeat_and_baseline_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "name": "identity",
+                        "repeats": 3,
+                        "baseline": "control",
+                        "arms": [{"name": "control"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = ExperimentPlan.load(path)
+            resolved = plan.resolved_dict(stamp="test", repo_root=Path(tmp), git_sha=None)
+
+            self.assertEqual(resolved["repeats"], 3)
+            self.assertEqual(resolved["baseline"], "control")
+
+            legacy_resolved = dict(resolved)
+            legacy_resolved.pop("repeats")
+            legacy_resolved.pop("baseline")
+            legacy_path = Path(tmp) / "legacy_resolved.json"
+            legacy_path.write_text(json.dumps(legacy_resolved), encoding="utf-8")
+            replayed = ExperimentPlan.load(legacy_path)
+            self.assertEqual(replayed.repeats, 3)
+            self.assertEqual(replayed.baseline, "control")
+
+    def test_benchmark_state_seed_is_cloned_into_an_isolated_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "seed"
+            destination = root / "arm" / "isolated_data"
+            source.mkdir()
+            (source / "state.db").write_text("seed", encoding="utf-8")
+            destination.mkdir(parents=True)
+            (destination / "stale").write_text("stale", encoding="utf-8")
+
+            clone_benchmark_state(source, destination)
+
+            self.assertEqual(
+                (destination / "state.db").read_text(encoding="utf-8"), "seed"
+            )
+            self.assertFalse((destination / "stale").exists())
+
+    def test_shared_topology_identity_pins_repeats_and_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            identity = Path(tmp) / "topology_fingerprint.txt"
+            self.assertIsNone(
+                require_shared_topology_construction_identity(identity, {"same": 100})
+            )
+            self.assertEqual(identity.read_text(encoding="utf-8"), "same\n")
+            self.assertIsNone(
+                require_shared_topology_construction_identity(identity, {"same": 100})
+            )
+            self.assertIn(
+                "identity mismatch",
+                require_shared_topology_construction_identity(identity, {"different": 100})
+                or "",
+            )
+
+    def test_query_class_comparison_uses_all_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arm_a = root / "a"
+            arm_b = root / "b"
+            for repeat, returned in (("rep00", ["relevant"]), ("rep01", ["other", "relevant"])):
+                for arm, docs in ((arm_a, []), (arm_b, returned)):
+                    rep = arm / repeat
+                    rep.mkdir(parents=True)
+                    (rep / "debug.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "search_type": "hybrid",
+                                "query": "same query",
+                                "relevant_doc_ids": ["relevant"],
+                                "returned_doc_ids": docs,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                compare_arms(arm_a, arm_b)
+
+        self.assertIn("n=2", output.getvalue())
+        self.assertIn("meanΔrr=0.7500", output.getvalue())
+
     def test_multi_client_corpus_seed_is_cloned_into_an_isolated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -71,24 +195,66 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             self.assertEqual(arm["factors"].get("text"), "off")
             self.assertEqual(arm["factors"].get("simeon_text"), "off")
 
-    def test_evidence_pipeline_plan_is_a_repeated_mixed_corpus_gate(self) -> None:
-        plan = json.loads(
-            (XPLAN_ROOT / "plans" / "search_evidence_pipeline_multicorp.json")
-            .read_text(encoding="utf-8")
+    def test_product_search_plans_use_the_topology_ann_default(self) -> None:
+        product_plans = (
+            "search_product_clean_baseline.json",
+            "search_product_component_ablation.json",
+            "search_product_nfcorpus_gate.json",
+            "search_vector_weight_0_20_multicorp.json",
+            "search_vector_weight_ablation.json",
+            "search_rerank_blend_multicorp.json",
+            "search_graph_vector_weight_ablation.json",
+            "search_lexical_floor_vector_only_multicorp.json",
+        )
+        for filename in product_plans:
+            with self.subTest(plan=filename):
+                plan = json.loads(
+                    (XPLAN_ROOT / "plans" / filename).read_text(encoding="utf-8")
+                )
+                env = plan["fixed"]["env"]
+                self.assertEqual(env["YAMS_BENCH_TOPOLOGY_MODE"], "hybrid_assist")
+                self.assertEqual(env["YAMS_BENCH_TOPOLOGY_VECTOR_POLICY"], "shadow")
+
+        self.assertFalse(
+            (XPLAN_ROOT / "plans" / "search_evidence_pipeline_multicorp.json").exists()
         )
 
-        self.assertGreaterEqual(plan["repeats"], 3)
-        self.assertEqual(plan["baseline"], "classic")
-        self.assertEqual(plan["fixed"]["params"]["datasets"], ["scifact", "nfcorpus"])
-        self.assertEqual(plan["fixed"]["params"]["topology_mode"], "disabled")
-        arms = {arm["name"]: arm for arm in plan["arms"]}
-        self.assertEqual(set(arms), {"classic", "evidence", "evidence_topology"})
-        self.assertEqual(arms["classic"]["params"]["candidate_pipeline"], "classic")
-        self.assertEqual(arms["evidence"]["params"]["topology_mode"], "disabled")
-        self.assertEqual(
-            arms["evidence_topology"]["params"]["topology_vector_policy"],
-            "shadow",
+    def test_generalized_memory_gate_is_a_lean_soar_construction_ablation(self) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "search_generalized_memory_topology_gate.json")
+            .read_text(encoding="utf-8")
         )
+        self.assertGreaterEqual(plan["repeats"], 3)
+        self.assertEqual(plan["baseline"], "shadow_margin020_min1")
+        self.assertEqual(
+            plan["fixed"]["params"]["shared_warm_cache"],
+            "generalized_memory_soar_boundary",
+        )
+        self.assertTrue(
+            plan["fixed"]["params"]["require_topology_construction_stability"]
+        )
+        self.assertNotIn(
+            "require_topology_construction_identity", plan["fixed"]["params"]
+        )
+        arms = {arm["name"]: arm for arm in plan["arms"]}
+        self.assertEqual(
+            set(arms),
+            {
+                "global_ann_c32",
+                "shadow_margin020_min1",
+                "narrow_soar_lambda1_ratio105",
+            },
+        )
+        soar = arms["narrow_soar_lambda1_ratio105"]
+        self.assertEqual(soar["params"]["topology_vector_policy"], "narrow")
+        self.assertEqual(soar["params"]["topology_boundary_spill"], "1")
+        self.assertEqual(
+            soar["params"]["topology_boundary_spill_residual_penalty"], 1.0
+        )
+        self.assertEqual(
+            soar["params"]["topology_boundary_spill_distance_ratio"], 1.05
+        )
+        self.assertEqual(soar["factors"]["ann_candidate_budget"], 32)
 
     def test_query_class_loader_ignores_missing_or_directory_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +289,6 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                     "topology_weak_query_narrow_applied": "1" if narrow else "0",
                     "topology_route_boundary_score_margin": "0.42",
                     "topology_seed_coverage_count": "2",
-                    "topology_member_rerank_distance_evaluations_actual": "0",
                     "vector_search_exact_distance_evaluations_actual": str(exact),
                 },
             }
@@ -253,24 +418,28 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                     "topology_route_confidence_abstained": "0",
                     "topology_snapshot_cache_hit": "0",
                     "topology_weak_query_allowed_candidates": "8",
-                    "topology_member_rerank_candidates": "32",
-                    "topology_member_rerank_selected": "8",
                     "vector_search_candidate_budget": "8",
                     "vector_search_result_budget": "16",
                     "vector_search_distance_evaluation_budget": "40",
-                    "topology_member_rerank_rows_visited_actual": "48",
-                    "topology_member_rerank_distance_evaluations_actual": "40",
                     "vector_search_rows_visited_actual": "16",
                     "vector_search_exact_distance_evaluations_actual": "8",
                     "vector_search_ann_candidate_budget_actual": "16",
-                    "topology_vector_scores_reused": "1",
-                    "topology_vector_scores_reused_count": "12",
                     "topology_vector_filter_applied": "1",
                     "topology_vector_filter_fallback": "0",
                     "topology_vector_filter_matched": "6",
                     "topology_vector_filter_removed": "10",
-                    "topology_vector_partition_ann_applied": "1",
-                    "topology_vector_partition_ann_fallback": "0",
+                    "topology_vector_allowed_set_ann_applied": "1",
+                    "topology_vector_allowed_set_ann_fallback": "0",
+                    "topology_vector_policy": "narrow",
+                    "latency_ms": "30",
+                    "topology_structure_candidate_count": "6",
+                    "topology_structure_scale_agreement_mean": "0.8",
+                    "topology_structure_overlap_support_mean": "0.6",
+                    "topology_structure_persistence_support_mean": "0.9",
+                    "topology_structure_cohesion_support_mean": "0.7",
+                    "topology_structure_bridge_support_mean": "0.4",
+                    "topology_structure_density_support_mean": "0.75",
+                    "topology_construction_fingerprint": "fixed-topology",
                 },
             },
             {
@@ -282,24 +451,28 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                     "topology_route_confidence_abstained": "1",
                     "topology_snapshot_cache_hit": "1",
                     "topology_weak_query_allowed_candidates": "4",
-                    "topology_member_rerank_candidates": "16",
-                    "topology_member_rerank_selected": "4",
                     "vector_search_candidate_budget": "4",
                     "vector_search_result_budget": "16",
                     "vector_search_distance_evaluation_budget": "24",
-                    "topology_member_rerank_rows_visited_actual": "24",
-                    "topology_member_rerank_distance_evaluations_actual": "16",
                     "vector_search_rows_visited_actual": "8",
                     "vector_search_exact_distance_evaluations_actual": "4",
                     "vector_search_ann_candidate_budget_actual": "8",
-                    "topology_vector_scores_reused": "0",
-                    "topology_vector_scores_reused_count": "0",
                     "topology_vector_filter_applied": "0",
                     "topology_vector_filter_fallback": "1",
                     "topology_vector_filter_matched": "0",
                     "topology_vector_filter_removed": "0",
-                    "topology_vector_partition_ann_applied": "0",
-                    "topology_vector_partition_ann_fallback": "1",
+                    "topology_vector_allowed_set_ann_applied": "0",
+                    "topology_vector_allowed_set_ann_fallback": "1",
+                    "topology_vector_policy": "narrow",
+                    "latency_ms": "10",
+                    "topology_structure_candidate_count": "2",
+                    "topology_structure_scale_agreement_mean": "0.4",
+                    "topology_structure_overlap_support_mean": "0.2",
+                    "topology_structure_persistence_support_mean": "0.7",
+                    "topology_structure_cohesion_support_mean": "0.5",
+                    "topology_structure_bridge_support_mean": "0.2",
+                    "topology_structure_density_support_mean": "0.65",
+                    "topology_construction_fingerprint": "fixed-topology",
                 },
             },
         ]
@@ -318,28 +491,32 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(metrics["topology_snapshot_cache_hit_rate"], 0.5)
         self.assertEqual(metrics["topology_allowed_candidates_avg"], 6.0)
-        self.assertEqual(metrics["topology_member_rerank_candidates_avg"], 24.0)
+        self.assertEqual(metrics["topology_vector_filter_allowed_candidates_avg"], 8.0)
+        self.assertEqual(metrics["topology_vector_filter_latency_ms_avg"], 30.0)
+        self.assertEqual(metrics["topology_vector_abstain_latency_ms_avg"], 10.0)
         self.assertEqual(metrics["vector_candidate_budget_avg"], 6.0)
         self.assertEqual(metrics["vector_result_budget_avg"], 16.0)
         self.assertEqual(metrics["vector_distance_evaluation_budget_avg"], 32.0)
-        self.assertEqual(metrics["topology_member_rows_visited_actual_avg"], 36.0)
-        self.assertEqual(
-            metrics["topology_member_distance_evaluations_actual_avg"], 28.0
-        )
         self.assertEqual(metrics["vector_rows_visited_actual_avg"], 12.0)
         self.assertEqual(metrics["vector_exact_distance_evaluations_actual_avg"], 6.0)
         self.assertEqual(metrics["vector_ann_candidate_budget_actual_avg"], 12.0)
-        self.assertEqual(metrics["vector_total_rows_visited_actual_avg"], 48.0)
-        self.assertEqual(
-            metrics["vector_total_exact_distance_evaluations_actual_avg"], 34.0
-        )
-        self.assertEqual(metrics["topology_vector_scores_reuse_rate"], 0.5)
+        self.assertEqual(metrics["vector_candidate_work_budget_avg"], 10.0)
+        self.assertEqual(metrics["vector_total_rows_visited_actual_avg"], 12.0)
+        self.assertEqual(metrics["vector_total_exact_distance_evaluations_actual_avg"], 6.0)
         self.assertEqual(metrics["topology_vector_filter_rate"], 0.5)
         self.assertEqual(metrics["topology_vector_filter_fallback_rate"], 0.5)
         self.assertEqual(metrics["topology_vector_filter_matched_avg"], 3.0)
         self.assertEqual(metrics["topology_vector_filter_removed_avg"], 5.0)
-        self.assertEqual(metrics["topology_vector_partition_ann_rate"], 0.5)
-        self.assertEqual(metrics["topology_vector_partition_ann_fallback_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_allowed_set_ann_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_allowed_set_ann_fallback_rate"], 0.5)
+        self.assertEqual(metrics["topology_structure_candidate_count_avg"], 4.0)
+        self.assertAlmostEqual(metrics["topology_structure_scale_agreement_avg"], 0.6)
+        self.assertAlmostEqual(metrics["topology_structure_overlap_support_avg"], 0.4)
+        self.assertAlmostEqual(metrics["topology_structure_persistence_support_avg"], 0.8)
+        self.assertAlmostEqual(metrics["topology_structure_cohesion_support_avg"], 0.6)
+        self.assertAlmostEqual(metrics["topology_structure_bridge_support_avg"], 0.3)
+        self.assertAlmostEqual(metrics["topology_structure_density_support_avg"], 0.7)
+        self.assertEqual(metrics["topology_construction_fingerprint_count"], 1.0)
 
     def test_shadow_projection_metrics_are_aggregated_without_counting_application(
         self,
@@ -513,27 +690,6 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             )
 
             self.assertIsNone(require_steady_state(debug_path, require_vector=False))
-
-    def test_candidate_pipeline_validation_rejects_a_misidentified_arm(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            debug_path = Path(tmp) / "debug.jsonl"
-            debug_path.write_text(
-                json.dumps(
-                    {
-                        "search_type": "hybrid",
-                        "search_stats": {"candidate_pipeline_variant": "classic"},
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            self.assertIsNone(require_candidate_pipeline(debug_path, expected="classic"))
-            self.assertIn(
-                "expected candidate pipeline 'evidence'",
-                require_candidate_pipeline(debug_path, expected="evidence") or "",
-            )
-
 
 class MultiClientMetricTests(unittest.TestCase):
     def test_read_write_latency_and_pool_pressure_are_preserved(self) -> None:
@@ -849,6 +1005,67 @@ class MixedCorpusTests(unittest.TestCase):
             metrics["mixed_topology_relevant_fragment_coverage_alpha"], 1.0
         )
         self.assertEqual(metrics["mixed_topology_relevant_fragment_coverage_beta"], 0.5)
+
+    def test_route_oracle_counts_empty_routes_as_relevant_fragment_misses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_path = root / "mixed_corpus_identity.json"
+            identity_path.write_text(
+                json.dumps(
+                    {
+                        "query_order": ["alpha__hit", "alpha__miss"],
+                        "query_sources": {
+                            "alpha__hit": "alpha",
+                            "alpha__miss": "alpha",
+                        },
+                        "document_sources": {
+                            "alpha__a1": ["alpha"],
+                            "alpha__a2": ["alpha"],
+                        },
+                        "document_hash_sources": {
+                            "hash-a1": ["alpha"],
+                            "hash-a2": ["alpha"],
+                        },
+                        "document_hashes": {
+                            "alpha__a1": "hash-a1",
+                            "alpha__a2": "hash-a2",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debug_path = root / "debug.jsonl"
+            debug_path.write_text(
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in [
+                        {
+                            "query_index": 0,
+                            "search_type": "hybrid",
+                            "relevant_doc_ids": ["alpha__a1"],
+                            "returned_doc_ids": ["alpha__a1"],
+                            "search_stats": {
+                                "topology_weak_query_allowed_candidate_hashes": "hash-a1"
+                            },
+                        },
+                        {
+                            "query_index": 1,
+                            "search_type": "hybrid",
+                            "relevant_doc_ids": ["alpha__a2"],
+                            "returned_doc_ids": [],
+                            "search_stats": {
+                                "topology_weak_query_allowed_candidate_hashes": ""
+                            },
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = analyze_mixed_corpus_debug(debug_path, identity_path, top_k=10)
+
+        self.assertEqual(metrics["mixed_topology_relevant_fragment_coverage"], 0.5)
+        self.assertEqual(metrics["mixed_topology_relevant_fragment_hit_rate"], 0.5)
 
     def test_cluster_overlap_reports_dataset_composition_without_duplicate_leakage(
         self,

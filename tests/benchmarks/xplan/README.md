@@ -98,6 +98,13 @@ shows source counts, entropy, and purity for every cluster. Aggregate metrics di
 fraction of cross-source clusters from the fraction of documents exposed to those clusters;
 content duplicated across corpora is reported separately and excluded from partition purity.
 
+For state-sensitive search ablations, `shared_warm_cache` primes one immutable YAMS store and clones
+it into each measured arm/repeat. This fixes corpus, vector index, tuner state, and persisted
+topology without letting one workload mutate the next workload's input. Topology plans can also set
+`require_topology_construction_identity=true`; the worker pins the first construction fingerprint
+and fails on within-workload, cross-repeat, or cross-arm drift. Do not point multiple measured arms
+at one live warm directory: that preserves topology but carries mutable query/tuner state forward.
+
 Evaluate ingestion changes in two lanes at the same code revision. Use
 `search_generalized_memory_topology_gate` after the index settles for mixed-memory quality and
 route purity. Use `retrieval_load` for concurrent adds/searches through the daemon; it reports
