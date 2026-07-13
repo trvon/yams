@@ -30,10 +30,7 @@ enum class RebuildReason : uint32_t {
 };
 
 /**
- * @brief Lock-free snapshot of vector index state.
- *
- * Written only from the coordinator's strand. Read lock-free via a seqlock in snapshot().
- * Keep this POD-ish to fit the seqlock pattern.
+ * @brief Snapshot of vector index state.
  */
 struct VectorIndexTelemetry {
     uint64_t rebuildEpoch{0};     ///< Monotonic; bumped at each finalize
@@ -48,8 +45,8 @@ struct VectorIndexTelemetry {
  * @brief Single owner of all vector-index mutations.
  *
  * All beginBulkLoad / finalizeBulkLoad / persistIndex / buildIndex calls flow
- * through this class.  Exposes a lock-free telemetry snapshot so the status
- * fast-path never blocks behind a rebuild mutex.
+ * through this class. Exposes a synchronized telemetry snapshot for status and
+ * diagnostics.
  *
  * Execution model: a Boost.Asio strand on the daemon's existing io_context.
  */
@@ -134,10 +131,9 @@ public:
     boost::asio::awaitable<Result<void>> requestRebuild(RebuildReason reason);
 
     /**
-     * @brief Lock-free telemetry snapshot.
+     * @brief Thread-safe telemetry snapshot.
      *
-     * Safe to call from any thread, including the status RPC path.  Uses a
-     * seqlock so readers never block behind a rebuild.
+     * Safe to call from any thread, including the status RPC path.
      */
     VectorIndexTelemetry snapshot() const noexcept;
 
@@ -187,8 +183,7 @@ private:
     // Called from BulkScope destructor (any thread).
     void releaseBulkScope() noexcept;
 
-    // Post a telemetry refresh to the strand. Single-writer invariant: all
-    // publishTelemetry() writes happen on strand_.
+    // Post a telemetry refresh to the strand.
     void postTelemetryRefresh() noexcept;
 
     // Runs on the strand: finalizes bulk window and persists index.
@@ -199,9 +194,7 @@ private:
     // inline when already on the strand, defeating the coalescing invariant.
     void doRebuildOnStrand(uint32_t reasons);
 
-    // Seqlock helpers — writer must run on strand.
     void publishTelemetry(const VectorIndexTelemetry& tel) noexcept;
-    VectorIndexTelemetry readTelemetrySeqlock() const noexcept;
 
     // Drain and notify all waiters whose targetEpoch <= current epoch.
     // Called on the strand after an epoch bump.
@@ -234,9 +227,8 @@ private:
     std::mutex waitersMutex_; // protects waiters_ (accessed from multiple strand posts)
     std::vector<Waiter> waiters_;
 
-    // ── Seqlock for lock-free snapshot reads ───────────────────────────────
-    mutable std::atomic<uint64_t> seqVersion_{0}; // even = stable, odd = writing
-    VectorIndexTelemetry seqData_{};              // written only on strand
+    mutable std::mutex telemetryMutex_;
+    VectorIndexTelemetry telemetry_{};
 };
 
 } // namespace yams::daemon

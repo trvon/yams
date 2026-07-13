@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
-#include <thread>
 
 namespace yams::daemon {
 
@@ -121,11 +120,9 @@ warnIfRebuildExceedsBudget(const std::shared_ptr<vector::VectorDatabase>& vdb) n
     }
 }
 
-// Post a telemetry refresh onto the strand (single-writer seqlock invariant).
-// All publishTelemetry() calls MUST originate from the strand.
 void VectorIndexCoordinator::postTelemetryRefresh() noexcept {
     boost::asio::post(strand_, [this]() {
-        VectorIndexTelemetry t = seqData_;
+        VectorIndexTelemetry t = snapshot();
         t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
         t.pendingReasons = pendingReasons_.load(std::memory_order_relaxed);
         t.rebuildEpoch = rebuildEpoch_.load(std::memory_order_relaxed);
@@ -155,7 +152,7 @@ VectorIndexCoordinator::BulkScope VectorIndexCoordinator::beginBulkIngest(Rebuil
                                  vdb->getLastError());
                 }
             }
-            VectorIndexTelemetry t = seqData_;
+            VectorIndexTelemetry t = snapshot();
             t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
             t.pendingReasons = pendingReasons_.load(std::memory_order_relaxed);
             publishTelemetry(t);
@@ -239,7 +236,7 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(Rebu
     if (rebuildInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
 
-        auto t = readTelemetrySeqlock();
+        auto t = snapshot();
         t.rebuilding = true;
         t.pendingReasons = reasons;
         publishTelemetry(t);
@@ -426,42 +423,13 @@ bool VectorIndexCoordinator::requestCheckpoint() noexcept {
 }
 
 VectorIndexTelemetry VectorIndexCoordinator::snapshot() const noexcept {
-    return readTelemetrySeqlock();
+    std::lock_guard<std::mutex> lock(telemetryMutex_);
+    return telemetry_;
 }
-
-// ── Seqlock helpers ─────────────────────────────────────────────────────────
 
 void VectorIndexCoordinator::publishTelemetry(const VectorIndexTelemetry& tel) noexcept {
-    // Begin write: bump to odd.
-    seqVersion_.fetch_add(1, std::memory_order_release);
-    seqData_ = tel;
-    // End write: bump to even.
-    seqVersion_.fetch_add(1, std::memory_order_release);
-}
-
-VectorIndexTelemetry VectorIndexCoordinator::readTelemetrySeqlock() const noexcept {
-    // Bounded seqlock read. If a writer is caught mid-update (or crashes between
-    // the two version bumps) we do not spin forever: after kMaxSpins we return
-    // the data we have and tolerate a potentially torn read for this one call.
-    // Status readers are best-effort; they must never block.
-    constexpr int kMaxSpins = 64;
-    for (int i = 0; i < kMaxSpins; ++i) {
-        const uint64_t v1 = seqVersion_.load(std::memory_order_acquire);
-        if (v1 & 1u) {
-            std::this_thread::yield();
-            continue;
-        }
-        const VectorIndexTelemetry t = seqData_;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint64_t v2 = seqVersion_.load(std::memory_order_relaxed);
-        if (v1 == v2) {
-            return t;
-        }
-        std::this_thread::yield();
-    }
-    // Fallback: return last-observed data (may be torn) rather than spin forever.
-    VectorIndexTelemetry fallback = seqData_;
-    return fallback;
+    std::lock_guard<std::mutex> lock(telemetryMutex_);
+    telemetry_ = tel;
 }
 
 // ── Waiters ──────────────────────────────────────────────────────────────────

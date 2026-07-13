@@ -1,4 +1,4 @@
-// Tests: seqlock telemetry snapshot — consistent reads from another thread, monotonic epoch.
+// Tests: synchronized telemetry snapshot — consistent reads from another thread, monotonic epoch.
 // Compile with -DYAMS_TESTING=1
 
 #include <catch2/catch_test_macros.hpp>
@@ -17,8 +17,8 @@
 
 using namespace yams::daemon;
 
-TEST_CASE("snapshot: lock-free reads return consistent telemetry during rebuild",
-          "[coordinator][telemetry][seqlock]") {
+TEST_CASE("snapshot: concurrent reads return consistent telemetry during rebuild",
+          "[coordinator][telemetry]") {
     boost::asio::io_context io;
     VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
 

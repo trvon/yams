@@ -8,22 +8,6 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
 
-// Forward declaration to avoid include issues
-namespace yams::daemon {
-struct ModelPoolConfig {
-    size_t maxLoadedModels = 3;
-    size_t hotPoolSize = 1;
-    size_t maxMemoryGB = 4;
-    std::string evictionPolicy = "lru";
-    std::chrono::seconds modelIdleTimeout{300};
-    std::chrono::seconds modelLoadTimeout{30};
-    std::vector<std::string> preloadModels;
-    bool lazyLoading = false;
-    bool enableGPU = false;
-    int numThreads = 4;
-};
-} // namespace yams::daemon
-
 namespace yams::daemon {
 
 // ============================================================================
@@ -458,15 +442,8 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
         }
     }
 
-    // Fall back to mock provider in debug/test builds
-#ifdef DEBUG
-    spdlog::info("No model provider available, using mock provider (DEBUG build)");
-    return std::make_unique<MockModelProvider>();
-#else
-    // Production: return null provider
     spdlog::warn("No model provider available, using null provider");
     return std::make_unique<NullModelProvider>();
-#endif
 }
 
 } // namespace yams::daemon
