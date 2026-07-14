@@ -41,17 +41,10 @@ struct AtomicMetadataInsertPhaseTiming {
     std::atomic<std::uint64_t> maxUs{0};
 };
 
-constexpr std::array<std::string_view, 11> kMetadataInsertPhaseNames{"prepare_writes",
-                                                                     "begin",
-                                                                     "insert_lookup_document",
-                                                                     "apply_metadata_writes",
-                                                                     "upsert_snapshot",
-                                                                     "path_tree",
-                                                                     "path_tree_savepoint",
-                                                                     "path_tree_upsert",
-                                                                     "path_tree_release",
-                                                                     "commit",
-                                                                     "cache_update"};
+constexpr std::array<std::string_view, 12> kMetadataInsertPhaseNames{
+    "prepare_writes",    "begin",     "insert_lookup_document", "apply_metadata_writes",
+    "upsert_snapshot",   "path_tree", "path_tree_savepoint",    "path_tree_upsert",
+    "path_tree_release", "commit",    "cache_update",           "transaction_total"};
 
 std::array<AtomicMetadataInsertPhaseTiming, kMetadataInsertPhaseNames.size()>&
 metadataInsertTimings() {
@@ -749,6 +742,9 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
 
     auto result = executeQuery<std::vector<InsertDocumentWithMetadataResult>>(
         [&](Database& db) -> Result<std::vector<InsertDocumentWithMetadataResult>> {
+            const auto transactionStart = std::chrono::steady_clock::now();
+            auto recordTransaction = scope_exit(
+                [&] { recordMetadataInsertPhase("transaction_total", transactionStart); });
             const auto beginStart = std::chrono::steady_clock::now();
             YAMS_TRY(beginTransaction(db));
             recordMetadataInsertPhase("begin", beginStart);

@@ -2474,9 +2474,10 @@ TEST_CASE("MetadataRepository: fuzzy search honors minSimilarity threshold",
         fix.repository_
             ->indexDocumentContent(nearInsert.value(), nearDoc.fileName, kNearTerm, "text/plain")
             .has_value());
-    REQUIRE((fix.repository_->tryAddSymSpellTerms({std::pair<std::string, int64_t>{kExactTerm, 1},
-                                                   {kNearTerm, 1}})
-                 .has_value()));
+    REQUIRE(
+        (fix.repository_
+             ->tryAddSymSpellTerms({std::pair<std::string, int64_t>{kExactTerm, 1}, {kNearTerm, 1}})
+             .has_value()));
 
     auto lowThreshold = fix.repository_->fuzzySearch(kExactTerm, 0.0f, 10);
     REQUIRE((lowThreshold.has_value()));
@@ -4626,10 +4627,13 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
     REQUIRE((pool->initialize().has_value()));
     auto repo = std::make_shared<MetadataRepository>(
         *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    resetMetadataInsertPhaseTimings();
 
     constexpr int kDocs = 64;
     {
-        MetadataInsertWriter writer(repo);
+        MetadataInsertWriter writer(
+            repo, MetadataInsertWriter::Options{.maxBatchCount = kDocs,
+                                                .maxDelay = std::chrono::milliseconds{50}});
 
         // Submit from several threads to exercise concurrent coalescing.
         std::atomic<int> next{0};
@@ -4664,6 +4668,32 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
         REQUIRE((static_cast<int>(ids.size()) == kDocs));
         std::sort(ids.begin(), ids.end());
         CHECK((std::adjacent_find(ids.begin(), ids.end()) == ids.end()));
+
+        REQUIRE(writer.flush());
+        const auto metrics = writer.metricsSnapshot();
+        CHECK(metrics.submittedItems == kDocs);
+        CHECK(metrics.completedItems == kDocs);
+        CHECK(metrics.batchItems == kDocs);
+        CHECK(metrics.batches > 0);
+        CHECK(metrics.batches < kDocs);
+        CHECK(metrics.maxBatchSize > 1);
+        CHECK(metrics.queueWaitSamples == kDocs);
+        CHECK(metrics.batchApplySamples == metrics.batches);
+        CHECK(metrics.failedBatches == 0);
+        CHECK(metrics.fallbackItems == 0);
+
+        const auto phaseTimings = getMetadataInsertPhaseTimingsSnapshot();
+        const auto transaction = phaseTimings.find("transaction_total");
+        REQUIRE(transaction != phaseTimings.end());
+        CHECK(transaction->second.calls == metrics.batches);
+        CHECK(transaction->second.totalUs >= phaseTimings.at("commit").totalUs);
+
+        writer.resetMetrics();
+        const auto reset = writer.metricsSnapshot();
+        CHECK(reset.submittedItems == 0);
+        CHECK(reset.completedItems == 0);
+        CHECK(reset.batches == 0);
+        CHECK(reset.batchItems == 0);
     }
 
     // All documents are durable after the writer drains.
