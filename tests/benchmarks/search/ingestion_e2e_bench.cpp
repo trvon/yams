@@ -521,15 +521,15 @@ struct SearchImpactProbe {
     std::string search_type;
     bool required_by_contract = false;
     bool skipped = false;
-    std::string skip_reason;
+    std::string skip_reason{};
     bool ok = false;
-    std::string error;
+    std::string error{};
     int64_t wall_ms = 0;
     int64_t completed_ms = 0;
     int64_t daemon_elapsed_ms = 0;
     uint64_t total_count = 0;
     uint64_t returned_count = 0;
-    std::vector<std::string> top_ids;
+    std::vector<std::string> top_ids{};
 
     json toJson() const {
         return json{{"name", name},
@@ -563,6 +563,7 @@ struct BenchmarkResult {
     std::string ingest_mode = "single_file_serial";
     std::size_t ingest_concurrency = 1;
     std::uint32_t post_ingest_coalesce_ms = 0;
+    std::uint32_t post_ingest_batch_size = 0;
     std::string timestamp;
     std::string embedding_model = "simeon-default";
     std::string embedding_backend = "simeon";
@@ -649,6 +650,7 @@ struct BenchmarkResult {
                             {"ingest_mode", ingest_mode},
                             {"ingest_concurrency", ingest_concurrency},
                             {"post_ingest_coalesce_ms", post_ingest_coalesce_ms},
+                            {"post_ingest_batch_size", post_ingest_batch_size},
                             {"timestamp", timestamp},
                             {"embedding_model", embedding_model},
                             {"embedding_backend", embedding_backend},
@@ -1119,6 +1121,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.ingest_mode = std::move(ingestMode);
     result.ingest_concurrency = std::max<std::size_t>(1, ingestConcurrency);
     result.post_ingest_coalesce_ms = benchPostIngestCoalesceMs();
+    result.post_ingest_batch_size = yams::daemon::TuneAdvisor::postIngestBatchSize();
     result.timestamp = nowIso8601();
     if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
         result.embedding_model = env;
@@ -1142,6 +1145,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     spdlog::info("Poll interval: {} ms", pollIntervalMs);
     spdlog::info("Ingest mode: {} (concurrency={})", result.ingest_mode, result.ingest_concurrency);
     spdlog::info("Post-ingest coalesce window: {} ms", result.post_ingest_coalesce_ms);
+    spdlog::info("Post-ingest batch size: {}", result.post_ingest_batch_size);
     spdlog::info("KG enrichment: {}", result.kg_enabled ? "enabled" : "disabled");
 
     // Phase 1: Start daemon
