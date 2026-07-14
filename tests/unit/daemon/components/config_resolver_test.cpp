@@ -804,14 +804,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Efficient profile scale is 0.0, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.0)) = 1
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 1u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("balanced profile uses medium values") {
@@ -822,14 +822,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Balanced profile scale is 0.5, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.5)) = 4
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("aggressive profile uses maximum values") {
@@ -840,14 +840,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Aggressive profile scale is 1.0, old totalBudget = 3
         // With active-stage floor: total = max(3, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 1.0)) = 8
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("profile affects cpuBudgetPercent") {

@@ -131,7 +131,7 @@ static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestB
         if (tasks.empty()) {
             continue;
         }
-        sm->enqueuePostIngestBatch(std::move(tasks));
+        sm->enqueuePostIngestRpcBatch(std::move(tasks));
     }
     pending.clear();
 }
@@ -223,33 +223,33 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     };
 
     while (!stop_.load()) {
-        // CPU-aware batch sizing: keep enough fan-out to avoid singleton post-ingest flushes.
-        const int tunedBatch =
-            std::clamp<int>(static_cast<int>(TuneAdvisor::postIngestBatchSize()) * 4, 16, 128);
-        int batchLimit = tunedBatch;
+        // Keep request admission independent from downstream post-ingest transaction sizing.
+        // Parallel waves provide request fan-out; larger post-ingest batches must not delay a
+        // partially filled request wave.
+        constexpr int kIngestBatchLimit = 16;
+        int batchLimit = kIngestBatchLimit;
         bool underPressure = false;
         try {
             auto snap = ResourceGovernor::instance().getSnapshot();
             if (snap.cpuUsagePercent > 80)
-                batchLimit = std::max(8, tunedBatch / 4);
+                batchLimit = 8;
             else if (snap.cpuUsagePercent > 60)
-                batchLimit = std::max(10, tunedBatch / 3);
+                batchLimit = 10;
             else if (snap.cpuUsagePercent > 40)
-                batchLimit = std::max(12, tunedBatch / 2);
+                batchLimit = 12;
         } catch (...) {
         }
         if (!ResourceGovernor::instance().canAdmitWork()) {
             // Avoid full ingestion deadlock under pressure: keep draining slowly.
             underPressure = true;
-            batchLimit =
-                correctnessMode ? std::max(32, tunedBatch * 2) : std::max(4, tunedBatch / 4);
+            batchLimit = correctnessMode ? 32 : 4;
         }
 
         const std::size_t queueDepth = channel->size_approx();
         const std::size_t queueCap = std::max<std::size_t>(1, channel->capacity());
         const bool backlogHigh = (queueDepth * 100u / queueCap) >= 70u;
         if (correctnessMode && backlogHigh) {
-            batchLimit = std::min(512, std::max(batchLimit, tunedBatch * 4));
+            batchLimit = 64;
         }
 
         InternalEventBus::StoreDocumentTask task;

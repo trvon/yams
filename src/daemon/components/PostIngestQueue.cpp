@@ -1073,11 +1073,22 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
+    enqueueBatchToChannel(std::move(tasks), postIngestChannel_, "enqueueBatch");
+}
+
+void PostIngestQueue::enqueueRpcBatch(std::vector<Task> tasks) {
+    auto channel = postIngestRpcChannel_ ? postIngestRpcChannel_ : postIngestChannel_;
+    enqueueBatchToChannel(std::move(tasks), channel, "enqueueRpcBatch");
+}
+
+void PostIngestQueue::enqueueBatchToChannel(
+    std::vector<Task> tasks,
+    const std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>>& channel,
+    const char* operation) {
     if (tasks.empty()) {
         return;
     }
-
-    auto channel = postIngestChannel_;
+    YAMS_ASSERT(channel, "PostIngestQueue batch enqueue requires an initialized channel");
 
     std::vector<InternalEventBus::PostIngestTask> busTasks;
     busTasks.reserve(tasks.size());
@@ -1109,9 +1120,8 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         }
         ++waits;
         if ((waits % 20u) == 1u) {
-            spdlog::debug(
-                "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
-                busTasks.size() - next, waits);
+            spdlog::debug("[PostIngestQueue] {} waiting on full channel (remaining={}, waits={})",
+                          operation, busTasks.size() - next, waits);
         }
     }
     if (queuedAny) {

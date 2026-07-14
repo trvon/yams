@@ -860,6 +860,7 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                    nullptr, &coordinator, nullptr, 64);
+    queue->setBatchCoalesceWindow(std::chrono::milliseconds(20));
     queue->start();
     auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
@@ -867,7 +868,14 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     }
     REQUIRE(queue->started());
 
-    queue->enqueueBatch(std::move(tasks));
+    bool highPriority = false;
+    SECTION("normal bulk work uses the configured batch cap") {
+        queue->enqueueBatch(std::move(tasks));
+    }
+    SECTION("priority work uses the interactive quota") {
+        highPriority = true;
+        queue->enqueueRpcBatch(std::move(tasks));
+    }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (queue->processed() < kDocCount && std::chrono::steady_clock::now() < deadline) {
@@ -882,6 +890,13 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
     REQUIRE(
         (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
+
+    const auto metrics = queue->metricsSnapshot();
+    const auto expectedBatches = highPriority ? 16u : 8u;
+    const auto expectedMaxBatchSize = highPriority ? 4u : 8u;
+    CHECK(metrics.batches.extractionBatches == expectedBatches);
+    CHECK(metrics.batches.contentIndexCalls == expectedBatches);
+    CHECK(metrics.batches.contentIndexMaxEntries == expectedMaxBatchSize);
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -923,6 +938,7 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                    nullptr, &coordinator, nullptr, 64);
+    queue->setBatchCoalesceWindow(std::chrono::milliseconds(20));
     queue->start();
     auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
@@ -940,6 +956,13 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
     REQUIRE((queue->processed() == kDocCount));
     REQUIRE((queue->failed() == 0));
     REQUIRE((metadataRepo->maxBatchWriteSize() > 1));
+
+    const auto metrics = queue->metricsSnapshot();
+    CHECK(metrics.batches.extractionTasks == kDocCount);
+    CHECK(metrics.batches.extractionBatches == 3);
+    CHECK(metrics.batches.contentIndexCalls == 3);
+    CHECK(metrics.batches.contentIndexEntries == kDocCount);
+    CHECK(metrics.batches.contentIndexMaxEntries == 16);
 
     stopAndResetQueue(queue);
     coordinator.stop();

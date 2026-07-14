@@ -235,6 +235,7 @@ public:
 
     void enqueue(Task t);
     void enqueueBatch(std::vector<Task> tasks);
+    void enqueueRpcBatch(std::vector<Task> tasks);
     bool tryEnqueue(const Task& t);
     bool tryEnqueue(Task&& t);
 
@@ -613,6 +614,10 @@ private:
 
     /// Initialize cached channel pointers from InternalEventBus
     void initializeChannels();
+    void enqueueBatchToChannel(
+        std::vector<Task> tasks,
+        const std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>>& channel,
+        const char* operation);
 
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
     // Index 0-4 = stages (Extraction..Title), index 5 = Embed
