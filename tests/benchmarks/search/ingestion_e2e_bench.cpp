@@ -12,6 +12,10 @@
     YAMS_BENCH_CORPUS_SIZE=N          - Number of documents to ingest (default: 100)
     YAMS_BENCH_DOC_SIZE=N             - Document size in bytes (default: 1000)
     YAMS_BENCH_POLL_INTERVAL_MS=N     - Queue polling interval (default: 100)
+    YAMS_BENCH_INGEST_MODE=MODE       - directory, pipelined_single_file, or
+                                        single_file_serial (default)
+    YAMS_BENCH_INGEST_CONCURRENCY=N   - Client count for pipelined_single_file
+                                        (default: 4)
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
     YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
     YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
@@ -39,6 +43,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/reference_counter.h>
@@ -46,8 +51,9 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <algorithm>
-#include <chrono>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -57,6 +63,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -326,13 +333,31 @@ private:
 // ============================================================================
 
 struct CorpusGenerator {
+    static constexpr std::uint32_t kSeed = 42;
+    static constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+    static constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+
     fs::path corpusDir;
     std::vector<std::string> createdFiles;
-    std::mt19937 rng{42}; // Fixed seed for reproducibility
+    std::mt19937 rng{kSeed};
     size_t docSize;
+    std::uint64_t fingerprintValue{kFnvOffsetBasis};
 
     CorpusGenerator(const fs::path& dir, size_t size) : corpusDir(dir), docSize(size) {
         yams::common::ensureDirectories(corpusDir);
+    }
+
+    void hashBytes(std::string_view bytes) {
+        for (const unsigned char byte : bytes) {
+            fingerprintValue ^= byte;
+            fingerprintValue *= kFnvPrime;
+        }
+    }
+
+    std::string fingerprint() const {
+        std::ostringstream out;
+        out << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << fingerprintValue;
+        return out.str();
     }
 
     void generateDocuments(int count) {
@@ -354,7 +379,10 @@ struct CorpusGenerator {
             }
 
             std::string filename = "doc_" + std::to_string(i) + ".txt";
-            std::ofstream(corpusDir / filename) << content.str();
+            const std::string document = content.str();
+            std::ofstream(corpusDir / filename) << document;
+            hashBytes(filename);
+            hashBytes(document);
             createdFiles.push_back(filename);
 
             if ((i + 1) % 10 == 0 || (i + 1) == count) {
@@ -479,6 +507,7 @@ struct SearchImpactProbe {
     bool ok = false;
     std::string error;
     int64_t wall_ms = 0;
+    int64_t completed_ms = 0;
     int64_t daemon_elapsed_ms = 0;
     uint64_t total_count = 0;
     uint64_t returned_count = 0;
@@ -494,6 +523,7 @@ struct SearchImpactProbe {
                     {"ok", ok},
                     {"error", error},
                     {"wall_ms", wall_ms},
+                    {"completed_ms", completed_ms},
                     {"daemon_elapsed_ms", daemon_elapsed_ms},
                     {"total_count", total_count},
                     {"returned_count", returned_count},
@@ -510,6 +540,10 @@ struct BenchmarkResult {
     int corpus_size = 0;
     int doc_size = 0;
     int poll_interval_ms = 0;
+    std::uint32_t corpus_seed = CorpusGenerator::kSeed;
+    std::string corpus_fingerprint;
+    std::string ingest_mode = "single_file_serial";
+    std::size_t ingest_concurrency = 1;
     std::string timestamp;
     std::string embedding_model = "simeon-default";
     std::string embedding_backend = "simeon";
@@ -526,6 +560,14 @@ struct BenchmarkResult {
     uint64_t observed_post = 0;
     uint64_t observed_embed = 0;
     uint64_t observed_kg = 0;
+    bool stages_settled = false;
+    bool enrichment_drained = false;
+    bool write_coordinator_flushed = false;
+    int64_t admission_ms = 0;
+    int64_t storage_ready_ms = 0;
+    int64_t pipeline_drain_ms = 0;
+    int64_t enrichment_ready_ms = 0;
+    int64_t searchability_ready_ms = 0;
 
     // Per-stage metrics
     StageMetrics metadata_storage;
@@ -574,22 +616,41 @@ struct BenchmarkResult {
 
     // WorkCoordinator metrics
     size_t thread_count = 0;
+    bool has_write_coordinator_stats = false;
+    yams::daemon::WriteCoordinator::Stats write_coordinator_stats;
 
     json toJson() const {
         json j;
-        j["test_config"] = {
-            {"corpus_size", corpus_size},           {"doc_size", doc_size},
-            {"poll_interval_ms", poll_interval_ms}, {"timestamp", timestamp},
-            {"embedding_model", embedding_model},   {"embedding_backend", embedding_backend},
-            {"simeon_recipe", simeon_recipe},       {"kg_enabled", kg_enabled}};
+        j["test_config"] = {{"corpus_size", corpus_size},
+                            {"doc_size", doc_size},
+                            {"poll_interval_ms", poll_interval_ms},
+                            {"corpus_seed", corpus_seed},
+                            {"corpus_fingerprint", corpus_fingerprint},
+                            {"ingest_mode", ingest_mode},
+                            {"ingest_concurrency", ingest_concurrency},
+                            {"timestamp", timestamp},
+                            {"embedding_model", embedding_model},
+                            {"embedding_backend", embedding_backend},
+                            {"simeon_recipe", simeon_recipe},
+                            {"kg_enabled", kg_enabled}};
 
         j["total_duration_ms"] = total_duration_ms;
         j["throughput_docs_per_sec"] = throughput_docs_per_sec;
-        j["pipeline_status"] = {
-            {"complete", pipeline_complete},    {"expected_post", expected_post},
-            {"observed_post", observed_post},   {"expected_embed", expected_embed},
-            {"observed_embed", observed_embed}, {"expected_kg", expected_kg},
-            {"observed_kg", observed_kg}};
+        j["pipeline_status"] = {{"complete", pipeline_complete},
+                                {"stages_settled", stages_settled},
+                                {"enrichment_drained", enrichment_drained},
+                                {"write_coordinator_flushed", write_coordinator_flushed},
+                                {"expected_post", expected_post},
+                                {"observed_post", observed_post},
+                                {"expected_embed", expected_embed},
+                                {"observed_embed", observed_embed},
+                                {"expected_kg", expected_kg},
+                                {"observed_kg", observed_kg}};
+        j["phase_timings"] = {{"admission_ms", admission_ms},
+                              {"storage_ready_ms", storage_ready_ms},
+                              {"pipeline_drain_ms", pipeline_drain_ms},
+                              {"enrichment_ready_ms", enrichment_ready_ms},
+                              {"searchability_ready_ms", searchability_ready_ms}};
 
         j["stages"] = {{"metadata_storage", metadata_storage.toJson()},
                        {"fts5_extraction", fts5_extraction.toJson()},
@@ -780,6 +841,42 @@ struct BenchmarkResult {
 
         j["work_coordinator"] = {{"thread_count", thread_count}};
 
+        if (has_write_coordinator_stats) {
+            const auto& stats = write_coordinator_stats;
+            j["write_coordinator"] = {
+                {"batches_enqueued", stats.batchesEnqueued},
+                {"batches_committed", stats.batchesCommitted},
+                {"ops_applied", stats.opsApplied},
+                {"commit_errors", stats.commitErrors},
+                {"nodes_upserted", stats.nodesUpserted},
+                {"edges_added", stats.edgesAdded},
+                {"edges_coalesced", stats.edgesCoalesced},
+                {"aliases_added", stats.aliasesAdded},
+                {"doc_entities_added", stats.docEntitiesAdded},
+                {"symbols_upserted", stats.symbolsUpserted},
+                {"node_key_lookups_batched", stats.nodeKeyLookupsBatched},
+                {"max_queue_depth", stats.maxQueueDepth},
+                {"capacity_rejections", stats.capacityRejections},
+                {"forced_enqueues_over_capacity", stats.forcedEnqueuesOverCapacity},
+                {"max_batch_apply_ms", stats.maxBatchApplyMs},
+                {"max_batch_queue_wait_ms", stats.maxBatchQueueWaitMs},
+                {"max_batch_excess_queue_wait_ms", stats.maxBatchExcessQueueWaitMs}};
+
+            json hotSources = json::array();
+            for (const auto& source : stats.hotSources) {
+                hotSources.push_back({{"source", source.source},
+                                      {"batches", source.batches},
+                                      {"ops", source.ops},
+                                      {"errors", source.errors},
+                                      {"total_queue_wait_ms", source.totalQueueWaitMs},
+                                      {"max_queue_wait_ms", source.maxQueueWaitMs},
+                                      {"max_excess_queue_wait_ms", source.maxExcessQueueWaitMs},
+                                      {"total_apply_ms", source.totalApplyMs},
+                                      {"max_apply_ms", source.maxApplyMs}});
+            }
+            j["write_coordinator"]["hot_sources"] = std::move(hotSources);
+        }
+
         return j;
     }
 };
@@ -874,9 +971,9 @@ QueueSnapshot captureQueueSnapshot() {
     return snap;
 }
 
-std::vector<SearchImpactProbe> runSearchImpactProbes(
-    const std::shared_ptr<yams::daemon::DaemonClient>& client, bool vectorsDisabled,
-    bool kgEnabled, bool pipelineComplete) {
+std::vector<SearchImpactProbe>
+runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
+                      bool vectorsDisabled, bool kgEnabled, bool pipelineComplete) {
     if (const char* searchProbes = std::getenv("YAMS_BENCH_SEARCH_PROBES");
         searchProbes && std::string(searchProbes) == "0") {
         return {};
@@ -931,6 +1028,7 @@ std::vector<SearchImpactProbe> runSearchImpactProbes(
         auto response = yams::cli::run_sync(client->search(req), 15s);
         const auto end = nowMs();
         probe.wall_ms = nonNegativeDeltaMs(end, start);
+        probe.completed_ms = end;
 
         if (!response) {
             probe.ok = false;
@@ -960,11 +1058,14 @@ std::vector<SearchImpactProbe> runSearchImpactProbes(
 // runBenchmark - Main benchmark logic
 // ============================================================================
 
-BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
+BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
+                             std::string ingestMode, std::size_t ingestConcurrency) {
     BenchmarkResult result;
     result.corpus_size = corpusSize;
     result.doc_size = docSize;
     result.poll_interval_ms = pollIntervalMs;
+    result.ingest_mode = std::move(ingestMode);
+    result.ingest_concurrency = std::max<std::size_t>(1, ingestConcurrency);
     result.timestamp = nowIso8601();
     if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
         result.embedding_model = env;
@@ -986,6 +1087,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     spdlog::info("Corpus size: {}", corpusSize);
     spdlog::info("Doc size: {} bytes", docSize);
     spdlog::info("Poll interval: {} ms", pollIntervalMs);
+    spdlog::info("Ingest mode: {} (concurrency={})", result.ingest_mode, result.ingest_concurrency);
     spdlog::info("KG enrichment: {}", result.kg_enabled ? "enabled" : "disabled");
 
     // Phase 1: Start daemon
@@ -1001,6 +1103,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     fs::path corpusDir = harness.root() / "corpus";
     CorpusGenerator corpus(corpusDir, docSize);
     corpus.generateDocuments(corpusSize);
+    result.corpus_fingerprint = corpus.fingerprint();
 
     // Phase 3: Connect to daemon
     spdlog::info("Phase 3: Connecting to daemon...");
@@ -1059,30 +1162,91 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     result.metadata_storage.name = "metadata_storage";
     result.metadata_storage.start_ms = ingestStartMs;
 
-    int successCount = 0, failCount = 0;
-    for (const auto& filename : corpus.createdFiles) {
+    std::atomic<int> successCount{0};
+    std::atomic<int> failCount{0};
+    const auto addSingleFile = [&](yams::daemon::DaemonClient& addClient,
+                                   const std::string& filename) {
         yams::daemon::AddDocumentRequest addReq;
         addReq.path = (corpusDir / filename).string();
         addReq.noEmbeddings = vectorsDisabled;
 
-        auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 30s);
+        auto addResult = yams::cli::run_sync(addClient.streamingAddDocument(addReq), 30s);
         if (!addResult) {
             spdlog::warn("Failed to ingest {}: {}", filename, addResult.error().message);
-            failCount++;
+            failCount.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const int completed = successCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (completed % 10 == 0 || completed == corpusSize) {
+            spdlog::info("Ingested {}/{} documents", completed, corpusSize);
+        }
+    };
+
+    if (result.ingest_mode == "directory") {
+        // Directory admission is one recursive request regardless of the caller's
+        // generic concurrency default. Keep the experiment identity truthful.
+        result.ingest_concurrency = 1;
+        yams::daemon::AddDocumentRequest addReq;
+        addReq.path = corpusDir.string();
+        addReq.recursive = true;
+        addReq.noEmbeddings = vectorsDisabled;
+        addReq.includePatterns = {"*.txt"};
+        auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+        if (!addResult) {
+            spdlog::warn("Directory ingestion failed: {}", addResult.error().message);
+            failCount.store(corpusSize, std::memory_order_relaxed);
         } else {
-            successCount++;
-            if (successCount % 10 == 0 || successCount == corpusSize) {
-                spdlog::info("Ingested {}/{} documents", successCount, corpusSize);
-            }
+            successCount.store(corpusSize, std::memory_order_relaxed);
+            spdlog::info("Directory ingestion accepted for {} documents: {}", corpusSize,
+                         addResult.value().message);
+        }
+    } else if (result.ingest_mode == "pipelined_single_file") {
+        const std::size_t workerCount =
+            std::min<std::size_t>(result.ingest_concurrency, corpus.createdFiles.size());
+        std::atomic<std::size_t> nextFile{0};
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+        for (std::size_t worker = 0; worker < workerCount; ++worker) {
+            workers.emplace_back([&, worker]() {
+                auto workerClient = std::make_shared<yams::daemon::DaemonClient>(clientConfig);
+                auto workerConnect = yams::cli::run_sync(workerClient->connect(), 5s);
+                if (!workerConnect) {
+                    spdlog::warn("Pipelined ingest worker {} failed to connect: {}", worker,
+                                 workerConnect.error().message);
+                    while (nextFile.fetch_add(1, std::memory_order_relaxed) <
+                           corpus.createdFiles.size()) {
+                        failCount.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    return;
+                }
+                while (true) {
+                    const std::size_t index = nextFile.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= corpus.createdFiles.size()) {
+                        break;
+                    }
+                    addSingleFile(*workerClient, corpus.createdFiles[index]);
+                }
+            });
+        }
+        for (auto& worker : workers) {
+            worker.join();
+        }
+    } else {
+        result.ingest_mode = "single_file_serial";
+        result.ingest_concurrency = 1;
+        for (const auto& filename : corpus.createdFiles) {
+            addSingleFile(*client, filename);
         }
     }
 
     int64_t ingestEndMs = nowMs();
     result.metadata_storage.end_ms = ingestEndMs;
-    result.metadata_storage.count = successCount;
-    result.metadata_storage.failures = failCount;
+    result.admission_ms = nonNegativeDeltaMs(ingestEndMs, ingestStartMs);
+    result.metadata_storage.count = static_cast<std::uint64_t>(successCount.load());
+    result.metadata_storage.failures = static_cast<std::uint64_t>(failCount.load());
 
-    spdlog::info("Ingestion complete: {} succeeded, {} failed in {} ms", successCount, failCount,
+    spdlog::info("Ingestion admission complete: {} succeeded, {} failed in {} ms",
+                 successCount.load(), failCount.load(),
                  nonNegativeDeltaMs(ingestEndMs, ingestStartMs));
 
     // Phase 5: Monitor pipeline completion via InternalEventBus
@@ -1096,24 +1260,26 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     // Expected counts
     // Note: FTS5 indexing happens synchronously in post-ingest metadata stage (not via jobs)
     // So we only track post-ingest (metadata+FTS5) and embeddings completion
-    uint64_t expectedPost = successCount;
-    uint64_t expectedEmbed = vectorsDisabled ? 0 : successCount;
-    uint64_t expectedKg = result.kg_enabled ? successCount : 0;
+    uint64_t expectedPost = static_cast<std::uint64_t>(successCount.load());
+    uint64_t expectedEmbed = vectorsDisabled ? 0 : static_cast<std::uint64_t>(successCount.load());
+    uint64_t expectedKg = result.kg_enabled ? static_cast<std::uint64_t>(successCount.load()) : 0;
     result.expected_post = expectedPost;
     result.expected_embed = expectedEmbed;
     result.expected_kg = expectedKg;
 
-    // Poll until all stages complete or timeout
+    // Poll until every expected item is consumed or explicitly dropped. Drops settle the
+    // workload but never satisfy the lossless completion contract.
     auto pipelineDeadline = std::chrono::steady_clock::now() + 60s;
     bool allStagesComplete = false;
+    bool allStagesSettled = false;
     QueueSnapshot lastSnap = initialSnap;
-    uint64_t lastEmbedProcessedDelta = 0;
-    uint64_t lastPostProcessedDelta = 0;
+    uint64_t lastEmbedConsumedDelta = 0;
+    uint64_t lastPostConsumedDelta = 0;
     uint64_t lastEmbedDroppedDelta = 0;
-    uint64_t lastKgProcessedDelta = 0;
+    uint64_t lastKgConsumedDelta = 0;
     uint64_t lastKgDroppedDelta = 0;
 
-    while (std::chrono::steady_clock::now() < pipelineDeadline && !allStagesComplete) {
+    while (std::chrono::steady_clock::now() < pipelineDeadline && !allStagesSettled) {
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
 
         QueueSnapshot snap = captureQueueSnapshot();
@@ -1146,37 +1312,43 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             saturatedAdd(saturatedAdd(snap.fts5_dropped, embedDroppedDelta), postDroppedDelta),
             countedKgDroppedDelta);
 
-        // Check if all stages have processed all documents (relative to baseline)
-        // FTS5 happens in post-ingest, so we only check post and embed completion
-        uint64_t embedProcessedDelta = saturatedAdd(
-            counterDelta(snap.embed_consumed, baselineEmbedConsumed), embedDroppedDelta);
-        uint64_t postProcessedDelta =
-            saturatedAdd(counterDelta(snap.post_consumed, baselinePostConsumed), postDroppedDelta);
-        uint64_t kgProcessedDelta = result.kg_enabled
-                                        ? saturatedAdd(counterDelta(snap.kg_consumed,
-                                                                    baselineKgConsumed),
-                                                       kgDroppedDelta)
-                                        : 0;
-        lastEmbedProcessedDelta = embedProcessedDelta;
-        lastPostProcessedDelta = postProcessedDelta;
-        lastKgProcessedDelta = kgProcessedDelta;
+        const uint64_t embedConsumedDelta =
+            counterDelta(snap.embed_consumed, baselineEmbedConsumed);
+        const uint64_t postConsumedDelta = counterDelta(snap.post_consumed, baselinePostConsumed);
+        const uint64_t kgConsumedDelta =
+            result.kg_enabled ? counterDelta(snap.kg_consumed, baselineKgConsumed) : 0;
+        lastEmbedConsumedDelta = embedConsumedDelta;
+        lastPostConsumedDelta = postConsumedDelta;
+        lastKgConsumedDelta = kgConsumedDelta;
         lastEmbedDroppedDelta = embedDroppedDelta;
         lastKgDroppedDelta = kgDroppedDelta;
 
-        bool embedComplete = embedProcessedDelta >= expectedEmbed;
-        bool postComplete = postProcessedDelta >= expectedPost;
-        bool kgComplete = kgProcessedDelta >= expectedKg;
+        // Completion is exact: consuming more work than was admitted indicates a replay or
+        // duplicate enqueue. Keep the settled checks below permissive so the benchmark can stop
+        // and report the over-count instead of waiting for a timeout.
+        const bool embedComplete = embedConsumedDelta == expectedEmbed;
+        const bool postComplete = postConsumedDelta == expectedPost;
+        const bool kgComplete = kgConsumedDelta == expectedKg;
+        const bool embedSettled =
+            saturatedAdd(embedConsumedDelta, embedDroppedDelta) >= expectedEmbed;
+        const bool postSettled = saturatedAdd(postConsumedDelta, postDroppedDelta) >= expectedPost;
+        const bool kgSettled =
+            saturatedAdd(kgConsumedDelta, result.kg_enabled ? kgDroppedDelta : 0) >= expectedKg;
 
-        allStagesComplete = embedComplete && postComplete && kgComplete;
+        allStagesComplete =
+            embedComplete && postComplete && kgComplete && result.dropped_batches == 0;
+        allStagesSettled = embedSettled && postSettled && kgSettled;
 
         if (nonNegativeDeltaMs(snap.timestamp_ms, initialSnap.timestamp_ms) % 1000 <
             pollIntervalMs) {
-            spdlog::info("Pipeline status: post={}/{} (includes FTS5) embed={}/{} kg={}/{}",
-                         postProcessedDelta, expectedPost, embedProcessedDelta, expectedEmbed,
-                         kgProcessedDelta, expectedKg);
+            spdlog::info("Pipeline status: post={}/{} (dropped={}) embed={}/{} (dropped={}) "
+                         "kg={}/{} (dropped={})",
+                         postConsumedDelta, expectedPost, postDroppedDelta, embedConsumedDelta,
+                         expectedEmbed, embedDroppedDelta, kgConsumedDelta, expectedKg,
+                         kgDroppedDelta);
         }
 
-        if (allStagesComplete) {
+        if (allStagesSettled) {
             // Update stage metrics (use deltas to exclude warmup)
             int64_t now = nowMs();
 
@@ -1200,32 +1372,22 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             result.kg_extraction.count = counterDelta(snap.kg_consumed, baselineKgConsumed);
             result.kg_extraction.failures = kgDroppedDelta;
 
-            spdlog::info("All pipeline stages complete!");
+            spdlog::info("All pipeline stages settled (lossless={})", allStagesComplete);
             break;
         }
     }
 
-    result.pipeline_complete = allStagesComplete;
-    result.observed_post = lastPostProcessedDelta;
-    result.observed_embed = lastEmbedProcessedDelta;
-    result.observed_kg = lastKgProcessedDelta;
-    result.final_kg_queued = lastSnap.kg_queued;
-    result.final_kg_consumed = lastSnap.kg_consumed;
-    result.final_kg_dropped = lastSnap.kg_dropped;
-    result.final_symbol_queued = lastSnap.symbol_queued;
-    result.final_symbol_consumed = lastSnap.symbol_consumed;
-    result.final_symbol_dropped = lastSnap.symbol_dropped;
-    result.final_entity_queued = lastSnap.entity_queued;
-    result.final_entity_consumed = lastSnap.entity_consumed;
-    result.final_entity_dropped = lastSnap.entity_dropped;
-    result.final_title_queued = lastSnap.title_queued;
-    result.final_title_consumed = lastSnap.title_consumed;
-    result.final_title_dropped = lastSnap.title_dropped;
+    result.stages_settled = allStagesSettled;
+    const int64_t storageReadyEndMs = nowMs();
+    result.storage_ready_ms = nonNegativeDeltaMs(storageReadyEndMs, ingestStartMs);
+    result.observed_post = lastPostConsumedDelta;
+    result.observed_embed = lastEmbedConsumedDelta;
+    result.observed_kg = lastKgConsumedDelta;
 
-    if (!allStagesComplete) {
-        spdlog::warn("Pipeline completion timeout after 60s (post={}/{} embed={}/{} kg={}/{})",
-                     lastPostProcessedDelta, expectedPost, lastEmbedProcessedDelta, expectedEmbed,
-                     lastKgProcessedDelta, expectedKg);
+    if (!allStagesSettled) {
+        spdlog::warn("Pipeline settlement timeout after 60s (post={}/{} embed={}/{} kg={}/{})",
+                     lastPostConsumedDelta, expectedPost, lastEmbedConsumedDelta, expectedEmbed,
+                     lastKgConsumedDelta, expectedKg);
 
         // Preserve partial pipeline evidence instead of leaving stage metrics at zero. A timeout is
         // still a failure, but partial counters identify which PostIngestQueue branch stalled.
@@ -1250,14 +1412,84 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         result.kg_extraction.failures = lastKgDroppedDelta;
     }
 
-    int64_t totalEndMs = nowMs();
-    result.total_duration_ms = nonNegativeDeltaMs(totalEndMs, ingestStartMs);
+    // The core counters can settle before entity/title work and deferred KG writes commit.
+    // Wait for every PostIngestQueue stage to drain, then flush the WriteCoordinator.
+    result.enrichment_drained = false;
+    const auto enrichmentDeadline = std::chrono::steady_clock::now() + 30s;
+    while (std::chrono::steady_clock::now() < enrichmentDeadline) {
+        lastSnap = captureQueueSnapshot();
+        bool postIngestIdle = true;
+        if (serviceManager) {
+            if (auto postIngest = serviceManager->getPostIngestQueue()) {
+                postIngestIdle =
+                    postIngest->size() == 0 && postIngest->kgQueueDepth() == 0 &&
+                    postIngest->symbolQueueDepth() == 0 && postIngest->entityQueueDepth() == 0 &&
+                    postIngest->titleQueueDepth() == 0 && postIngest->totalInFlight() == 0;
+            }
+        }
+        const bool embeddingIdle =
+            lastSnap.embed_jobs == 0 &&
+            (!serviceManager || serviceManager->getEmbeddingInFlightJobs() == 0);
+        if (postIngestIdle && embeddingIdle) {
+            result.enrichment_drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
+    }
+
+    result.write_coordinator_flushed = true;
+    if (serviceManager) {
+        if (auto* writeCoordinator = serviceManager->getWriteCoordinator()) {
+            auto flushResult = writeCoordinator->flush(30s);
+            result.write_coordinator_flushed = static_cast<bool>(flushResult);
+            result.write_coordinator_stats = writeCoordinator->getStats();
+            result.has_write_coordinator_stats = true;
+            if (!flushResult) {
+                spdlog::warn("WriteCoordinator flush failed: {}", flushResult.error().message);
+            }
+        }
+    }
+
+    lastSnap = captureQueueSnapshot();
+    result.final_kg_queued = lastSnap.kg_queued;
+    result.final_kg_consumed = lastSnap.kg_consumed;
+    result.final_kg_dropped = lastSnap.kg_dropped;
+    result.final_symbol_queued = lastSnap.symbol_queued;
+    result.final_symbol_consumed = lastSnap.symbol_consumed;
+    result.final_symbol_dropped = lastSnap.symbol_dropped;
+    result.final_entity_queued = lastSnap.entity_queued;
+    result.final_entity_consumed = lastSnap.entity_consumed;
+    result.final_entity_dropped = lastSnap.entity_dropped;
+    result.final_title_queued = lastSnap.title_queued;
+    result.final_title_consumed = lastSnap.title_consumed;
+    result.final_title_dropped = lastSnap.title_dropped;
+    result.dropped_batches = saturatedAdd(
+        result.dropped_batches,
+        saturatedAdd(result.final_symbol_dropped,
+                     saturatedAdd(result.final_entity_dropped, result.final_title_dropped)));
+
+    result.pipeline_complete = allStagesComplete && result.enrichment_drained &&
+                               result.write_coordinator_flushed && result.dropped_batches == 0 &&
+                               failCount.load(std::memory_order_relaxed) == 0;
+    const int64_t enrichmentEndMs = nowMs();
+    result.pipeline_drain_ms = nonNegativeDeltaMs(enrichmentEndMs, storageReadyEndMs);
+    result.enrichment_ready_ms = nonNegativeDeltaMs(enrichmentEndMs, ingestStartMs);
+    result.total_duration_ms = result.enrichment_ready_ms;
     result.throughput_docs_per_sec =
-        result.total_duration_ms > 0 ? successCount / (result.total_duration_ms / 1000.0) : 0.0;
+        result.total_duration_ms > 0
+            ? static_cast<double>(successCount.load()) / (result.total_duration_ms / 1000.0)
+            : 0.0;
 
     spdlog::info("Phase 6: Running fixed search-impact probes...");
     result.search_impact =
         runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled, result.pipeline_complete);
+    for (const auto& probe : result.search_impact) {
+        if (probe.name == "keyword" && probe.ok &&
+            probe.total_count >= static_cast<std::uint64_t>(successCount.load())) {
+            result.searchability_ready_ms = nonNegativeDeltaMs(probe.completed_ms, ingestStartMs);
+            break;
+        }
+    }
 
     if (serviceManager) {
         result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
@@ -1313,10 +1545,21 @@ int main(int /*argc*/, char* /*argv*/[]) {
         pollInterval = std::atoi(env);
     }
 
+    std::string ingestMode = "single_file_serial";
+    if (const char* env = std::getenv("YAMS_BENCH_INGEST_MODE")) {
+        ingestMode = env;
+    }
+
+    std::size_t ingestConcurrency = 4;
+    if (const char* env = std::getenv("YAMS_BENCH_INGEST_CONCURRENCY")) {
+        ingestConcurrency = static_cast<std::size_t>(std::max(1, std::atoi(env)));
+    }
+
     const char* outputPath = std::getenv("YAMS_BENCH_OUTPUT");
 
     // Run benchmark
-    BenchmarkResult result = runBenchmark(corpusSize, docSize, pollInterval);
+    BenchmarkResult result =
+        runBenchmark(corpusSize, docSize, pollInterval, ingestMode, ingestConcurrency);
 
     // Output results
     json output = result.toJson();
@@ -1330,5 +1573,8 @@ int main(int /*argc*/, char* /*argv*/[]) {
         std::cout << jsonStr << std::endl;
     }
 
-    return result.metadata_storage.failures > 0 ? 1 : 0;
+    return result.metadata_storage.failures > 0 || !result.pipeline_complete ||
+                   result.dropped_batches > 0
+               ? 1
+               : 0;
 }

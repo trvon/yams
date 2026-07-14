@@ -223,6 +223,7 @@ def cmd_self_test(_: argparse.Namespace) -> int:
     stamp_base = f"selftest-{utc_stamp()}"
     for plan_name in (
         "ingest_pipeline",
+        "ingest_submission_path",
         "retrieval_load",
         "repair_ability",
         "ops_timeline",

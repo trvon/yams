@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +14,53 @@ from typing import Any
 from artifacts import raw_worker_output_path, write_json
 from workers.ablation import apply_ablation
 from workers.base import WorkerContext, WorkerResult
+
+
+_METRIC_TOKEN = re.compile(r"[^a-z0-9]+")
+
+
+def _metric_token(value: object) -> str:
+    return _METRIC_TOKEN.sub("_", str(value).strip().lower()).strip("_") or "unknown"
+
+
+def _truthy(value: object) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _flatten_numeric_block(
+    metrics: dict[str, Any], prefix: str, block: object
+) -> None:
+    if not isinstance(block, dict):
+        return
+    for key, value in block.items():
+        if isinstance(value, bool):
+            metrics[f"{prefix}_{_metric_token(key)}"] = 1.0 if value else 0.0
+        elif isinstance(value, (int, float)):
+            metrics[f"{prefix}_{_metric_token(key)}"] = float(value)
+
+
+def _flatten_phase_group(
+    metrics: dict[str, Any], prefix: str, group: object
+) -> None:
+    if not isinstance(group, dict):
+        return
+    for phase, values in group.items():
+        _flatten_numeric_block(metrics, f"{prefix}_{_metric_token(phase)}", values)
+
+
+def _flatten_named_numeric_records(
+    metrics: dict[str, Any], prefix: str, records: object, name_key: str
+) -> None:
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if not isinstance(record, dict) or not record.get(name_key):
+            continue
+        _flatten_numeric_block(
+            metrics,
+            f"{prefix}_{_metric_token(record[name_key])}",
+            record,
+        )
 
 
 def _phase_total_ms(block: dict[str, Any] | None, key: str) -> float:
@@ -44,7 +93,7 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
     semantic = probes.get("semantic") or {}
     graph = probes.get("graph_rerank_hybrid") or {}
 
-    return {
+    metrics: dict[str, Any] = {
         "total_duration_ms": float(raw.get("total_duration_ms") or 0),
         "docs_per_s": float(raw.get("throughput_docs_per_sec") or 0),
         "pipeline_complete": 1.0 if status.get("complete") else 0.0,
@@ -77,6 +126,182 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
         "graph_total": float(graph.get("total_count") or 0),
     }
 
+    _flatten_numeric_block(metrics, "phase", raw.get("phase_timings"))
+    for public_name in (
+        "admission_ms",
+        "storage_ready_ms",
+        "pipeline_drain_ms",
+        "enrichment_ready_ms",
+        "searchability_ready_ms",
+    ):
+        metrics[public_name] = float(
+            ((raw.get("phase_timings") or {}).get(public_name) or 0)
+            if isinstance(raw.get("phase_timings"), dict)
+            else 0
+        )
+
+    stages = raw.get("stages") or {}
+    if isinstance(stages, dict):
+        for stage, values in stages.items():
+            _flatten_numeric_block(metrics, f"stage_{_metric_token(stage)}", values)
+
+    _flatten_numeric_block(metrics, "queue", queues)
+    _flatten_numeric_block(metrics, "post_ingest_batch", raw.get("post_ingest_batch_metrics"))
+    _flatten_numeric_block(metrics, "write_coordinator", raw.get("write_coordinator"))
+    write_coordinator = raw.get("write_coordinator") or {}
+    if isinstance(write_coordinator, dict):
+        _flatten_named_numeric_records(
+            metrics,
+            "write_coordinator_source",
+            write_coordinator.get("hot_sources"),
+            "source",
+        )
+    _flatten_numeric_block(metrics, "work_coordinator", raw.get("work_coordinator"))
+
+    enrichment = raw.get("enrichment_status") or {}
+    if isinstance(enrichment, dict):
+        for stage, values in enrichment.items():
+            _flatten_numeric_block(metrics, f"enrichment_{_metric_token(stage)}", values)
+
+    for group_name in (
+        "embedding_phase_timings",
+        "document_store_phase_timings",
+        "content_store_phase_timings",
+        "metadata_insert_phase_timings",
+        "ref_counter_commit_phase_timings",
+        "ref_counter_writer_timings",
+        "ref_counter_writer_value_metrics",
+        "post_ingest_phase_timings",
+    ):
+        _flatten_phase_group(metrics, _metric_token(group_name), raw.get(group_name))
+
+    return metrics
+
+
+def ingestion_experiment_identity(raw: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable workload identity; deliberately excludes timestamps and host state."""
+    cfg = raw.get("test_config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    keys = (
+        "corpus_size",
+        "doc_size",
+        "corpus_seed",
+        "corpus_fingerprint",
+        "ingest_mode",
+        "ingest_concurrency",
+        "embedding_model",
+        "embedding_backend",
+        "simeon_recipe",
+        "kg_enabled",
+    )
+    return {key: cfg.get(key) for key in keys}
+
+
+def require_ingestion_experiment_identity(
+    identity_path: Path, identity: dict[str, Any]
+) -> str | None:
+    observed = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    if identity_path.is_file():
+        expected = identity_path.read_text(encoding="utf-8").strip()
+        if expected != observed:
+            return (
+                "ingestion experiment identity mismatch: "
+                f"expected={expected} observed={observed}"
+            )
+        return None
+    identity_path.parent.mkdir(parents=True, exist_ok=True)
+    identity_path.write_text(observed + "\n", encoding="utf-8")
+    return None
+
+
+def validate_ingestion_contract(
+    raw: dict[str, Any], *, require_full_searchability: bool = False
+) -> list[str]:
+    errors: list[str] = []
+    cfg = raw.get("test_config") or {}
+    status = raw.get("pipeline_status") or {}
+    queues = raw.get("queues") or {}
+    stages = raw.get("stages") or {}
+
+    if not isinstance(status, dict) or status.get("complete") is not True:
+        errors.append("pipeline incomplete")
+    if isinstance(status, dict):
+        for stage in ("post", "embed", "kg"):
+            expected = int(status.get(f"expected_{stage}") or 0)
+            observed = int(status.get(f"observed_{stage}") or 0)
+            if observed < expected:
+                errors.append(
+                    f"{stage} incomplete: observed={observed} expected={expected}"
+                )
+            elif observed > expected:
+                errors.append(
+                    f"{stage} duplicate work: observed={observed} expected={expected}"
+                )
+        if status.get("enrichment_drained") is False:
+            errors.append("enrichment queues did not drain")
+        if status.get("write_coordinator_flushed") is False:
+            errors.append("WriteCoordinator did not flush")
+
+    dropped = int(queues.get("dropped_batches") or 0) if isinstance(queues, dict) else 0
+    if dropped != 0:
+        errors.append(f"pipeline dropped {dropped} batches")
+
+    if isinstance(stages, dict):
+        metadata_stage = stages.get("metadata_storage") or {}
+        if isinstance(metadata_stage, dict) and int(metadata_stage.get("failures") or 0) != 0:
+            errors.append(
+                f"document admission failures={int(metadata_stage.get('failures') or 0)}"
+            )
+
+    enrichment = raw.get("enrichment_status") or {}
+    kg_enabled = bool(cfg.get("kg_enabled")) if isinstance(cfg, dict) else False
+    if isinstance(enrichment, dict):
+        for name, values in enrichment.items():
+            if not isinstance(values, dict):
+                continue
+            if name == "kg" and not kg_enabled:
+                continue
+            queued = int(values.get("queued") or 0)
+            consumed = int(values.get("consumed") or 0)
+            stage_dropped = int(values.get("dropped") or 0)
+            if stage_dropped:
+                errors.append(f"{name} enrichment dropped={stage_dropped}")
+            if consumed < queued:
+                errors.append(
+                    f"{name} enrichment incomplete: consumed={consumed} queued={queued}"
+                )
+
+    write_coordinator = raw.get("write_coordinator") or {}
+    if isinstance(write_coordinator, dict):
+        commit_errors = int(write_coordinator.get("commit_errors") or 0)
+        if commit_errors:
+            errors.append(f"WriteCoordinator commit_errors={commit_errors}")
+
+    corpus_size = int(cfg.get("corpus_size") or 0) if isinstance(cfg, dict) else 0
+    probes = raw.get("search_impact") or []
+    if isinstance(probes, list):
+        for probe in probes:
+            if not isinstance(probe, dict) or not probe.get("required_by_contract"):
+                continue
+            name = str(probe.get("name") or "unknown")
+            if probe.get("skipped") or probe.get("ok") is not True:
+                errors.append(f"required searchability probe failed: {name}")
+                continue
+            if int(probe.get("returned_count") or 0) <= 0:
+                errors.append(f"required searchability probe returned no results: {name}")
+            if (
+                require_full_searchability
+                and name == "keyword"
+                and int(probe.get("total_count") or 0) < corpus_size
+            ):
+                errors.append(
+                    "corpus not fully searchable: "
+                    f"keyword_total={int(probe.get('total_count') or 0)} "
+                    f"corpus_size={corpus_size}"
+                )
+    return errors
+
 
 def _resolve_binary(ctx: WorkerContext) -> Path:
     explicit = ctx.params.get("binary") or os.environ.get("YAMS_BENCH_BINARY")
@@ -103,12 +328,15 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     raw_path = raw_worker_output_path(ctx.arm_dir, ctx.step_index, "ingestion_e2e")
 
     if ctx.dry_run:
-        metrics = {
-            "total_duration_ms": 0.0,
-            "docs_per_s": 0.0,
-            "pipeline_complete": 0.0,
-            "dropped_batches": 0.0,
-        }
+        metrics = {name: 0.0 for name in ctx.step.metrics}
+        metrics.update(
+            {
+                "total_duration_ms": 0.0,
+                "docs_per_s": 0.0,
+                "pipeline_complete": 0.0,
+                "dropped_batches": 0.0,
+            }
+        )
         write_json(
             raw_path,
             {"dry_run": True, "binary": str(binary), "params": ctx.params},
@@ -147,10 +375,22 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     poll_ms = int(
         env.get("YAMS_BENCH_POLL_INTERVAL_MS") or ctx.params.get("poll_interval_ms") or 100
     )
+    ingest_mode = str(
+        env.get("YAMS_BENCH_INGEST_MODE")
+        or ctx.params.get("ingest_mode")
+        or "single_file_serial"
+    )
+    ingest_concurrency = int(
+        env.get("YAMS_BENCH_INGEST_CONCURRENCY")
+        or ctx.params.get("ingest_concurrency")
+        or 4
+    )
 
     env["YAMS_BENCH_CORPUS_SIZE"] = str(corpus_size)
     env["YAMS_BENCH_DOC_SIZE"] = str(doc_size)
     env["YAMS_BENCH_POLL_INTERVAL_MS"] = str(poll_ms)
+    env["YAMS_BENCH_INGEST_MODE"] = ingest_mode
+    env["YAMS_BENCH_INGEST_CONCURRENCY"] = str(max(1, ingest_concurrency))
     env["YAMS_BENCH_OUTPUT"] = str(raw_path)
 
     timeout = ctx.step.timeout_sec
@@ -185,16 +425,6 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     stdout_path.write_text(proc.stdout or "", encoding="utf-8", errors="replace")
     stderr_path.write_text(proc.stderr or "", encoding="utf-8", errors="replace")
 
-    if proc.returncode != 0:
-        return WorkerResult(
-            status="failed",
-            exit_code=proc.returncode,
-            metrics={},
-            attributes={"binary": str(binary)},
-            message=f"ingestion_e2e exited {proc.returncode}",
-            raw_path=str(raw_path) if raw_path.exists() else None,
-        )
-
     if not raw_path.exists():
         # Some older builds printed JSON to stdout only.
         if proc.stdout and proc.stdout.strip().startswith("{"):
@@ -219,7 +449,45 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
             raw_path=str(raw_path),
         )
 
-    metrics = extract_metrics(raw if isinstance(raw, dict) else {})
+    if not isinstance(raw, dict):
+        return WorkerResult(
+            status="failed",
+            exit_code=1,
+            metrics={},
+            message="ingestion_e2e output root must be an object",
+            raw_path=str(raw_path),
+        )
+
+    metrics = extract_metrics(raw)
+    contract_errors: list[str] = []
+    if _truthy(ctx.params.get("require_complete_pipeline", True)):
+        contract_errors.extend(
+            validate_ingestion_contract(
+                raw,
+                require_full_searchability=_truthy(
+                    ctx.params.get("require_full_searchability", True)
+                ),
+            )
+        )
+
+    identity = ingestion_experiment_identity(raw)
+    identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    identity_sha256 = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+    if _truthy(ctx.params.get("require_experiment_identity", True)):
+        if not identity.get("corpus_fingerprint"):
+            contract_errors.append("missing ingestion corpus fingerprint")
+        identity_path = (
+            ctx.arm.run_dir
+            / "shared_state"
+            / "ingestion_identity"
+            / f"{ctx.arm.arm.safe_name}.json"
+        )
+        identity_error = require_ingestion_experiment_identity(identity_path, identity)
+        if identity_error:
+            contract_errors.append(identity_error)
+
+    if proc.returncode != 0:
+        contract_errors.insert(0, f"ingestion_e2e exited {proc.returncode}")
     # Compatibility copy for older ablation summary path names.
     legacy_copy = ctx.arm_dir / f"{ctx.arm.arm.safe_name}.json"
     try:
@@ -227,20 +495,32 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     except OSError:
         pass
 
+    valid = not contract_errors
     return WorkerResult(
-        status="ok",
-        exit_code=0,
+        status="ok" if valid else "failed",
+        exit_code=0 if valid else (proc.returncode or 1),
         metrics=metrics,
         attributes={
             "binary": str(binary),
             "corpus_size": corpus_size,
             "doc_size": doc_size,
+            "ingest_mode": identity.get("ingest_mode"),
+            "ingest_concurrency": identity.get("ingest_concurrency"),
+            "requested_ingest_mode": ingest_mode,
+            "requested_ingest_concurrency": max(1, ingest_concurrency),
+            "experiment_identity": identity,
+            "experiment_identity_sha256": identity_sha256,
+            "contract_errors": contract_errors,
             "ablation": ablation,
             "semantic_skip": (_probe_map(raw).get("semantic") or {}).get("skip_reason"),
             "graph_skip": (_probe_map(raw).get("graph_rerank_hybrid") or {}).get(
                 "skip_reason"
             ),
         },
-        message="ingestion_e2e completed",
+        message=(
+            "ingestion_e2e completed"
+            if valid
+            else "ingestion_e2e contract failed: " + "; ".join(contract_errors)
+        ),
         raw_path=str(raw_path),
     )

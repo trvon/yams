@@ -1,13 +1,13 @@
 {
-  "name": "ingest_pipeline",
-  "description": "Ingest ablation (one-factor-off): KG, vectors, GLiNER, and full minimal path for optimization ranking.",
+  "name": "ingest_submission_path",
+  "description": "Equal-corpus lossless ingestion gate: compare one recursive directory request with concurrent pipelined single-file requests while preserving complete searchability and enrichment.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
-  "timeout_sec": 900,
+  "timeout_sec": 1200,
   "continue_on_arm_failure": true,
   "mode": "synthetic",
   "repeats": 3,
-  "baseline": "baseline",
+  "baseline": "directory",
   "fixed": {
     "env": {
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1"
@@ -16,8 +16,6 @@
       "corpus_size": 100,
       "doc_size": 1000,
       "poll_interval_ms": 100,
-      "ingest_mode": "directory",
-      "ingest_concurrency": 1,
       "require_complete_pipeline": true,
       "require_full_searchability": true,
       "require_experiment_identity": true
@@ -25,28 +23,26 @@
   },
   "arms": [
     {
-      "name": "baseline",
-      "factors": { "kg": "on", "vectors": "on", "gliner": "on" }
+      "name": "directory",
+      "factors": {
+        "ingest_mode": "directory",
+        "ingest_concurrency": 1
+      },
+      "params": {
+        "ingest_mode": "directory",
+        "ingest_concurrency": 1
+      }
     },
     {
-      "name": "no_kg",
-      "factors": { "kg": "off", "vectors": "on", "gliner": "on" }
-    },
-    {
-      "name": "no_vectors",
-      "factors": { "kg": "on", "vectors": "off", "gliner": "on" }
-    },
-    {
-      "name": "no_gliner",
-      "factors": { "kg": "on", "vectors": "on", "gliner": "off" }
-    },
-    {
-      "name": "no_vectors_no_kg",
-      "factors": { "kg": "off", "vectors": "off", "gliner": "on" }
-    },
-    {
-      "name": "minimal",
-      "factors": { "kg": "off", "vectors": "off", "gliner": "off" }
+      "name": "pipelined_single_file_c4",
+      "factors": {
+        "ingest_mode": "pipelined_single_file",
+        "ingest_concurrency": 4
+      },
+      "params": {
+        "ingest_mode": "pipelined_single_file",
+        "ingest_concurrency": 4
+      }
     }
   ],
   "steps": [
@@ -98,9 +94,7 @@
       "enrichment_ready_ms",
       "searchability_ready_ms",
       "document_store_total_ms",
-      "extract_ms",
-      "kg_ms",
-      "embed_prepare_ms",
+      "queue_max_store_document_tasks",
       "queue_max_post_ingest",
       "queue_max_embed_jobs",
       "write_coordinator_batches_enqueued",
@@ -114,6 +108,6 @@
       "write_coordinator_max_batch_queue_wait_ms",
       "write_coordinator_max_batch_excess_queue_wait_ms"
     ],
-    "group_by": ["kg", "vectors", "gliner"]
+    "group_by": ["ingest_mode", "ingest_concurrency"]
   }
 }
