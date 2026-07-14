@@ -97,6 +97,7 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
         "total_duration_ms": float(raw.get("total_duration_ms") or 0),
         "docs_per_s": float(raw.get("throughput_docs_per_sec") or 0),
         "pipeline_complete": 1.0 if status.get("complete") else 0.0,
+        "post_ingest_coalesce_ms": float(cfg.get("post_ingest_coalesce_ms") or 0),
         "kg_enabled": 1.0 if cfg.get("kg_enabled") else 0.0,
         "expected_kg": float(status.get("expected_kg") or 0),
         "observed_kg": float(status.get("observed_kg") or 0),
@@ -146,6 +147,11 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
             _flatten_numeric_block(metrics, f"stage_{_metric_token(stage)}", values)
 
     _flatten_numeric_block(metrics, "queue", queues)
+    _flatten_numeric_block(
+        metrics,
+        "metadata_insert_writer",
+        raw.get("metadata_insert_writer_metrics"),
+    )
     _flatten_numeric_block(metrics, "post_ingest_batch", raw.get("post_ingest_batch_metrics"))
     _flatten_numeric_block(metrics, "write_coordinator", raw.get("write_coordinator"))
     write_coordinator = raw.get("write_coordinator") or {}
@@ -175,6 +181,30 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
     ):
         _flatten_phase_group(metrics, _metric_token(group_name), raw.get(group_name))
 
+    writer_apply_total_us = metrics.get(
+        "metadata_insert_writer_batch_apply_total_us"
+    )
+    transaction_total_us = metrics.get(
+        "metadata_insert_phase_timings_transaction_total_total_us"
+    )
+    apply_samples = metrics.get("metadata_insert_writer_batch_apply_samples")
+    if isinstance(writer_apply_total_us, (int, float)) and isinstance(
+        transaction_total_us, (int, float)
+    ):
+        estimated_total_us = max(
+            0.0, float(writer_apply_total_us) - float(transaction_total_us)
+        )
+        metrics[
+            "metadata_insert_writer_connection_wait_estimated_total_us"
+        ] = estimated_total_us
+        metrics[
+            "metadata_insert_writer_connection_wait_estimated_avg_us"
+        ] = (
+            estimated_total_us / float(apply_samples)
+            if isinstance(apply_samples, (int, float)) and apply_samples > 0
+            else 0.0
+        )
+
     return metrics
 
 
@@ -190,6 +220,7 @@ def ingestion_experiment_identity(raw: dict[str, Any]) -> dict[str, Any]:
         "corpus_fingerprint",
         "ingest_mode",
         "ingest_concurrency",
+        "post_ingest_coalesce_ms",
         "embedding_model",
         "embedding_backend",
         "simeon_recipe",
@@ -385,12 +416,19 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
         or ctx.params.get("ingest_concurrency")
         or 4
     )
+    post_ingest_coalesce_raw = env.get("YAMS_BENCH_POST_INGEST_COALESCE_MS")
+    if post_ingest_coalesce_raw is None:
+        post_ingest_coalesce_raw = ctx.params.get("post_ingest_coalesce_ms", 2)
+    post_ingest_coalesce_ms = int(post_ingest_coalesce_raw)
 
     env["YAMS_BENCH_CORPUS_SIZE"] = str(corpus_size)
     env["YAMS_BENCH_DOC_SIZE"] = str(doc_size)
     env["YAMS_BENCH_POLL_INTERVAL_MS"] = str(poll_ms)
     env["YAMS_BENCH_INGEST_MODE"] = ingest_mode
     env["YAMS_BENCH_INGEST_CONCURRENCY"] = str(max(1, ingest_concurrency))
+    env["YAMS_BENCH_POST_INGEST_COALESCE_MS"] = str(
+        max(0, min(20, post_ingest_coalesce_ms))
+    )
     env["YAMS_BENCH_OUTPUT"] = str(raw_path)
 
     timeout = ctx.step.timeout_sec

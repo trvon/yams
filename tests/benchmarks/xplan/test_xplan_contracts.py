@@ -796,6 +796,7 @@ class IngestionContractTests(unittest.TestCase):
                 "corpus_fingerprint": "fnv1a64:abc123",
                 "ingest_mode": "directory",
                 "ingest_concurrency": 1,
+                "post_ingest_coalesce_ms": 2,
                 "embedding_model": "simeon-default",
                 "embedding_backend": "simeon",
                 "simeon_recipe": "stable",
@@ -857,6 +858,33 @@ class IngestionContractTests(unittest.TestCase):
                     }
                 ],
             },
+            "metadata_insert_writer_metrics": {
+                "submitted_items": 10,
+                "completed_items": 10,
+                "rejected_items": 0,
+                "batches": 4,
+                "batch_items": 10,
+                "max_batch_size": 4,
+                "avg_batch_size": 2.5,
+                "queue_wait_samples": 10,
+                "queue_wait_total_us": 500,
+                "queue_wait_max_us": 90,
+                "queue_wait_avg_us": 50,
+                "batch_apply_samples": 4,
+                "batch_apply_total_us": 1200,
+                "batch_apply_max_us": 400,
+                "batch_apply_avg_us": 300,
+                "failed_batches": 0,
+                "fallback_items": 0,
+            },
+            "metadata_insert_phase_timings": {
+                "transaction_total": {
+                    "calls": 4,
+                    "total_us": 800,
+                    "max_us": 250,
+                    "avg_us": 200,
+                }
+            },
             "search_impact": [
                 {
                     "name": "keyword",
@@ -916,6 +944,17 @@ class IngestionContractTests(unittest.TestCase):
         self.assertEqual(metrics["queue_max_post_ingest"], 4.0)
         self.assertEqual(metrics["write_coordinator_batches_committed"], 12.0)
         self.assertEqual(metrics["write_coordinator_max_batch_queue_wait_ms"], 2.0)
+        self.assertEqual(metrics["metadata_insert_writer_avg_batch_size"], 2.5)
+        self.assertEqual(metrics["metadata_insert_writer_queue_wait_avg_us"], 50.0)
+        self.assertEqual(metrics["metadata_insert_writer_batch_apply_avg_us"], 300.0)
+        self.assertEqual(
+            metrics["metadata_insert_writer_connection_wait_estimated_total_us"],
+            400.0,
+        )
+        self.assertEqual(
+            metrics["metadata_insert_writer_connection_wait_estimated_avg_us"],
+            100.0,
+        )
         self.assertEqual(
             metrics["write_coordinator_source_doc_svc_versioning_max_queue_wait_ms"],
             6.0,
@@ -925,6 +964,7 @@ class IngestionContractTests(unittest.TestCase):
         raw = self._complete_result()
         identity = ingestion_experiment_identity(raw)
         self.assertEqual(identity["corpus_fingerprint"], "fnv1a64:abc123")
+        self.assertEqual(identity["post_ingest_coalesce_ms"], 2)
         self.assertNotIn("timestamp", identity)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -978,6 +1018,7 @@ class IngestionContractTests(unittest.TestCase):
 
         self.assertEqual(feature_plan["repeats"], 3)
         self.assertEqual(feature_plan["fixed"]["params"]["ingest_mode"], "directory")
+        self.assertEqual(feature_plan["fixed"]["params"]["post_ingest_coalesce_ms"], 2)
         self.assertTrue(feature_plan["fixed"]["params"]["require_complete_pipeline"])
         self.assertTrue(feature_plan["fixed"]["params"]["require_experiment_identity"])
 

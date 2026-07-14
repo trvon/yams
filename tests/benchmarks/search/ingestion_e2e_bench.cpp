@@ -16,6 +16,8 @@
                                         single_file_serial (default)
     YAMS_BENCH_INGEST_CONCURRENCY=N   - Client count for pipelined_single_file
                                         (default: 4)
+    YAMS_BENCH_POST_INGEST_COALESCE_MS=N
+                                      - Typed post-ingest coalescing window (default: 2)
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
     YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
     YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
@@ -102,6 +104,21 @@ bool envFlagEnabled(const char* name) {
     return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
+std::uint32_t benchPostIngestCoalesceMs() {
+    constexpr std::uint32_t kMaxCoalesceMs = 20;
+    const auto defaultValue = yams::daemon::TuningConfig{}.postIngestCoalesceMs;
+    const char* raw = std::getenv("YAMS_BENCH_POST_INGEST_COALESCE_MS");
+    if (!raw || !*raw) {
+        return defaultValue;
+    }
+    try {
+        const auto parsed = std::stoul(raw);
+        return parsed <= kMaxCoalesceMs ? static_cast<std::uint32_t>(parsed) : defaultValue;
+    } catch (const std::exception&) {
+        return defaultValue;
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -146,6 +163,7 @@ public:
         // Disable auto-repair during benchmarks to avoid background work (per-hash DB checks,
         // vector cleanup, etc.) affecting ingestion measurements.
         cfg.enableAutoRepair = false;
+        cfg.tuning.postIngestCoalesceMs = benchPostIngestCoalesceMs();
 
         // Benchmark embedding-mode contract:
         // - YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 forces mock model provider
@@ -544,6 +562,7 @@ struct BenchmarkResult {
     std::string corpus_fingerprint;
     std::string ingest_mode = "single_file_serial";
     std::size_t ingest_concurrency = 1;
+    std::uint32_t post_ingest_coalesce_ms = 0;
     std::string timestamp;
     std::string embedding_model = "simeon-default";
     std::string embedding_backend = "simeon";
@@ -587,6 +606,7 @@ struct BenchmarkResult {
         ref_counter_writer_timings;
     std::unordered_map<std::string, yams::storage::RefCounterWriterValueMetric>
         ref_counter_writer_value_metrics;
+    yams::metadata::MetadataInsertWriter::MetricsSnapshot metadata_insert_writer_metrics;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
     std::vector<SearchImpactProbe> search_impact;
 
@@ -628,6 +648,7 @@ struct BenchmarkResult {
                             {"corpus_fingerprint", corpus_fingerprint},
                             {"ingest_mode", ingest_mode},
                             {"ingest_concurrency", ingest_concurrency},
+                            {"post_ingest_coalesce_ms", post_ingest_coalesce_ms},
                             {"timestamp", timestamp},
                             {"embedding_model", embedding_model},
                             {"embedding_backend", embedding_backend},
@@ -709,6 +730,37 @@ struct BenchmarkResult {
                                                    static_cast<double>(timing.calls)}};
         }
         j["metadata_insert_phase_timings"] = std::move(metadataInsertTimings);
+
+        j["metadata_insert_writer_metrics"] = {
+            {"submitted_items", metadata_insert_writer_metrics.submittedItems},
+            {"completed_items", metadata_insert_writer_metrics.completedItems},
+            {"rejected_items", metadata_insert_writer_metrics.rejectedItems},
+            {"batches", metadata_insert_writer_metrics.batches},
+            {"batch_items", metadata_insert_writer_metrics.batchItems},
+            {"max_batch_size", metadata_insert_writer_metrics.maxBatchSize},
+            {"avg_batch_size",
+             metadata_insert_writer_metrics.batches == 0
+                 ? 0.0
+                 : static_cast<double>(metadata_insert_writer_metrics.batchItems) /
+                       static_cast<double>(metadata_insert_writer_metrics.batches)},
+            {"queue_wait_samples", metadata_insert_writer_metrics.queueWaitSamples},
+            {"queue_wait_total_us", metadata_insert_writer_metrics.queueWaitTotalUs},
+            {"queue_wait_max_us", metadata_insert_writer_metrics.queueWaitMaxUs},
+            {"queue_wait_avg_us",
+             metadata_insert_writer_metrics.queueWaitSamples == 0
+                 ? 0.0
+                 : static_cast<double>(metadata_insert_writer_metrics.queueWaitTotalUs) /
+                       static_cast<double>(metadata_insert_writer_metrics.queueWaitSamples)},
+            {"batch_apply_samples", metadata_insert_writer_metrics.batchApplySamples},
+            {"batch_apply_total_us", metadata_insert_writer_metrics.batchApplyTotalUs},
+            {"batch_apply_max_us", metadata_insert_writer_metrics.batchApplyMaxUs},
+            {"batch_apply_avg_us",
+             metadata_insert_writer_metrics.batchApplySamples == 0
+                 ? 0.0
+                 : static_cast<double>(metadata_insert_writer_metrics.batchApplyTotalUs) /
+                       static_cast<double>(metadata_insert_writer_metrics.batchApplySamples)},
+            {"failed_batches", metadata_insert_writer_metrics.failedBatches},
+            {"fallback_items", metadata_insert_writer_metrics.fallbackItems}};
 
         json refCounterCommitTimings = json::object();
         for (const auto& [phase, timing] : ref_counter_commit_phase_timings) {
@@ -1066,6 +1118,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.poll_interval_ms = pollIntervalMs;
     result.ingest_mode = std::move(ingestMode);
     result.ingest_concurrency = std::max<std::size_t>(1, ingestConcurrency);
+    result.post_ingest_coalesce_ms = benchPostIngestCoalesceMs();
     result.timestamp = nowIso8601();
     if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
         result.embedding_model = env;
@@ -1088,6 +1141,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     spdlog::info("Doc size: {} bytes", docSize);
     spdlog::info("Poll interval: {} ms", pollIntervalMs);
     spdlog::info("Ingest mode: {} (concurrency={})", result.ingest_mode, result.ingest_concurrency);
+    spdlog::info("Post-ingest coalesce window: {} ms", result.post_ingest_coalesce_ms);
     spdlog::info("KG enrichment: {}", result.kg_enabled ? "enabled" : "disabled");
 
     // Phase 1: Start daemon
@@ -1137,6 +1191,10 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         yams::metadata::resetMetadataInsertPhaseTimings();
         yams::storage::resetRefCounterCommitPhaseTimings();
         yams::storage::resetRefCounterWriterMetrics();
+        auto appContext = serviceManager->getAppContext();
+        if (appContext.metadataInsertWriter) {
+            appContext.metadataInsertWriter->resetMetrics();
+        }
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
             if (!result.kg_enabled) {
@@ -1503,6 +1561,11 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         result.ref_counter_writer_timings = yams::storage::getRefCounterWriterTimingsSnapshot();
         result.ref_counter_writer_value_metrics =
             yams::storage::getRefCounterWriterValueMetricsSnapshot();
+        auto appContext = serviceManager->getAppContext();
+        if (appContext.metadataInsertWriter) {
+            result.metadata_insert_writer_metrics =
+                appContext.metadataInsertWriter->metricsSnapshot();
+        }
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }
