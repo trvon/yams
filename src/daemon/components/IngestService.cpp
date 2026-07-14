@@ -135,7 +135,7 @@ static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestB
         if (tasks.empty()) {
             continue;
         }
-        sm->enqueuePostIngestRpcBatch(std::move(tasks));
+        sm->enqueuePostIngestTasks(std::move(tasks));
     }
     pending.clear();
 }

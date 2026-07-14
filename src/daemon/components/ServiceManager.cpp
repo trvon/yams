@@ -4173,7 +4173,7 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
     }
 }
 
-void ServiceManager::enqueuePostIngestRpcBatch(std::vector<PostIngestQueue::Task> tasks) {
+void ServiceManager::enqueuePostIngestTasks(std::vector<PostIngestQueue::Task> tasks) {
     auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     if (!piq || tasks.empty()) {
         return;
@@ -4189,7 +4189,13 @@ void ServiceManager::enqueuePostIngestRpcBatch(std::vector<PostIngestQueue::Task
     if (!hashes.empty()) {
         searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
         topologyManager_.markDirtyBatch(hashes);
-        piq->enqueueRpcBatch(std::move(tasks));
+        const std::size_t interactiveQuota =
+            std::max<std::size_t>(1u, TuneAdvisor::postIngestRpcMaxPerBatch());
+        if (tasks.size() <= interactiveQuota) {
+            piq->enqueueRpcBatch(std::move(tasks));
+        } else {
+            piq->enqueueBatch(std::move(tasks));
+        }
     }
 }
 
